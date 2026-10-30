@@ -93,6 +93,15 @@ holds it. vim's tab keys, for instance:
 }
 ```
 
+Set `tab_group_shortcuts` to `true` to scope `ActivateTab1`…`ActivateTab9` to
+the active tab's group and enable `ActivateTabGroup1`…`ActivateTabGroup9` for
+switching between groups. Holding the tab modifiers shows group-relative number
+badges; holding the group modifiers numbers the groups themselves. Set
+`tab_group_activation` to `"recent"` (default) or `"first"` to choose which tab
+inside a group is focused when switching groups. While `tab_group_shortcuts` is
+off, `ActivateTab1`…`ActivateTab9` stay global and the group chords stay
+unbound.
+
 An unknown action name, an invalid keystroke, or a line that is neither a
 shortcut nor a list of them is skipped with a warning in the log rather than
 breaking the rest of your bindings.

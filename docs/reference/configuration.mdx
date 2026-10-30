@@ -95,6 +95,8 @@ their id from the file name. [More about themes →](/customization/themes)
 | `new_tab_position` | enum | `"after-current"` | Or `end`. |
 | `confirm_close` | enum | `"when-busy"` | When closing a tab or pane asks first: `never`, `when-busy` (a program or agent is still running), `always` (even an idle shell). `ssh_warn_on_close` is honoured either way. |
 | `sidebar_auto_grouping` | bool | `true` | Groups unpinned tabs by repository (SSH tabs by host). Off: a flat list below the pinned groups, which show either way. Pinned groups and folds are stored with the workspace, not here. |
+| `tab_group_shortcuts` | bool | `false` | Scope `ActivateTab1`…`ActivateTab9` (`Alt+1`–`9` off macOS, `⌘1`–`9` on macOS) to the active group and enable `ActivateTabGroup1`…`ActivateTabGroup9` (`Shift+Alt+1`–`9` off macOS, `⇧⌘1`–`9` on macOS) to switch groups. Holding each family's modifiers shows its number badges. Off keeps `ActivateTab1`…`ActivateTab9` global and leaves the group chords unbound. |
+| `tab_group_activation` | enum | `"recent"` | Which tab to focus when switching groups with `ActivateTabGroup1`…`ActivateTabGroup9`: `recent` (most-recently focused tab in the group, falling back to its first) or `first`. |
 | `sidebar_width` | number | `220` | Pixels (100–2000). |
 | `sidebar_collapsed` | bool | `false` | |
 | `right_panel_visible` | bool | `false` | |

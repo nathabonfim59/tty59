@@ -20,7 +20,7 @@ use crate::core::group_key::{
 };
 use crate::terminal::git_status::GitStatusCache;
 use crate::ui::app::{TITLE_BAR_BORDER, Tab, TitleStripRow as _, Tty59App};
-use crate::ui::hints::tab_badge_label;
+use crate::ui::hints::{badge_positions_from_order, tab_badge_label};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
@@ -260,7 +260,6 @@ impl Tty59App {
     ) -> impl IntoElement + use<> {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
-        let show_badges = self.mod_hint_badges;
         let width = self.sidebar_px(window, cx);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
         // Blanked here, written again from paint: a row filtered out by the
@@ -306,23 +305,15 @@ impl Tty59App {
         let keys: Rc<Vec<Option<GroupKey>>> = Rc::new(self.sidebar_group_keys(cx));
         let groups = &self.sidebar_groups;
         let sections = sidebar_sections(&keys, groups);
+        let badge_positions = self.sidebar_badge_positions(&sections, cx);
         // A search outranks a fold. Typing something that matches a row inside
         // a folded group has to show that row — a box that says nothing
         // matches while the match sits behind a chevron is just lying.
         let folds_apply = query.is_empty();
 
-        // ⌘N runs ActivateTabN, which goes through `activate_visual` — the
-        // Nth row as the sidebar lays it out, not the Nth tab in `self.tabs`.
-        // The badge has to be read off the same order or it names a chord that
-        // opens a different tab, so take it from `visual_tab_order` rather than
-        // flattening `sections` a second time here.
-        let badge_pos: Vec<usize> = {
-            let mut pos = vec![0usize; self.tabs.len()];
-            for (n, i) in self.visual_tab_order(cx).into_iter().enumerate() {
-                pos[i] = n;
-            }
-            pos
-        };
+        // Badges and activation share one mapping. A global hold numbers the
+        // sidebar's visual order; a group hold numbers only the active section,
+        // starting at one, and leaves rows outside it without a badge.
 
         // The row shows an elided title and a branch; the filter used to read
         // only the elided title, so typing the branch you can see, or the part
@@ -596,8 +587,21 @@ impl Tty59App {
                     rows: rows.clone(),
                 })
             });
+            let group_badges =
+                badge_positions.is_some() && self.mod_hint_group && section.name.is_some();
+            let header_badge_pos = group_badges
+                .then(|| {
+                    let first = *section.tabs.first()?;
+                    badge_positions.as_ref()?.get(first).copied().flatten()
+                })
+                .flatten();
             for (slot, i) in visible.into_iter().enumerate() {
-                let badge_pos = badge_pos[i];
+                let badge_pos = if group_badges {
+                    None
+                } else {
+                    badge_positions.as_ref().and_then(|positions| positions[i])
+                };
+                let show_badge = badge_pos.is_some();
                 let tab = &self.tabs[i];
                 reveal_drawn |= reveal == Some(tab.tree_id.get());
                 let is_active = i == active;
@@ -607,7 +611,7 @@ impl Tty59App {
                 let agent_status = tab.agent_status(cx);
                 let agent_unread = tab.agent_unread_count(cx);
                 let git_cwd = git_click(tab, window, cx);
-                let badge_extra = if show_badges && badge_pos < 9 {
+                let badge_extra = if show_badge {
                     row_metrics::BADGE + row_metrics::GAP
                 } else {
                     0.
@@ -627,7 +631,7 @@ impl Tty59App {
                 };
                 // Status rides at the row's trailing end, where the badge
                 // would be; the badge wins while the modifier is held.
-                let status_dot = match show_badges && badge_pos < 9 {
+                let status_dot = match show_badge {
                     true => None,
                     false => self.row_status_dot(agent_status, agent_unread, rail_fill),
                 };
@@ -1110,7 +1114,7 @@ impl Tty59App {
                     })
                     .child(label_region)
                     .children(status_dot)
-                    .when(show_badges && badge_pos < 9, |row| {
+                    .when_some(badge_pos, |row, badge_pos| {
                         row.child(
                             div()
                                 .flex_shrink_0()
@@ -1128,7 +1132,7 @@ impl Tty59App {
                                 .child(tab_badge_label(badge_pos)),
                         )
                     })
-                    .when(!(show_badges && badge_pos < 9), |row| {
+                    .when(!show_badge, |row| {
                         let backing: gpui::Hsla = if is_active {
                             gpui::rgb(sf.selected).into()
                         } else {
@@ -1283,6 +1287,9 @@ impl Tty59App {
                     avail -= measure_text(&ts, &meta_font, header_size, &count_label)
                         + row_metrics::META_GAP;
                 }
+                if header_badge_pos.is_some() {
+                    avail -= row_metrics::BADGE + row_metrics::META_GAP;
+                }
                 let avail = avail.max(HEADER_NAME_FLOOR);
                 // What the shared branch would take if nothing were in its
                 // way: the branch itself, the `·` before its counts, the
@@ -1304,6 +1311,9 @@ impl Tty59App {
                 let label = elide_label(&ts, &header_font, header_size, &name, name_avail);
                 let name_w = measure_text(&ts, &header_font, header_size, &label);
                 let hover_group = SharedString::from(format!("sidebar-group-{group_ix}"));
+                let has_shared_git = shared_git.is_some();
+                let is_renaming = renaming_group.is_some();
+                let group_is_active = section.tabs.contains(&active);
                 let bar = h_flex()
                     .id(("sidebar-group", group_ix))
                     .group(hover_group.clone())
@@ -1524,13 +1534,38 @@ impl Tty59App {
                     .when(folded, |bar| {
                         bar.child(div().flex_shrink_0().child(count_label))
                     })
-                    .children(self.header_actions(
-                        group_ix,
-                        group_key.clone(),
-                        hover_group,
-                        rail_fill,
-                        cx,
-                    ));
+                    .when(
+                        header_badge_pos.is_some() && !has_shared_git && !is_renaming,
+                        |bar| bar.child(div().flex_1()),
+                    )
+                    .when_some(header_badge_pos, |bar, badge_pos| {
+                        bar.child(
+                            div()
+                                .id(("sidebar-group-badge", group_ix))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .size(px(20.))
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(if group_is_active {
+                                    gpui::rgb(sf.text_selected).into()
+                                } else {
+                                    cx.theme().muted_foreground
+                                })
+                                .child(tab_badge_label(badge_pos)),
+                        )
+                    })
+                    .when(header_badge_pos.is_none(), |bar| {
+                        bar.children(self.header_actions(
+                            group_ix,
+                            group_key.clone(),
+                            hover_group,
+                            rail_fill,
+                            cx,
+                        ))
+                    });
                 // Renaming is offered on a menu rather than a double click:
                 // the first click of a double would fold the group, so the
                 // name would be edited on a box that just shut. An auto group
@@ -2804,7 +2839,109 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(&i) = self.visual_tab_order(cx).get(n) {
+        let order = if cx.global::<Config>().tab_group_shortcuts {
+            self.active_group_tab_order(cx)
+        } else {
+            self.visual_tab_order(cx)
+        };
+        if let Some(&i) = order.get(n) {
+            self.activate(i, window, cx);
+        }
+    }
+
+    /// Each non-empty group's tabs in visual order.
+    pub(crate) fn group_tab_orders(&self, cx: &gpui::App) -> Vec<Vec<usize>> {
+        let keys = self.sidebar_group_keys(cx);
+        sidebar_sections(&keys, &self.sidebar_groups)
+            .into_iter()
+            .map(|s| s.tabs)
+            .filter(|tabs| !tabs.is_empty())
+            .collect()
+    }
+
+    /// The active tab's group in display order. `None` is a real key here:
+    /// ungrouped tabs form a section too, and number within it just like a
+    /// pinned or automatic group. This deliberately does not use `tab_run`,
+    /// which means "every tab" on a top strip; group scoping is independent of
+    /// where the tabs are drawn.
+    pub(crate) fn active_group_tab_order(&self, cx: &gpui::App) -> Vec<usize> {
+        let keys = self.sidebar_group_keys(cx);
+        let Some(active_group) = keys.get(self.active) else {
+            return Vec::new();
+        };
+        (0..keys.len())
+            .filter(|&i| keys.get(i) == Some(active_group))
+            .collect()
+    }
+
+    /// Badge positions derived from the sidebar's already-resolved sections, so
+    /// rendering a held modifier does not resolve `sidebar_group_keys` or
+    /// rebuild `sidebar_sections` a second time per frame.
+    fn sidebar_badge_positions(
+        &self,
+        sections: &[Section],
+        cx: &gpui::App,
+    ) -> Option<Vec<Option<usize>>> {
+        let group_shortcuts = cx.global::<Config>().tab_group_shortcuts;
+        if !self.mod_hint_badges || (self.mod_hint_group && !group_shortcuts) {
+            return None;
+        }
+        let positions = if self.mod_hint_group {
+            badge_positions_from_order(
+                self.tabs.len(),
+                sections.iter().filter_map(|s| s.tabs.first().copied()),
+            )
+        } else if group_shortcuts {
+            let active_tabs = sections
+                .iter()
+                .find(|s| s.tabs.contains(&self.active))
+                .map(|s| s.tabs.as_slice())
+                .unwrap_or(&[]);
+            badge_positions_from_order(self.tabs.len(), active_tabs.iter().copied())
+        } else {
+            badge_positions_from_order(
+                self.tabs.len(),
+                sections.iter().flat_map(|s| s.tabs.iter().copied()),
+            )
+        };
+        Some(positions)
+    }
+
+    pub(crate) fn activate_group_visual(
+        &mut self,
+        n: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cfg = cx.global::<Config>();
+        if !cfg.tab_group_shortcuts {
+            return;
+        }
+        let activation = cfg.tab_group_activation;
+        let keys = self.sidebar_group_keys(cx);
+        let Some(section) = sidebar_sections(&keys, &self.sidebar_groups)
+            .into_iter()
+            .filter(|s| !s.tabs.is_empty())
+            .nth(n)
+        else {
+            return;
+        };
+        let target = match activation {
+            crate::core::config::TabGroupActivation::First => section.tabs.first().copied(),
+            crate::core::config::TabGroupActivation::Recent => self
+                .tabs_by_mru()
+                .into_iter()
+                .find(|&i| {
+                    section.tabs.contains(&i)
+                        && (i == self.active
+                            || self.tabs.get(i).is_some_and(|t| t.last_used.get() > 0))
+                })
+                .or_else(|| section.tabs.first().copied()),
+        };
+        if let Some(i) = target {
+            if self.sidebar_groups.is_folded(section.key.as_ref()) {
+                self.toggle_sidebar_group(section.key.as_ref(), cx);
+            }
             self.activate(i, window, cx);
         }
     }
@@ -3315,6 +3452,148 @@ mod fold_tests {
             .find(|g| g.folder.as_deref() == Some(folder))
             .expect("just pinned")
             .id
+    }
+
+    #[gpui::test]
+    fn group_numbers_stay_in_the_active_group_on_a_top_strip(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 5);
+        app.update(&mut vcx, |app, cx| {
+            let work = label(app, "work", cx);
+            let other = label(app, "other", cx);
+            for i in [0, 2, 4] {
+                app.set_tab_group(i, Some(work), cx);
+            }
+            for i in [1, 3] {
+                app.set_tab_group(i, Some(other), cx);
+            }
+        });
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.tab_group_shortcuts = true;
+            cfg.tab_bar_position = crate::core::config::TabBarPosition::Top;
+            cx.set_global(cfg);
+            crate::ui::keymap::rebind(cx);
+        });
+
+        app.update(&mut vcx, |app, cx| {
+            assert_eq!(app.active_group_tab_order(cx), [0, 2, 4]);
+            assert_eq!(app.group_tab_orders(cx), vec![vec![0, 2, 4], vec![1, 3]]);
+            app.mod_hint_badges = true;
+            app.mod_hint_group = false;
+            assert_eq!(
+                app.tab_badge_positions(cx).unwrap(),
+                [Some(0), None, Some(1), None, Some(2)],
+                "the tab hold numbers only the active group, starting at one"
+            );
+            app.mod_hint_group = true;
+            assert_eq!(
+                app.tab_badge_positions(cx).unwrap(),
+                [Some(0), Some(1), None, None, None],
+                "the group hold numbers the first tab of each group"
+            );
+            app.mod_hint_badges = false;
+        });
+
+        let tab_chord = if cfg!(target_os = "macos") {
+            "secondary-2"
+        } else {
+            "alt-2"
+        };
+        vcx.simulate_keystrokes(tab_chord);
+        vcx.run_until_parked();
+        assert_eq!(
+            app.read_with(&vcx, |app, _| app.active),
+            2,
+            "the ordinary tab chord scopes to the active group while enabled"
+        );
+
+        let group_chord = if cfg!(target_os = "macos") {
+            "secondary-shift-2"
+        } else {
+            "alt-shift-2"
+        };
+        vcx.simulate_keystrokes(group_chord);
+        vcx.run_until_parked();
+        assert_eq!(
+            app.read_with(&vcx, |app, _| app.active),
+            1,
+            "the group chord selects the second group, defaulting to its first tab when unused"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate_visual(1, window, cx);
+            assert_eq!(app.active, 3, "second tab in the second group");
+            app.activate_visual(2, window, cx);
+            assert_eq!(app.active, 3, "there is no third tab in the second group");
+
+            // Switching back to group 1 picks its most-recently focused tab (tab 2).
+            app.activate_group_visual(0, window, cx);
+            assert_eq!(app.active, 2);
+
+            // Switching to group 2 picks its most-recently focused tab (tab 3).
+            app.activate_group_visual(1, window, cx);
+            assert_eq!(app.active, 3);
+        });
+
+        vcx.update(|_, cx| {
+            cx.global_mut::<Config>().tab_group_activation =
+                crate::core::config::TabGroupActivation::First;
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate_group_visual(0, window, cx);
+            assert_eq!(
+                app.active, 0,
+                "First mode selects the first tab of the group rather than the recent one"
+            );
+        });
+
+        vcx.update(|_, cx| cx.global_mut::<Config>().tab_group_shortcuts = false);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate_group_visual(1, window, cx);
+            assert_eq!(
+                app.active, 0,
+                "a dispatched group action is inert while off"
+            );
+            app.activate_visual(1, window, cx);
+            assert_eq!(
+                app.active, 1,
+                "ordinary tab chords return to global order when off"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn group_numbers_follow_auto_groups_and_ungrouped_tabs(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 5);
+        vcx.update(|_, cx| cx.global_mut::<Config>().tab_group_shortcuts = true);
+        app.update(&mut vcx, |app, cx| {
+            plant_repo(app, 0, "/w/alpha/one", "/w/alpha", cx);
+            plant_repo(app, 1, "/w/beta/one", "/w/beta", cx);
+            plant_repo(app, 2, "/w/alpha/two", "/w/alpha", cx);
+            plant_plain(app, 3, "/plain/three", cx);
+            plant_plain(app, 4, "/plain/four", cx);
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.active_group_tab_order(cx), [0, 2]);
+            assert_eq!(
+                app.group_tab_orders(cx),
+                vec![vec![0, 2], vec![1], vec![3, 4]]
+            );
+            app.activate_visual(1, window, cx);
+            assert_eq!(app.active, 2);
+
+            // Select group 3 (Ungrouped) and then its second tab.
+            app.activate_group_visual(2, window, cx);
+            assert_eq!(app.active, 3);
+            assert_eq!(
+                app.active_group_tab_order(cx),
+                [3, 4],
+                "ungrouped is a section with its own numbering too"
+            );
+            app.activate_visual(1, window, cx);
+            assert_eq!(app.active, 4);
+        });
     }
 
     /// Rule 1. A tab kept in a pinned group is not the probe's to move:
