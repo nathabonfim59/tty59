@@ -22,7 +22,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          # macos-14 is in its retirement brownouts (jobs are cancelled at
+          # dispatch — twice during the 26.10.3 release); macos-15 is the
+          # hosted arm64 image, and the one server-macos already builds on.
+          - runner: macos-15
             os: macos
             arch: arm64
             target: aarch64-apple-darwin
