@@ -58,7 +58,7 @@ TTY59_DRIVER_DIR=/tmp/tty59-run-skill .claude/skills/run-tty59/driver.sh wait 0.
 | Command | Purpose |
 |---|---|
 | `status` | Print the demo window's niri JSON |
-| `focus` | Explicitly focus the demo before more input |
+| `focus [WINDOW_ID]` | Focus the main demo window or another window from `status` before more input |
 | `type TEXT` | Type into the focused demo |
 | `key CODE...` | Send numeric Linux input events, such as `28:1 28:0` for Enter or `56:1`/`56:0` for Alt down/up |
 | `new-tab` | Send Ctrl+Shift+T |
@@ -96,6 +96,9 @@ TTY59_DRIVER_DIR=/tmp/tty59-run-skill .claude/skills/run-tty59/driver.sh test -p
   display, or calibrate with `click-raw` and a screenshot.
 - **Niri focus changes before the fullscreen animation ends.** `launch` waits
   0.5 seconds so a screenshot cannot catch the previously focused window.
+- **Settings opens a second window.** `status` lists both IDs and `focus [WINDOW_ID]`
+  selects one. The guard compares the focused window's PID with the isolated
+  demo, so it accepts Settings without accepting another tty59 instance.
 - **Config isolation also isolates the daemon.** `stop` verifies `/proc` command
   lines against the demo config before signalling anything; never use a broad
   `pkill tty59-app` for cleanup.

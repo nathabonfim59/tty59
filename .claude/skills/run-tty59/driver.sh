@@ -32,7 +32,7 @@ Usage: driver.sh COMMAND [ARGS]
   wait SECONDS                  Wait for delayed UI state
   shot NAME [X Y W H]           Capture fullscreen or a screenshot-pixel crop
   status                        Print the demo window JSON
-  focus                         Focus the demo window
+  focus [WINDOW_ID]               Focus the demo main window or one of its other windows
   stop                          Stop only this driver's GUI and daemon
 EOF
 }
@@ -67,10 +67,11 @@ window_id() {
 }
 
 ensure_focused() {
-  local id focused
-  id=$(window_id) || fail "demo window not found; launch again"
-  focused=$(niri msg --json focused-window | jq -r '.id // empty')
-  [[ $focused == "$id" ]] || \
+  local focused pid
+  need_niri
+  pid=$(app_pid)
+  focused=$(niri msg --json focused-window | jq -r '.pid // empty')
+  [[ $focused == "$pid" ]] || \
     fail "demo window is not focused; refusing input/capture (use driver.sh focus first)"
 }
 
@@ -263,8 +264,17 @@ EOF
     ;;
 
   focus)
-    id=$(window_id)
+    [[ $# -le 1 ]] || fail "usage: focus [WINDOW_ID]"
+    need_niri
+    pid=$(app_pid)
+    id=${1:-$(window_id)}
+    niri msg --json windows | \
+      jq -er --argjson pid "$pid" --argjson id "$id" \
+        'first(.[] | select(.pid == $pid and .id == $id) | .id)' > /dev/null || \
+      fail "window $id does not belong to this demo"
     niri msg action focus-window --id "$id"
+    # As at launch, wait for niri's focus/transition to settle before capture.
+    sleep 0.5
     ;;
 
   stop)
