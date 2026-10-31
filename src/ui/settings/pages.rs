@@ -1400,6 +1400,11 @@ impl Tty59App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let tab_group_shortcuts = cfg.tab_group_shortcuts;
+        let group_activation_idx = match cfg.tab_group_activation {
+            TabGroupActivation::Recent => 0,
+            TabGroupActivation::First => 1,
+        };
         let confirm_idx = match cfg.confirm_close {
             ConfirmClose::Never => 0,
             ConfirmClose::WhenBusy => 1,
@@ -1461,6 +1466,28 @@ impl Tty59App {
             cx,
             |this, on, _, cx| this.set_sidebar_auto_grouping(on, cx),
         );
+        let group_shortcuts = self.settings_switch(
+            "wt-tab-group-shortcuts",
+            tab_group_shortcuts,
+            cx,
+            |this, on, _, cx| this.set_tab_group_shortcuts(on, cx),
+        );
+        let group_activation = self.settings_choice(
+            "wt-tab-group-activation",
+            &[t(L10nKey::SettingsRecentTab), t(L10nKey::SettingsFirstTab)],
+            group_activation_idx,
+            cx,
+            |this, ix, _w, cx| {
+                this.set_tab_group_activation(
+                    if ix == 0 {
+                        TabGroupActivation::Recent
+                    } else {
+                        TabGroupActivation::First
+                    },
+                    cx,
+                );
+            },
+        );
         self.settings_group(
             Some(t(L10nKey::SettingsTabs)),
             None,
@@ -1481,6 +1508,18 @@ impl Tty59App {
                     t(L10nKey::SettingsSidebarGrouping),
                     t(L10nKey::SettingsSidebarGroupingDesc),
                     grouping,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsTabGroupShortcuts),
+                    t(L10nKey::SettingsTabGroupShortcutsDesc),
+                    group_shortcuts,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsTabGroupActivation),
+                    t(L10nKey::SettingsTabGroupActivationDesc),
+                    group_activation,
                     cx,
                 ),
                 self.settings_row(

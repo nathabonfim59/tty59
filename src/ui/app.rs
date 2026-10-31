@@ -12,7 +12,7 @@ use std::sync::Arc;
 use crate::core::actions::*;
 use crate::core::config::{
     Config, CursorStyle as ConfigCursorStyle, MouseZoomModifier, NewTabPosition, RightPanelTab,
-    ShellConfig, TabBarPosition, WindowBackdrop,
+    ShellConfig, TabBarPosition, TabGroupActivation, WindowBackdrop,
 };
 use crate::core::session::{
     Session, SessionAxis, SessionPane, SessionTab, WorkspaceId, WorkspaceStore,
@@ -1045,6 +1045,8 @@ pub struct Tty59App {
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
+    /// Whether the visible badges number the tab groups rather than tabs.
+    pub(crate) mod_hint_group: bool,
     pub(crate) mod_hint_gen: u64,
     pub(crate) record_gen: u64,
     pub(crate) home_focus: gpui::FocusHandle,
@@ -1766,6 +1768,7 @@ impl Tty59App {
             worktree_prompt: None,
             maximized: None,
             mod_hint_badges: false,
+            mod_hint_group: false,
             mod_hint_gen: 0,
             record_gen: 0,
             home_focus: cx.focus_handle(),
@@ -4023,6 +4026,22 @@ impl Tty59App {
         self.update_config(cx, |cfg| cfg.sidebar_auto_grouping = on);
     }
 
+    pub(crate) fn set_tab_group_shortcuts(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.tab_group_shortcuts = on);
+        crate::ui::keymap::rebind(cx);
+        if !on {
+            self.dismiss_mod_hint(cx);
+        }
+    }
+
+    pub(crate) fn set_tab_group_activation(
+        &mut self,
+        mode: TabGroupActivation,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_config(cx, |cfg| cfg.tab_group_activation = mode);
+    }
+
     pub(crate) fn toggle_tab_sidebar(&mut self, cx: &mut Context<Self>) {
         let next = match cx.global::<Config>().tab_bar_position {
             TabBarPosition::Top => TabBarPosition::Left,
@@ -5441,6 +5460,7 @@ impl Tty59App {
             return;
         }
         if index < self.tabs.len() && index != self.active {
+            self.touch_active_tab();
             self.remember_active_pane(window, cx);
             // Zoom rides with its tab (#599): stash the outgoing tab's zoom
             // and bring the incoming tab's back. The clears elsewhere (drag,
@@ -5450,6 +5470,7 @@ impl Tty59App {
                 outgoing.zoomed = self.maximized.take();
             }
             self.active = index;
+            self.touch_active_tab();
             self.maximized = self.tabs[index].zoomed.take().filter(|leaf| {
                 // The zoomed pane may have exited while its tab was away —
                 // a stale entity must not come back as the zoom.
@@ -7265,6 +7286,12 @@ impl Tty59App {
             }
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
+            }
+            L10nKey::SettingsTabGroupShortcuts => {
+                self.set_tab_group_shortcuts(defaults.tab_group_shortcuts, cx)
+            }
+            L10nKey::SettingsTabGroupActivation => {
+                self.set_tab_group_activation(defaults.tab_group_activation, cx)
             }
             L10nKey::SettingsEditorGitGutter => {
                 self.set_editor_git_gutter(defaults.editor_git_gutter, cx)
@@ -10068,6 +10095,33 @@ impl Render for Tty59App {
                 }))
                 .on_action(cx.listener(|this, _: &ActivateTab9, window, cx| {
                     this.activate_visual(8, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup1, window, cx| {
+                    this.activate_group_visual(0, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup2, window, cx| {
+                    this.activate_group_visual(1, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup3, window, cx| {
+                    this.activate_group_visual(2, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup4, window, cx| {
+                    this.activate_group_visual(3, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup5, window, cx| {
+                    this.activate_group_visual(4, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup6, window, cx| {
+                    this.activate_group_visual(5, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup7, window, cx| {
+                    this.activate_group_visual(6, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup8, window, cx| {
+                    this.activate_group_visual(7, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ActivateTabGroup9, window, cx| {
+                    this.activate_group_visual(8, window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &IncreaseFontSize, _window, cx| {
                     this.change_font_size(FONT_SIZE_STEP, cx)

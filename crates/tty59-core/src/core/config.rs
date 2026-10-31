@@ -291,6 +291,19 @@ pub struct Config {
     /// either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
+    /// Whether tab number shortcuts (`ActivateTab1`…`ActivateTab9`) are scoped
+    /// to the active group and group-switching shortcuts
+    /// (`ActivateTabGroup1`…`ActivateTabGroup9`) and their hold-to-show badges
+    /// are active. Off keeps `ActivateTab1`…`ActivateTab9` global and leaves
+    /// the group-switching keys to the terminal exactly as an unbound action
+    /// would.
+    #[serde(default)]
+    pub tab_group_shortcuts: bool,
+    /// Which tab inside a group is focused when `ActivateTabGroup1`…`ActivateTabGroup9`
+    /// selects that group. `Recent` (default) picks the most-recently focused
+    /// tab in the group, falling back to its first tab.
+    #[serde(default, deserialize_with = "de_lenient")]
+    pub tab_group_activation: TabGroupActivation,
     #[serde(default, deserialize_with = "de_lenient")]
     pub notify_on_command_finish: NotifyMode,
     pub check_for_updates: bool,
@@ -618,6 +631,14 @@ pub enum TabBarPosition {
     Left,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TabGroupActivation {
+    #[default]
+    Recent,
+    First,
+}
+
 /// Native window backdrop material for the Windows GUI. Other platforms retain
 /// the value for config synchronization but do not use it for rendering.
 /// `Auto` keeps the legacy behavior where theme blur decides between blurred
@@ -834,6 +855,8 @@ impl Default for Config {
             editor_lsp: true,
             editor_git_gutter: true,
             sidebar_auto_grouping: true,
+            tab_group_shortcuts: false,
+            tab_group_activation: TabGroupActivation::Recent,
             notify_on_command_finish: NotifyMode::Unfocused,
             check_for_updates: true,
             mobile_access: false,
@@ -1926,6 +1949,26 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.sidebar_auto_grouping, "persisted");
+    }
+
+    #[test]
+    fn tab_group_shortcuts_default_off_and_round_trip() {
+        let defaults = Config::default();
+        assert!(!defaults.tab_group_shortcuts);
+        assert_eq!(defaults.tab_group_activation, TabGroupActivation::Recent);
+        let old: Config = serde_json::from_str(r#"{"sidebar_auto_grouping":true}"#).unwrap();
+        assert!(!old.tab_group_shortcuts);
+        assert_eq!(old.tab_group_activation, TabGroupActivation::Recent);
+
+        let on: Config =
+            serde_json::from_str(r#"{"tab_group_shortcuts":true,"tab_group_activation":"first"}"#)
+                .unwrap();
+        assert!(on.tab_group_shortcuts);
+        assert_eq!(on.tab_group_activation, TabGroupActivation::First);
+        let json = serde_json::to_string(&on).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(back.tab_group_shortcuts, "persisted");
+        assert_eq!(back.tab_group_activation, TabGroupActivation::First);
     }
 
     #[test]

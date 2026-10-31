@@ -751,6 +751,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSidebarGroupingDesc => {
             "Group unpinned tabs by git repository, SSH tabs by host."
         }
+        L10nKey::SettingsTabGroupShortcuts => "Group tab shortcuts",
+        L10nKey::SettingsTabGroupShortcutsDesc => {
+            "Scope tab shortcuts to the active group and use group shortcuts to switch between groups."
+        }
+        L10nKey::SettingsTabGroupActivation => "Group shortcut target",
+        L10nKey::SettingsTabGroupActivationDesc => {
+            "Which tab to focus when switching to a group with a shortcut."
+        }
+        L10nKey::SettingsRecentTab => "Recent tab",
+        L10nKey::SettingsFirstTab => "First tab",
         L10nKey::DocumentDock => "Dock beside terminal",
         L10nKey::DocumentFill => "Fill window",
         L10nKey::SettingsNotifications => "Notifications",
@@ -788,6 +798,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Every key you have rebound goes back to its default. There is no undo."
         }
         L10nKey::KeybindGoToTab => "Go to Tab {n}",
+        L10nKey::KeybindGoToTabGroup => "Go to Tab Group {n}",
         L10nKey::KeybindGoToWorkspace => "Go to Workspace {n}",
         L10nKey::KeybindInsertNewline => "Insert Newline",
         L10nKey::KeybindForkSessionRight => "Fork Session Right",

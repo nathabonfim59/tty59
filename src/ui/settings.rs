@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::core::config::{
     BellMode, Config, ConfirmClose, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition,
-    NotifyMode, PromptCursorStyle, TabBarPosition, UI_FONT_SIZE_DEFAULT, UpdateChannel,
-    WindowBackdrop,
+    NotifyMode, PromptCursorStyle, TabBarPosition, TabGroupActivation, UI_FONT_SIZE_DEFAULT,
+    UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
@@ -737,6 +737,16 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsTabGroupShortcuts,
+            keywords: SettingsSearchKeybindingsKeywords,
+        },
+        SearchEntry {
+            section: General,
+            title: SettingsTabGroupActivation,
+            keywords: SettingsSearchKeybindingsKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsEditorGitGutter,
             keywords: SettingsSearchEditorGitGutterKeywords,
         },
@@ -853,6 +863,8 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
+            L10nKey::SettingsTabGroupShortcuts => "tab_group_shortcuts",
+            L10nKey::SettingsTabGroupActivation => "tab_group_activation",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
             L10nKey::SettingsEditorLsp => "editor_lsp",
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
@@ -973,6 +985,8 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
+            L10nKey::SettingsTabGroupShortcuts => t(L10nKey::SettingsTabGroupShortcutsDesc),
+            L10nKey::SettingsTabGroupActivation => t(L10nKey::SettingsTabGroupActivationDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
             L10nKey::SettingsEditorLsp => t(L10nKey::SettingsEditorLspDesc),
             L10nKey::SettingsEditorSoftWrap => t(L10nKey::SettingsEditorSoftWrapDesc),
@@ -1025,6 +1039,12 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
+            }
+            L10nKey::SettingsTabGroupShortcuts => {
+                cfg.tab_group_shortcuts != defaults.tab_group_shortcuts
+            }
+            L10nKey::SettingsTabGroupActivation => {
+                cfg.tab_group_activation != defaults.tab_group_activation
             }
             L10nKey::SettingsEditorGitGutter => cfg.editor_git_gutter != defaults.editor_git_gutter,
             L10nKey::SettingsEditorLsp => cfg.editor_lsp != defaults.editor_lsp,
@@ -3035,6 +3055,41 @@ mod tests {
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsAutoHideTitlebarButtons]);
+    }
+
+    #[test]
+    fn group_shortcut_setting_tracks_its_config_key_and_modified_state() {
+        let entry = settings_search_entries()
+            .iter()
+            .find(|e| e.title == L10nKey::SettingsTabGroupShortcuts)
+            .unwrap();
+        assert_eq!(entry.config_key(), "tab_group_shortcuts");
+        assert!(!entry.description().is_empty());
+        assert!(!entry.modified(&Config::default()));
+
+        let activation = settings_search_entries()
+            .iter()
+            .find(|e| e.title == L10nKey::SettingsTabGroupActivation)
+            .unwrap();
+        assert_eq!(activation.config_key(), "tab_group_activation");
+        assert!(!activation.description().is_empty());
+        assert!(!activation.modified(&Config::default()));
+
+        let mut cfg = Config::default();
+        cfg.tab_group_shortcuts = true;
+        cfg.tab_group_activation = TabGroupActivation::First;
+        let changed = settings_search_entries()
+            .iter()
+            .filter(|e| e.modified(&cfg))
+            .map(|e| e.title)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            changed,
+            vec![
+                L10nKey::SettingsTabGroupShortcuts,
+                L10nKey::SettingsTabGroupActivation
+            ]
+        );
     }
 
     /// A shortcut is the first thing someone searching a settings window for a
