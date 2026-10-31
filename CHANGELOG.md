@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.10.3] - 2026-10-31
+
+### Added
+
+- **Tab number shortcuts can be scoped to the group you are in**: turning on
+  `tab_group_shortcuts` re-scopes `ActivateTab1`…`ActivateTab9` to the active
+  tab's group and binds `ActivateTabGroup1`…`ActivateTabGroup9` to switch
+  between groups. Holding either family's modifiers shows its number badges
+  on the sidebar and the tab strip — the tab modifiers number the tabs of the
+  group you are in, the group modifiers number the groups.
+  `tab_group_activation` picks which tab inside a group a switch focuses: the
+  one you used last (default) or the group's first. Off by default: while it
+  is off, the number shortcuts stay global and the group chords stay unbound.
+
 ## [26.10.2] - 2026-10-29
 
 ### Fixed
