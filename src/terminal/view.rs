@@ -2739,6 +2739,7 @@ impl TerminalView {
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         super::inputtrace::mark("key");
+        self.settle_compose_preedit(&ev.keystroke, cx);
         let link_dropped_on_a_remote_pane =
             self.workspace().is_some() && !self.terminal.child_exited();
         if self.terminal.exited && !link_dropped_on_a_remote_pane {
@@ -6179,6 +6180,30 @@ impl TerminalView {
         if !self.marked_text.is_empty() {
             self.marked_text.clear();
             cx.notify();
+        }
+    }
+
+    /// Drops an xkb compose preedit once the sequence has resolved.
+    ///
+    /// gpui's X11 and Wayland backends show a dead key or Compose sequence
+    /// as marked text while it is `Composing`, but on `Composed` they only
+    /// drop their own copy and hand the result over as a plain `KeyDown`
+    /// whose `key_char` is the composed character — no `unmark_text`. An
+    /// editor that lets that key reach `replace_text_in_range` never
+    /// notices; this view consumes the key in `on_key_down`, so the
+    /// preedit stayed painted until the next focus loss. A keystroke that
+    /// carries text is exactly the end of the sequence (the `Composing`
+    /// steps arrive with `key_char` cleared), so that is the cue.
+    ///
+    /// macOS and Windows route composition through their IMEs, which do
+    /// unmark, and on macOS a key can carry text while a real IME preedit
+    /// is still open — so this stays on the xkb platforms.
+    fn settle_compose_preedit(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
+        if cfg!(any(target_os = "macos", target_os = "windows")) {
+            return;
+        }
+        if ks.key_char.as_deref().is_some_and(|c| !c.is_empty()) {
+            self.clear_marked_text(cx);
         }
     }
 
@@ -13318,6 +13343,52 @@ mod gpui_tests {
             next_input_until_timeout(&mut daemon),
             None,
             "resuming the shell must not synthesize Ctrl-U after {chord}"
+        );
+    }
+
+    /// gpui's xkb compose path, as Wayland and X11 drive it: the dead key
+    /// sets marked text and arrives with `key_char` cleared, and the key that
+    /// completes the sequence arrives as a plain `KeyDown` carrying the
+    /// composed character, with no `unmark_text` in between.
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[gpui::test]
+    fn a_composed_key_clears_the_dead_key_preedit(cx: &mut TestAppContext) {
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, window, cx| {
+                assert!(!view.input_active());
+                view.set_marked_text("´".to_string(), cx);
+                let dead = KeyDownEvent {
+                    keystroke: gpui::Keystroke {
+                        modifiers: gpui::Modifiers::default(),
+                        key: "dead_acute".to_string(),
+                        key_char: None,
+                    },
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                view.on_key_down(&dead, window, cx);
+                assert_eq!(view.marked_text, "´", "still composing: keep the preedit");
+
+                let composed = KeyDownEvent {
+                    keystroke: gpui::Keystroke {
+                        modifiers: gpui::Modifiers::default(),
+                        key: "aacute".to_string(),
+                        key_char: Some("á".to_string()),
+                    },
+                    is_held: false,
+                    prefer_character_input: false,
+                };
+                view.on_key_down(&composed, window, cx);
+                assert!(
+                    view.marked_text.is_empty(),
+                    "the composed key ends the sequence, so the preedit goes"
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some("á".as_bytes().to_vec())
         );
     }
 
