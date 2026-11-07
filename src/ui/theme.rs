@@ -1400,6 +1400,78 @@ mod tests {
             &[WindowBackdrop::Auto, WindowBackdrop::Off]
         );
     }
+
+    /// The diagram palette must come from the *active* theme, not from
+    /// `MermaidTheme::light()`/`dark()`. Overwrite the theme with unmistakable
+    /// values: a mapping that ignores `cx.theme()` misses every assertion here.
+    #[gpui::test]
+    fn mermaid_theme_follows_the_active_light_theme(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Light, None, cx);
+            {
+                let theme = Theme::global_mut(cx);
+                theme.foreground = rgb(0x203040).into();
+                theme.background = rgb(0xf0f1f2).into();
+                theme.muted = rgb(0xe1e2e3).into();
+                theme.secondary = rgb(0xd4d5d6).into();
+                theme.secondary_hover = rgb(0xc7c8c9).into();
+                theme.border = rgb(0xb0b1b2).into();
+                theme.muted_foreground = rgb(0x606162).into();
+                theme.danger = rgb(0xb00020).into();
+                theme.font_family = "Inter".into();
+            }
+
+            let theme = cx.theme();
+            let mapped = mermaid_theme(cx);
+            assert!(!mapped.dark_mode, "light mode must not map as dark");
+            assert_eq!(mapped.font_family, "Inter");
+            assert_eq!(mapped.background, mermaid_rgba(theme.background));
+            assert_eq!(mapped.text, mermaid_rgba(theme.foreground));
+            assert_eq!(mapped.primary, mermaid_rgba(theme.muted));
+            assert_eq!(mapped.primary_text, mermaid_rgba(theme.foreground));
+            assert_eq!(mapped.primary_border, mermaid_rgba(theme.border));
+            assert_eq!(mapped.secondary, mermaid_rgba(theme.secondary));
+            assert_eq!(mapped.tertiary, mermaid_rgba(theme.secondary_hover));
+            assert_eq!(mapped.line, mermaid_rgba(theme.muted_foreground));
+            assert_eq!(mapped.edge_label_background, mermaid_rgba(theme.background));
+            assert_eq!(mapped.cluster_background, mermaid_rgba(theme.muted));
+            assert_eq!(mapped.cluster_border, mermaid_rgba(theme.border));
+            assert_eq!(mapped.note_background, mermaid_rgba(theme.secondary));
+            assert_eq!(mapped.note_border, mermaid_rgba(theme.border));
+            assert_eq!(mapped.actor_background, mermaid_rgba(theme.secondary));
+            assert_eq!(mapped.actor_border, mermaid_rgba(theme.border));
+            assert_eq!(mapped.error, mermaid_rgba(theme.danger));
+        });
+    }
+
+    /// A dark theme has to flip `dark_mode` and re-derive every colour; the
+    /// dark and light mappings must not come out identical.
+    #[gpui::test]
+    fn mermaid_theme_follows_the_active_dark_theme(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Dark, None, cx);
+
+            let theme = cx.theme();
+            let dark = mermaid_theme(cx);
+            assert!(dark.dark_mode, "dark mode must map as dark");
+            assert_eq!(dark.font_family, theme.font_family.to_string());
+            assert_eq!(dark.background, mermaid_rgba(theme.background));
+            assert_eq!(dark.text, mermaid_rgba(theme.foreground));
+            assert_eq!(dark.primary, mermaid_rgba(theme.muted));
+            assert_eq!(dark.primary_border, mermaid_rgba(theme.border));
+            assert_eq!(dark.error, mermaid_rgba(theme.danger));
+
+            Theme::change(ThemeMode::Light, None, cx);
+            let light = mermaid_theme(cx);
+            assert!(!light.dark_mode);
+            assert_ne!(
+                dark.background, light.background,
+                "a theme change must produce a different diagram palette"
+            );
+        });
+    }
 }
 
 /// The text view's style for rendered Markdown, wherever tty59 shows it.
@@ -1410,4 +1482,57 @@ mod tests {
 pub(crate) fn markdown_style(cx: &gpui::App) -> gpui_component::text::TextViewStyle {
     gpui_component::text::TextViewStyle::default()
         .inline_code_background(cx.theme().foreground.opacity(0.08))
+}
+
+/// The palette handed to the mermaid renderer for the active theme.
+///
+/// Diagrams draw on the preview's own background and use the theme's body ink,
+/// neutral fills and borders. Nodes stay neutral on purpose: per-node accent
+/// colours are out of scope, so `primary`/`secondary`/`tertiary` are all
+/// neutral surfaces and every border comes from the theme's one border colour.
+/// `error` is the theme's danger ink, which is the readable red rather than
+/// the danger *fill* (that fill's foreground is meant for text on top of it).
+pub(crate) fn mermaid_theme(cx: &gpui::App) -> tty59_mermaid::MermaidTheme {
+    let theme = cx.theme();
+    let font_family = if theme.font_family.trim().is_empty() {
+        "sans-serif".to_string()
+    } else {
+        theme.font_family.to_string()
+    };
+
+    tty59_mermaid::MermaidTheme {
+        dark_mode: theme.is_dark(),
+        font_family,
+        background: mermaid_rgba(theme.background),
+        text: mermaid_rgba(theme.foreground),
+        primary: mermaid_rgba(theme.muted),
+        primary_text: mermaid_rgba(theme.foreground),
+        primary_border: mermaid_rgba(theme.border),
+        secondary: mermaid_rgba(theme.secondary),
+        tertiary: mermaid_rgba(theme.secondary_hover),
+        line: mermaid_rgba(theme.muted_foreground),
+        edge_label_background: mermaid_rgba(theme.background),
+        cluster_background: mermaid_rgba(theme.muted),
+        cluster_border: mermaid_rgba(theme.border),
+        note_background: mermaid_rgba(theme.secondary),
+        note_border: mermaid_rgba(theme.border),
+        actor_background: mermaid_rgba(theme.secondary),
+        actor_border: mermaid_rgba(theme.border),
+        error: mermaid_rgba(theme.danger),
+    }
+}
+
+/// gpui's float colours (0..=1) → the renderer's straight 8-bit sRGB.
+fn mermaid_rgba(color: Hsla) -> tty59_mermaid::Rgba {
+    let color = gpui::Rgba::from(color);
+    tty59_mermaid::Rgba {
+        r: to_byte(color.r),
+        g: to_byte(color.g),
+        b: to_byte(color.b),
+        a: to_byte(color.a),
+    }
+}
+
+fn to_byte(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
 }

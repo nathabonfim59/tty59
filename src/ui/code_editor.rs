@@ -3304,7 +3304,18 @@ impl Tty59App {
                                     ("editor-md-preview-body", slot),
                                     markdown,
                                 )
-                                .style(crate::ui::theme::markdown_style(cx)),
+                                .style(crate::ui::theme::markdown_style(cx))
+                                // The preview identity is the buffer entity
+                                // plus this group's slot, so each pane keeps
+                                // its own last-good diagram images.
+                                .plugin(
+                                    crate::ui::markdown_mermaid::MermaidPlugin::new(
+                                        crate::ui::markdown_mermaid::PreviewIdentity::from_buffer(
+                                            f.id(),
+                                            slot,
+                                        ),
+                                    ),
+                                ),
                             ),
                         &scroll,
                     ))
