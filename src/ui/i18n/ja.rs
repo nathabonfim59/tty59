@@ -2447,6 +2447,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "Claude Code のペインで、Claude が画面端で折り返した行をつなげ、段落を 1 行として貼り付けます。⌘⌥C または「そのままコピー」で表示どおりにコピーします"
         }
+        L10nKey::MermaidRendering => "図をレンダリング中…",
+        L10nKey::MermaidRenderError => "図のエラー",
     })
 }
 

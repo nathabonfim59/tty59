@@ -2217,6 +2217,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "在 Claude Code 窗格中，将 Claude 在窗格边缘折行的内容重新合并，段落粘贴为一行。⌘⌥C 或“原样复制”按显示内容复制"
         }
+        L10nKey::MermaidRendering => "正在渲染图表…",
+        L10nKey::MermaidRenderError => "图表错误",
     })
 }
 
