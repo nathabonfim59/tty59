@@ -17,9 +17,27 @@
 //! Offsets shift when text *above* a fence changes, so an edit earlier in the
 //! document may reset the placeholder for a later block. That is expected: the
 //! source line itself did not move, but its document position did.
+//!
+//! # Stable registration
+//!
+//! The editor rebuilds the preview element on every render, so the plugin is
+//! installed again on each rebuild. The text view treats every plugin
+//! registration as a new extension revision and responds by reparsing the whole
+//! document and dropping the selection, even when nothing changed. To avoid
+//! that, [`preview_plugin_for`] keeps one [`MarkdownExtensions`] registry per
+//! [`PreviewIdentity`] in an App-global bounded LRU ([`MAX_PREVIEW_REGISTRIES`]
+//! entries) and installs a clone of the retained registry, whose revision is
+//! unchanged. Evicted registries are dropped outright: they own no window
+//! resources, only the plugin's parser and renderer closures, so no cleanup
+//! hook is needed.
 
-use gpui::{EntityId, IntoElement};
-use gpui_component::text::{MarkdownNode, MarkdownParseContext, MarkdownPlugin, markdown_ast};
+use std::collections::VecDeque;
+
+use gpui::{App, EntityId, Global, IntoElement};
+use gpui_component::text::{
+    MarkdownExtensions, MarkdownNode, MarkdownParseContext, MarkdownPlugin, TextView,
+    TextViewPlugin, markdown_ast,
+};
 
 mod render;
 
@@ -110,6 +128,103 @@ impl MarkdownPlugin for MermaidPlugin {
     }
 }
 
+/// The plugin the editor's Markdown preview installs for `identity`.
+///
+/// The editor rebuilds the preview element on every render, so this runs again
+/// on each rebuild. It must hand the text view an extension registry whose
+/// revision is stable for `identity`: the text view reparses the whole document
+/// and drops the selection whenever that revision changes.
+pub(crate) fn preview_plugin_for(identity: PreviewIdentity, cx: &mut App) -> impl TextViewPlugin {
+    preview_plugin_with(identity, MermaidPlugin::new(identity), cx)
+}
+
+/// [`preview_plugin_for`] with an injected plugin, for tests.
+///
+/// The plugin is used only the first time an identity is registered; later
+/// calls for the same identity hand back the retained registry's clone. Tests
+/// pass a counting wrapper to observe the parses the real text view performs.
+pub(crate) fn preview_plugin_with<P>(
+    identity: PreviewIdentity,
+    plugin: P,
+    cx: &mut App,
+) -> impl TextViewPlugin
+where
+    P: MarkdownPlugin,
+{
+    let extensions = cx
+        .default_global::<PreviewRegistries>()
+        .extensions(identity, || plugin);
+    StableMermaidPlugin { extensions }
+}
+
+/// A [`TextViewPlugin`] that installs a retained Markdown extension registry.
+///
+/// Going through a text-view plugin (rather than calling
+/// `TextView::markdown_extensions` directly) keeps the editor's wiring to the
+/// public `.plugin(...)` entry point.
+struct StableMermaidPlugin {
+    extensions: MarkdownExtensions,
+}
+
+impl TextViewPlugin for StableMermaidPlugin {
+    fn setup(self, text_view: TextView) -> TextView {
+        text_view.markdown_extensions(self.extensions)
+    }
+}
+
+/// How many previews keep a retained extension registry.
+///
+/// Each entry is a handful of `Arc` clones, so 64 covers every preview a user
+/// realistically has open at once without growing without bound as buffers
+/// come and go.
+const MAX_PREVIEW_REGISTRIES: usize = 64;
+
+/// App-global LRU of retained extension registries, keyed by preview identity.
+///
+/// Least recently used first. An identity that is looked up moves to the back;
+/// inserting a new identity at the bound drops the front entry. A dropped entry
+/// only loses its stable revision: the next registration for that identity
+/// builds a fresh registry, which reparses once and then stays stable again.
+#[derive(Default)]
+struct PreviewRegistries {
+    entries: VecDeque<(PreviewIdentity, MarkdownExtensions)>,
+}
+
+impl Global for PreviewRegistries {}
+
+impl PreviewRegistries {
+    /// The retained registry for `identity`, building it with `build` on a miss.
+    ///
+    /// `build` only runs when no registry is retained for `identity`; every
+    /// other call returns a clone of the same registry, so the text view's
+    /// extension revision does not change between editor rebuilds.
+    fn extensions<P>(
+        &mut self,
+        identity: PreviewIdentity,
+        build: impl FnOnce() -> P,
+    ) -> MarkdownExtensions
+    where
+        P: MarkdownPlugin,
+    {
+        if let Some(index) = self.entries.iter().position(|(id, _)| *id == identity) {
+            let entry = self
+                .entries
+                .remove(index)
+                .expect("the index came from this deque");
+            let extensions = entry.1.clone();
+            self.entries.push_back(entry);
+            return extensions;
+        }
+
+        let extensions = MarkdownExtensions::default().plugin(build());
+        if self.entries.len() == MAX_PREVIEW_REGISTRIES {
+            self.entries.pop_front();
+        }
+        self.entries.push_back((identity, extensions.clone()));
+        extensions
+    }
+}
+
 /// Turn an mdast `Code` node into a mermaid block when its language matches.
 ///
 /// `original_fence` is the node's source slice (fences included) and
@@ -169,10 +284,18 @@ fn mix(mut value: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{Context, Render, TestAppContext, Window};
-    use gpui_component::text::TextView;
+    use gpui::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window,
+    };
+    use gpui_component::Root;
+    use gpui_component::WindowExt as _;
     use gpui_component::text::markdown_ast::Code;
-    use std::sync::{Arc, Mutex};
+    use gpui_component::text::{TextView, TextViewState};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     /// What one parsed node carried, recorded by the probe plugin below.
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -522,5 +645,373 @@ mod tests {
             identity(4, 0),
         );
         assert!(seen.is_empty());
+    }
+
+    /// Wraps the real parser and records each call the text view makes.
+    ///
+    /// The text view asks the installed plugin to parse; counting here measures
+    /// real parses of the document, not registry bookkeeping.
+    #[derive(Clone)]
+    struct CountingPlugin {
+        inner: MermaidPlugin,
+        parses: Arc<AtomicUsize>,
+        blocks: Arc<Mutex<Vec<MermaidBlock>>>,
+    }
+
+    impl CountingPlugin {
+        fn new(identity: PreviewIdentity) -> Self {
+            Self {
+                inner: MermaidPlugin::new(identity),
+                parses: Arc::new(AtomicUsize::new(0)),
+                blocks: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn parses(&self) -> usize {
+            self.parses.load(Ordering::SeqCst)
+        }
+
+        fn block_ids(&self) -> Vec<u64> {
+            self.blocks
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|block| block.block_id)
+                .collect()
+        }
+    }
+
+    impl MarkdownPlugin for CountingPlugin {
+        fn is_block(&self) -> bool {
+            self.inner.is_block()
+        }
+
+        fn name(&self) -> &str {
+            self.inner.name()
+        }
+
+        fn parse(
+            &self,
+            node: &markdown_ast::Node,
+            cx: &MarkdownParseContext<'_>,
+        ) -> Option<MarkdownNode> {
+            let parsed = self.inner.parse(node, cx)?;
+            self.parses.fetch_add(1, Ordering::SeqCst);
+            if let Some(block) = parsed.data::<MermaidBlock>() {
+                self.blocks.lock().unwrap().push(block.clone());
+            }
+            Some(parsed)
+        }
+
+        fn render(
+            &self,
+            _node: &MarkdownNode,
+            _window: &mut Window,
+            _cx: &mut App,
+        ) -> impl IntoElement {
+            gpui::div()
+        }
+    }
+
+    /// A view that rebuilds its Markdown previews, like the editor does on any
+    /// change to the surrounding view.
+    struct Previews {
+        previews: Vec<(Entity<TextViewState>, PreviewIdentity, CountingPlugin)>,
+    }
+
+    impl Render for Previews {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            gpui::div()
+                .flex()
+                .flex_col()
+                .children(self.previews.iter().map(|(state, identity, plugin)| {
+                    TextView::new(state)
+                        .selectable(true)
+                        .plugin(preview_plugin_with(*identity, plugin.clone(), cx))
+                }))
+        }
+    }
+
+    /// Draw the window once.
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// Notify the root and draw, so the preview element is rebuilt the way the
+    /// editor rebuilds it when anything around it changes.
+    fn rebuild(vcx: &mut VisualTestContext, root: &Entity<Previews>) {
+        vcx.update(|_, cx| {
+            root.update(cx, |_, cx| cx.notify());
+        });
+        draw(vcx);
+    }
+
+    /// One diagram, so one parse call is exactly one whole-document pass.
+    const ONE_DIAGRAM: &str = "```mermaid\ngraph TD; A-->B\n```\n";
+
+    /// Regression for B4, parse half: the editor rebuilds the preview element
+    /// on every render, and the baseline installed a fresh plugin registration
+    /// each time. Every registration bumped the text view's extension
+    /// revision, so unchanged Markdown was reparsed on every rebuild.
+    #[gpui::test]
+    fn unchanged_rebuilds_parse_once(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let preview_id = identity(21, 0);
+        let state = cx.new(|cx| TextViewState::markdown(ONE_DIAGRAM, cx));
+        let plugin = CountingPlugin::new(preview_id);
+        let previews = cx.new(|_| Previews {
+            previews: vec![(state.clone(), preview_id, plugin.clone())],
+        });
+        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert_eq!(
+            plugin.parses(),
+            1,
+            "the first draw installs the plugin and parses the document once"
+        );
+
+        for _ in 0..8 {
+            rebuild(&mut vcx, &previews);
+        }
+
+        assert_eq!(
+            plugin.parses(),
+            1,
+            "unchanged rebuilds must not reparse the Markdown"
+        );
+    }
+
+    /// Regression for B4, selection half: the same fresh registration also
+    /// reset the text view's selection. This test asserts only the selection,
+    /// so the baseline fails on the reset itself.
+    #[gpui::test]
+    fn unchanged_rebuilds_keep_the_selection(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let preview_id = identity(23, 0);
+        let state = cx.new(|cx| TextViewState::markdown(ONE_DIAGRAM, cx));
+        let plugin = CountingPlugin::new(preview_id);
+        let previews = cx.new(|_| Previews {
+            previews: vec![(state.clone(), preview_id, plugin.clone())],
+        });
+        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+
+        // Select everything and read it back inside the same update: flushing
+        // effects at the end of an update draws dirty windows in tests, and
+        // that draw is exactly what the baseline wiring mishandles.
+        let selected = vcx.update(|window, cx| {
+            state.update(cx, |state, cx| state.select_all(cx));
+            let direct = state.read(cx).selected_text();
+            assert!(
+                !direct.is_empty(),
+                "select-all must select the document text"
+            );
+            let via_copy = window.selected_text(cx);
+            assert!(!via_copy.is_empty(), "select-all must be visible to Copy");
+            via_copy
+        });
+
+        for _ in 0..8 {
+            rebuild(&mut vcx, &previews);
+        }
+
+        let selected_after = vcx.update(|window, cx| window.selected_text(cx));
+        assert!(!selected_after.is_empty(), "the selection was cleared");
+        assert_eq!(
+            selected_after, selected,
+            "unchanged rebuilds must keep the selection"
+        );
+    }
+
+    /// A real source edit must still parse again; only unchanged rebuilds are
+    /// allowed to be free.
+    #[gpui::test]
+    fn editing_the_source_reparses_while_rebuilds_do_not(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let preview_id = identity(22, 0);
+        let state = cx.new(|cx| TextViewState::markdown(ONE_DIAGRAM, cx));
+        let plugin = CountingPlugin::new(preview_id);
+        let previews = cx.new(|_| Previews {
+            previews: vec![(state.clone(), preview_id, plugin.clone())],
+        });
+        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert_eq!(plugin.parses(), 1);
+
+        let edited = "```mermaid\ngraph TD; A-->B-->C\n```\n";
+        vcx.update(|_, cx| state.update(cx, |state, cx| state.set_text(edited, cx)));
+        assert_eq!(
+            plugin.parses(),
+            2,
+            "a source edit must parse the new document"
+        );
+
+        rebuild(&mut vcx, &previews);
+        assert_eq!(
+            plugin.parses(),
+            2,
+            "the rebuild that follows an edit must not parse again"
+        );
+    }
+
+    /// The same buffer in two groups (and two buffers in one group) must keep
+    /// separate registries, so one preview's rebuild cannot touch the other's
+    /// parse state or block identities.
+    #[gpui::test]
+    fn distinct_previews_keep_separate_registries(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let first_id = identity(31, 0);
+        let second_id = identity(31, 1);
+        let first_state = cx.new(|cx| TextViewState::markdown(ONE_DIAGRAM, cx));
+        let second_state = cx.new(|cx| TextViewState::markdown(ONE_DIAGRAM, cx));
+        let first = CountingPlugin::new(first_id);
+        let second = CountingPlugin::new(second_id);
+        let previews = cx.new(|_| Previews {
+            previews: vec![
+                (first_state, first_id, first.clone()),
+                (second_state, second_id, second.clone()),
+            ],
+        });
+        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert_eq!(first.parses(), 1);
+        assert_eq!(second.parses(), 1);
+
+        for _ in 0..4 {
+            rebuild(&mut vcx, &previews);
+        }
+        assert_eq!(
+            first.parses(),
+            1,
+            "the first preview must not reparse on rebuild"
+        );
+        assert_eq!(
+            second.parses(),
+            1,
+            "the second preview must not reparse on rebuild"
+        );
+
+        let first_ids = first.block_ids();
+        let second_ids = second.block_ids();
+        assert_eq!(first_ids.len(), 1);
+        assert_eq!(second_ids.len(), 1);
+        for (first_block, second_block) in first_ids.iter().zip(second_ids.iter()) {
+            assert_ne!(
+                first_block, second_block,
+                "two previews must not share a block identity"
+            );
+        }
+    }
+
+    /// The retained-registry cache reuses entries, stays bounded, evicts the
+    /// least recently used identity, and rebuilds an evicted identity when it
+    /// comes back. Builds are counted through the injected closure, so this
+    /// observes cache behavior rather than any private revision number.
+    #[test]
+    fn registry_cache_reuses_bounded_entries_and_evicts_least_recent() {
+        let mut registries = PreviewRegistries::default();
+        let builds = Arc::new(AtomicUsize::new(0));
+        let build = |identity: PreviewIdentity| {
+            let builds = builds.clone();
+            move || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                MermaidPlugin::new(identity)
+            }
+        };
+
+        let first = identity(1, 0);
+        let _ = registries.extensions(first, build(first));
+        let _ = registries.extensions(first, build(first));
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            1,
+            "the same identity must reuse its retained registry"
+        );
+        assert_eq!(registries.entries.len(), 1);
+
+        for slot in 1..MAX_PREVIEW_REGISTRIES {
+            let id = identity(2, slot);
+            let _ = registries.extensions(id, build(id));
+        }
+        assert_eq!(registries.entries.len(), MAX_PREVIEW_REGISTRIES);
+        assert_eq!(builds.load(Ordering::SeqCst), MAX_PREVIEW_REGISTRIES);
+
+        // Touching the oldest entry makes the following one least recent.
+        let _ = registries.extensions(first, build(first));
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            MAX_PREVIEW_REGISTRIES,
+            "touching a retained identity must not rebuild it"
+        );
+        let second = identity(2, 1);
+        assert!(registries.entries.iter().any(|(id, _)| *id == second));
+
+        let fresh = identity(3, 0);
+        let _ = registries.extensions(fresh, build(fresh));
+        assert_eq!(
+            registries.entries.len(),
+            MAX_PREVIEW_REGISTRIES,
+            "the cache must stay bounded"
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), MAX_PREVIEW_REGISTRIES + 1);
+        assert!(
+            registries.entries.iter().any(|(id, _)| *id == first),
+            "the recently used identity survives"
+        );
+        assert!(
+            !registries.entries.iter().any(|(id, _)| *id == second),
+            "the least recently used identity is evicted"
+        );
+
+        let _ = registries.extensions(second, build(second));
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            MAX_PREVIEW_REGISTRIES + 2,
+            "an evicted identity builds a fresh registry when it returns"
+        );
+        assert_eq!(registries.entries.len(), MAX_PREVIEW_REGISTRIES);
+    }
+
+    /// End to end through the App global and the real text view: evicting a
+    /// preview's retained registry costs exactly one reparse when that preview
+    /// is next installed, and nothing more on later rebuilds.
+    #[gpui::test]
+    fn evicted_preview_reparses_once_when_it_returns(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let preview_id = identity(41, 0);
+        let state = cx.new(|cx| TextViewState::markdown(ONE_DIAGRAM, cx));
+        let plugin = CountingPlugin::new(preview_id);
+        let previews = cx.new(|_| Previews {
+            previews: vec![(state.clone(), preview_id, plugin.clone())],
+        });
+        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        vcx.run_until_parked();
+        draw(&mut vcx);
+        assert_eq!(plugin.parses(), 1);
+
+        // Push the preview's identity out of the bounded cache.
+        vcx.update(|_, cx| {
+            let registries = cx.default_global::<PreviewRegistries>();
+            for slot in 0..MAX_PREVIEW_REGISTRIES {
+                let id = identity(42, slot);
+                let _ = registries.extensions(id, || MermaidPlugin::new(id));
+            }
+        });
+
+        rebuild(&mut vcx, &previews);
+        assert_eq!(
+            plugin.parses(),
+            2,
+            "an evicted preview parses once when its registry is rebuilt"
+        );
+
+        rebuild(&mut vcx, &previews);
+        assert_eq!(plugin.parses(), 2, "the rebuilt registry is stable again");
     }
 }

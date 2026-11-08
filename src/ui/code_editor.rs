@@ -3307,13 +3307,16 @@ impl Tty59App {
                                 .style(crate::ui::theme::markdown_style(cx))
                                 // The preview identity is the buffer entity
                                 // plus this group's slot, so each pane keeps
-                                // its own last-good diagram images.
+                                // its own last-good diagram images. The
+                                // factory keeps the plugin registration
+                                // stable across rebuilds.
                                 .plugin(
-                                    crate::ui::markdown_mermaid::MermaidPlugin::new(
+                                    crate::ui::markdown_mermaid::preview_plugin_for(
                                         crate::ui::markdown_mermaid::PreviewIdentity::from_buffer(
                                             f.id(),
                                             slot,
                                         ),
+                                        cx,
                                     ),
                                 ),
                             ),
