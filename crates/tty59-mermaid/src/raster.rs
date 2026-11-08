@@ -6,6 +6,25 @@
 //! panic, absurd dimensions) comes back as [`crate::MermaidError::Render`];
 //! nothing here panics on any input.
 //!
+//! Raster images referenced from the SVG (`<image href="…">` and `feImage`)
+//! are omitted on purpose. Diagram sources come from untrusted markdown, and
+//! usvg's default href resolvers would read any path on disk — including
+//! unbounded character devices such as `/dev/zero` — and decode embedded
+//! data-URL rasters into large decoder allocations. Both resolvers are
+//! therefore pinned to return `None`: such elements are skipped and render
+//! as nothing, while shapes and text are unaffected. (merman's resvg-safe
+//! pipeline already strips or refuses every non-data-URL image href — its
+//! sanitizer removes them, its terminal validation rejects any that
+//! survive — so this is the second, independent layer.)
+//!
+//! Note this crate's `resvg` build leaves the `raster-images` feature off:
+//! even with the default resolvers, PNG/JPEG/GIF/WebP hrefs would not be
+//! *painted* here — but their bytes would still be read from disk or
+//! decoded from the data URL, and nested-SVG images are painted regardless
+//! of that feature. The resolver policy above omits every image href
+//! independently of any feature set, so the guarantee does not rest on
+//! build features.
+//!
 //! Text uses one process-wide font database ([`font_stack`]) built from the
 //! system fonts, with the CSS generic families pointed at faces that are
 //! actually installed. merman measures diagram labels with a proportional
@@ -15,6 +34,7 @@
 //! (`ui-sans-serif`, `system-ui`, …) fall back to the same faces instead of
 //! a serif font wider than the boxes merman sized for the text.
 
+use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, OnceLock};
 
@@ -84,6 +104,10 @@ struct FontStack {
     db: Arc<fontdb::Database>,
     /// Used as `usvg`'s default family for `<text>` without `font-family`.
     default_family: String,
+    /// Lowercased installed family name → faces carrying it, in database
+    /// order. Built once here so case-insensitive selection is a map lookup
+    /// instead of a scan over every installed face for every text span.
+    faces_by_family: HashMap<String, Vec<fontdb::ID>>,
 }
 
 static FONT_STACK: OnceLock<FontStack> = OnceLock::new();
@@ -115,9 +139,20 @@ fn font_stack() -> &'static FontStack {
             db.set_monospace_family(name.clone());
         }
 
+        let mut faces_by_family: HashMap<String, Vec<fontdb::ID>> = HashMap::new();
+        for face in db.faces() {
+            for (name, _) in &face.families {
+                faces_by_family
+                    .entry(name.to_ascii_lowercase())
+                    .or_default()
+                    .push(face.id);
+            }
+        }
+
         FontStack {
             db: Arc::new(db),
             default_family: sans.unwrap_or_else(|| "sans-serif".to_owned()),
+            faces_by_family,
         }
     })
 }
@@ -221,21 +256,13 @@ fn select_font(font: &usvg::Font, db: &mut Arc<fontdb::Database>) -> Option<font
                 if let Some(id) = query_family(db, fontdb::Family::Name(name), font) {
                     return Some(id);
                 }
-                let candidates: Vec<fontdb::ID> = db
-                    .faces()
-                    .filter(|face| {
-                        face.families
-                            .iter()
-                            .any(|(face_name, _)| face_name.eq_ignore_ascii_case(name))
-                    })
-                    .map(|face| face.id)
-                    .collect();
-                if let Some(id) = best_face(
-                    db,
-                    &candidates,
-                    font.weight(),
-                    fontdb::Style::from(font.style()),
-                ) {
+                // Case-insensitive fallback through the once-built map
+                // (`FontStack::faces_by_family`) instead of a scan over
+                // every installed face for every span.
+                let candidates = font_stack().faces_by_family.get(&name.to_ascii_lowercase());
+                if let Some(id) = candidates.and_then(|ids| {
+                    best_face(db, ids, font.weight(), fontdb::Style::from(font.style()))
+                }) {
                     return Some(id);
                 }
             }
@@ -356,20 +383,50 @@ pub(crate) fn rasterize(svg: &str, scale: f32) -> Result<Raster, MermaidError> {
     })
 }
 
-fn draw(svg: &str, scale: f32) -> Result<Raster, MermaidError> {
+/// The pinned [`usvg::Options`] every parse in this crate goes through:
+/// the shared font stack, no resources dir, and the image-href refusal
+/// policy. Kept as one helper so the unit tests parse with exactly the
+/// options production uses — pixels alone cannot prove the policy, because
+/// this crate's `resvg` build has `raster-images` off and never paints a
+/// raster href.
+fn pinned_options() -> usvg::Options<'static> {
     let stack = font_stack();
-    let options = usvg::Options {
+    usvg::Options {
         font_family: stack.default_family.clone(),
         fontdb: stack.db.clone(),
         font_resolver: usvg::FontResolver {
             select_font: Box::new(select_font),
             select_fallback: usvg::FontResolver::default_fallback_selector(),
         },
+        // No disk resources are ever consulted for relative hrefs.
+        resources_dir: None,
+        // Diagram sources come from untrusted markdown: refuse every
+        // `<image>`/`feImage` href. The defaults would `std::fs::read` any
+        // existing path a string href names — including unbounded character
+        // devices such as `/dev/zero` — and hand embedded data-URL rasters
+        // to the image decoders. Returning `None` skips the element, so it
+        // renders as nothing; shapes and text are unaffected.
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(
+                |_: &str, _: Arc<Vec<u8>>, _: &usvg::Options| -> Option<usvg::ImageKind> { None },
+            ),
+            resolve_string: Box::new(|_: &str, _: &usvg::Options| -> Option<usvg::ImageKind> {
+                None
+            }),
+        },
         ..usvg::Options::default()
-    };
+    }
+}
 
-    let tree = usvg::Tree::from_str(svg, &options)
-        .map_err(|e| MermaidError::Render(format!("SVG parse failed: {e}")))?;
+/// Parse `svg` under [`pinned_options`], mapping parse failures to
+/// [`MermaidError::Render`] exactly like the draw path.
+fn parse_tree(svg: &str) -> Result<usvg::Tree, MermaidError> {
+    usvg::Tree::from_str(svg, &pinned_options())
+        .map_err(|e| MermaidError::Render(format!("SVG parse failed: {e}")))
+}
+
+fn draw(svg: &str, scale: f32) -> Result<Raster, MermaidError> {
+    let tree = parse_tree(svg)?;
 
     let size = tree.size();
     let (vw, vh) = (f64::from(size.width()), f64::from(size.height()));
@@ -415,6 +472,61 @@ mod tests {
     fn pixel(raster: &Raster, x: u32, y: u32) -> [u8; 4] {
         let i = (y * raster.width + x) as usize * 4;
         raster.bgra[i..i + 4].try_into().unwrap()
+    }
+
+    /// Whether the parsed tree contains any `<image>` node anywhere. Pixels
+    /// cannot prove the href policy in this build (`raster-images` is off,
+    /// so no raster href is ever painted); the parsed tree can.
+    fn has_image_node(group: &usvg::Group) -> bool {
+        group.children().iter().any(|node| match node {
+            usvg::Node::Image(_) => true,
+            usvg::Node::Group(child) => has_image_node(child),
+            _ => false,
+        })
+    }
+
+    /// Standard-alphabet base64 with padding — a test-only copy of the
+    /// integration fixture's encoder, so the data-URL fixture below carries
+    /// a fully valid PNG (magic bytes, parseable dimensions), not just URL
+    /// syntax: usvg's converter drops `<image>` nodes whose payload has no
+    /// recognizable size, which would gut the baseline proof.
+    fn base64(data: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let (chunks, rest) = data.as_chunks::<3>();
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+        for chunk in chunks {
+            let word =
+                (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+            for shift in [18, 12, 6, 0] {
+                out.push(TABLE[(word >> shift & 0x3f) as usize] as char);
+            }
+        }
+        match rest {
+            [a] => {
+                let word = u32::from(*a) << 16;
+                out.push(TABLE[(word >> 18 & 0x3f) as usize] as char);
+                out.push(TABLE[(word >> 12 & 0x3f) as usize] as char);
+                out.push_str("==");
+            }
+            [a, b] => {
+                let word = (u32::from(*a) << 16) | (u32::from(*b) << 8);
+                out.push(TABLE[(word >> 18 & 0x3f) as usize] as char);
+                out.push(TABLE[(word >> 12 & 0x3f) as usize] as char);
+                out.push(TABLE[(word >> 6 & 0x3f) as usize] as char);
+                out.push('=');
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// A `data:image/png;base64,…` URL holding a real 16×16 magenta PNG.
+    fn sentinel_png_data_url() -> String {
+        let mut pixmap = tiny_skia::Pixmap::new(16, 16).expect("16x16 pixmap");
+        pixmap.fill(tiny_skia::Color::from_rgba8(0xff, 0x00, 0xff, 0xff));
+        let png = pixmap.encode_png().expect("encode sentinel png");
+        format!("data:image/png;base64,{}", base64(&png))
     }
 
     fn assert_close(actual: [u8; 4], expected: [u8; 4], tolerance: u8) {
@@ -699,5 +811,102 @@ mod tests {
         let second = rasterize(&svg, 2.0).unwrap();
         assert_eq!(first.bgra, second.bgra);
         assert_eq!((first.width, first.height), (second.width, second.height));
+    }
+
+    /// A real PNG on disk that an `<image>` href points at. Security
+    /// regression: usvg's DEFAULT string resolver would read any existing
+    /// path, so untrusted markdown could pull file bytes into the process.
+    /// Painting is a separate, feature-gated concern — the failing-before
+    /// proof is the parsed tree: the default resolver keeps an image node
+    /// (the file was read); the pinned resolver must keep the tree
+    /// image-free and the raster fully transparent.
+    #[test]
+    fn image_href_file_png_is_not_loaded() {
+        let path = std::env::temp_dir().join(format!(
+            "tty59-mermaid-image-href-{}.png",
+            std::process::id()
+        ));
+        let mut pixmap = tiny_skia::Pixmap::new(16, 16).expect("16x16 pixmap");
+        // Vivid magenta, absent from every theme palette, as the sentinel.
+        pixmap.fill(tiny_skia::Color::from_rgba8(0xff, 0x00, 0xff, 0xff));
+        let png = pixmap.encode_png().expect("encode sentinel png");
+        std::fs::write(&path, png).expect("write sentinel png");
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(path.clone());
+
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><image href="{}" width="16" height="16"/></svg>"#,
+            path.display()
+        );
+        let tree = parse_tree(&svg).expect("parse must succeed");
+        assert!(
+            !has_image_node(tree.root()),
+            "PNG was read from disk: image node present in the parsed tree"
+        );
+        let raster = rasterize(&svg, 1.0).expect("rasterize must succeed");
+        assert_eq!((raster.width, raster.height), (16, 16));
+        assert!(
+            raster.bgra.iter().all(|byte| *byte == 0),
+            "PNG was loaded from disk and drawn: sentinel pixels present"
+        );
+    }
+
+    /// Embedded data-URL images — the one href form merman's resvg-safe
+    /// pipeline passes through to the SVG — proven end to end through the
+    /// public `render_svg` plus the pinned parse: the SVG keeps the href,
+    /// the pinned parse keeps it out of the tree. Baseline: the default
+    /// `resolve_data` turns the real encoded PNG into an image node and
+    /// this fails, even though this build would never paint it.
+    #[test]
+    fn mermaid_embedded_image_href_parses_to_no_image_node() {
+        let source = format!(
+            "flowchart TD\n    Shot@{{ img: \"{}\", label: \"blocked\" }}\n    Shot --> Check[preview]\n",
+            sentinel_png_data_url()
+        );
+        let svg = crate::render_svg(&source, &crate::MermaidTheme::light())
+            .expect("render_svg image-square source");
+        assert!(
+            svg.contains(r#"<image href="data:image/png"#),
+            "no image href in the SVG; the blocked-image path was not reached"
+        );
+        let tree = parse_tree(&svg).expect("parse mermaid SVG");
+        assert!(
+            !has_image_node(tree.root()),
+            "data-URL image node present in the parsed tree"
+        );
+    }
+
+    /// Security regression: the DEFAULT string resolver `std::fs::read`s any
+    /// existing path an `<image>` href names — on `/dev/zero` that read is
+    /// unbounded and hangs or OOMs the process. The pinned resolver never
+    /// touches the disk, so this must finish immediately and draw nothing.
+    /// The font database is warmed first so the timed section measures href
+    /// handling, not one-time system font scanning, and the render runs on a
+    /// worker thread bounded by `recv_timeout` so a regression fails fast
+    /// instead of hanging the test binary.
+    #[test]
+    fn image_href_dev_zero_returns_promptly() {
+        rasterize(&svg_with_size("4", "4"), 1.0).expect("font-stack warmup");
+
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">"#.to_owned()
+            + r#"<image href="/dev/zero" width="8" height="8"/></svg>"#;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = tx.send(rasterize(&svg, 1.0));
+        });
+        let result = rx
+            .recv_timeout(std::time::Duration::from_millis(250))
+            .expect("rasterize hung on /dev/zero (unbounded read)");
+        let raster = result.expect("rasterize must succeed");
+        assert!(
+            raster.bgra.iter().all(|byte| *byte == 0),
+            "device image was loaded and drawn"
+        );
+        worker.join().expect("worker panicked");
     }
 }

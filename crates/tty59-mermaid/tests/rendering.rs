@@ -9,6 +9,7 @@
 use std::fmt::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use resvg::tiny_skia;
 use tty59_mermaid::{MAX_PIXELS, MermaidError, MermaidTheme, Rgba, rasterize, render, render_svg};
 
 const FLOWCHART: &str = "\
@@ -335,4 +336,165 @@ fn huge_source_raster_stays_within_pixel_cap() {
         has_visible_pixel(&raster),
         "capped huge raster is fully transparent"
     );
+}
+
+/// Standard-alphabet base64 with padding — just enough to embed the sentinel
+/// PNG into a `data:` URL without adding a dependency.
+fn base64(data: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let (chunks, rest) = data.as_chunks::<3>();
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in chunks {
+        let word = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        for shift in [18, 12, 6, 0] {
+            out.push(TABLE[(word >> shift & 0x3f) as usize] as char);
+        }
+    }
+    match rest {
+        [a] => {
+            let word = u32::from(*a) << 16;
+            out.push(TABLE[(word >> 18 & 0x3f) as usize] as char);
+            out.push(TABLE[(word >> 12 & 0x3f) as usize] as char);
+            out.push_str("==");
+        }
+        [a, b] => {
+            let word = (u32::from(*a) << 16) | (u32::from(*b) << 8);
+            out.push(TABLE[(word >> 18 & 0x3f) as usize] as char);
+            out.push(TABLE[(word >> 12 & 0x3f) as usize] as char);
+            out.push(TABLE[(word >> 6 & 0x3f) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+/// A 16×16 vivid-magenta PNG as a `data:image/png;base64,…` URL. Magenta is
+/// absent from both neutral theme palettes, so any of its pixels in a raster
+/// can only come from the embedded image being decoded and drawn.
+fn sentinel_png_data_url() -> String {
+    let mut pixmap = tiny_skia::Pixmap::new(16, 16).expect("16x16 pixmap");
+    pixmap.fill(tiny_skia::Color::from_rgba8(0xff, 0x00, 0xff, 0xff));
+    let png = pixmap.encode_png().expect("encode sentinel png");
+    format!("data:image/png;base64,{}", base64(&png))
+}
+
+const SENTINEL_BGRA: [u8; 4] = [0xff, 0x00, 0xff, 0xff];
+
+/// Post-fix assurance, end to end (untrusted markdown → pixels): an
+/// embedded raster is the one image href merman's resvg-safe pipeline lets
+/// through to the SVG. This crate's `resvg` build paints no raster hrefs
+/// anyway (`raster-images` is off), so this cannot fail on the old
+/// resolver; the failing-before proof is the parsed-tree unit test
+/// `mermaid_embedded_image_href_parses_to_no_image_node`. What this pins
+/// down: the href really reaches the SVG, the full render stays
+/// sentinel-free, and the diagram's own shapes and labels still render.
+#[test]
+fn mermaid_embedded_image_href_is_not_drawn() {
+    let source = format!(
+        "flowchart TD\n    Shot@{{ img: \"{}\", label: \"blocked\" }}\n    Shot --> Check[preview]\n",
+        sentinel_png_data_url()
+    );
+    let theme = MermaidTheme::light();
+
+    let svg = render_svg(&source, &theme)
+        .unwrap_or_else(|error| panic!("render_svg rejected the image-square source: {error}"));
+    // This only proves anything while the href actually reaches the SVG.
+    assert!(
+        svg.contains(r#"<image href="data:image/png"#),
+        "no image href in the SVG; the blocked-image path was not reached"
+    );
+
+    let raster = render(&source, &theme, 2.0).expect("render image-square diagram");
+    assert!(
+        has_visible_pixel(&raster),
+        "diagram chrome (shapes/labels) must still render"
+    );
+    let sentinel_pixels = raster
+        .bgra
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| **px == SENTINEL_BGRA)
+        .count();
+    assert_eq!(
+        sentinel_pixels, 0,
+        "embedded data-URL raster was decoded and drawn"
+    );
+}
+
+/// Layered defense, documented end-to-end (NOT a before/after proof: merman
+/// stops these itself, so this passes on the old rasterizer too). A
+/// file-path image href in untrusted markdown never reaches the pixels:
+/// today merman's resvg-safe sanitizer silently strips the href of a real,
+/// existing PNG reference (its terminal validation errors on whatever
+/// survives sanitization with a resvg-safe contract / non-local resource
+/// message); should a future merman ever pass one through, the
+/// rasterizer's pinned resolver still refuses to read the disk. The
+/// sentinel PNG is really written to disk so a Syntax error or a
+/// missing-file skip can never mask the outcome.
+#[test]
+fn mermaid_file_image_href_never_reaches_pixels() {
+    let path = std::env::temp_dir().join(format!(
+        "tty59-mermaid-e2e-image-{}.png",
+        std::process::id()
+    ));
+    let mut pixmap = tiny_skia::Pixmap::new(16, 16).expect("16x16 pixmap");
+    pixmap.fill(tiny_skia::Color::from_rgba8(0xff, 0x00, 0xff, 0xff));
+    let png = pixmap.encode_png().expect("encode sentinel png");
+    std::fs::write(&path, png).expect("write sentinel png");
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(path.clone());
+    let href = path.display().to_string();
+
+    let source = format!(
+        "flowchart TD\n    Shot@{{ img: \"{href}\", label: \"blocked\" }}\n    Shot --> Check[preview]\n"
+    );
+    let theme = MermaidTheme::light();
+
+    match render_svg(&source, &theme) {
+        // A Syntax error would mean the fixture stopped exercising the href
+        // path (the directive no longer parses), not that images are safe.
+        Err(MermaidError::Syntax(message)) => {
+            panic!("source no longer parses; fixture regressed: {message}");
+        }
+        // merman refusing what survives its sanitizer is the refusing
+        // outcome; accept its current and historic wordings.
+        Err(MermaidError::Render(message)) => {
+            assert!(
+                message.contains("resvg-safe contract") || message.contains("non-local resource"),
+                "unexpected Render error: {message}"
+            );
+        }
+        Ok(svg) => {
+            // Current merman: the sanitizer strips the file href but keeps
+            // the (now href-less) <image> element. A future merman may pass
+            // the href through instead; both must stay sentinel-free.
+            if svg.contains(&href) {
+                assert!(
+                    svg.contains(&format!(r#"<image href="{href}""#)),
+                    "path present in the SVG but not as the image href"
+                );
+            } else {
+                assert!(
+                    svg.contains("<image"),
+                    "image element vanished; fixture no longer reaches the image path"
+                );
+            }
+            let raster = render(&source, &theme, 1.0).expect("render image-square diagram");
+            assert!(
+                has_visible_pixel(&raster),
+                "diagram chrome (shapes/labels) must still render"
+            );
+            assert!(
+                !raster.bgra.as_chunks::<4>().0.contains(&SENTINEL_BGRA),
+                "file image leaked into pixels"
+            );
+        }
+    }
 }
