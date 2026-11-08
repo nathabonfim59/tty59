@@ -26,6 +26,8 @@
 //! - Output is deterministic for the same input (no clocks, no randomness),
 //!   so the GUI can cache by `(source, theme, scale)`.
 
+mod raster;
+
 use std::fmt;
 
 mod svg;
@@ -193,9 +195,7 @@ pub fn render_svg(source: &str, theme: &MermaidTheme) -> Result<String, MermaidE
 /// passes the window's scale factor). See [`MAX_PIXELS`] for the size cap.
 /// Text is laid out with the system fonts (loaded once per process).
 pub fn rasterize(svg: &str, scale: f32) -> Result<Raster, MermaidError> {
-    // FOUNDATION STUB — part A implements this.
-    let _ = (svg, scale);
-    Err(MermaidError::Render("not implemented yet".into()))
+    raster::rasterize(svg, scale)
 }
 
 /// [`render_svg`] then [`rasterize`].
