@@ -863,6 +863,142 @@ mod tests {
         });
     }
 
+    /// The colors toggle is a live palette change, driven through
+    /// `render_block` exactly as the preview drives it. Turning the setting
+    /// off re-keys the block (accents are part of the theme), schedules
+    /// exactly one new render under the neutral palette, and — asserted
+    /// before that render is allowed to settle — the pending state shows
+    /// the stable-height placeholder, never the colored image this block
+    /// showed a moment ago. Turning the setting back on finds the colored
+    /// entry still cached and reuses it without a third render. The
+    /// renderer records each request's accent count and draws a different
+    /// footprint per palette, so the on-screen geometry says which
+    /// palette's image is actually up.
+    #[gpui::test]
+    fn mermaid_colors_toggle_rerenders_and_never_shows_the_stale_last_good(
+        cx: &mut TestAppContext,
+    ) {
+        let requests: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = requests.clone();
+        let renderer: RenderFn = Arc::new(move |_, theme, _| {
+            let accents = theme.accents.len();
+            seen.lock().unwrap().push(accents);
+            // Colored: 100×50 logical. Neutral: 120×60 — one footprint per
+            // palette, so width alone identifies the image on screen.
+            if accents == 0 {
+                Ok(raster(120, 60, 1.0))
+            } else {
+                Ok(raster(100, 50, 1.0))
+            }
+        });
+        cx.update(|cx| install(cx, renderer));
+        let vcx = cx.add_empty_window();
+        let source = "graph TD\nA-->B";
+        let drawn = block(9, source);
+
+        // No Config global: colors default on. First render lands, is shown
+        // once more so the block stores its colored last-good.
+        let pending = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_close(
+            f32::from(pending.size.height),
+            PENDING_HEIGHT,
+            "first draw is the placeholder",
+        );
+        vcx.run_until_parked();
+        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![6],
+            "one colored render so far"
+        );
+
+        // Toggle off. The next draw is the neutral key's pending state;
+        // assert it before parking, while the request is still in flight.
+        vcx.update(|_, cx| {
+            cx.set_global(crate::core::config::Config(
+                crate::core::config::CoreConfig {
+                    editor_mermaid_colors: false,
+                    ..Default::default()
+                },
+            ));
+        });
+        let neutral_pending = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_close(
+            f32::from(neutral_pending.size.width),
+            400.0,
+            "no colored last-good while the neutral render is pending",
+        );
+        assert_close(
+            f32::from(neutral_pending.size.height),
+            50.0,
+            "the block keeps its stable last-good height",
+        );
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![6],
+            "the neutral render is scheduled, not yet run"
+        );
+        vcx.update(|_, cx| {
+            let key = key_for(cx, source);
+            let cache = cx.global::<MermaidCache>();
+            assert_eq!(
+                cache.state_of(&key),
+                Some("pending"),
+                "exactly one neutral request, already in flight"
+            );
+            assert!(
+                cache
+                    .last_good_for_block(9, key.theme(), key.scale_bits())
+                    .is_none(),
+                "the colored last-good must not match the neutral theme"
+            );
+        });
+
+        // The neutral render lands with its own footprint…
+        vcx.run_until_parked();
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![6, 0],
+            "the neutral render ran with an empty palette"
+        );
+        let neutral = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_close(
+            f32::from(neutral.size.width),
+            120.0,
+            "the neutral image, identified by its own size",
+        );
+        assert_close(f32::from(neutral.size.height), 60.0, "neutral height");
+
+        // …and toggling back on reuses the still-cached colored entry: no
+        // third render, the colored footprint back on screen.
+        vcx.update(|_, cx| {
+            cx.global_mut::<crate::core::config::Config>()
+                .editor_mermaid_colors = true;
+        });
+        let colored_again = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_close(
+            f32::from(colored_again.size.width),
+            100.0,
+            "the cached colored entry is reused",
+        );
+        assert_close(f32::from(colored_again.size.height), 50.0, "colored height");
+        assert_eq!(
+            *requests.lock().unwrap(),
+            vec![6, 0],
+            "no re-render for a palette that is still cached"
+        );
+    }
+
     /// With Part A's real renderer, an invalid source takes the failure
     /// path: the error line above the original source as an ordinary code
     /// block, visibly taller than the error line alone. The draw goes

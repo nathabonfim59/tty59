@@ -1526,6 +1526,324 @@ mod tests {
             assert_eq!(after.error, mermaid_rgba(theme.danger));
         });
     }
+
+    /// The ANSI ink order the accent palette is derived in.
+    const INK_NAMES: [&str; 6] = ["red", "green", "yellow", "blue", "magenta", "cyan"];
+
+    /// Overwrites the theme with explicit packed colours for the accent
+    /// tests: foreground, background, muted, border, then the six ANSI inks
+    /// red..cyan. Every value is unmistakable, so a mapping that reads any
+    /// other source (stock palettes, defaults) misses the assertions.
+    fn accent_theme(
+        cx: &mut gpui::App,
+        mode: ThemeMode,
+        foreground: u32,
+        background: u32,
+        muted: u32,
+        border: u32,
+        inks: [u32; 6],
+    ) {
+        Theme::change(mode, None, cx);
+        let theme = Theme::global_mut(cx);
+        theme.foreground = rgb(foreground).into();
+        theme.background = rgb(background).into();
+        theme.muted = rgb(muted).into();
+        theme.border = rgb(border).into();
+        let [red, green, yellow, blue, magenta, cyan] = inks;
+        theme.red = rgb(red).into();
+        theme.green = rgb(green).into();
+        theme.yellow = rgb(yellow).into();
+        theme.blue = rgb(blue).into();
+        theme.magenta = rgb(magenta).into();
+        theme.cyan = rgb(cyan).into();
+    }
+
+    /// Packed `0xRRGGBB` → the renderer's opaque colour, the form the
+    /// mapper's fills take.
+    fn accent_rgba(color: u32) -> tty59_mermaid::Rgba {
+        tty59_mermaid::Rgba {
+            r: (color >> 16) as u8,
+            g: (color >> 8) as u8,
+            b: color as u8,
+            a: 255,
+        }
+    }
+
+    /// An accent fill exactly as the mapper builds it: the ink blended into
+    /// the background with [`presets::mix`]'s channel arithmetic.
+    fn accent_fill(background: u32, ink: u32, amount: f32) -> tty59_mermaid::Rgba {
+        accent_rgba(presets::mix(background, ink, amount))
+    }
+
+    /// An accent colour back to packed RGB, for contrast checks.
+    fn packed(color: tty59_mermaid::Rgba) -> u32 {
+        (color.r as u32) << 16 | (color.g as u32) << 8 | color.b as u32
+    }
+
+    /// Six accents, one per ANSI ink in red/green/yellow/blue/magenta/cyan
+    /// order, each with the ink itself as its border and the theme's
+    /// foreground as its text. The fills blend the ink into the background,
+    /// and the blend step is chosen per accent: this theme's foreground
+    /// *is* its red ink, so red needs a weaker blend (15 %) to stay
+    /// readable, its blue ink is dark enough to need the floor step
+    /// (10 %), and the other four read at the full 20 %. The margins
+    /// around the 4.5 floor at each step were verified when the fixture
+    /// colours were picked, so every assertion pins the exact step taken.
+    #[gpui::test]
+    fn mermaid_accents_use_the_active_ansi_inks_in_order(cx: &mut TestAppContext) {
+        const FOREGROUND: u32 = 0xb01a2c;
+        const BACKGROUND: u32 = 0xf0f1f2;
+        const INKS: [u32; 6] = [0xb01a2c, 0x3fb950, 0xd4a72c, 0x050810, 0xb98ef9, 0x3fbcc0];
+        const STEPS: [f32; 6] = [0.15, 0.20, 0.20, 0.10, 0.20, 0.20];
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            accent_theme(
+                cx,
+                ThemeMode::Light,
+                FOREGROUND,
+                BACKGROUND,
+                0xe1e2e3,
+                0xb0b1b2,
+                INKS,
+            );
+
+            // The fixture is a legal theme whose body text reads fine; only
+            // one ink collides with the foreground.
+            assert!(
+                presets::contrast(FOREGROUND, BACKGROUND) >= 4.5,
+                "the fixture's own body text must clear the floor"
+            );
+
+            let mapped = mermaid_theme(cx);
+            assert_eq!(mapped.accents.len(), 6, "one accent per ANSI ink");
+            for (i, (accent, (&ink, &step))) in mapped
+                .accents
+                .iter()
+                .zip(INKS.iter().zip(STEPS.iter()))
+                .enumerate()
+            {
+                let name = INK_NAMES[i];
+                assert_eq!(
+                    accent.border,
+                    mermaid_rgba(rgb(ink).into()),
+                    "{name} border is the ink itself"
+                );
+                assert_eq!(
+                    accent.text, mapped.text,
+                    "{name} text is the theme's foreground"
+                );
+                assert_eq!(
+                    accent.fill,
+                    accent_fill(BACKGROUND, ink, step),
+                    "{name} fill is the ink blended at its chosen step {step}"
+                );
+                assert!(
+                    presets::contrast(FOREGROUND, packed(accent.fill)) >= 4.5,
+                    "{name} text keeps the floor on its fill"
+                );
+            }
+        });
+    }
+
+    /// The shipped default light and dark presets need no mercy: every ANSI
+    /// ink reads at the full 20 % blend, keeps the ink as its border in
+    /// red..cyan order, and holds the foreground at ≥ 4.5:1 on its fill —
+    /// never the neutral fallback, which would be a bug in the shipped
+    /// look, not mercy. The accents are asserted against the *active*
+    /// theme values (what `apply_theme` writes into the component theme),
+    /// not the preset specs, so a mapping that ignored the live theme
+    /// fails here too.
+    #[gpui::test]
+    fn mermaid_accents_hold_the_contrast_floor_for_stock_light_and_dark(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            for (id, mode) in [("light", ThemeMode::Light), ("dark", ThemeMode::Dark)] {
+                let preset = presets::by_id(cx, id);
+                let neutrals = preset.neutrals();
+                let inks: [u32; 6] = std::array::from_fn(|i| preset.ansi_ink(i + 1));
+                accent_theme(
+                    cx,
+                    mode,
+                    neutrals.foreground,
+                    neutrals.background,
+                    neutrals.muted,
+                    neutrals.border,
+                    inks,
+                );
+
+                let mapped = mermaid_theme(cx);
+                assert_eq!(mapped.accents.len(), 6, "{id}: one accent per ANSI ink");
+                for (i, (accent, &ink)) in mapped.accents.iter().zip(inks.iter()).enumerate() {
+                    let name = INK_NAMES[i];
+                    assert_eq!(
+                        accent.border,
+                        mermaid_rgba(rgb(ink).into()),
+                        "{id} {name}: border is the active ANSI ink, not a fallback"
+                    );
+                    assert_eq!(
+                        accent.text, mapped.text,
+                        "{id} {name}: text is the theme's foreground"
+                    );
+                    assert_eq!(
+                        accent.fill,
+                        accent_fill(neutrals.background, ink, 0.20),
+                        "{id} {name}: the full 20 % blend"
+                    );
+                    assert!(
+                        presets::contrast(neutrals.foreground, packed(accent.fill)) >= 4.5,
+                        "{id} {name}: text keeps the floor on its fill"
+                    );
+                }
+            }
+        });
+    }
+
+    /// The setting owns the mode: off yields the empty accent vector — the
+    /// renderer's neutral look, byte-identical to pre-Phase-2 — while on,
+    /// and crucially a context with no `Config` global at all (standalone
+    /// theme tests, previews the settings never reached), yields the full
+    /// six: colored diagrams are the shipped default, so absence of
+    /// configuration must not silently turn them off.
+    #[gpui::test]
+    fn mermaid_accents_follow_the_editor_mermaid_colors_setting(cx: &mut TestAppContext) {
+        const INKS: [u32; 6] = [0xd1242f, 0x1a7f37, 0x9a6700, 0x0969da, 0x8250df, 0x1b7c83];
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            accent_theme(
+                cx,
+                ThemeMode::Light,
+                0x1c1c1e,
+                0xfcfcfb,
+                0xe1e2e3,
+                0xb0b1b2,
+                INKS,
+            );
+
+            assert_eq!(
+                mermaid_theme(cx).accents.len(),
+                6,
+                "no Config global: the palette defaults on"
+            );
+
+            cx.set_global(Config(crate::core::config::CoreConfig {
+                editor_mermaid_colors: true,
+                ..Default::default()
+            }));
+            assert_eq!(
+                mermaid_theme(cx).accents.len(),
+                6,
+                "explicit on keeps the six accents"
+            );
+
+            cx.global_mut::<Config>().editor_mermaid_colors = false;
+            assert!(
+                mermaid_theme(cx).accents.is_empty(),
+                "off produces the empty neutral palette"
+            );
+        });
+    }
+
+    /// A theme whose foreground sits on the wrong side of its inks — here
+    /// the foreground *is* the yellow ink, and against this background even
+    /// 10 % of any of the six inks stays under the floor — gets the
+    /// documented failure mode: every accent falls back to the neutral
+    /// node pair (`primary` fill, `primary_border` border), and the text
+    /// stays the theme's foreground. That fallback is itself below the
+    /// floor here (≈ 3.8:1 against `muted`), which is the accepted price of
+    /// never swapping the text for black or white: an unreadable theme is
+    /// fixed in its palette, not in the diagram renderer.
+    #[gpui::test]
+    fn mermaid_accents_fall_back_to_neutral_when_no_blend_reads(cx: &mut TestAppContext) {
+        const FOREGROUND: u32 = 0x9a6700;
+        const INKS: [u32; 6] = [0xb00020, 0x1a7f37, FOREGROUND, 0x0969da, 0x8250df, 0x1b7c83];
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            accent_theme(
+                cx,
+                ThemeMode::Light,
+                FOREGROUND,
+                0xf0f1f2,
+                0xe1e2e3,
+                0xb0b1b2,
+                INKS,
+            );
+
+            let mapped = mermaid_theme(cx);
+            assert_eq!(mapped.accents.len(), 6);
+            for (i, accent) in mapped.accents.iter().enumerate() {
+                let name = INK_NAMES[i];
+                assert_eq!(accent.fill, mapped.primary, "{name} takes the neutral fill");
+                assert_eq!(
+                    accent.border, mapped.primary_border,
+                    "{name} takes the neutral border"
+                );
+                assert_eq!(
+                    accent.text, mapped.text,
+                    "{name} text stays the foreground, never black or white"
+                );
+            }
+        });
+    }
+
+    /// One failed accent must not drag its siblings down: the gray "yellow"
+    /// ink here is the theme's own foreground, so no blend step rescues it
+    /// and it alone takes the neutral pair — while the five pastel inks
+    /// around it keep their full 20 % blends, their own borders and the
+    /// shared foreground text. Each accent walks the ladder alone.
+    #[gpui::test]
+    fn mermaid_accents_fall_back_alone_without_neutralizing_their_siblings(
+        cx: &mut TestAppContext,
+    ) {
+        const FOREGROUND: u32 = 0x6b6b6d;
+        const BACKGROUND: u32 = 0xf0f1f2;
+        const INKS: [u32; 6] = [0xfff1f0, 0xf0fff2, FOREGROUND, 0xeef4ff, 0xf8f0ff, 0xeffcff];
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            accent_theme(
+                cx,
+                ThemeMode::Light,
+                FOREGROUND,
+                BACKGROUND,
+                0xe1e2e3,
+                0xb0b1b2,
+                INKS,
+            );
+
+            let mapped = mermaid_theme(cx);
+            assert_eq!(mapped.accents.len(), 6);
+
+            let failed = &mapped.accents[2];
+            assert_eq!(
+                failed.fill, mapped.primary,
+                "the foreground-equal ink takes the neutral fill"
+            );
+            assert_eq!(failed.border, mapped.primary_border);
+            assert_eq!(failed.text, mapped.text);
+
+            for (i, (accent, &ink)) in mapped.accents.iter().zip(INKS.iter()).enumerate() {
+                if i == 2 {
+                    continue;
+                }
+                let name = INK_NAMES[i];
+                assert_eq!(
+                    accent.fill,
+                    accent_fill(BACKGROUND, ink, 0.20),
+                    "{name} keeps its full blend"
+                );
+                assert_eq!(
+                    accent.border,
+                    mermaid_rgba(rgb(ink).into()),
+                    "{name} keeps its own ink as border"
+                );
+                assert_eq!(accent.text, mapped.text);
+                assert!(
+                    presets::contrast(FOREGROUND, packed(accent.fill)) >= 4.5,
+                    "{name} text keeps the floor on its fill"
+                );
+            }
+        });
+    }
 }
 
 /// The text view's style for rendered Markdown, wherever tty59 shows it.
@@ -1541,9 +1859,12 @@ pub(crate) fn markdown_style(cx: &gpui::App) -> gpui_component::text::TextViewSt
 /// The palette handed to the mermaid renderer for the active theme.
 ///
 /// Diagrams draw on the preview's own background and use the theme's body ink,
-/// neutral fills and borders. Nodes stay neutral on purpose: per-node accent
-/// colours are out of scope, so `primary`/`secondary`/`tertiary` are all
-/// neutral surfaces and every border comes from the theme's one border colour.
+/// neutral fills and borders: `primary`/`secondary`/`tertiary` are neutral
+/// surfaces and every border comes from the theme's one border colour.
+/// Per-shape accent colours live in `accents`, derived from the active ANSI
+/// inks by [`mermaid_accents`] and switched by the `editor_mermaid_colors`
+/// setting; the base fields stay neutral so the accent-less look is exactly
+/// the one diagrams had before accents existed.
 /// `error` is the theme's danger ink, which is the readable red rather than
 /// the danger *fill* (that fill's foreground is meant for text on top of it).
 pub(crate) fn mermaid_theme(cx: &gpui::App) -> tty59_mermaid::MermaidTheme {
@@ -1573,6 +1894,104 @@ pub(crate) fn mermaid_theme(cx: &gpui::App) -> tty59_mermaid::MermaidTheme {
         actor_background: mermaid_rgba(theme.secondary),
         actor_border: mermaid_rgba(theme.border),
         error: mermaid_rgba(theme.danger),
+        accents: if mermaid_colors(cx) {
+            mermaid_accents(theme)
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// The contrast every accent's label must keep on its fill: WCAG's text
+/// floor, the same 4.5:1 tty59 holds its own text to.
+const MERMAID_ACCENT_FLOOR: f32 = 4.5;
+
+/// How much of each ANSI ink is blended into the background for an accent
+/// fill, and the steps the blend walks down when the theme's own
+/// foreground cannot read on the first one: 20 %, then 15 %, then 10 %.
+/// Less ink means more background, and the background is what the
+/// foreground was chosen to read on, so each step down walks the fill back
+/// toward legibility without ever touching the text colour.
+const MERMAID_ACCENT_MIX_STEPS: [f32; 3] = [0.20, 0.15, 0.10];
+
+/// Whether diagrams get per-shape accent colours: the
+/// `editor_mermaid_colors` setting. Defaulting to on when no `Config`
+/// global is installed (standalone theme tests, previews the settings
+/// never reached) is deliberate: colored diagrams are the shipped look,
+/// and absence of configuration must not silently turn them off.
+fn mermaid_colors(cx: &App) -> bool {
+    cx.try_global::<Config>()
+        .is_none_or(|config| config.editor_mermaid_colors)
+}
+
+/// The per-shape accent palette for the active theme: one accent per ANSI
+/// ink, in red/green/yellow/blue/magenta/cyan order.
+///
+/// Each accent keeps the theme legible rather than re-authoring it: the
+/// border is the ink itself, the text is the theme's own foreground —
+/// never black or white, whatever the fill — and the fill is the ink
+/// blended into the background, stepping down
+/// [`MERMAID_ACCENT_MIX_STEPS`] until the foreground clears
+/// [`MERMAID_ACCENT_FLOOR`] on it. An ink no step rescues falls back to
+/// the neutral node look (`primary` fill, `primary_border` border) with
+/// the foreground as its text; each accent walks the ladder alone, so one
+/// unlucky ink never recolors its siblings. In a theme whose own
+/// foreground is already unreadable that fallback can be unreadable too —
+/// the accepted price of never swapping the text colour, because an
+/// unreadable theme is fixed in its palette, not in the diagram renderer.
+fn mermaid_accents(theme: &Theme) -> Vec<tty59_mermaid::Accent> {
+    let foreground = theme.foreground;
+    let background = theme.background;
+    let text = mermaid_rgba(foreground);
+    let neutral_fill = mermaid_rgba(theme.muted);
+    let neutral_border = mermaid_rgba(theme.border);
+
+    [
+        theme.red,
+        theme.green,
+        theme.yellow,
+        theme.blue,
+        theme.magenta,
+        theme.cyan,
+    ]
+    .into_iter()
+    .map(|ink| {
+        let fill = MERMAID_ACCENT_MIX_STEPS
+            .iter()
+            .copied()
+            .map(|amount| presets::mix(hsla24(background), hsla24(ink), amount))
+            .find(|fill| presets::contrast(hsla24(foreground), *fill) >= MERMAID_ACCENT_FLOOR);
+        match fill {
+            Some(fill) => tty59_mermaid::Accent {
+                fill: mermaid_rgb(fill),
+                border: mermaid_rgba(ink),
+                text,
+            },
+            None => tty59_mermaid::Accent {
+                fill: neutral_fill,
+                border: neutral_border,
+                text,
+            },
+        }
+    })
+    .collect()
+}
+
+/// `Hsla` → packed `0xRRGGBB`, the form [`presets::mix`] and
+/// [`presets::contrast`] work in. Alpha is dropped: mixes build opaque
+/// fills and contrast is defined on RGB alone.
+fn hsla24(color: Hsla) -> u32 {
+    let rgb = crate::terminal::palette::hsla_to_rgb(color);
+    (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32
+}
+
+/// Packed `0xRRGGBB` → the renderer's opaque straight-alpha colour.
+fn mermaid_rgb(color: u32) -> tty59_mermaid::Rgba {
+    tty59_mermaid::Rgba {
+        r: (color >> 16) as u8,
+        g: (color >> 8) as u8,
+        b: color as u8,
+        a: 255,
     }
 }
 

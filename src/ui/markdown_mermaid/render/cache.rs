@@ -625,6 +625,32 @@ mod tests {
         );
     }
 
+    /// Accents are part of the key's theme by value, so a palette change
+    /// alone — the colors toggle flipping between empty and six accents —
+    /// is a new diagram identity: its own entry, and no match for another
+    /// palette's last-good.
+    #[test]
+    fn mermaid_accents_alone_change_the_cache_key() {
+        let neutral = MermaidTheme::light();
+        assert!(neutral.accents.is_empty());
+        let mut colored = neutral.clone();
+        colored.accents = vec![tty59_mermaid::Accent {
+            fill: tty59_mermaid::Rgba::rgb(0xd9, 0xda, 0xdc),
+            border: tty59_mermaid::Rgba::rgb(0x05, 0x08, 0x10),
+            text: tty59_mermaid::Rgba::rgb(0xb0, 0x1a, 0x2c),
+        }];
+        assert_ne!(
+            CacheKey::new("graph TD\nA-->B", neutral.clone(), 1.0),
+            CacheKey::new("graph TD\nA-->B", colored.clone(), 1.0),
+            "an accent-only change must rekey the cache"
+        );
+        assert_eq!(
+            CacheKey::new("graph TD\nA-->B", colored.clone(), 1.0),
+            CacheKey::new("graph TD\nA-->B", colored, 1.0),
+            "equal accents keep equal keys"
+        );
+    }
+
     /// A completion whose entry aged out stays out; a completion from an
     /// older generation must not overwrite a newer pending render of the
     /// same key.
