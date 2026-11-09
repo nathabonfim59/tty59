@@ -455,6 +455,8 @@ impl Tty59App {
         // Descriptions can carry live status, so they must not take part in
         // the identity that preserves GPUI's hover state.
         let element_id = settings_row_id(&label, &desc);
+        #[cfg(test)]
+        let row_debug_id = element_id.to_string();
         let (hit, miss) = match self
             .active_settings()
             .filter(|s| !s.search_active && !capture)
@@ -516,20 +518,33 @@ impl Tty59App {
                         .child(t(L10nKey::SettingsModified)),
                 ),
             });
+        // Tests find the row's pieces by stable selectors derived from the
+        // row's own `settings-row-{key}` id. Both the selector strings and the
+        // calls are cfg(test), so a production row builds exactly the element
+        // it did before.
+        #[cfg(test)]
+        let labels_debug_id = format!("{element_id}-labels");
         let labels = v_flex()
             .gap(px(2.))
             .min_w_0()
+            // Beside a never-shrinking control, zero flex-basis bounds the
+            // label column to the row's remaining width, so its description
+            // wraps there. A stacked row keeps the column auto-sized.
+            .when(!stacked, |col| col.flex_1())
             .when(gated, |col| col.opacity(0.45))
             .child(title_line)
             .when(!desc.is_empty(), |col| {
-                col.child(
-                    div()
-                        .text_size(fs(12.))
-                        .line_height(px(17.))
-                        .text_color(tk.k5)
-                        .child(desc),
-                )
+                let description = div()
+                    .text_size(fs(12.))
+                    .line_height(px(17.))
+                    .text_color(tk.k5)
+                    .child(desc);
+                #[cfg(test)]
+                let description = description.debug_selector(|| format!("{element_id}-desc"));
+                col.child(description)
             });
+        #[cfg(test)]
+        let labels = labels.debug_selector(move || labels_debug_id.clone());
         let row = div()
             .id(element_id)
             .role(gpui::Role::Group)
@@ -556,6 +571,8 @@ impl Tty59App {
                     .gap(px(8.))
                     .child(control),
             );
+        #[cfg(test)]
+        let row = row.debug_selector(move || row_debug_id.clone());
         if capture {
             if let Some(entry) = entry {
                 self.active_settings()
@@ -1482,21 +1499,26 @@ impl Tty59App {
                     )
                     .into_any_element()
                 });
-                rows.push(
-                    div()
-                        .id(SharedString::from(format!("search-result-{title:?}")))
-                        .when(selected, |d| {
-                            d.bg(tk.k04).rounded(px(7.)).mx(px(-8.)).px(px(8.))
-                        })
-                        .when_some(
-                            self.active_settings()
-                                .filter(|_| selected)
-                                .map(|s| s.search_anchor.clone()),
-                            |d, anchor| d.anchor_scroll(Some(anchor)),
-                        )
-                        .child(row)
-                        .into_any_element(),
-                );
+                // The wrapper is what carries a selected result's highlight
+                // background, so tests measure it too, by the same id it
+                // already carries.
+                #[cfg(test)]
+                let wrapper_debug_id = format!("search-result-{title:?}");
+                let wrapper = div()
+                    .id(SharedString::from(format!("search-result-{title:?}")))
+                    .when(selected, |d| {
+                        d.bg(tk.k04).rounded(px(7.)).mx(px(-8.)).px(px(8.))
+                    })
+                    .when_some(
+                        self.active_settings()
+                            .filter(|_| selected)
+                            .map(|s| s.search_anchor.clone()),
+                        |d, anchor| d.anchor_scroll(Some(anchor)),
+                    )
+                    .child(row);
+                #[cfg(test)]
+                let wrapper = wrapper.debug_selector(move || wrapper_debug_id.clone());
+                rows.push(wrapper.into_any_element());
                 index += 1;
             }
             groups.push(

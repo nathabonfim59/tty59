@@ -3893,7 +3893,10 @@ mod gpui_tests {
     use crate::core::session::Session;
     use crate::ui::app::Tty59App;
     use crate::ui::i18n::L10nKey;
-    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
+    use gpui::{
+        AppContext as _, Bounds, Entity, Pixels, Size, TestAppContext, VisualTestContext, px, size,
+    };
+    use gpui_component::ActiveTheme as _;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -4674,5 +4677,307 @@ mod gpui_tests {
         });
         assert!(prompt_editor);
         assert!(tab_completion, "the completion menu comes back with it");
+    }
+
+    // ── Shared row layout (B9) ───────────────────────────────────────────
+    //
+    // The rows every Settings page is built from, measured through the inline
+    // Settings overlay this test build draws. The long Mermaid description and
+    // the Language servers description both have to wrap inside their row, and
+    // nothing a row contains — labels, description, control — may reach past
+    // the row or the highlighted search-result wrapper around it, at any width.
+    //
+    // These are structural guards: under the test platform's NoopTextSystem
+    // simplified metrics (0.6em per character) they catch a row, description,
+    // or control escaping its container. They do NOT reproduce the native
+    // pixel overflow. The native bug was reproduced and fixed in the headless
+    // Wayland before/after pair: native-boat/wayland-before-mermaid.png (switch
+    // outside the row, description unwrapped) against
+    // native-boat/wayland-fixed-mermaid.png (switch inside, description
+    // wrapped).
+
+    /// One row the layout tests measure: its catalog keys, the query that
+    /// makes its row the one selected search result, and the static debug
+    /// selectors its elements record under in test builds — the same strings
+    /// the production row attaches, which `debug_bounds` requires as
+    /// literals.
+    struct RowFixture {
+        key: L10nKey,
+        desc_key: L10nKey,
+        query: &'static str,
+        row: &'static str,
+        labels: &'static str,
+        description: &'static str,
+        wrapper: &'static str,
+        control: &'static str,
+    }
+
+    const MERMAID_ROW: RowFixture = RowFixture {
+        key: L10nKey::SettingsEditorMermaidColors,
+        desc_key: L10nKey::SettingsEditorMermaidColorsDesc,
+        query: "editor_mermaid_colors",
+        row: "settings-row-SettingsEditorMermaidColors",
+        labels: "settings-row-SettingsEditorMermaidColors-labels",
+        description: "settings-row-SettingsEditorMermaidColors-desc",
+        wrapper: "search-result-SettingsEditorMermaidColors",
+        control: "wt-editor-mermaid-colors",
+    };
+
+    const LANGUAGE_SERVERS_ROW: RowFixture = RowFixture {
+        key: L10nKey::SettingsEditorLsp,
+        desc_key: L10nKey::SettingsEditorLspDesc,
+        query: "editor_lsp",
+        row: "settings-row-SettingsEditorLsp",
+        labels: "settings-row-SettingsEditorLsp-labels",
+        description: "settings-row-SettingsEditorLsp-desc",
+        wrapper: "search-result-SettingsEditorLsp",
+        control: "wt-editor-lsp",
+    };
+
+    /// One Settings row as the window really laid it out through the search
+    /// results page: the `search-result-{key}` wrapper that carries the
+    /// selected result's highlight background, the row itself, its label
+    /// column, its description block, and the row's switch.
+    #[derive(Debug)]
+    struct RowLayout {
+        wrapper: Bounds<Pixels>,
+        row: Bounds<Pixels>,
+        labels: Bounds<Pixels>,
+        description: Bounds<Pixels>,
+        control: Bounds<Pixels>,
+    }
+
+    fn measured(
+        vcx: &mut VisualTestContext,
+        key: L10nKey,
+        selector: &'static str,
+        what: &str,
+    ) -> Bounds<Pixels> {
+        vcx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{key:?}: {what} `{selector}` was laid out and painted"))
+    }
+
+    /// Search Settings for one setting's config key at a window size and
+    /// measure the matched row. Opening the inline Settings overlay and
+    /// searching builds the production `settings_row_gated_when` row through
+    /// the real page render and capture path — the same tree the inline page
+    /// paints — with exactly that row as the one selected result, so the
+    /// wrapper carries the highlight.
+    fn searched_row_layout(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        fixture: &RowFixture,
+        viewport: Size<Pixels>,
+    ) -> RowLayout {
+        app.update_in(vcx, |app, window, cx| {
+            if app.active_settings().is_none() {
+                app.open_settings_section(SettingsSection::General, window, cx);
+            }
+            let search = app.active_settings().unwrap().search.clone();
+            search.update(cx, |search, cx| search.set_value(fixture.query, window, cx));
+            app.autoselect_settings_search(cx);
+        });
+        vcx.simulate_resize(viewport);
+        // Two cycles: the first lays the results out under the window size,
+        // the second paints the settled tree, which is when debug bounds are
+        // recorded.
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        RowLayout {
+            wrapper: measured(
+                vcx,
+                fixture.key,
+                fixture.wrapper,
+                "the search-result wrapper",
+            ),
+            row: measured(vcx, fixture.key, fixture.row, "the row"),
+            labels: measured(vcx, fixture.key, fixture.labels, "the label column"),
+            description: measured(vcx, fixture.key, fixture.description, "the description"),
+            control: measured(vcx, fixture.key, fixture.control, "the switch"),
+        }
+    }
+
+    /// Containment with a half-pixel tolerance for device-pixel snapping, and
+    /// both boxes in the failure message so a CI log shows the real geometry.
+    fn assert_inside(outer: Bounds<Pixels>, inner: Bounds<Pixels>, what: &str) {
+        assert!(
+            inner.left() >= outer.left() - px(0.5)
+                && inner.right() <= outer.right() + px(0.5)
+                && inner.top() >= outer.top() - px(0.5)
+                && inner.bottom() <= outer.bottom() + px(0.5),
+            "{what} {inner:?} must stay inside {outer:?}"
+        );
+    }
+
+    /// The one-line width of a description under the test platform's
+    /// NoopTextSystem, whose simplified metrics are a fixed 0.6em per
+    /// character rather than native font advances. The measure and the layout
+    /// agree under those metrics, which is what the wrapping precondition
+    /// compares; it is not a native pixel measurement.
+    fn one_line_width(vcx: &mut VisualTestContext, copy: &'static str) -> f32 {
+        vcx.update(|window, cx| {
+            let label_px = 12. / 16. * window.rem_size().as_f32();
+            let font = gpui::Font {
+                family: cx.theme().font_family.clone(),
+                features: Default::default(),
+                fallbacks: None,
+                weight: Default::default(),
+                style: Default::default(),
+            };
+            window
+                .text_system()
+                .shape_line(
+                    gpui::SharedString::from(copy),
+                    px(label_px),
+                    &[gpui::TextRun {
+                        len: copy.len(),
+                        font,
+                        color: gpui::Hsla::default(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                )
+                .width
+                .as_f32()
+        })
+    }
+
+    /// Precondition for the wrapping assertions: under the test platform's
+    /// simplified NoopTextSystem metrics the copy cannot fit the measured
+    /// label column on one line. That one-line width is not a native pixel
+    /// claim; it only makes the multi-line height assertion meaningful.
+    fn assert_cannot_fit_one_line(
+        vcx: &mut VisualTestContext,
+        copy: &'static str,
+        labels: Bounds<Pixels>,
+        key: L10nKey,
+    ) {
+        let one_line = one_line_width(vcx, copy);
+        assert!(
+            one_line > labels.size.width.as_f32(),
+            "{key:?}: the description's one-line width {one_line} must exceed its label column {labels:?}"
+        );
+    }
+
+    /// The rows both long descriptions share, beside a switch: everything the
+    /// row contains stays inside the row and inside the highlighted wrapper,
+    /// the switch sits beside the labels with positive size, and both
+    /// descriptions wrap onto more than one line rather than painting past
+    /// the highlight as one long line. Structure under the simplified test
+    /// metrics, not native pixels: the overflow itself is reproduced and fixed
+    /// in the headless Wayland before/after pair.
+    #[gpui::test]
+    fn settings_row_layout_wraps_long_descriptions_inside_the_highlighted_result(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        for fixture in [&MERMAID_ROW, &LANGUAGE_SERVERS_ROW] {
+            let key = fixture.key;
+            let laid = searched_row_layout(&app, &mut vcx, fixture, size(px(1100.), px(1000.)));
+            assert_inside(laid.wrapper, laid.row, "the row");
+            assert_inside(laid.row, laid.labels, "the label column");
+            assert_inside(laid.labels, laid.description, "the description");
+            assert_inside(laid.row, laid.control, "the switch");
+            assert!(
+                laid.control.size.width > px(0.) && laid.control.size.height > px(0.),
+                "{key:?}: the switch must have positive size: {laid:?}"
+            );
+            assert!(
+                laid.control.left() >= laid.labels.right() - px(0.5),
+                "{key:?}: the switch sits beside the label column: {laid:?}"
+            );
+            assert_cannot_fit_one_line(
+                &mut vcx,
+                crate::ui::i18n::t(fixture.desc_key),
+                laid.labels,
+                key,
+            );
+            assert!(
+                laid.description.size.height >= px(17. * 2. - 0.5),
+                "{key:?}: the description wraps onto more than one 17px line: {laid:?}"
+            );
+        }
+    }
+
+    /// Below the row width where label and control still fit beside each
+    /// other, the row stacks: the control moves under the labels on a line of
+    /// its own. Stacking must not let the description escape the row either —
+    /// it wraps inside the narrower column too. Structure under the simplified
+    /// test metrics, not native pixels; the native pair is the headless
+    /// Wayland before/after capture.
+    #[gpui::test]
+    fn settings_row_layout_stacks_the_control_below_the_labels_when_narrow(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        for fixture in [&MERMAID_ROW, &LANGUAGE_SERVERS_ROW] {
+            let key = fixture.key;
+            // An 800px viewport leaves a 468px page column, below the 500px
+            // stacking threshold, so this row must be stacked.
+            let laid = searched_row_layout(&app, &mut vcx, fixture, size(px(800.), px(700.)));
+            assert_inside(laid.wrapper, laid.row, "the row");
+            assert_inside(laid.row, laid.labels, "the label column");
+            assert_inside(laid.labels, laid.description, "the description");
+            assert_inside(laid.row, laid.control, "the switch");
+            assert!(
+                laid.control.size.width > px(0.) && laid.control.size.height > px(0.),
+                "{key:?}: the switch must have positive size: {laid:?}"
+            );
+            assert!(
+                laid.control.top() >= laid.labels.bottom() - px(0.5),
+                "{key:?}: stacking puts the control below the labels: {laid:?}"
+            );
+            assert_cannot_fit_one_line(
+                &mut vcx,
+                crate::ui::i18n::t(fixture.desc_key),
+                laid.labels,
+                key,
+            );
+            assert!(
+                laid.description.size.height >= px(17. * 2. - 0.5),
+                "{key:?}: the description wraps onto more than one 17px line: {laid:?}"
+            );
+        }
+    }
+
+    /// A wide window cannot make the row wider: the page caps its column at
+    /// `READING_COLUMN`, and the highlighted wrapper — which bleeds 8px into
+    /// the page padding either side — is all the row, its description, and
+    /// its switch may occupy. Structure under the simplified test metrics, not
+    /// native pixels; the native pair is the headless Wayland before/after
+    /// capture.
+    #[gpui::test]
+    fn settings_row_layout_caps_the_row_at_the_reading_column_on_wide_windows(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        for fixture in [&MERMAID_ROW, &LANGUAGE_SERVERS_ROW] {
+            let key = fixture.key;
+            let laid = searched_row_layout(&app, &mut vcx, fixture, size(px(1440.), px(1000.)));
+            let cap = px(super::READING_COLUMN + 16. + 0.5);
+            assert!(
+                laid.wrapper.size.width <= cap && laid.row.size.width <= cap,
+                "{key:?}: the row and its highlight stay inside the reading column: {laid:?}"
+            );
+            assert!(
+                laid.row.size.width >= px(600.),
+                "{key:?}: the row fills the reading column rather than collapsing: {laid:?}"
+            );
+            assert_inside(laid.wrapper, laid.description, "the description");
+            assert_inside(laid.wrapper, laid.control, "the switch");
+            assert!(
+                laid.control.left() >= laid.labels.right() - px(0.5),
+                "{key:?}: the switch sits beside the label column: {laid:?}"
+            );
+        }
     }
 }
