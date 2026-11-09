@@ -273,6 +273,12 @@ pub struct Config {
     /// [`Self::editor_soft_wrap`]. Files that are not Markdown ignore it.
     #[serde(default)]
     pub editor_markdown_preview: bool,
+    /// Whether Mermaid diagrams in the Markdown preview color their shapes,
+    /// one accent from the theme's inks per shape, rather than drawing every
+    /// shape in the neutral fill and border. On by default; off restores the
+    /// quiet monochrome look the preview had before accents existed.
+    #[serde(default = "default_true")]
+    pub editor_mermaid_colors: bool,
     /// Whether the code editor starts language servers (rust-analyzer,
     /// typescript-language-server, …) for the files it opens, for
     /// diagnostics, completion, hover and go to definition. On by default;
@@ -852,6 +858,7 @@ impl Default for Config {
             scm_changes_tree: false,
             editor_soft_wrap: false,
             editor_markdown_preview: false,
+            editor_mermaid_colors: true,
             editor_lsp: true,
             editor_git_gutter: true,
             sidebar_auto_grouping: true,
@@ -1983,6 +1990,25 @@ mod tests {
         let json = serde_json::to_string(&off).unwrap();
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(!back.dim_inactive_panes);
+    }
+
+    #[test]
+    fn editor_mermaid_colors_defaults_on_and_round_trips() {
+        assert!(Config::default().editor_mermaid_colors);
+
+        // A config written before the key existed still colors diagrams:
+        // missing means on, exactly like `Config::default()`.
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(old.editor_mermaid_colors, "missing field defaults on");
+
+        for on in [true, false] {
+            let cfg: Config =
+                serde_json::from_str(&format!(r#"{{"editor_mermaid_colors": {on}}}"#)).unwrap();
+            assert_eq!(cfg.editor_mermaid_colors, on);
+            let json = serde_json::to_string(&cfg).unwrap();
+            let back: Config = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.editor_mermaid_colors, on, "round trip keeps {on}");
+        }
     }
 
     #[test]

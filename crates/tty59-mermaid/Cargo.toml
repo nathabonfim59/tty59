@@ -1,0 +1,28 @@
+# Mermaid diagrams for the markdown preview: mermaid source → themed SVG
+# (merman, MIT OR Apache-2.0) → BGRA pixels (resvg). Kept free of gpui so it
+# builds and tests headless; the GUI side (`ui::markdown_mermaid`) wraps the
+# pixels in a gpui `RenderImage`.
+#
+# Written from scratch for tty59. Zed's `mermaid_render` crate does the same
+# job but is GPL-3.0-or-later — do not copy code from it into this crate.
+[package]
+name = "tty59-mermaid"
+version.workspace = true
+edition.workspace = true
+description = "Mermaid diagram rendering (source → themed SVG → pixels) for tty59's markdown preview"
+repository = "https://github.com/nathabonfim59/tty59"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+merman = { version = "0.9.3", default-features = false, features = ["all-diagrams", "layout-cytoscape", "svg"] }
+# Same 0.47 stack as the root crate and the gpui fork, so one resvg/usvg/
+# tiny-skia lives in the tree. `text` (fontdb + rustybuzz) is what lays out
+# the diagram labels; the root crate keeps it off for its icon SVGs, and
+# feature unification turns it on there too, which costs nothing it uses.
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
+serde_json = "1"
+thiserror = "2"
+
+[lints]
+workspace = true

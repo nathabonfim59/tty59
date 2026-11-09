@@ -141,6 +141,10 @@ reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "1d217ee
 # build.rs links.
 tty59-vt = { path = "crates/tty59-vt" }
 
+# Mermaid diagrams in the markdown preview (`ui::markdown_mermaid`): source →
+# themed SVG → BGRA pixels, gpui-free so it tests headless.
+tty59-mermaid = { path = "crates/tty59-mermaid" }
+
 # Desktop notifications driven by OSC 9 / OSC 777 escape sequences, on Linux and
 # Windows. On macOS only its `set_application` is used — never `show`; see
 # `terminal::remote::macos_notify` for why.

@@ -1036,10 +1036,13 @@ l10n_keys! {
     SettingsEditorSoftWrapDesc,
     SettingsEditorMarkdownPreview,
     SettingsEditorMarkdownPreviewDesc,
+    SettingsEditorMermaidColors,
+    SettingsEditorMermaidColorsDesc,
     SettingsSearchEditorGitGutterKeywords,
     SettingsSearchEditorLspKeywords,
     SettingsSearchEditorSoftWrapKeywords,
     SettingsSearchEditorMarkdownPreviewKeywords,
+    SettingsSearchEditorMermaidColorsKeywords,
     EditorGoToLinePlaceholder,
     EditorGoToSymbolAction,
     EditorNavigateBack,
@@ -1875,6 +1878,8 @@ l10n_keys! {
     SettingsCopyJoinWrapped,
     SettingsCopyJoinWrappedDesc,
     SettingsSearchCopyJoinWrappedKeywords,
+    MermaidRendering,
+    MermaidRenderError,
 }
 
 /// The source control strings that are translated but not yet displayed.

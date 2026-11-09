@@ -6,11 +6,12 @@ use super::*;
 impl Tty59App {
     pub(super) fn render_editor_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let cfg = cx.global::<Config>();
-        let (git_gutter, lsp, soft_wrap, markdown) = (
+        let (git_gutter, lsp, soft_wrap, markdown, mermaid_colors) = (
             cfg.editor_git_gutter,
             cfg.editor_lsp,
             cfg.editor_soft_wrap,
             cfg.editor_markdown_preview,
+            cfg.editor_mermaid_colors,
         );
         let git_gutter =
             self.settings_switch("wt-editor-git-gutter", git_gutter, cx, |this, on, _, cx| {
@@ -27,6 +28,12 @@ impl Tty59App {
             self.settings_switch("wt-editor-markdown", markdown, cx, |this, on, _, cx| {
                 this.set_editor_markdown_preview(on, cx)
             });
+        let mermaid_colors = self.settings_switch(
+            "wt-editor-mermaid-colors",
+            mermaid_colors,
+            cx,
+            |this, on, _, cx| this.set_editor_mermaid_colors(on, cx),
+        );
         self.settings_group(
             Some(t(L10nKey::SettingsEditor)),
             None,
@@ -55,6 +62,12 @@ impl Tty59App {
                     markdown,
                     cx,
                 ),
+                self.settings_row(
+                    t(L10nKey::SettingsEditorMermaidColors),
+                    t(L10nKey::SettingsEditorMermaidColorsDesc),
+                    mermaid_colors,
+                    cx,
+                ),
             ]
             .map(IntoElement::into_any_element),
             cx,
@@ -77,5 +90,13 @@ impl Tty59App {
     /// What Markdown files open as; files already open keep their own mode.
     pub(crate) fn set_editor_markdown_preview(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.editor_markdown_preview = on);
+    }
+
+    /// Whether the Markdown preview colors Mermaid diagram shapes. Unlike the
+    /// other editor switches, this one reaches previews already on screen in
+    /// every window, so they redraw with the new palette at once.
+    pub(crate) fn set_editor_mermaid_colors(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.editor_mermaid_colors = on);
+        cx.refresh_windows();
     }
 }

@@ -1331,6 +1331,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsEditorMarkdownPreviewDesc => {
             "Show Markdown files as a rendered preview rather than as source when they open."
         }
+        L10nKey::SettingsEditorMermaidColors => "Color diagram shapes",
+        L10nKey::SettingsEditorMermaidColorsDesc => {
+            "Color the shapes in Mermaid diagrams in the Markdown preview. Off draws them in the theme's neutral fill."
+        }
         L10nKey::SettingsSearchEditorGitGutterKeywords => {
             "git gutter diff changes markers staged index scm vcs modified added deleted"
         }
@@ -1340,6 +1344,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchEditorSoftWrapKeywords => "wrap soft wrap long lines editor",
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "markdown preview rendered md readme"
+        }
+        L10nKey::SettingsSearchEditorMermaidColorsKeywords => {
+            "mermaid diagram chart colors accents shapes markdown preview"
         }
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
         L10nKey::EditorGoToSymbolAction => "Go to Symbol in Editor…",
@@ -2374,6 +2381,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line. ⌘⌥C or Copy Raw copies them as shown"
         }
+        L10nKey::MermaidRendering => "Rendering diagram…",
+        L10nKey::MermaidRenderError => "Diagram error",
     }
 }
 
