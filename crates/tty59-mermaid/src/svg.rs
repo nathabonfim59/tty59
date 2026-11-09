@@ -679,25 +679,112 @@ mindmap
         overflows
     }
 
-    /// Reconstructs the raw pre-unclip SVG from the production output: only
-    /// generated viewport `overflow:visible` declarations become `hidden`.
-    fn reclip_viewports(svg: &str) -> String {
-        let mut out = String::with_capacity(svg.len());
-        let mut rest = svg;
+    /// The expected production SVG: apply only the hidden→visible viewport
+    /// overflow rewrite to the genuine raw merman output. Viewports that are
+    /// already visible (some family labels default that way) must stay visible
+    /// byte-for-byte; this is the flowchart regression that a blanket re-clip
+    /// helper missed.
+    fn expected_unclip(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len() + 64);
+        let mut rest = raw;
         while let Some(start) = rest.find(FALLBACK_VIEWPORT_PREFIX) {
             let (head, tail) = rest.split_at(start);
             out.push_str(head);
-            let viewport_len = tail.find('>').expect("viewport end") + 1;
-            let viewport = &tail[..viewport_len];
-            out.push_str(
-                &viewport
-                    .replace("overflow:visible", "overflow:hidden")
-                    .replace("overflow: visible", "overflow: hidden"),
-            );
-            rest = &tail[viewport_len..];
+            let tag_len = tail.find('>').expect("viewport end") + 1;
+            let tag = &tail[..tag_len];
+            out.push_str(&rewrite_hidden_overflow(tag));
+            rest = &tail[tag_len..];
         }
         out.push_str(rest);
         out
+    }
+
+    fn rewrite_hidden_overflow(tag: &str) -> String {
+        let Some(style_start) = tag.find(r#"style=""#) else {
+            return tag.to_owned();
+        };
+        let style_value_start = style_start + r#"style=""#.len();
+        let style_len = tag[style_value_start..].find('"').expect("viewport style");
+        let style_end = style_value_start + style_len;
+        let style = &tag[style_value_start..style_end];
+        let rewritten = if style.contains("overflow:hidden") {
+            style.replace("overflow:hidden", "overflow:visible")
+        } else if style.contains("overflow: hidden") {
+            style.replace("overflow: hidden", "overflow: visible")
+        } else {
+            return tag.to_owned();
+        };
+        let mut out = String::with_capacity(tag.len() + 1);
+        out.push_str(&tag[..style_value_start]);
+        out.push_str(&rewritten);
+        out.push_str(&tag[style_end..]);
+        out
+    }
+
+    fn overflow_value(style: &str) -> Option<&str> {
+        style
+            .split(';')
+            .find_map(|declaration| declaration.trim().strip_prefix("overflow:"))
+            .map(str::trim)
+    }
+
+    fn normalize_overflow(style: &str, value: &str) -> String {
+        let compact = format!("overflow:{value}");
+        if style.contains(&compact) {
+            style.replacen(&compact, "overflow:<value>", 1)
+        } else {
+            style.replacen(&format!("overflow: {value}"), "overflow: <value>", 1)
+        }
+    }
+
+    /// Proves the transformation touched no style byte except the overflow
+    /// value, and that an already-visible viewport stayed visible.
+    fn assert_only_viewport_overflow_changed(raw: &str, production: &str) {
+        let raw_tags: Vec<&str> = viewport_tags(raw);
+        let production_tags: Vec<&str> = viewport_tags(production);
+        assert_eq!(
+            raw_tags.len(),
+            production_tags.len(),
+            "viewport count changed: raw {} production {}",
+            raw_tags.len(),
+            production_tags.len()
+        );
+        for (index, (raw_tag, production_tag)) in
+            raw_tags.iter().zip(production_tags.iter()).enumerate()
+        {
+            let raw_style = attribute(raw_tag, "style").expect("raw viewport style");
+            let production_style =
+                attribute(production_tag, "style").expect("production viewport style");
+            let raw_overflow = overflow_value(raw_style).expect("raw overflow");
+            let production_overflow =
+                overflow_value(production_style).expect("production overflow");
+            let expected = if raw_overflow == "hidden" {
+                "visible"
+            } else {
+                raw_overflow
+            };
+            assert_eq!(
+                production_overflow, expected,
+                "viewport {index}: overflow {raw_overflow} -> {production_overflow}"
+            );
+            assert_eq!(
+                normalize_overflow(raw_style, raw_overflow),
+                normalize_overflow(production_style, production_overflow),
+                "viewport {index}: style bytes outside the overflow value changed"
+            );
+        }
+    }
+
+    fn viewport_tags(svg: &str) -> Vec<&str> {
+        let mut tags = Vec::new();
+        let mut rest = svg;
+        while let Some(start) = rest.find(FALLBACK_VIEWPORT_PREFIX) {
+            let tail = &rest[start..];
+            let tag_len = tail.find('>').expect("viewport end") + 1;
+            tags.push(&tail[..tag_len]);
+            rest = &tail[tag_len..];
+        }
+        tags
     }
 
     /// Removes the test-only mindmap section-edge `stroke` override from
@@ -846,18 +933,45 @@ mindmap
                 .unwrap_or_else(|error| panic!("{name}: raw render failed: {error}"));
             let production = render(source, &theme)
                 .unwrap_or_else(|error| panic!("{name}: render failed: {error}"));
+            let expected = expected_unclip(&raw);
             assert!(
-                reclip_viewports(&production) == raw,
-                "{name}: post-process changed more than generated viewport overflow"
+                production == expected,
+                "{name}: post-process changed more than the hidden->visible viewport overflow (raw {} bytes, production {} bytes, expected {} bytes)",
+                raw.len(),
+                production.len(),
+                expected.len()
             );
+            assert_only_viewport_overflow_changed(&raw, &production);
         }
 
         let raw = render_inner(MINDMAP_CLIPPING_FIXTURE, &theme).expect("raw mindmap render");
         let production = render(MINDMAP_CLIPPING_FIXTURE, &theme).expect("mindmap render");
+        let stripped = strip_edge_stroke(&production);
+        let expected = expected_unclip(&raw);
         assert!(
-            strip_edge_stroke(&reclip_viewports(&production)) == raw,
-            "mindmap post-process changed more than viewport overflow and edge stroke"
+            stripped == expected,
+            "mindmap post-process changed more than viewport overflow and edge stroke (raw {} bytes, stripped {} bytes, expected {} bytes)",
+            raw.len(),
+            stripped.len(),
+            expected.len()
         );
+        assert_only_viewport_overflow_changed(&raw, &stripped);
+    }
+
+    #[test]
+    fn expected_unclip_preserves_already_visible_viewports() {
+        let raw = r##"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="20"><svg xmlns="http://www.w3.org/2000/svg" x="0" y="0" width="10" height="10" viewBox="0 0 10 10" preserveAspectRatio="none" style="overflow:visible;opacity:1;">a</svg><svg xmlns="http://www.w3.org/2000/svg" x="0" y="0" width="10" height="10" viewBox="0 0 10 10" preserveAspectRatio="none" style="overflow:hidden;opacity:1;">b</svg></svg>"##;
+        let expected = expected_unclip(raw);
+        assert_eq!(
+            expected.matches("overflow:visible").count(),
+            2,
+            "already-visible viewport was not preserved: {expected}"
+        );
+        assert!(
+            !expected.contains("overflow:hidden"),
+            "hidden viewport was not unclipped: {expected}"
+        );
+        assert_only_viewport_overflow_changed(raw, &expected);
     }
 
     #[test]
