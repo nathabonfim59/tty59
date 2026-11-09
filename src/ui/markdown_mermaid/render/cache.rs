@@ -311,7 +311,7 @@ impl MermaidCache {
         }
 
         let state = match raster {
-            Ok(raster) => match super::raster_to_image(&raster) {
+            Ok(raster) => match super::raster_to_image(raster) {
                 Some((image, logical)) => EntryState::Ready { image, logical },
                 // A malformed raster has no message worth showing beyond
                 // the localized error label the renderer draws by itself.

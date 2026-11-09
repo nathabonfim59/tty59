@@ -488,14 +488,17 @@ fn error_line(message: &str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-/// The renderer contract's straight-BGRA raster as a gpui
-/// [`RenderImage`], with the logical size the layout must use: device
+/// Consume the renderer contract's straight-BGRA raster, turning it into a
+/// gpui [`RenderImage`], with the logical size the layout must use: device
 /// pixels divided by the scale the raster *reports* (which may be lower
 /// than requested after the renderer's pixel cap), never the requested
 /// scale. Malformed rasters — zero dimensions, a byte count that does not
 /// match, or a non-finite/non-positive scale — are rejected defensively
 /// rather than trusted; the caller turns rejection into a failure state.
-fn raster_to_image(raster: &tty59_mermaid::Raster) -> Option<(Arc<RenderImage>, LogicalSize)> {
+///
+/// The raster is owned here so its pixel buffer can be handed to the image
+/// (see `raster_conversion_moves_the_buffer_without_cloning`).
+fn raster_to_image(raster: tty59_mermaid::Raster) -> Option<(Arc<RenderImage>, LogicalSize)> {
     let width = raster.width;
     let height = raster.height;
     if width == 0 || height == 0 {
@@ -524,10 +527,14 @@ fn raster_to_image(raster: &tty59_mermaid::Raster) -> Option<(Arc<RenderImage>, 
         return None;
     }
     // The raster is already straight-alpha BGRA — exactly the layout
-    // `RenderImage` frames upload — so the buffer is moved in verbatim.
-    let buffer = RgbaImage::from_raw(width, height, raster.bgra.clone())?;
+    // `RenderImage` frames upload — so the buffer moves into the image
+    // without a copy: `RgbaImage::from_raw` takes the vector verbatim.
+    let buffer = RgbaImage::from_raw(width, height, raster.bgra)?;
     let frame = Frame::new(buffer);
-    let image = Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)));
+    // `from_buf` moves the frame into inline storage. `from_elem(frame, 1)`
+    // would loop `elem.clone()`, cloning the frame and its pixel buffer even
+    // for one element — which is exactly the copy this converter avoids.
+    let image = Arc::new(RenderImage::new(SmallVec::from_buf([frame])));
     Some((image, logical))
 }
 
@@ -856,16 +863,14 @@ mod tests {
         });
     }
 
-    /// Against Part A's stub (`render` returning `Render("not implemented
-    /// yet")`), the failure path draws: the error line above the original
-    /// source as an ordinary code block, visibly taller than the error
-    /// line alone. The draw goes through a real rendered view — the
-    /// fallback nests a text view, which needs an entity on the element
-    /// stack just like the actual preview provides. The source is
-    /// deliberately not valid mermaid, so the test keeps failing the same
-    /// way once Part A's real renderer lands.
+    /// With Part A's real renderer, an invalid source takes the failure
+    /// path: the error line above the original source as an ordinary code
+    /// block, visibly taller than the error line alone. The draw goes
+    /// through a real rendered view — the fallback nests a text view, which
+    /// needs an entity on the element stack just like the actual preview
+    /// provides. The source is deliberately not valid mermaid.
     #[gpui::test]
-    fn the_stub_failure_renders_the_fallback(cx: &mut TestAppContext) {
+    fn invalid_source_failure_renders_the_fallback(cx: &mut TestAppContext) {
         cx.update(|cx| gpui_component::init(cx));
         let source = "definitely not a diagram: ((( ]][";
         let recorded: Arc<Mutex<Option<Bounds<Pixels>>>> = Arc::new(Mutex::new(None));
@@ -874,7 +879,7 @@ mod tests {
             recorded: recorded.clone(),
         });
 
-        // First draw renders the placeholder and schedules the stub render.
+        // First draw renders the placeholder and schedules the render.
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
@@ -900,7 +905,7 @@ mod tests {
         // Reference: the error line alone, which has no nested view and
         // can be drawn raw.
         let message =
-            failure_message(&MermaidError::Render("not implemented yet".into()).to_string());
+            failure_message(&MermaidError::Syntax("invalid diagram source".into()).to_string());
         let line_only = draw_measured(vcx, size(px(400.), px(2000.)), |_, cx| {
             error_line(&message, cx)
         });
@@ -1486,7 +1491,7 @@ mod tests {
                 drop(task);
             }
             for block_id in 0..CAP_LAST_GOOD as u64 {
-                let (image, logical) = raster_to_image(&raster(2, 2, 1.0)).expect("dummy image");
+                let (image, logical) = raster_to_image(raster(2, 2, 1.0)).expect("dummy image");
                 cache.store_last_good(
                     100_000 + block_id,
                     MermaidTheme::light(),
@@ -1572,10 +1577,10 @@ mod tests {
     /// Malformed rasters become failures, never panics.
     #[gpui::test]
     fn malformed_rasters_fail_gracefully(cx: &mut TestAppContext) {
-        assert_eq!(raster_to_image(&raster(0, 10, 1.0)), None);
-        assert_eq!(raster_to_image(&raster(10, 0, 1.0)), None);
+        assert_eq!(raster_to_image(raster(0, 10, 1.0)), None);
+        assert_eq!(raster_to_image(raster(10, 0, 1.0)), None);
         assert_eq!(
-            raster_to_image(&tty59_mermaid::Raster {
+            raster_to_image(tty59_mermaid::Raster {
                 width: 4,
                 height: 4,
                 scale: 1.0,
@@ -1583,13 +1588,13 @@ mod tests {
             }),
             None
         );
-        assert_eq!(raster_to_image(&raster(4, 4, 0.0)), None);
-        assert_eq!(raster_to_image(&raster(4, 4, f32::NAN)), None);
+        assert_eq!(raster_to_image(raster(4, 4, 0.0)), None);
+        assert_eq!(raster_to_image(raster(4, 4, f32::NAN)), None);
         // A tiny positive scale divides finite pixels into infinity; the
         // logical size must be validated before the image is allocated.
-        assert_eq!(raster_to_image(&raster(2, 2, 1e-42)), None);
+        assert_eq!(raster_to_image(raster(2, 2, 1e-42)), None);
         // The good case: logical size comes from the raster's own scale.
-        let (image, logical) = raster_to_image(&raster(400, 200, 2.0)).expect("valid raster");
+        let (image, logical) = raster_to_image(raster(400, 200, 2.0)).expect("valid raster");
         assert_eq!(
             image.size(0),
             size(400.into(), 200.into()),
@@ -1617,6 +1622,140 @@ mod tests {
             let key = CacheKey::new("graph TD\nA-->B", MermaidTheme::light(), 2.0);
             assert_eq!(cx.global::<MermaidCache>().state_of(&key), Some("failed"));
         });
+    }
+
+    /// Consuming the raster must hand its BGRA buffer straight to the gpui
+    /// image. The previous `&Raster` adapter cloned the whole vector — up
+    /// to `MAX_PIXELS` × 4 bytes per diagram — for a buffer nobody reads
+    /// again. The pointer comparison is the clone detector: cloning
+    /// allocates a new buffer while the original is still live, so the two
+    /// addresses cannot be equal. The byte comparison is separate evidence
+    /// that the move preserves every channel, alpha included (a pointer
+    /// match alone would not catch swapped channels or clamped pixels).
+    /// This test fails while the converter clones and passes once it moves.
+    #[test]
+    fn raster_conversion_moves_the_buffer_without_cloning() {
+        let mut source = raster(2, 1, 1.0);
+        source.bgra = vec![0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0x80];
+        let input_ptr = source.bgra.as_ptr();
+        let input_len = source.bgra.len();
+
+        let (image, _) = raster_to_image(source).expect("valid raster");
+        let bytes = image.as_bytes(0).expect("the image has one frame");
+        assert_eq!(bytes.len(), input_len);
+        assert_eq!(
+            bytes.as_ptr(),
+            input_ptr,
+            "the raster's BGRA buffer must be moved into the image, not cloned"
+        );
+        assert_eq!(
+            bytes.to_vec(),
+            vec![0x10, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0x80],
+            "pixels (including alpha) survive the move byte for byte"
+        );
+        assert_eq!(bytes[3], 0xff, "first pixel's BGRA alpha");
+        assert_eq!(bytes[7], 0x80, "second pixel's BGRA alpha");
+    }
+
+    /// Production-renderer smoke: no injected render function — the default
+    /// cache runs the real [`tty59_mermaid::render`] pipeline (merman → SVG
+    /// → resvg, including system-font rasterization) exactly like the editor
+    /// preview. Valid flow, sequence, class, state and gantt sources must
+    /// reach `Ready` with actually drawn pixels. Each source is drawn once
+    /// to request its render (pending), then again after the background
+    /// work lands: the second draw is the real ready-image path, which
+    /// records the window that uploads the image. The pixel check also
+    /// rejects a blank opaque background by requiring more than one RGB
+    /// color, not just nonzero alpha.
+    #[gpui::test]
+    fn production_renderer_draws_flow_sequence_class_state_and_gantt(cx: &mut TestAppContext) {
+        let cases = [
+            (
+                "flowchart",
+                "flowchart TD\n    A[Start] --> B{Ready?}\n    B -->|yes| C[Done]\n    B -->|no| A",
+            ),
+            (
+                "sequence",
+                "sequenceDiagram\n    participant A as Alice\n    participant B as Bob\n    A->>B: Request\n    B-->>A: Response",
+            ),
+            (
+                "class",
+                "classDiagram\n    class Animal {\n        +String name\n        +eat()\n    }\n    class Dog {\n        +bark()\n    }\n    Animal <|-- Dog",
+            ),
+            (
+                "state",
+                "stateDiagram-v2\n    [*] --> Idle\n    Idle --> Running: start\n    Running --> Idle: stop\n    Running --> [*]",
+            ),
+            (
+                "gantt",
+                "gantt\n    title Release plan\n    dateFormat YYYY-MM-DD\n    axisFormat %m-%d\n    section Build\n    Compile :a1, 2026-01-01, 3d\n    Test :a2, after a1, 2d\n    section Ship\n    Package :b1, after a2, 1d",
+            ),
+        ];
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            // The production default: the real renderer, no test seam.
+            cx.set_global(MermaidCache::default());
+        });
+        let vcx = cx.add_empty_window();
+
+        for (name, source) in cases {
+            let blk = block(1, source);
+            // First draw is pending: visible prepaint performs the block's
+            // single request per miss, and parking waits for the background
+            // render to complete.
+            draw_measured(vcx, size(px(600.), px(4000.)), |window, cx| {
+                render_block(&blk, window, cx)
+            });
+            vcx.run_until_parked();
+
+            // Second draw is the ready-image path the preview actually
+            // paints; it also records the drawing window for atlas release.
+            draw_measured(vcx, size(px(600.), px(4000.)), |window, cx| {
+                render_block(&blk, window, cx)
+            });
+
+            vcx.update(|_, cx| {
+                let key = key_for(cx, source);
+                let cache = cx.global::<MermaidCache>();
+                assert_eq!(
+                    cache.state_of(&key),
+                    Some("ready"),
+                    "{name}: the production render did not complete"
+                );
+                let image = cache.ready_image(&key).expect("ready image");
+                assert!(
+                    cache.has_live_record(&image),
+                    "{name}: the ready image must be displayed and recorded"
+                );
+                let size = image.size(0);
+                assert!(
+                    size.width.0 > 1 && size.height.0 > 1,
+                    "{name}: degenerate image size {size:?}"
+                );
+                let bytes = image.as_bytes(0).expect("the image has one frame");
+                assert_eq!(
+                    bytes.len(),
+                    size.width.0 as usize * size.height.0 as usize * 4,
+                    "{name}: BGRA byte count"
+                );
+                let drawn = bytes.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
+                assert!(drawn > 0, "{name}: the production renderer drew no pixels");
+                // A blank opaque background has nonzero alpha everywhere but
+                // a single RGB value; real diagrams use several ink colors.
+                let mut colors = std::collections::HashSet::new();
+                for pixel in bytes.chunks_exact(4) {
+                    if pixel[3] != 0 {
+                        colors.insert((pixel[0], pixel[1], pixel[2]));
+                    }
+                }
+                assert!(
+                    colors.len() > 1,
+                    "{name}: drawn pixels must use more than one RGB color (got {})",
+                    colors.len()
+                );
+            });
+        }
     }
 
     /// The error line shows one trimmed line, capped; nothing usable comes
