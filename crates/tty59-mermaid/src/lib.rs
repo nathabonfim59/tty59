@@ -25,6 +25,9 @@
 //!   (the returned [`Raster::scale`] says which), never refused.
 //! - Output is deterministic for the same input (no clocks, no randomness),
 //!   so the GUI can cache by `(source, theme, scale)`.
+//! - [`MermaidTheme::accents`] empty means the neutral look, byte-for-byte
+//!   what it was before accents existed; non-empty colors each shape from the
+//!   list, deterministically.
 
 mod raster;
 
@@ -89,6 +92,23 @@ pub struct MermaidTheme {
     pub actor_border: Rgba,
     /// Errors and critical markers inside diagrams.
     pub error: Rgba,
+    /// Per-shape accent colors: when non-empty, the renderer gives the
+    /// diagram's shapes (flowchart nodes, sequence participants, class and
+    /// state boxes, mindmap branches, …) distinct colors by cycling through
+    /// this list in a stable order, so the same diagram always colors the
+    /// same shape the same way. Empty = the neutral look (every shape uses
+    /// `primary`/`primary_border`/`primary_text`).
+    pub accents: Vec<Accent>,
+}
+
+/// One accent: a shape's fill, its outline and the text drawn on it. The
+/// GUI derives these from the active tty59 theme; `text` must stay readable
+/// on `fill`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Accent {
+    pub fill: Rgba,
+    pub border: Rgba,
+    pub text: Rgba,
 }
 
 /// The default font stack. Proportional faces are deliberate: merman's
@@ -118,6 +138,7 @@ impl MermaidTheme {
             actor_background: Rgba::rgb(0xf6, 0xf8, 0xfa),
             actor_border: Rgba::rgb(0xd0, 0xd7, 0xde),
             error: Rgba::rgb(0xcf, 0x22, 0x2e),
+            accents: Vec::new(),
         }
     }
 
@@ -142,6 +163,7 @@ impl MermaidTheme {
             actor_background: Rgba::rgb(0x16, 0x1b, 0x22),
             actor_border: Rgba::rgb(0x30, 0x36, 0x3d),
             error: Rgba::rgb(0xf8, 0x51, 0x49),
+            accents: Vec::new(),
         }
     }
 }
