@@ -767,6 +767,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsEditorMermaidColors,
+            keywords: SettingsSearchEditorMermaidColorsKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsNotifyOnCommandFinish,
             keywords: SettingsSearchNotifyOnCommandFinishKeywords,
         },
@@ -869,6 +874,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorLsp => "editor_lsp",
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
             L10nKey::SettingsEditorMarkdownPreview => "editor_markdown_preview",
+            L10nKey::SettingsEditorMermaidColors => "editor_mermaid_colors",
             L10nKey::SettingsNotifyOnCommandFinish => "notify_on_command_finish",
             L10nKey::SettingsNotifyThreshold => "notify_threshold_secs",
             L10nKey::SettingsTerminalBell => "bell",
@@ -991,6 +997,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorLsp => t(L10nKey::SettingsEditorLspDesc),
             L10nKey::SettingsEditorSoftWrap => t(L10nKey::SettingsEditorSoftWrapDesc),
             L10nKey::SettingsEditorMarkdownPreview => t(L10nKey::SettingsEditorMarkdownPreviewDesc),
+            L10nKey::SettingsEditorMermaidColors => t(L10nKey::SettingsEditorMermaidColorsDesc),
             L10nKey::SettingsNotifyOnCommandFinish => t(L10nKey::SettingsNotifyOnCommandFinishDesc),
             L10nKey::SettingsNotifyThreshold => t(L10nKey::SettingsNotifyThresholdDesc),
             L10nKey::SettingsAppHttpProxy => t(L10nKey::SettingsAppHttpProxyDesc),
@@ -1051,6 +1058,9 @@ impl SearchEntry {
             L10nKey::SettingsEditorSoftWrap => cfg.editor_soft_wrap != defaults.editor_soft_wrap,
             L10nKey::SettingsEditorMarkdownPreview => {
                 cfg.editor_markdown_preview != defaults.editor_markdown_preview
+            }
+            L10nKey::SettingsEditorMermaidColors => {
+                cfg.editor_mermaid_colors != defaults.editor_mermaid_colors
             }
             L10nKey::SettingsNotifyOnCommandFinish => {
                 cfg.notify_on_command_finish != defaults.notify_on_command_finish
@@ -3057,6 +3067,45 @@ mod tests {
         assert_eq!(changed, vec![L10nKey::SettingsAutoHideTitlebarButtons]);
     }
 
+    /// The Mermaid colors switch is found under General by its config key and
+    /// by its own name in every language, and flipping it marks that row — and
+    /// only that row — as changed, so its reset link resets the right thing.
+    #[test]
+    fn the_mermaid_colors_switch_is_found_by_key_and_name_and_marks_only_itself() {
+        let entry = settings_search_entries()
+            .iter()
+            .find(|e| e.title == L10nKey::SettingsEditorMermaidColors)
+            .unwrap();
+        assert!(entry.section == SettingsSection::General);
+        assert_eq!(entry.config_key(), "editor_mermaid_colors");
+        assert!(!entry.description().is_empty());
+        assert!(!entry.modified(&Config::default()));
+        for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
+            crate::ui::i18n::set_locale(locale);
+            let name = t(L10nKey::SettingsEditorMermaidColors);
+            for query in ["editor_mermaid_colors", name] {
+                assert!(entry_matches(entry, query), "{locale}: {query}");
+                assert_eq!(
+                    best_matching_section(query).unwrap().profile_label(),
+                    SettingsSection::General.profile_label(),
+                    "{locale}: {query}"
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+
+        let cfg = Config(crate::core::config::CoreConfig {
+            editor_mermaid_colors: false,
+            ..crate::core::config::CoreConfig::default()
+        });
+        let changed = settings_search_entries()
+            .iter()
+            .filter(|e| e.modified(&cfg))
+            .map(|e| e.title)
+            .collect::<Vec<_>>();
+        assert_eq!(changed, vec![L10nKey::SettingsEditorMermaidColors]);
+    }
+
     #[test]
     fn group_shortcut_setting_tracks_its_config_key_and_modified_state() {
         let entry = settings_search_entries()
@@ -3843,7 +3892,10 @@ mod gpui_tests {
     use crate::core::config::{Config, MouseZoomModifier};
     use crate::core::session::Session;
     use crate::ui::app::Tty59App;
+    use crate::ui::i18n::L10nKey;
     use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
         crate::core::config::pin_test_config_dir();
@@ -4227,6 +4279,165 @@ mod gpui_tests {
             assert_eq!(cx.global::<Config>().notify_threshold_secs, 73);
         });
         vcx.run_until_parked();
+    }
+
+    /// A second window that counts its own view renders. Nothing in the
+    /// settings path notifies or draws it, so a count that moves after a
+    /// toggle can only come from the `cx.refresh_windows()` in the setter.
+    struct RenderProbe {
+        renders: Arc<AtomicUsize>,
+    }
+
+    impl gpui::Render for RenderProbe {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            _: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            self.renders.fetch_add(1, Ordering::SeqCst);
+            gpui::div()
+        }
+    }
+
+    /// Open the independent probe window. Nothing ever draws it by hand: the
+    /// framework's effect flush draws exactly the windows it has marked dirty.
+    fn probe_window(cx: &mut TestAppContext) -> Arc<AtomicUsize> {
+        let renders = Arc::new(AtomicUsize::new(0));
+        let _handle = cx.open_window(size(px(400.), px(300.)), |_, _| RenderProbe {
+            renders: renders.clone(),
+        });
+        renders
+    }
+
+    /// Flush queued effects and park, then prove an unrelated update/park does
+    /// not move the count on its own. Returns the settled count. The probe's
+    /// window is never drawn directly; a manual draw would call its Render
+    /// unconditionally and hide a missing refresh.
+    fn settle_probe(cx: &TestAppContext, renders: &Arc<AtomicUsize>) -> usize {
+        cx.update(|_| {});
+        cx.background_executor.run_until_parked();
+        let stable = renders.load(Ordering::SeqCst);
+        cx.update(|_| {});
+        cx.background_executor.run_until_parked();
+        assert_eq!(
+            renders.load(Ordering::SeqCst),
+            stable,
+            "the probe only redraws when something refreshes it"
+        );
+        stable
+    }
+
+    /// Flush effects after an action and read the probe count. Only a window
+    /// the action refreshed is dirty, so this update draws it; the probe window
+    /// itself is never drawn by hand.
+    fn refreshed_probe_count(cx: &TestAppContext, renders: &Arc<AtomicUsize>) -> usize {
+        cx.update(|_| {});
+        cx.background_executor.run_until_parked();
+        renders.load(Ordering::SeqCst)
+    }
+
+    /// The switch under Markdown preview has to reach the real settings path:
+    /// a click on the rendered switch runs `set_editor_mermaid_colors`, which
+    /// writes the flag into the global config and asks every window to
+    /// repaint so open previews elsewhere follow the toggle. The independent
+    /// probe window is never notified, so only that refresh draws it.
+    #[gpui::test]
+    fn the_mermaid_colors_switch_writes_config_and_refreshes_other_windows(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        let renders = probe_window(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+            let search = app.active_settings().unwrap().search.clone();
+            search.update(cx, |search, cx| {
+                search.set_value("editor_mermaid_colors", window, cx)
+            });
+            app.autoselect_settings_search(cx);
+        });
+        vcx.simulate_resize(size(px(1100.), px(1000.)));
+        // Search results put the matching row at the top with the scroll
+        // offset at zero, and the results page is not virtualized, so the
+        // switch is painted and its debug selector is recorded without
+        // relying on scroll anchoring a row below the fold.
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        assert!(
+            app.read_with(&vcx, |_, cx| cx.global::<Config>().editor_mermaid_colors),
+            "the switch starts on"
+        );
+
+        // Settle the probe after opening the page: whatever the settings page
+        // itself refreshed is now flushed, and an unrelated update no longer
+        // moves the count. Nothing is drawn on the probe by hand.
+        let before_off = settle_probe(cx, &renders);
+        let switch = vcx
+            .debug_bounds("wt-editor-mermaid-colors")
+            .expect("the Mermaid colors switch is on the Editor page");
+        vcx.simulate_click(switch.center(), gpui::Modifiers::none());
+        assert!(
+            !app.read_with(&vcx, |_, cx| cx.global::<Config>().editor_mermaid_colors),
+            "clicking the switch turns colors off"
+        );
+        assert!(
+            refreshed_probe_count(cx, &renders) > before_off,
+            "turning colors off refreshed the other window"
+        );
+
+        let before_on = settle_probe(cx, &renders);
+        let switch = vcx
+            .debug_bounds("wt-editor-mermaid-colors")
+            .expect("the switch is still laid out after the toggle");
+        vcx.simulate_click(switch.center(), gpui::Modifiers::none());
+        assert!(
+            app.read_with(&vcx, |_, cx| cx.global::<Config>().editor_mermaid_colors),
+            "clicking it again turns colors back on"
+        );
+        assert!(
+            refreshed_probe_count(cx, &renders) > before_on,
+            "turning colors back on refreshed the other window too"
+        );
+    }
+
+    /// The row's Reset link routes through the real `reset_settings_value`
+    /// dispatch: from off it must call the setter with the default (on) and
+    /// refresh the other window, exactly as the click does.
+    #[gpui::test]
+    fn resetting_mermaid_colors_restores_the_default_and_refreshes_other_windows(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        let renders = probe_window(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+            app.set_editor_mermaid_colors(false, cx);
+        });
+        vcx.run_until_parked();
+        assert!(
+            !app.read_with(&vcx, |_, cx| cx.global::<Config>().editor_mermaid_colors),
+            "the regression starts with colors off"
+        );
+
+        // The setter above refreshed every window; settle that so the reset is
+        // the only thing left that can move the probe count.
+        let before_reset = settle_probe(cx, &renders);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.reset_settings_value(L10nKey::SettingsEditorMermaidColors, window, cx);
+        });
+        assert!(
+            app.read_with(&vcx, |_, cx| cx.global::<Config>().editor_mermaid_colors),
+            "Reset restores the default, which is colors on"
+        );
+        assert!(
+            refreshed_probe_count(cx, &renders) > before_reset,
+            "Reset refreshed the other window"
+        );
     }
 
     #[gpui::test]

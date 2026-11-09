@@ -1245,12 +1245,19 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsEditorMarkdownPreviewDesc => {
             "打开 Markdown 文件时显示渲染后的预览而不是源码。"
         }
+        L10nKey::SettingsEditorMermaidColors => "为图表形状着色",
+        L10nKey::SettingsEditorMermaidColorsDesc => {
+            "在 Markdown 预览中为 Mermaid 图表的形状着色。关闭后使用主题的中性填充色。"
+        }
         L10nKey::SettingsSearchEditorGitGutterKeywords => {
             "git 更改 标记 差异 暂存 修改 新增 删除 gutter diff"
         }
         L10nKey::SettingsSearchEditorLspKeywords => "lsp 语言服务器 诊断 错误 警告 补全 定义",
         L10nKey::SettingsSearchEditorSoftWrapKeywords => "换行 自动换行 长行 wrap",
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => "markdown 预览 渲染 md",
+        L10nKey::SettingsSearchEditorMermaidColorsKeywords => {
+            "mermaid 图表 颜色 着色 形状 markdown 预览"
+        }
         L10nKey::EditorGoToLinePlaceholder => "行号，或 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "跳转到编辑器中的符号…",
         L10nKey::EditorNavigateBack => "后退",

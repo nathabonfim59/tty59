@@ -1442,6 +1442,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsEditorMarkdownPreviewDesc => {
             "Открывать Markdown в режиме просмотра, а не как исходный текст."
         }
+        L10nKey::SettingsEditorMermaidColors => "Раскрашивать фигуры диаграмм",
+        L10nKey::SettingsEditorMermaidColorsDesc => {
+            "Раскрашивать фигуры диаграмм Mermaid в предпросмотре Markdown. Выключено — рисуются нейтральным цветом темы."
+        }
         L10nKey::SettingsSearchEditorGitGutterKeywords => {
             "поля различия изменения метки индекс изменено добавлено удалено git gutter diff changes markers staged index scm vcs modified added deleted"
         }
@@ -1453,6 +1457,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "просмотр разметка markdown preview rendered md readme"
+        }
+        L10nKey::SettingsSearchEditorMermaidColorsKeywords => {
+            "mermaid диаграмма график цвета акценты фигуры markdown предпросмотр"
         }
         L10nKey::EditorGoToLinePlaceholder => "Строка или строка:столбец (1-{total})",
         L10nKey::EditorGoToSymbolAction => "Перейти к символу в редакторе…",
