@@ -332,7 +332,10 @@ fn collect_node_paint(group: &usvg::Group, paint: &mut NodePaint) {
     for child in group.children() {
         match child {
             usvg::Node::Path(path) => {
-                if let Some(fill) = path.fill()
+                let bounds = path.bounding_box();
+                if bounds.width() > 0.0
+                    && bounds.height() > 0.0
+                    && let Some(fill) = path.fill()
                     && fill.opacity().get() > 0.5
                     && let usvg::Paint::Color(color) = fill.paint()
                 {
@@ -378,6 +381,19 @@ fn count_exact_color(raster: &Raster, color: Rgba) -> usize {
         .iter()
         .filter(|pixel| **pixel == target)
         .count()
+}
+
+#[test]
+fn zero_area_node_line_paths_are_not_recorded_as_body_fill() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><g id="x-node_0"><path d="M0 10 L20 10" fill="#000000"/><path d="M2 2 L18 2 L18 18 L2 18 Z" fill="#112233"/></g></svg>"##;
+    let mut nodes = Vec::new();
+    node_paints(parse_tree(svg).root(), &mut nodes);
+    assert_eq!(nodes.len(), 1, "node group not found: {nodes:?}");
+    assert_eq!(
+        nodes[0].body_fills,
+        vec![[0x11, 0x22, 0x33]],
+        "zero-height node line was recorded as body fill"
+    );
 }
 
 #[test]
