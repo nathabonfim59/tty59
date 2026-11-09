@@ -52,11 +52,24 @@ fn render_inner(source: &str, theme: &MermaidTheme) -> Result<String, MermaidErr
     let renderer = Renderer::new().with_engine(Engine::new().with_site_config(site_config(theme)));
 
     match renderer.render(RenderRequest::svg(source, OperationControl::new(), request)) {
-        Ok(RenderOutput::Svg(Some(output))) => Ok(output.into_parts().0),
+        Ok(RenderOutput::Svg(Some(output))) => {
+            let svg = output.into_parts().0;
+            Ok(apply_accents(svg, source, theme))
+        }
         Ok(_) => Err(MermaidError::Render(
             "the diagram renderer produced no SVG".into(),
         )),
         Err(error) => Err(classify(error)),
+    }
+}
+
+/// Apply the accent pass to merman's SVG. An empty palette returns the input
+/// unchanged before scanning, so the neutral look stays byte-identical.
+fn apply_accents(svg: String, source: &str, theme: &MermaidTheme) -> String {
+    if theme.accents.is_empty() {
+        svg
+    } else {
+        crate::accents::apply(&svg, source, theme).into_owned()
     }
 }
 
