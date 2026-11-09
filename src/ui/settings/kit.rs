@@ -232,7 +232,12 @@ impl RenderOnce for Switch {
         };
         let on = self.on;
         let left = if on { w - knob - 2. } else { 2. };
-        div()
+        // Tests find a switch by the id the caller already gave it. Both the
+        // selector string and the call are cfg(test), so a production Switch
+        // builds exactly the element it did before.
+        #[cfg(test)]
+        let debug_selector = self.id.to_string();
+        let switch = div()
             .id(self.id)
             .role(gpui::Role::Switch)
             .when_some(self.label, |d, label| d.aria_label(label))
@@ -261,7 +266,10 @@ impl RenderOnce for Switch {
             .when_some(self.handler.filter(|_| !self.disabled), |d, handler| {
                 d.cursor_pointer()
                     .on_click(move |_, window, cx| handler(&!on, window, cx))
-            })
+            });
+        #[cfg(test)]
+        let switch = switch.debug_selector(move || debug_selector.clone());
+        switch
     }
 }
 
