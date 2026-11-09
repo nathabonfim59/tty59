@@ -1,9 +1,12 @@
 //! Mermaid source → themed, resvg-safe SVG.
 //!
-//! merman owns parsing, layout and SVG emission. This module only supplies the
+//! merman owns parsing, layout and SVG emission. This module supplies the
 //! site configuration (theme palette, dark mode, font family), a deterministic
-//! diagram id, and merman's [`SvgPipeline::resvg_safe`] post-processing so the
-//! result can be handed to `usvg`/`resvg` unchanged.
+//! diagram id, and merman's [`SvgPipeline::resvg_safe`] post-processing, then
+//! applies two small passes to the final SVG: unclipping every generated
+//! HTML-label viewport so real glyphs are not cut, and painting mindmap branch
+//! edges with the contract line color (merman has no independent variable for
+//! them).
 //!
 //! Written from scratch against merman's public API. Never copy from Zed's
 //! GPL-licensed `mermaid_render` crate.
@@ -26,9 +29,9 @@ pub(crate) fn render(source: &str, theme: &MermaidTheme) -> Result<String, Merma
 
     // merman is not documented as panic-free for every hostile input, and the
     // contract here is that this function never unwinds into the caller. The
-    // class clipping post-process runs inside the same boundary.
+    // SVG post-processing runs inside the same boundary.
     match catch_unwind(AssertUnwindSafe(|| {
-        render_inner(source, theme).map(unclip_class_fallback_viewports)
+        render_inner(source, theme).map(|svg| postprocess(svg, theme))
     })) {
         Ok(result) => result,
         Err(_) => Err(MermaidError::Render("the diagram renderer panicked".into())),
@@ -57,29 +60,8 @@ fn render_inner(source: &str, theme: &MermaidTheme) -> Result<String, MermaidErr
     }
 }
 
-/// Root marker merman puts on class-diagram SVGs (`aria_roledescription` is
-/// the diagram type). Checked on the rendered document's root tag, never on
-/// the user's source, so text that merely contains these words cannot opt in.
-/// merman's class detector currently reports `classDiagram`; the `-v2`
-/// spelling of the Mermaid header and the render-family name are accepted
-/// too, so a harmless upstream role rename cannot silently disable the fix.
-const CLASS_ROOT_ROLE: &str = r#"role="graphics-document document""#;
-const CLASS_ROOT_ROLEDESCRIPTIONS: [&str; 3] = [
-    r#"aria-roledescription="classDiagram""#,
-    r#"aria-roledescription="classDiagram-v2""#,
-    r#"aria-roledescription="class""#,
-];
-
-/// Classes merman's resvg-safe pipeline copies from the source label groups
-/// onto the generated fallback text elements. Only class *node* titles,
-/// members, methods and annotations carry these; edge labels (`edgeLabel`)
-/// and notes are deliberately left alone.
-const CLASS_NODE_LABEL_CLASSES: [&str; 4] = [
-    "label-group",
-    "members-group",
-    "methods-group",
-    "annotation-group",
-];
+/// Root accessibility marker merman puts on every SVG document.
+const ROOT_ROLE: &str = r#"role="graphics-document document""#;
 
 /// Opening tag of a label that merman's resvg-safe pipeline lowered from a
 /// `<foreignObject>` into a nested, measured-width viewport.
@@ -91,25 +73,26 @@ const FALLBACK_HIDDEN_STYLE_SPACED: &str = r#"overflow: hidden"#;
 const FALLBACK_VISIBLE_STYLE: &str = r#"overflow:visible"#;
 const FALLBACK_VISIBLE_STYLE_SPACED: &str = r#"overflow: visible"#;
 
-/// Class diagrams measure each title/member row with merman's deterministic
-/// text profile, then the resvg-safe fallback paints that row inside a nested
-/// `<svg>` viewport of exactly the measured width, with `overflow: hidden`.
-/// Real system-font glyphs are often a little wider than the profile, so the
-/// first and last glyphs get clipped even though the enclosing class box has
-/// room to spare. Let only those generated class-node label viewports paint
-/// outside their tight bounds: font size, text positions and class geometry
-/// stay untouched, edge labels and notes keep their clipping, and every other
-/// diagram family is returned byte-identical.
+/// Post-process the final merman SVG: unclip every generated HTML-label
+/// viewport, then fix mindmap branch-edge paint.
+fn postprocess(svg: String, theme: &MermaidTheme) -> String {
+    let svg = unclip_fallback_viewports(svg);
+    paint_mindmap_edges(svg, theme)
+}
+
+/// merman's resvg-safe pipeline lowers every HTML label (`<foreignObject>`)
+/// into a nested viewport of exactly the deterministic text profile's measured
+/// width, with `overflow: hidden`. Real system-font glyphs can be a little
+/// wider than that profile, so the first and last glyphs get clipped even when
+/// the enclosing shape or edge-label box has room. Let every generated
+/// viewport paint outside its tight bounds: font size, text positions and all
+/// geometry stay untouched.
 ///
 /// The final pipeline minifies the declaration (`overflow:hidden`); the
 /// spaced spelling is accepted too so the fix does not depend on the
 /// minifier's exact formatting.
-fn unclip_class_fallback_viewports(svg: String) -> String {
-    if !is_class_diagram(&svg) {
-        return svg;
-    }
-
-    let mut out = String::with_capacity(svg.len() + 16);
+fn unclip_fallback_viewports(svg: String) -> String {
+    let mut out = String::with_capacity(svg.len() + 64);
     let mut rest = svg.as_str();
     let mut changed = false;
     while let Some(start) = rest.find(FALLBACK_VIEWPORT_PREFIX) {
@@ -120,15 +103,7 @@ fn unclip_class_fallback_viewports(svg: String) -> String {
             return out;
         };
         let (tag, after) = tail.split_at(tag_len + 1);
-        let Some(close) = after.find("</svg>") else {
-            out.push_str(tag);
-            out.push_str(after);
-            return out;
-        };
-        let body = &after[..close];
-        if fallback_body_is_class_node_label(body)
-            && let Some(unclipped) = unclip_style(tag)
-        {
+        if let Some(unclipped) = unclip_style(tag) {
             out.push_str(&unclipped);
             changed = true;
         } else {
@@ -162,54 +137,117 @@ fn unclip_style(tag: &str) -> Option<String> {
     Some(out)
 }
 
-/// Whether a generated fallback viewport's body carries a class-node label
-/// group in merman's own `data-merman-source-classes` list. The list is copied
-/// onto the generated fallback `<text>` elements from the source label groups,
-/// so this needs no guess about the class diagram's emitted class names.
-fn fallback_body_is_class_node_label(body: &str) -> bool {
-    let mut rest = body;
-    while let Some(start) = rest.find("data-merman-source-classes=\"") {
-        let value_start = start + "data-merman-source-classes=\"".len();
-        let Some(value_len) = rest[value_start..].find('"') else {
-            return false;
-        };
-        let classes = &rest[value_start..value_start + value_len];
-        if classes
-            .split_whitespace()
-            .any(|class| CLASS_NODE_LABEL_CLASSES.contains(&class))
-        {
-            return true;
-        }
-        rest = &rest[value_start + value_len..];
+/// Mindmap branch edges have no independent theme variable: merman paints
+/// `.section-edge-*` paths with `cScale{i}`, the same color as the node body
+/// (mindmap/render.rs). The base theme's `cScaleInv{i}` only reaches section
+/// `<line>` elements. Paint the branch paths with the contract `line` color
+/// inline so they stay visible against the background; geometry is untouched.
+fn paint_mindmap_edges(svg: String, theme: &MermaidTheme) -> String {
+    if !is_mindmap(&svg) {
+        return svg;
     }
-    false
+    let stroke = theme.line.to_css();
+    let mut out = String::with_capacity(svg.len() + 64);
+    let mut rest = svg.as_str();
+    while let Some(start) = rest.find("<path") {
+        let (head, tail) = rest.split_at(start);
+        out.push_str(head);
+        let Some(tag_len) = tail.find('>') else {
+            out.push_str(tail);
+            return out;
+        };
+        let (tag, after) = tail.split_at(tag_len + 1);
+        let is_section_edge = attribute(tag, "class").is_some_and(|classes| {
+            classes
+                .split_whitespace()
+                .any(|class| class.starts_with("section-edge-"))
+        });
+        if is_section_edge {
+            out.push_str(&set_inline_style(tag, "stroke", &stroke));
+        } else {
+            out.push_str(tag);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
-/// Minimal attribute lookup for one already-isolated start tag, used by the
-/// fallback-shape unit tests. Values never contain a quote here: merman
-/// escapes them before emission.
-#[cfg(test)]
+/// Adds or replaces `property` in an element's inline `style` attribute.
+/// Inline styles beat regular generated stylesheet rules, but an `!important`
+/// declaration is stronger. Used only where merman has no independent theme
+/// variable and the generated CSS must be overridden.
+fn set_inline_style(tag: &str, property: &str, value: &str) -> String {
+    if let Some(style_start) = tag.find(r#"style=""#) {
+        let style_value_start = style_start + r#"style=""#.len();
+        let Some(style_len) = tag[style_value_start..].find('"') else {
+            return tag.to_owned();
+        };
+        let style_end = style_value_start + style_len;
+        let style = &tag[style_value_start..style_end];
+        let mut rebuilt = String::with_capacity(style.len() + property.len() + value.len() + 4);
+        for declaration in style.split(';') {
+            let declaration = declaration.trim();
+            if declaration.is_empty() {
+                continue;
+            }
+            if declaration
+                .split_once(':')
+                .is_some_and(|(name, _)| name.trim() == property)
+            {
+                continue;
+            }
+            rebuilt.push_str(declaration);
+            rebuilt.push(';');
+        }
+        rebuilt.push_str(property);
+        rebuilt.push(':');
+        rebuilt.push_str(value);
+        rebuilt.push(';');
+
+        let mut out = String::with_capacity(tag.len() + rebuilt.len());
+        out.push_str(&tag[..style_value_start]);
+        out.push_str(&rebuilt);
+        out.push_str(&tag[style_end..]);
+        out
+    } else {
+        let insert_at = if tag.ends_with("/>") {
+            tag.len() - 2
+        } else {
+            tag.len() - 1
+        };
+        let mut out = String::with_capacity(tag.len() + property.len() + value.len() + 12);
+        out.push_str(&tag[..insert_at]);
+        out.push_str(&format!(" style=\"{property}:{value};\""));
+        out.push_str(&tag[insert_at..]);
+        out
+    }
+}
+
+/// Minimal attribute lookup for one already-isolated start tag. Values never
+/// contain a quote here: merman escapes them before emission.
 fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     let start = tag.find(&format!("{name}=\""))? + name.len() + 2;
     let end = start + tag[start..].find('"')?;
     Some(&tag[start..end])
 }
 
-/// Whether the document's root `<svg>` tag carries the class-diagram
-/// accessibility marker. Only the first `<svg` is inspected, so a nested or
-/// quoted one cannot change the decision.
-fn is_class_diagram(svg: &str) -> bool {
-    let Some(start) = svg.find("<svg") else {
-        return false;
-    };
-    let Some(tag_len) = svg[start..].find('>') else {
-        return false;
-    };
-    let root_tag = &svg[start..start + tag_len];
-    root_tag.contains(CLASS_ROOT_ROLE)
-        && CLASS_ROOT_ROLEDESCRIPTIONS
-            .iter()
-            .any(|marker| root_tag.contains(marker))
+/// The document's root `<svg>` start tag, if there is one. Only the first
+/// `<svg` is inspected, so a nested or quoted one cannot change the decision.
+fn root_tag(svg: &str) -> Option<&str> {
+    let start = svg.find("<svg")?;
+    let tag_len = svg[start..].find('>')?;
+    Some(&svg[start..start + tag_len])
+}
+
+/// Whether the rendered document is a mindmap. Checked on the root tag, never
+/// on the user's source.
+fn is_mindmap(svg: &str) -> bool {
+    root_tag(svg).is_some_and(|tag| {
+        tag.contains(ROOT_ROLE)
+            && (tag.contains(r#"aria-roledescription="mindmap""#)
+                || tag.contains(r#"class="mindmapDiagram""#))
+    })
 }
 
 /// Map merman's errors onto the crate's two public categories: anything the
@@ -347,6 +385,33 @@ fn variables(theme: &MermaidTheme) -> Map<String, Value> {
     for (key, value) in colors {
         variables.insert(key.into(), Value::String(value.to_css()));
     }
+
+    // Mindmaps (and the shared cScale consumers) read their per-section
+    // palette from these variables. merman's base theme derives cScale from
+    // primary/secondary/tertiary and darkens it, but explicit theme variables
+    // are replayed last, so pin every entry to the contract colors.
+    let fills = [theme.primary, theme.secondary, theme.tertiary];
+    let fill_css = fills.map(|fill| fill.to_css());
+    let line_css = theme.line.to_css();
+    let label_css = theme.primary_text.to_css();
+    for index in 0..12 {
+        let fill = &fill_css[index % fill_css.len()];
+        variables.insert(format!("cScale{index}"), Value::String(fill.clone()));
+        variables.insert(format!("cScalePeer{index}"), Value::String(fill.clone()));
+        variables.insert(format!("cScaleInv{index}"), Value::String(line_css.clone()));
+        variables.insert(
+            format!("cScaleLabel{index}"),
+            Value::String(label_css.clone()),
+        );
+    }
+    variables.insert("git0".into(), Value::String(fill_css[0].clone()));
+    variables.insert("gitBranchLabel0".into(), Value::String(label_css.clone()));
+    variables.insert(
+        "nodeBorder".into(),
+        Value::String(theme.primary_border.to_css()),
+    );
+    variables.insert("mainBkg".into(), Value::String(fill_css[0].clone()));
+    variables.insert("scaleLabelColor".into(), Value::String(label_css));
     variables
 }
 
@@ -553,7 +618,23 @@ classDiagram
     }
     class Beta
     Alpha --> Beta : relates
-    note for Alpha \"kept clipped\"
+    note for Alpha \"a note\"
+";
+
+    const ER_CLIPPING_FIXTURE: &str = "\
+erDiagram
+    CUSTOMER ||--o{ ORDER : places
+    ORDER ||--|{ LINE_ITEM : contains
+";
+
+    const MINDMAP_CLIPPING_FIXTURE: &str = "\
+mindmap
+  root((plan))
+    render
+      compile
+        package
+    review
+    release
 ";
 
     const OTHER_FAMILIES: [(&str, &str); 8] = [
@@ -562,43 +643,29 @@ classDiagram
             "sequence",
             "sequenceDiagram\n  A->>B: hello\n  B-->>A: world",
         ),
+        ("class", CLASS_CLIPPING_FIXTURE),
         ("state", "stateDiagram-v2\n  [*] --> Idle\n  Idle --> [*]"),
-        ("er", "erDiagram\n  CUSTOMER ||--o{ ORDER : places"),
+        ("er", ER_CLIPPING_FIXTURE),
         (
             "gantt",
             "gantt\n  title Plan\n  dateFormat YYYY-MM-DD\n  section Build\n  Compile :a1, 2024-01-01, 3d",
         ),
         ("pie", "pie title Split\n  \"Build\" : 50\n  \"Test\" : 50"),
-        ("mindmap", "mindmap\n  root((plan))\n    build\n    test"),
         (
             "gitGraph",
             "gitGraph\n  commit id: \"init\"\n  branch feature\n  checkout feature\n  commit id: \"work\"",
         ),
     ];
 
-    /// Every generated resvg-safe fallback viewport in `svg` as
-    /// `(source classes, overflow value)` pairs, in document order. The source
-    /// classes are copied onto the fallback `<text>` elements inside the
-    /// generated viewport.
-    fn fallback_viewports(svg: &str) -> Vec<(String, String)> {
-        let mut viewports = Vec::new();
+    /// Every generated resvg-safe fallback viewport's `overflow` value in
+    /// document order.
+    fn fallback_viewport_overflows(svg: &str) -> Vec<String> {
+        let mut overflows = Vec::new();
         let mut rest = svg;
         while let Some(start) = rest.find(FALLBACK_VIEWPORT_PREFIX) {
             let tail = &rest[start..];
             let viewport_len = tail.find('>').expect("viewport end") + 1;
             let viewport = &tail[..viewport_len];
-            let after = &tail[viewport_len..];
-            let close = after.find("</svg>").expect("viewport close");
-            let body = &after[..close];
-            let classes = body
-                .match_indices("data-merman-source-classes=\"")
-                .map(|(start, _)| {
-                    let value_start = start + "data-merman-source-classes=\"".len();
-                    let value_len = body[value_start..].find('"').expect("source classes value");
-                    &body[value_start..value_start + value_len]
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
             let overflow = attribute(viewport, "style")
                 .unwrap_or_default()
                 .split(';')
@@ -606,63 +673,173 @@ classDiagram
                 .unwrap_or_default()
                 .trim()
                 .to_owned();
-            viewports.push((classes, overflow));
-            rest = &after[close + "</svg>".len()..];
+            overflows.push(overflow);
+            rest = &tail[viewport_len..];
         }
-        viewports
+        overflows
     }
 
-    fn is_class_node_label(classes: &str) -> bool {
-        classes
-            .split_whitespace()
-            .any(|class| CLASS_NODE_LABEL_CLASSES.contains(&class))
+    /// Reconstructs the raw pre-unclip SVG from the production output: only
+    /// generated viewport `overflow:visible` declarations become `hidden`.
+    fn reclip_viewports(svg: &str) -> String {
+        let mut out = String::with_capacity(svg.len());
+        let mut rest = svg;
+        while let Some(start) = rest.find(FALLBACK_VIEWPORT_PREFIX) {
+            let (head, tail) = rest.split_at(start);
+            out.push_str(head);
+            let viewport_len = tail.find('>').expect("viewport end") + 1;
+            let viewport = &tail[..viewport_len];
+            out.push_str(
+                &viewport
+                    .replace("overflow:visible", "overflow:hidden")
+                    .replace("overflow: visible", "overflow: hidden"),
+            );
+            rest = &tail[viewport_len..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// Removes the test-only mindmap section-edge `stroke` override from
+    /// `<path>` tags so the result can be compared with the raw render.
+    fn strip_edge_stroke(svg: &str) -> String {
+        let mut out = String::with_capacity(svg.len());
+        let mut rest = svg;
+        while let Some(start) = rest.find("<path") {
+            let (head, tail) = rest.split_at(start);
+            out.push_str(head);
+            let tag_len = tail.find('>').expect("path end") + 1;
+            let tag = &tail[..tag_len];
+            let is_edge = attribute(tag, "class").is_some_and(|classes| {
+                classes
+                    .split_whitespace()
+                    .any(|class| class.starts_with("section-edge-"))
+            });
+            if is_edge {
+                out.push_str(&remove_inline_property(tag, "stroke"));
+            } else {
+                out.push_str(tag);
+            }
+            rest = &tail[tag_len..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn remove_inline_property(tag: &str, property: &str) -> String {
+        let Some(style_start) = tag.find(r#"style=""#) else {
+            return tag.to_owned();
+        };
+        let style_value_start = style_start + r#"style=""#.len();
+        let style_len = tag[style_value_start..].find('"').expect("style value");
+        let style_end = style_value_start + style_len;
+        let style = &tag[style_value_start..style_end];
+        let rebuilt = style
+            .split(';')
+            .map(str::trim)
+            .filter(|declaration| !declaration.is_empty())
+            .filter(|declaration| {
+                !declaration
+                    .split_once(':')
+                    .is_some_and(|(name, _)| name.trim() == property)
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        if rebuilt.is_empty() {
+            let mut start = style_start;
+            if tag[..start].ends_with(' ') {
+                start -= 1;
+            }
+            let mut out = String::with_capacity(tag.len());
+            out.push_str(&tag[..start]);
+            out.push_str(&tag[style_end + 1..]);
+            out
+        } else {
+            let mut out = String::with_capacity(tag.len());
+            out.push_str(&tag[..style_value_start]);
+            out.push_str(&rebuilt);
+            out.push(';');
+            out.push_str(&tag[style_end..]);
+            out
+        }
+    }
+
+    fn css_rgb(css: &str) -> [u8; 3] {
+        let hex = css
+            .strip_prefix('#')
+            .unwrap_or_else(|| panic!("not hex: {css}"));
+        assert_eq!(hex.len(), 6, "not #rrggbb: {css}");
+        [
+            u8::from_str_radix(&hex[0..2], 16).expect("red"),
+            u8::from_str_radix(&hex[2..4], 16).expect("green"),
+            u8::from_str_radix(&hex[4..6], 16).expect("blue"),
+        ]
+    }
+
+    fn relative_luminance(css: &str) -> f64 {
+        let [r, g, b] = css_rgb(css);
+        let linear = |channel: u8| {
+            let value = f64::from(channel) / 255.0;
+            if value <= 0.039_28 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    }
+
+    fn contrast_ratio(first: &str, second: &str) -> f64 {
+        let first = relative_luminance(first);
+        let second = relative_luminance(second);
+        let (lighter, darker) = if first >= second {
+            (first, second)
+        } else {
+            (second, first)
+        };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    fn assert_not_black(fill: &str) {
+        let [r, g, b] = css_rgb(fill);
+        assert!(
+            r.max(g).max(b) >= 16,
+            "mindmap body fill {fill} is effectively black"
+        );
     }
 
     #[test]
-    fn class_rows_are_unclipped_and_edge_and_note_labels_are_not() {
+    fn every_generated_fallback_viewport_is_unclipped() {
         let theme = MermaidTheme::dark();
-        let svg = render(CLASS_CLIPPING_FIXTURE, &theme).unwrap();
-        let root = &svg[..svg.find('>').expect("root end")];
-        assert!(
-            is_class_diagram(&svg),
-            "unrecognized class root role: {root}"
-        );
-
-        let viewports = fallback_viewports(&svg);
-        let node_labels: Vec<_> = viewports
-            .iter()
-            .filter(|(classes, _)| is_class_node_label(classes))
-            .collect();
-        assert!(
-            !node_labels.is_empty(),
-            "real class fixture produced no node-label fallbacks: {viewports:?}"
-        );
-        assert!(
-            node_labels
-                .iter()
-                .all(|(_, overflow)| overflow == "visible"),
-            "class node-label viewport still clipped: {node_labels:?}"
-        );
+        for (name, source) in OTHER_FAMILIES
+            .into_iter()
+            .chain([("mindmap", MINDMAP_CLIPPING_FIXTURE)])
+        {
+            let svg = render(source, &theme).unwrap_or_else(|error| panic!("{name}: {error}"));
+            let overflows = fallback_viewport_overflows(&svg);
+            assert!(
+                overflows.iter().all(|overflow| overflow == "visible"),
+                "{name}: generated viewport still clipped: {overflows:?}"
+            );
+            if matches!(name, "class" | "er" | "mindmap") {
+                assert!(
+                    !overflows.is_empty(),
+                    "{name}: real fixture produced no generated fallback viewports"
+                );
+            }
+        }
 
         let with_edge_and_note = render(CLASS_WITH_EDGE_AND_NOTE, &theme).unwrap();
-        let other_viewports: Vec<_> = fallback_viewports(&with_edge_and_note)
-            .into_iter()
-            .filter(|(classes, _)| !is_class_node_label(classes))
-            .collect();
+        let overflows = fallback_viewport_overflows(&with_edge_and_note);
+        assert!(!overflows.is_empty(), "class note/edge labels not reached");
         assert!(
-            !other_viewports.is_empty(),
-            "fixture did not reach the edge-label/note fallback path"
-        );
-        assert!(
-            other_viewports
-                .iter()
-                .all(|(_, overflow)| overflow == "hidden"),
-            "non-node class labels were unclipped: {other_viewports:?}"
+            overflows.iter().all(|overflow| overflow == "visible"),
+            "class note/edge labels still clipped: {overflows:?}"
         );
     }
 
     #[test]
-    fn non_class_families_are_byte_and_pixel_identical_to_the_raw_render() {
+    fn postprocess_changes_only_fallback_overflow_and_mindmap_edge_stroke() {
         let theme = MermaidTheme::dark();
         for (name, source) in OTHER_FAMILIES {
             let raw = render_inner(source, &theme)
@@ -670,28 +847,99 @@ classDiagram
             let production = render(source, &theme)
                 .unwrap_or_else(|error| panic!("{name}: render failed: {error}"));
             assert!(
-                production == raw,
-                "{name}: class clipping post-process changed the SVG"
+                reclip_viewports(&production) == raw,
+                "{name}: post-process changed more than generated viewport overflow"
             );
-            let raw_raster = crate::rasterize(&raw, 1.0).expect("raw raster");
-            let production_raster = crate::rasterize(&production, 1.0).expect("production raster");
-            assert!(
-                production_raster.bgra == raw_raster.bgra,
-                "{name}: class clipping post-process changed pixels ({}x{})",
-                production_raster.width,
-                production_raster.height
-            );
+        }
+
+        let raw = render_inner(MINDMAP_CLIPPING_FIXTURE, &theme).expect("raw mindmap render");
+        let production = render(MINDMAP_CLIPPING_FIXTURE, &theme).expect("mindmap render");
+        assert!(
+            strip_edge_stroke(&reclip_viewports(&production)) == raw,
+            "mindmap post-process changed more than viewport overflow and edge stroke"
+        );
+    }
+
+    #[test]
+    fn mindmap_neutral_variables_are_exact_and_readable() {
+        for theme in [MermaidTheme::light(), MermaidTheme::dark()] {
+            let variables = variables(&theme);
+            let get = |key: &str| {
+                variables
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| panic!("missing {key}"))
+            };
+            let fills = [
+                theme.primary.to_css(),
+                theme.secondary.to_css(),
+                theme.tertiary.to_css(),
+            ];
+            let line = theme.line.to_css();
+            let label = theme.primary_text.to_css();
+            for index in 0..12 {
+                let fill = &fills[index % fills.len()];
+                assert_eq!(get(&format!("cScale{index}")), fill.as_str());
+                assert_eq!(get(&format!("cScalePeer{index}")), fill.as_str());
+                assert_eq!(get(&format!("cScaleInv{index}")), line.as_str());
+                assert_eq!(get(&format!("cScaleLabel{index}")), label.as_str());
+                assert_not_black(fill.as_str());
+                assert!(
+                    contrast_ratio(fill.as_str(), label.as_str()) >= 4.5,
+                    "theme dark={}: cScale{index} {fill} vs label {label}",
+                    theme.dark_mode
+                );
+            }
+            assert_eq!(get("git0"), fills[0].as_str());
+            assert_eq!(get("gitBranchLabel0"), label.as_str());
+            assert_eq!(get("nodeBorder"), theme.primary_border.to_css().as_str());
+            assert_eq!(get("mainBkg"), fills[0].as_str());
+            assert_eq!(get("scaleLabelColor"), label.as_str());
         }
     }
 
     #[test]
-    fn class_post_process_changes_bytes_and_pixels_only_for_node_rows() {
+    fn mindmap_section_edges_are_painted_with_the_line_color() {
+        let theme = MermaidTheme::dark();
+        let svg = render(MINDMAP_CLIPPING_FIXTURE, &theme).expect("mindmap render");
+        let line = theme.line.to_css();
+        let mut edges = 0usize;
+        let mut rest = svg.as_str();
+        while let Some(start) = rest.find("<path") {
+            let tail = &rest[start..];
+            let tag_len = tail.find('>').expect("path end") + 1;
+            let tag = &tail[..tag_len];
+            let is_edge = attribute(tag, "class").is_some_and(|classes| {
+                classes
+                    .split_whitespace()
+                    .any(|class| class.starts_with("section-edge-"))
+            });
+            if is_edge {
+                edges += 1;
+                let style = attribute(tag, "style").expect("edge style");
+                assert_eq!(
+                    style.matches("stroke:").count(),
+                    1,
+                    "edge has duplicate stroke declarations: {tag}"
+                );
+                assert!(
+                    style.contains(&format!("stroke:{line};")),
+                    "edge not painted with line {line}: {tag}"
+                );
+            }
+            rest = &tail[tag_len..];
+        }
+        assert!(edges > 0, "mindmap fixture produced no section edges");
+    }
+
+    #[test]
+    fn class_post_process_changes_bytes_and_pixels() {
         let theme = MermaidTheme::dark();
         let raw = render_inner(CLASS_CLIPPING_FIXTURE, &theme).expect("raw class render");
         let production = render(CLASS_CLIPPING_FIXTURE, &theme).expect("class render");
         assert!(
             raw != production,
-            "class post-process left the SVG byte-identical"
+            "post-process left the class SVG byte-identical"
         );
         assert!(raw.contains("overflow:hidden"));
         assert!(production.contains("overflow:visible"));
@@ -700,7 +948,7 @@ classDiagram
         let production_raster = crate::rasterize(&production, 2.0).expect("class raster");
         assert!(
             raw_raster.bgra != production_raster.bgra,
-            "class post-process changed the SVG but not the pixels ({}x{})",
+            "post-process changed the SVG but not the pixels ({}x{})",
             production_raster.width,
             production_raster.height
         );

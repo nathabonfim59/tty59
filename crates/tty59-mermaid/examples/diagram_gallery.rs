@@ -1,15 +1,16 @@
-//! Dark-theme review gallery for the class-clipping fix.
+//! Light and dark review gallery for generated-label viewport clipping and
+//! mindmap neutral paint.
 //!
-//! Writes all nine enabled diagram families as SVG + PNG at 2× on the dark
-//! theme, plus the class fixture in three forms:
+//! For all nine families it writes SVG + PNG at 2× on both light and dark.
+//! For class, ER and mindmap it also writes, per theme:
 //!
-//! - `class-before.*`: production SVG with its generated class-node
-//!   viewports re-clipped to merman's pre-fix `overflow: hidden` default;
-//! - `class-after.*`: production SVG (the fix);
-//! - `class-reference.*`: the same SVG with the class-node viewports removed
+//! - `*-before-*.*`: production SVG with every generated label viewport
+//!   re-clipped to merman's pre-fix `overflow: hidden` default;
+//! - `*-after-*.*`: production SVG (the unclip fix);
+//! - `*-reference-*.*`: the same SVG with the generated viewports removed
 //!   entirely (no clipping possible), the pixel oracle.
 //!
-//! `class-row-widths.txt` diagnoses every class-node fallback row: the nested
+//! `*-row-widths-*.txt` diagnoses every generated fallback row: the nested
 //! viewport width merman measured, the real glyph ink width rendered by this
 //! crate's font stack, and whether the tight viewport clipped it.
 //!
@@ -42,6 +43,22 @@ classDiagram
     }
     Shape <|-- Circle
     Shape <|-- Square
+";
+
+const ER: &str = "\
+erDiagram
+    CUSTOMER ||--o{ ORDER : places
+    ORDER ||--|{ LINE_ITEM : contains
+";
+
+const MINDMAP: &str = "\
+mindmap
+  root((plan))
+    render
+      compile
+        package
+    review
+    release
 ";
 
 const DIAGRAMS: [(&str, &str); 9] = [
@@ -77,14 +94,7 @@ stateDiagram-v2
     Running --> [*]
 ",
     ),
-    (
-        "er",
-        "\
-erDiagram
-    CUSTOMER ||--o{ ORDER : places
-    ORDER ||--|{ LINE_ITEM : contains
-",
-    ),
+    ("er", ER),
     (
         "gantt",
         "\
@@ -108,19 +118,7 @@ pie title Work split
     \"Docs\" : 20
 ",
     ),
-    (
-        "mindmap",
-        "\
-mindmap
-  root((plan))
-    build
-      compile
-      package
-    test
-      unit
-      render
-",
-    ),
+    ("mindmap", MINDMAP),
     (
         "gitgraph",
         "\
@@ -137,13 +135,6 @@ gitGraph
 
 const FALLBACK_VIEWPORT_PREFIX: &str =
     r#"<svg xmlns="http://www.w3.org/2000/svg" x="0" y="0" width=""#;
-
-const CLASS_NODE_LABEL_CLASSES: [&str; 4] = [
-    "label-group",
-    "members-group",
-    "methods-group",
-    "annotation-group",
-];
 
 #[derive(Debug)]
 struct Viewport {
@@ -173,41 +164,75 @@ fn main() -> ExitCode {
 fn dump(directory: &Path) -> Result<(), String> {
     std::fs::create_dir_all(directory)
         .map_err(|error| format!("create {}: {error}", directory.display()))?;
-    let theme = MermaidTheme::dark();
 
-    for (name, source) in DIAGRAMS {
-        let svg = render_svg(source, &theme).map_err(|error| format!("{name}: {error}"))?;
-        write_svg(directory, &format!("{name}-dark.svg"), &svg)?;
-        write_png(directory, &format!("{name}-dark.png"), &svg, &theme)?;
+    for (theme_name, theme) in [
+        ("light", MermaidTheme::light()),
+        ("dark", MermaidTheme::dark()),
+    ] {
+        for (name, source) in DIAGRAMS {
+            let svg = render_svg(source, &theme)
+                .map_err(|error| format!("{name}/{theme_name}: {error}"))?;
+            write_svg(directory, &format!("{name}-{theme_name}.svg"), &svg)?;
+            write_png(directory, &format!("{name}-{theme_name}.png"), &svg, &theme)?;
+        }
+
+        for (name, source) in [("class", CLASS), ("er", ER), ("mindmap", MINDMAP)] {
+            let after = render_svg(source, &theme)
+                .map_err(|error| format!("{name}/{theme_name}: {error}"))?;
+            let before = reclip_viewports(&after);
+            let reference = strip_viewports(&after);
+            write_svg(
+                directory,
+                &format!("{name}-before-{theme_name}.svg"),
+                &before,
+            )?;
+            write_svg(directory, &format!("{name}-after-{theme_name}.svg"), &after)?;
+            write_svg(
+                directory,
+                &format!("{name}-reference-{theme_name}.svg"),
+                &reference,
+            )?;
+            write_png(
+                directory,
+                &format!("{name}-before-{theme_name}.png"),
+                &before,
+                &theme,
+            )?;
+            write_png(
+                directory,
+                &format!("{name}-after-{theme_name}.png"),
+                &after,
+                &theme,
+            )?;
+            write_png(
+                directory,
+                &format!("{name}-reference-{theme_name}.png"),
+                &reference,
+                &theme,
+            )?;
+
+            let diagnostics = row_diagnostics(&after, theme_name)?;
+            let path = directory.join(format!("{name}-row-widths-{theme_name}.txt"));
+            std::fs::write(&path, diagnostics)
+                .map_err(|error| format!("write {}: {error}", path.display()))?;
+
+            let before_pixels = rasterize(&before, SCALE)
+                .map_err(|error| format!("{name}-before-{theme_name}: {error}"))?;
+            let after_pixels = rasterize(&after, SCALE)
+                .map_err(|error| format!("{name}-after-{theme_name}: {error}"))?;
+            let reference_pixels = rasterize(&reference, SCALE)
+                .map_err(|error| format!("{name}-reference-{theme_name}: {error}"))?;
+            println!(
+                "{name}/{theme_name}: after==reference pixels: {}, before==after pixels: {}, after!=before pixels: {}",
+                after_pixels.bgra == reference_pixels.bgra,
+                before_pixels.bgra == after_pixels.bgra,
+                after_pixels.bgra != before_pixels.bgra
+            );
+        }
     }
 
-    let after = render_svg(CLASS, &theme).map_err(|error| format!("class: {error}"))?;
-    let before = reclip_node_viewports(&after);
-    let reference = strip_node_viewports(&after);
-    write_svg(directory, "class-before.svg", &before)?;
-    write_svg(directory, "class-after.svg", &after)?;
-    write_svg(directory, "class-reference.svg", &reference)?;
-    write_png(directory, "class-before.png", &before, &theme)?;
-    write_png(directory, "class-after.png", &after, &theme)?;
-    write_png(directory, "class-reference.png", &reference, &theme)?;
-
-    let diagnostics = row_diagnostics(&after)?;
-    let path = directory.join("class-row-widths.txt");
-    std::fs::write(&path, diagnostics)
-        .map_err(|error| format!("write {}: {error}", path.display()))?;
-
-    let before_pixels =
-        rasterize(&before, SCALE).map_err(|error| format!("class-before: {error}"))?;
-    let after_pixels = rasterize(&after, SCALE).map_err(|error| format!("class-after: {error}"))?;
-    let reference_pixels =
-        rasterize(&reference, SCALE).map_err(|error| format!("class-reference: {error}"))?;
     println!(
-        "class: after==reference pixels: {}, before==after pixels: {}",
-        after_pixels.bgra == reference_pixels.bgra,
-        before_pixels.bgra == after_pixels.bgra
-    );
-    println!(
-        "wrote gallery to {} (9 families dark @ {SCALE}x, class before/after/reference)",
+        "wrote gallery to {} (9 families light+dark @ {SCALE}x; class/er/mindmap before/after/reference + row widths)",
         directory.display()
     );
     Ok(())
@@ -304,26 +329,13 @@ fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
     Some(&tag[start..end])
 }
 
-fn is_class_node_label(classes: &str) -> bool {
-    classes
-        .split_whitespace()
-        .any(|class| CLASS_NODE_LABEL_CLASSES.contains(&class))
-}
-
-fn node_viewports(svg: &str) -> Vec<Viewport> {
-    find_viewports(svg)
-        .into_iter()
-        .filter(|viewport| is_class_node_label(&viewport.classes))
-        .collect()
-}
-
 /// Reconstructs the pre-fix production SVG from the current one: only the
-/// generated class-node viewports' `overflow: visible` goes back to merman's
-/// default `hidden`; every other byte stays identical.
-fn reclip_node_viewports(svg: &str) -> String {
+/// generated viewports' `overflow: visible` goes back to merman's default
+/// `hidden`; every other byte stays identical.
+fn reclip_viewports(svg: &str) -> String {
     let mut out = String::with_capacity(svg.len());
     let mut cursor = 0;
-    for viewport in node_viewports(svg) {
+    for viewport in find_viewports(svg) {
         out.push_str(&svg[cursor..viewport.open_start]);
         let tag = &svg[viewport.open_start..viewport.open_end];
         out.push_str(
@@ -336,13 +348,13 @@ fn reclip_node_viewports(svg: &str) -> String {
     out
 }
 
-/// Removes the class-node viewports entirely (`<svg …>…</svg>` → `<g …>…</g>`)
-/// so no viewport clipping is possible; the font size, coordinates and every
-/// other element stay byte-identical.
-fn strip_node_viewports(svg: &str) -> String {
+/// Removes every generated viewport (`<svg …>…</svg>` → `<g …>…</g>`) so no
+/// viewport clipping is possible; the font size, coordinates and every other
+/// element stay byte-identical.
+fn strip_viewports(svg: &str) -> String {
     let mut out = String::with_capacity(svg.len());
     let mut cursor = 0;
-    for viewport in node_viewports(svg) {
+    for viewport in find_viewports(svg) {
         out.push_str(&svg[cursor..viewport.open_start]);
         let tag = &svg[viewport.open_start..viewport.open_end];
         out.push_str("<g");
@@ -358,15 +370,15 @@ fn strip_node_viewports(svg: &str) -> String {
 /// Per-row diagnosis: merman's measured viewport width vs the real glyph ink
 /// width from this crate's font stack, measured by rendering the fallback's
 /// own `<text>` element on a roomy canvas at the same 2× scale.
-fn row_diagnostics(svg: &str) -> Result<String, String> {
+fn row_diagnostics(svg: &str, theme_name: &str) -> Result<String, String> {
     let mut out = String::new();
-    writeln!(out, "theme=dark scale={SCALE}").expect("write diagnostics");
+    writeln!(out, "theme={theme_name} scale={SCALE}").expect("write diagnostics");
     writeln!(
         out,
         "classes | viewport_width | ink_width | overflow | clipped | text"
     )
     .expect("write diagnostics");
-    for viewport in node_viewports(svg) {
+    for viewport in find_viewports(svg) {
         let body = &svg[viewport.open_end..viewport.close_start];
         let mut texts = Vec::new();
         let mut cursor = 0;
