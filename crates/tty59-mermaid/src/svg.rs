@@ -3,10 +3,11 @@
 //! merman owns parsing, layout and SVG emission. This module supplies the
 //! site configuration (theme palette, dark mode, font family), a deterministic
 //! diagram id, and merman's [`SvgPipeline::resvg_safe`] post-processing, then
-//! applies two small passes to the final SVG: unclipping every generated
-//! HTML-label viewport so real glyphs are not cut, and painting mindmap branch
-//! edges with the contract line color (merman has no independent variable for
-//! them).
+//! applies three small passes to the final SVG: unclipping every generated
+//! HTML-label viewport so real glyphs are not cut, flooring non-positive
+//! generated mindmap edge widths so deep branches stay visible, and painting
+//! mindmap branch edges with the contract line color (merman has no
+//! independent variable for them).
 //!
 //! Written from scratch against merman's public API. Never copy from Zed's
 //! GPL-licensed `mermaid_render` crate.
@@ -87,9 +88,11 @@ const FALLBACK_VISIBLE_STYLE: &str = r#"overflow:visible"#;
 const FALLBACK_VISIBLE_STYLE_SPACED: &str = r#"overflow: visible"#;
 
 /// Post-process the final merman SVG: unclip every generated HTML-label
-/// viewport, then fix mindmap branch-edge paint.
+/// viewport, floor non-positive mindmap edge widths, then fix mindmap
+/// branch-edge paint.
 fn postprocess(svg: String, theme: &MermaidTheme) -> String {
     let svg = unclip_fallback_viewports(svg);
+    let svg = clamp_mindmap_edge_widths(svg);
     paint_mindmap_edges(svg, theme)
 }
 
@@ -148,6 +151,105 @@ fn unclip_style(tag: &str) -> Option<String> {
     out.push_str(&unclipped);
     out.push_str(&tag[style_end..]);
     Some(out)
+}
+
+/// merman generates one `.edge-depth-{section}` stylesheet rule per section
+/// with width `17 - 3 * (section + 1)`. From depth 5 that value is zero or
+/// negative, and usvg drops a non-positive stroke width entirely, so deep
+/// mindmap edges vanish. Clamp only those generated widths to a one-unit
+/// floor: every already-positive width stays byte-for-byte identical, and
+/// geometry, colors and every other stylesheet rule are untouched.
+///
+/// The rewrite is narrow on purpose: only `<style>` contents are inspected,
+/// and only rules scoped to this document's generated root id
+/// (`#<diagram-id> .edge-depth-{n}`) are candidates, so a label or an
+/// unrelated stylesheet selector that happens to spell the same text is
+/// never touched. The pass is gated on the rendered document being a
+/// mindmap, so timeline/kanban output keeps its own generated widths.
+fn clamp_mindmap_edge_widths(svg: String) -> String {
+    if !is_mindmap(&svg) {
+        return svg;
+    }
+    let Some(diagram_id) = root_tag(&svg).and_then(|tag| attribute(tag, "id")) else {
+        return svg;
+    };
+    let selector = format!("#{diagram_id} .edge-depth-");
+
+    const STYLE_OPEN: &str = "<style";
+    const STYLE_CLOSE: &str = "</style>";
+
+    let mut out = String::with_capacity(svg.len());
+    let mut rest = svg.as_str();
+    let mut changed = false;
+    while let Some(start) = rest.find(STYLE_OPEN) {
+        let (head, tail) = rest.split_at(start);
+        out.push_str(head);
+        let Some(open_end) = tail.find('>') else {
+            out.push_str(tail);
+            return out;
+        };
+        let (open_tag, after_open) = tail.split_at(open_end + 1);
+        out.push_str(open_tag);
+        let Some(close_rel) = after_open.find(STYLE_CLOSE) else {
+            out.push_str(after_open);
+            return out;
+        };
+        let (css, after_close) = after_open.split_at(close_rel);
+        if let Some(clamped) = clamp_style_depth_widths(css, &selector) {
+            out.push_str(&clamped);
+            changed = true;
+        } else {
+            out.push_str(css);
+        }
+        out.push_str(STYLE_CLOSE);
+        rest = &after_close[STYLE_CLOSE.len()..];
+    }
+    out.push_str(rest);
+
+    if changed { out } else { svg }
+}
+
+/// Floors non-positive widths of already-isolated stylesheet text for one
+/// exact selector. Returns `None` when every matching rule is already
+/// positive, so the caller can keep the original bytes.
+fn clamp_style_depth_widths(style: &str, selector: &str) -> Option<String> {
+    const DECLARATION: &str = "{stroke-width:";
+
+    let mut out = String::with_capacity(style.len());
+    let mut rest = style;
+    let mut changed = false;
+    while let Some(start) = rest.find(selector) {
+        let (head, tail) = rest.split_at(start);
+        out.push_str(head);
+        out.push_str(selector);
+        let suffix = &tail[selector.len()..];
+        let suffix_len = suffix
+            .find(|ch: char| !(ch.is_ascii_digit() || ch == '-'))
+            .unwrap_or(suffix.len());
+        out.push_str(&suffix[..suffix_len]);
+        let after_selector = &suffix[suffix_len..];
+        let Some(declaration) = after_selector.strip_prefix(DECLARATION) else {
+            rest = after_selector;
+            continue;
+        };
+        let Some(value_len) = declaration.find([';', '}']) else {
+            rest = after_selector;
+            continue;
+        };
+        let value = &declaration[..value_len];
+        if value.parse::<f64>().is_ok_and(|width| width <= 0.0) {
+            out.push_str(DECLARATION);
+            out.push('1');
+            changed = true;
+        } else {
+            out.push_str(DECLARATION);
+            out.push_str(value);
+        }
+        rest = &declaration[value_len..];
+    }
+    out.push_str(rest);
+
+    if changed { Some(out) } else { None }
 }
 
 /// Mindmap branch edges have no independent theme variable: merman paints
@@ -939,7 +1041,7 @@ mindmap
     }
 
     #[test]
-    fn postprocess_changes_only_fallback_overflow_and_mindmap_edge_stroke() {
+    fn postprocess_changes_only_fallback_overflow_mindmap_widths_and_edge_stroke() {
         let theme = MermaidTheme::dark();
         for (name, source) in OTHER_FAMILIES {
             let raw = render_inner(source, &theme)
@@ -958,17 +1060,26 @@ mindmap
         }
 
         let raw = render_inner(MINDMAP_CLIPPING_FIXTURE, &theme).expect("raw mindmap render");
+        assert!(
+            raw.contains(".edge-depth-5{stroke-width:-1;}"),
+            "mindmap fixture never reached a generated non-positive edge width"
+        );
         let production = render(MINDMAP_CLIPPING_FIXTURE, &theme).expect("mindmap render");
+        assert!(
+            production.contains(".edge-depth-5{stroke-width:1;}"),
+            "production did not floor the generated edge width"
+        );
+        let raw_clamped = clamp_mindmap_edge_widths(raw.clone());
         let stripped = strip_edge_stroke(&production);
-        let expected = expected_unclip(&raw);
+        let expected = expected_unclip(&raw_clamped);
         assert!(
             stripped == expected,
-            "mindmap post-process changed more than viewport overflow and edge stroke (raw {} bytes, stripped {} bytes, expected {} bytes)",
+            "mindmap post-process changed more than viewport overflow, edge width floor and edge stroke (raw {} bytes, stripped {} bytes, expected {} bytes)",
             raw.len(),
             stripped.len(),
             expected.len()
         );
-        assert_only_viewport_overflow_changed(&raw, &stripped);
+        assert_only_viewport_overflow_changed(&raw_clamped, &stripped);
     }
 
     #[test]
@@ -1057,6 +1168,53 @@ mindmap
             rest = &tail[tag_len..];
         }
         assert!(edges > 0, "mindmap fixture produced no section edges");
+    }
+
+    #[test]
+    fn edge_width_clamp_floors_only_root_scoped_generated_style_rules() {
+        let svg = r##"<svg id="d" role="graphics-document document" aria-roledescription="mindmap"><style>#d .edge-depth-4{stroke-width:2;}#d .edge-depth-5{stroke-width:0;}#d .edge-depth-6{stroke-width:-4;}#other .edge-depth-5{stroke-width:-9;}.label.edge-depth-5{stroke-width:-7;}</style><text>.edge-depth-5{stroke-width:-1;}</text></svg>"##;
+        let expected = svg
+            .replace(
+                "#d .edge-depth-5{stroke-width:0;}",
+                "#d .edge-depth-5{stroke-width:1;}",
+            )
+            .replace(
+                "#d .edge-depth-6{stroke-width:-4;}",
+                "#d .edge-depth-6{stroke-width:1;}",
+            );
+        let clamped = clamp_mindmap_edge_widths(svg.to_owned());
+        assert_eq!(clamped, expected);
+        assert!(
+            clamped.contains(r#"<text>.edge-depth-5{stroke-width:-1;}</text>"#),
+            "label text was rewritten"
+        );
+        assert!(
+            clamped.contains("#other .edge-depth-5{stroke-width:-9;}")
+                && clamped.contains(".label.edge-depth-5{stroke-width:-7;}"),
+            "unrelated stylesheet rules were rewritten"
+        );
+
+        // A mindmap with only positive generated widths is untouched.
+        let positive = r##"<svg id="d" role="graphics-document document" aria-roledescription="mindmap"><style>#d .edge-depth-4{stroke-width:2;}</style></svg>"##;
+        assert_eq!(
+            clamp_mindmap_edge_widths(positive.to_owned()),
+            positive,
+            "positive generated widths were rewritten"
+        );
+    }
+
+    #[test]
+    fn edge_width_clamp_leaves_non_mindmap_output_byte_identical() {
+        for svg in [
+            r##"<svg role="graphics-document document" aria-roledescription="timeline"><style>#d .edge-depth-5{stroke-width:-1;}</style></svg>"##,
+            r##"<svg role="graphics-document document" aria-roledescription="kanban"><style>#d .edge-depth-6{stroke-width:-4;}</style></svg>"##,
+        ] {
+            assert_eq!(
+                clamp_mindmap_edge_widths(svg.to_owned()),
+                svg,
+                "non-mindmap output was rewritten"
+            );
+        }
     }
 
     #[test]
