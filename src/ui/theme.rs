@@ -1425,7 +1425,12 @@ mod tests {
             let theme = cx.theme();
             let mapped = mermaid_theme(cx);
             assert!(!mapped.dark_mode, "light mode must not map as dark");
-            assert_eq!(mapped.font_family, "Inter");
+            // The diagram font is the renderer's fixed metric-matched stack,
+            // so the UI's "Inter" must not surface here.
+            assert_eq!(
+                mapped.font_family,
+                tty59_mermaid::MermaidTheme::light().font_family
+            );
             assert_eq!(mapped.background, mermaid_rgba(theme.background));
             assert_eq!(mapped.text, mermaid_rgba(theme.foreground));
             assert_eq!(mapped.primary, mermaid_rgba(theme.muted));
@@ -1456,7 +1461,11 @@ mod tests {
             let theme = cx.theme();
             let dark = mermaid_theme(cx);
             assert!(dark.dark_mode, "dark mode must map as dark");
-            assert_eq!(dark.font_family, theme.font_family.to_string());
+            // Both palettes share the one metric-matched renderer stack.
+            assert_eq!(
+                dark.font_family,
+                tty59_mermaid::MermaidTheme::light().font_family
+            );
             assert_eq!(dark.background, mermaid_rgba(theme.background));
             assert_eq!(dark.text, mermaid_rgba(theme.foreground));
             assert_eq!(dark.primary, mermaid_rgba(theme.muted));
@@ -1470,6 +1479,51 @@ mod tests {
                 dark.background, light.background,
                 "a theme change must produce a different diagram palette"
             );
+        });
+    }
+
+    /// merman lays a diagram out against a deterministic Arial-like
+    /// measurement profile, and the renderer's fixed font stack is
+    /// metric-matched to that profile. Whatever font the UI uses, the
+    /// preview must hand the renderer that fixed stack: with any other
+    /// face the drawn labels' metrics disagree with the layout's boxes and
+    /// clip or overlap. The diagram font must therefore stay the renderer's
+    /// default and stay unchanged when the UI font changes, while the
+    /// palette keeps following the active theme.
+    #[gpui::test]
+    fn mermaid_theme_keeps_the_renderer_font_when_the_ui_font_changes(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            Theme::change(ThemeMode::Light, None, cx);
+
+            let before = mermaid_theme(cx);
+            let renderer_default = tty59_mermaid::MermaidTheme::light().font_family;
+
+            {
+                let theme = Theme::global_mut(cx);
+                theme.font_family = "JetBrains Mono".into();
+            }
+
+            let theme = cx.theme();
+            let after = mermaid_theme(cx);
+            assert_eq!(
+                after.font_family, renderer_default,
+                "the diagram font must be the renderer's default stack, not the UI font"
+            );
+            assert_ne!(
+                after.font_family, "JetBrains Mono",
+                "the UI font must not leak into the diagram theme"
+            );
+            assert_eq!(
+                after.font_family, before.font_family,
+                "changing the UI font must not change the diagram font"
+            );
+
+            // Only the font is decoupled; colours still follow the theme.
+            assert_eq!(after.background, mermaid_rgba(theme.background));
+            assert_eq!(after.text, mermaid_rgba(theme.foreground));
+            assert_eq!(after.primary, mermaid_rgba(theme.muted));
+            assert_eq!(after.error, mermaid_rgba(theme.danger));
         });
     }
 }
@@ -1494,15 +1548,15 @@ pub(crate) fn markdown_style(cx: &gpui::App) -> gpui_component::text::TextViewSt
 /// the danger *fill* (that fill's foreground is meant for text on top of it).
 pub(crate) fn mermaid_theme(cx: &gpui::App) -> tty59_mermaid::MermaidTheme {
     let theme = cx.theme();
-    let font_family = if theme.font_family.trim().is_empty() {
-        "sans-serif".to_string()
-    } else {
-        theme.font_family.to_string()
-    };
 
     tty59_mermaid::MermaidTheme {
         dark_mode: theme.is_dark(),
-        font_family,
+        // merman lays diagrams out against a deterministic Arial-like
+        // measurement profile; this fixed stack is metric-matched to it.
+        // The UI font must not go here: labels would draw in a face whose
+        // metrics disagree with the layout, clipping or overlapping their
+        // boxes. The frozen contract carries the stack on `light()`.
+        font_family: tty59_mermaid::MermaidTheme::light().font_family,
         background: mermaid_rgba(theme.background),
         text: mermaid_rgba(theme.foreground),
         primary: mermaid_rgba(theme.muted),
