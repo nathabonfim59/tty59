@@ -529,7 +529,7 @@ fn mindmap_actual_paint_is_neutral_readable_and_exact() {
 
 #[test]
 fn unclipped_ink_stays_inside_the_class_boxes() {
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     struct Rect {
         x: f64,
         y: f64,
