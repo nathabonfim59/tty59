@@ -33,6 +33,7 @@ mod raster;
 
 use std::fmt;
 
+mod accents;
 mod svg;
 
 /// An sRGB color with straight (non-premultiplied) alpha.
