@@ -1395,6 +1395,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsEditorMarkdownPreviewDesc => {
             "Markdown ファイルを開いたとき、ソースではなくレンダリングしたプレビューを表示します。"
         }
+        L10nKey::SettingsEditorMermaidColors => "図の図形に色を付ける",
+        L10nKey::SettingsEditorMermaidColorsDesc => {
+            "Markdown プレビューの Mermaid 図の図形に色を付けます。オフではテーマの中立色で描画します。"
+        }
         L10nKey::SettingsSearchEditorGitGutterKeywords => {
             "git 変更 マーカー 差分 ステージ 変更 追加 削除 gutter diff"
         }
@@ -1402,6 +1406,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorSoftWrapKeywords => "折り返し 長い行 wrap",
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => {
             "markdown プレビュー レンダリング md"
+        }
+        L10nKey::SettingsSearchEditorMermaidColorsKeywords => {
+            "mermaid 図 グラフ 色 アクセント 図形 markdown プレビュー"
         }
         L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "エディタ内のシンボルへ移動…",
@@ -2447,6 +2454,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsCopyJoinWrappedDesc => {
             "Claude Code のペインで、Claude が画面端で折り返した行をつなげ、段落を 1 行として貼り付けます。⌘⌥C または「そのままコピー」で表示どおりにコピーします"
         }
+        L10nKey::MermaidRendering => "図をレンダリング中…",
+        L10nKey::MermaidRenderError => "図のエラー",
     })
 }
 

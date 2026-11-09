@@ -25,8 +25,16 @@
 //!   (the returned [`Raster::scale`] says which), never refused.
 //! - Output is deterministic for the same input (no clocks, no randomness),
 //!   so the GUI can cache by `(source, theme, scale)`.
+//! - [`MermaidTheme::accents`] empty means the neutral look, byte-for-byte
+//!   what it was before accents existed; non-empty colors each shape from the
+//!   list, deterministically.
+
+mod raster;
 
 use std::fmt;
+
+mod accents;
+mod svg;
 
 /// An sRGB color with straight (non-premultiplied) alpha.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -85,46 +93,79 @@ pub struct MermaidTheme {
     pub actor_border: Rgba,
     /// Errors and critical markers inside diagrams.
     pub error: Rgba,
+    /// Per-shape accent colors: when non-empty, the renderer gives the
+    /// diagram's shapes (flowchart nodes, sequence participants, class and
+    /// state boxes, mindmap branches, …) distinct colors by cycling through
+    /// this list in a stable order, so the same diagram always colors the
+    /// same shape the same way. Empty = the neutral look (every shape uses
+    /// `primary`/`primary_border`/`primary_text`).
+    pub accents: Vec<Accent>,
 }
+
+/// One accent: a shape's fill, its outline and the text drawn on it. The
+/// GUI derives these from the active tty59 theme; `text` must stay readable
+/// on `fill`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Accent {
+    pub fill: Rgba,
+    pub border: Rgba,
+    pub text: Rgba,
+}
+
+/// The default font stack. Proportional faces are deliberate: merman's
+/// deterministic text measurer estimates Arial-like advances, and resvg's
+/// `system-fonts` fallback resolves these names to a close installed face.
+const DEFAULT_FONT_FAMILY: &str = "Arial, Liberation Sans, sans-serif";
 
 impl MermaidTheme {
-    /// A neutral light theme. Part A fills in the palette.
+    /// A neutral light theme.
     pub fn light() -> Self {
-        todo_theme(false)
+        Self {
+            dark_mode: false,
+            font_family: DEFAULT_FONT_FAMILY.into(),
+            background: Rgba::rgb(0xff, 0xff, 0xff),
+            text: Rgba::rgb(0x1f, 0x23, 0x28),
+            primary: Rgba::rgb(0xf6, 0xf8, 0xfa),
+            primary_text: Rgba::rgb(0x1f, 0x23, 0x28),
+            primary_border: Rgba::rgb(0xd0, 0xd7, 0xde),
+            secondary: Rgba::rgb(0xea, 0xee, 0xf2),
+            tertiary: Rgba::rgb(0xf6, 0xf8, 0xfa),
+            line: Rgba::rgb(0x57, 0x60, 0x6a),
+            edge_label_background: Rgba::rgb(0xff, 0xff, 0xff),
+            cluster_background: Rgba::rgb(0xf6, 0xf8, 0xfa),
+            cluster_border: Rgba::rgb(0xd0, 0xd7, 0xde),
+            note_background: Rgba::rgb(0xff, 0xf8, 0xc5),
+            note_border: Rgba::rgb(0xd4, 0xa7, 0x2c),
+            actor_background: Rgba::rgb(0xf6, 0xf8, 0xfa),
+            actor_border: Rgba::rgb(0xd0, 0xd7, 0xde),
+            error: Rgba::rgb(0xcf, 0x22, 0x2e),
+            accents: Vec::new(),
+        }
     }
 
-    /// A neutral dark theme. Part A fills in the palette.
+    /// A neutral dark theme.
     pub fn dark() -> Self {
-        todo_theme(true)
-    }
-}
-
-// FOUNDATION STUB — part A replaces this with real light/dark palettes.
-fn todo_theme(dark_mode: bool) -> MermaidTheme {
-    let (bg, fg) = if dark_mode {
-        (Rgba::rgb(0x1e, 0x1e, 0x1e), Rgba::rgb(0xe6, 0xe6, 0xe6))
-    } else {
-        (Rgba::rgb(0xff, 0xff, 0xff), Rgba::rgb(0x1e, 0x1e, 0x1e))
-    };
-    MermaidTheme {
-        dark_mode,
-        font_family: "sans-serif".into(),
-        background: bg,
-        text: fg,
-        primary: bg,
-        primary_text: fg,
-        primary_border: fg,
-        secondary: bg,
-        tertiary: bg,
-        line: fg,
-        edge_label_background: bg,
-        cluster_background: bg,
-        cluster_border: fg,
-        note_background: bg,
-        note_border: fg,
-        actor_background: bg,
-        actor_border: fg,
-        error: Rgba::rgb(0xdc, 0x26, 0x26),
+        Self {
+            dark_mode: true,
+            font_family: DEFAULT_FONT_FAMILY.into(),
+            background: Rgba::rgb(0x0d, 0x11, 0x17),
+            text: Rgba::rgb(0xe6, 0xed, 0xf3),
+            primary: Rgba::rgb(0x16, 0x1b, 0x22),
+            primary_text: Rgba::rgb(0xe6, 0xed, 0xf3),
+            primary_border: Rgba::rgb(0x30, 0x36, 0x3d),
+            secondary: Rgba::rgb(0x21, 0x26, 0x2d),
+            tertiary: Rgba::rgb(0x16, 0x1b, 0x22),
+            line: Rgba::rgb(0x8b, 0x94, 0x9e),
+            edge_label_background: Rgba::rgb(0x0d, 0x11, 0x17),
+            cluster_background: Rgba::rgb(0x16, 0x1b, 0x22),
+            cluster_border: Rgba::rgb(0x30, 0x36, 0x3d),
+            note_background: Rgba::rgb(0x3d, 0x2f, 0x00),
+            note_border: Rgba::rgb(0x9e, 0x6a, 0x03),
+            actor_background: Rgba::rgb(0x16, 0x1b, 0x22),
+            actor_border: Rgba::rgb(0x30, 0x36, 0x3d),
+            error: Rgba::rgb(0xf8, 0x51, 0x49),
+            accents: Vec::new(),
+        }
     }
 }
 
@@ -170,18 +211,14 @@ pub enum MermaidError {
 
 /// Mermaid source → themed, raster-safe SVG.
 pub fn render_svg(source: &str, theme: &MermaidTheme) -> Result<String, MermaidError> {
-    // FOUNDATION STUB — part A implements this.
-    let _ = (source, theme);
-    Err(MermaidError::Render("not implemented yet".into()))
+    svg::render(source, theme)
 }
 
 /// SVG → straight-alpha BGRA at `scale` (device pixels per SVG unit; the GUI
 /// passes the window's scale factor). See [`MAX_PIXELS`] for the size cap.
 /// Text is laid out with the system fonts (loaded once per process).
 pub fn rasterize(svg: &str, scale: f32) -> Result<Raster, MermaidError> {
-    // FOUNDATION STUB — part A implements this.
-    let _ = (svg, scale);
-    Err(MermaidError::Render("not implemented yet".into()))
+    raster::rasterize(svg, scale)
 }
 
 /// [`render_svg`] then [`rasterize`].
