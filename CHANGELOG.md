@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.11.0] - 2026-11-10
+
+### Added
+
+- **Mermaid diagrams render in the markdown preview**: a fenced block whose
+  info string starts with `mermaid` is drawn as a themed diagram instead of
+  source text. Rendering runs off the UI thread with a cache, so only
+  visible diagrams are painted and an edit keeps the last good image until
+  the new one is ready. Diagram colors follow the active theme, and a new
+  setting switches the per-shape accent colors on or off. Untrusted SVG is
+  sanitized (image references refused) before it is rasterized.
+
+### Fixed
+
+- **A dead key or Compose accent no longer stays painted as a ghost**: on
+  X11 and Wayland the composed character arrives as a plain key press with
+  no "unmark" event, so the accent lingered until the next focus loss. A
+  keystroke that carries text now ends the sequence and clears it.
+- **Settings rows keep their labels beside their controls**: long labels
+  are bounded instead of pushing the control out of place.
+
 ## [26.10.3] - 2026-10-31
 
 ### Added
