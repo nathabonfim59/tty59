@@ -847,47 +847,25 @@ impl Tab {
             .find_map(|l| l.read(cx).agent())
     }
 
-    /// The tab's most urgent agent leaf, named and reported by that one leaf.
-    ///
-    /// `agent` and `agent_status` answer independently — the *first* leaf
-    /// carrying an agent, and the highest urgency found *anywhere* in the tab
-    /// — so reading them as a pair can put one pane's name beside another
-    /// pane's state, a row no leaf ever had. Anywhere both halves are shown
-    /// at once reads them from here instead (#543).
-    pub(crate) fn agent_row(
-        &self,
-        cx: &App,
-    ) -> Option<(
-        crate::core::cli_agent::CLIAgent,
-        crate::core::cli_agent::AgentStatus,
-    )> {
-        use crate::core::cli_agent::AgentStatus;
-        let urgency = |s: AgentStatus| match s {
-            AgentStatus::Waiting => 3,
-            AgentStatus::Working => 2,
-            AgentStatus::Done => 1,
-            AgentStatus::Idle => 0,
-        };
+    /// The most urgent agent state in any live pane of this tab.
+    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
         self.pane
             .terminals()
             .into_iter()
-            .filter_map(|l| {
-                let view = l.read(cx);
-                let agent = view.agent()?;
-                // A pane whose agent is running but has never reported a
-                // session reads as idle, the same reading the badge has always
-                // given it.
-                let status = view
-                    .agent_session()
-                    .map(|s| s.status)
-                    .unwrap_or(AgentStatus::Idle);
-                Some((agent, status))
+            .filter_map(|leaf| {
+                let view = leaf.read(cx);
+                view.agent_session()
+                    .filter(|session| {
+                        !session.agent_exited()
+                            && (view.agent().is_some() || session.detection.is_some())
+                    })
+                    .map(|session| session.status)
+                    .or_else(|| {
+                        view.agent()
+                            .map(|_| crate::core::cli_agent::AgentStatus::Idle)
+                    })
             })
-            .max_by_key(|(_, status)| urgency(*status))
-    }
-
-    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
-        self.agent_row(cx).map(|(_, status)| status)
+            .max_by_key(|status| crate::ui::tray::urgency(*status))
     }
 
     pub(crate) fn agent_unread_count(&self, cx: &App) -> usize {
@@ -2380,8 +2358,19 @@ impl Tty59App {
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let view = leaf.read(cx);
-                let Some(agent) = view.agent() else { continue };
                 let session = view.agent_session();
+                if session.as_ref().is_some_and(|state| state.agent_exited()) {
+                    continue;
+                }
+                let agent = view.agent();
+                let Some(name) = agent.map(|agent| agent.display_name()).or_else(|| {
+                    session
+                        .as_ref()
+                        .and_then(|state| state.detection.as_ref())
+                        .map(|detection| detection.kind.as_str())
+                }) else {
+                    continue;
+                };
                 let status = session.as_ref().map_or(AgentStatus::Idle, |s| s.status);
                 let since_ms = session.as_ref().and_then(|s| s.since_ms);
                 let waited = session
@@ -2401,6 +2390,7 @@ impl Tty59App {
                 agents.push(crate::ui::tray::AgentRow {
                     leaf_id: leaf.entity_id().as_u64(),
                     agent,
+                    name: name.to_string(),
                     status,
                     detail,
                     since_ms,

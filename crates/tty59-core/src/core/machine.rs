@@ -412,6 +412,8 @@ pub struct PaneRecord {
     pub ssh_spec: Option<Box<NativeSshSpec>>,
     #[serde(default)]
     pub agent: Option<AgentFacts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_overview: Option<crate::core::cli_agent::AgentOverview>,
     /// What the pane is actually running, resolved: the spawn's override if it
     /// had one, otherwise the shell the config named at the time.
     ///
@@ -434,6 +436,7 @@ impl PaneRecord {
             osc_title: None,
             ssh_spec: None,
             agent: None,
+            agent_overview: None,
             shell: None,
             live: false,
         }
@@ -491,6 +494,7 @@ impl PaneSeed {
             osc_title: None,
             ssh_spec: self.ssh_spec.map(|s| Box::new(s.without_secrets())),
             agent: self.agent,
+            agent_overview: None,
             shell: self.shell,
             live,
         }

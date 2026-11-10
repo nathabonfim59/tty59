@@ -304,7 +304,7 @@ members = ["crates/*"]
 # The root `tty59` package is a member implicitly; naming every crate here is
 # what makes a bare `cargo build` / `cargo test` at the root cover the whole
 # workspace, which is how CI invokes them.
-default-members = [".", "crates/tty59-core", "crates/tty59-server", "crates/tty59-cli"]
+default-members = [".", "crates/tty59-core", "crates/tty59-server", "crates/tty59-cli", "crates/tty59-agent-detect"]
 
 [workspace.package]
 edition = "2024"

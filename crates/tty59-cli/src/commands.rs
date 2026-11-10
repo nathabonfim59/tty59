@@ -1090,14 +1090,24 @@ fn create_tab(
         other => bail!("the server answered TabCreate with {other:?}"),
     };
     if let Some(group) = group {
-        match backend.control(ControlRequest::TabSetGroup {
+        let filed = backend.control(ControlRequest::TabSetGroup {
             workspace,
             tab: tab.id,
             group: Some(group),
             last_auto: None,
-        })? {
+        });
+        let context = || {
+            format!(
+                "tab {} was created but not filed in pinned group {group}",
+                tab.id
+            )
+        };
+        match filed.with_context(context)? {
             ReplyOk::Unit => {}
-            other => bail!("the server answered TabSetGroup with {other:?}"),
+            other => bail!(
+                "{}: the server answered TabSetGroup with {other:?}",
+                context()
+            ),
         }
     }
     Ok(tab)
@@ -1772,7 +1782,9 @@ fn wait(args: WaitArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
             ReplyOk::AgentStates(states) => states,
             other => bail!("the server answered AgentStates with {other:?}"),
         };
-        let entry = states.into_iter().find(|s| s.pane_id == pane);
+        let entry = states
+            .into_iter()
+            .find(|s| s.pane_id == pane && !s.state.agent_exited());
         let mut current = match &entry {
             Some(e) => match e.state.status {
                 AgentStatus::Idle => WaitState::Idle,
@@ -2109,10 +2121,6 @@ fn pane_is_live(backend: &mut dyn Backend, pane: u64) -> Result<bool> {
 fn agents(backend: &mut dyn Backend) -> Result<Outcome> {
     match backend.control(ControlRequest::AgentStates)? {
         ReplyOk::AgentStates(states) => {
-            // AgentStates only contains panes that have already emitted a hook
-            // event. The machine snapshot independently records the daemon's
-            // foreground-process detection, including a supported agent that
-            // has not been able to report yet.
             let diagnostics = fetch_machine(backend)
                 .map(|machine| agent_hook_diagnostics(&states, &machine, backend))
                 .unwrap_or_default();
@@ -2195,7 +2203,12 @@ fn agent_hook_diagnostics(
         .filter(|hook_agent| {
             machine.panes.iter().any(|pane| {
                 pane.live
-                    && !states.iter().any(|state| state.pane_id == pane.id)
+                    && !states.iter().any(|state| {
+                        state.pane_id == pane.id
+                            && (state.state.rich
+                                || state.state.observed()
+                                || state.state.session_id.is_some())
+                    })
                     && pane.agent.as_ref().is_some_and(|facts| {
                         HookAgent::of_detected(facts.agent) == Some(*hook_agent)
                     })
@@ -2876,6 +2889,28 @@ mod tests {
             }
             backend.machine.workspaces[0].groups.pinned.clear();
         }
+    }
+
+    #[test]
+    fn tab_new_reports_the_created_tab_if_group_filing_fails() {
+        let mut backend = mock();
+        let group = pin_second_tab(&mut backend, None);
+        let tab = Tab::leaf(6);
+        backend.replies.extend([
+            ReplyOk::TabTree(Box::new(tab.clone())),
+            ReplyOk::Panes(vec![]),
+        ]);
+        let error = execute(
+            cli(&["tty59", "tab", "new", "api", "--group", &group]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("tab {} was created but not filed", tab.id))
+        );
     }
 
     #[test]
@@ -4413,6 +4448,30 @@ mod tests {
         assert_eq!(r.json["status"], "exit");
         assert_eq!(r.json["matched"], false);
         assert!(r.human.contains("exited"), "{}", r.human);
+    }
+
+    #[test]
+    fn wait_treats_an_exited_agent_in_a_live_shell_as_no_agent() {
+        use tty59_core::core::cli_agent::{AgentDetectionSession, AgentStatus};
+
+        let mut backend = mock();
+        let mut exited = agent_state(3, AgentStatus::Idle);
+        exited.state.detection = Some(AgentDetectionSession {
+            kind: "codex".into(),
+            epoch: 2,
+            exited: true,
+            source: None,
+            rule: None,
+        });
+        backend
+            .replies
+            .push_back(ReplyOk::AgentStates(vec![exited]));
+        let report = run_cli(
+            &["tty59", "wait", "%3", "--until", "no-agent"],
+            &Context::default(),
+            &mut backend,
+        );
+        assert_eq!(json_of(report)["status"], "no-agent");
     }
 
     /// The trap this state exists to close. A pane with nothing reporting used

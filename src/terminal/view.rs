@@ -465,6 +465,7 @@ pub struct TerminalView {
     /// at the prompt with no agent in front.
     agent_detection_armed: bool,
     last_agent_status: Option<crate::core::cli_agent::AgentStatus>,
+    agent_screen: super::screen_agent::ScreenAgent,
     last_agent_session: (Option<String>, Option<Vec<String>>),
     agent_turn_started: Option<std::time::Instant>,
     /// The "finished" notification for a turn that just reached `Done`,
@@ -2058,6 +2059,7 @@ impl TerminalView {
             seen_agent: None,
             agent_detection_armed,
             last_agent_status: None,
+            agent_screen: Default::default(),
             last_agent_session: (None, None),
             agent_turn_started: None,
             pending_finish_notice: None,
@@ -4364,6 +4366,8 @@ impl TerminalView {
         }
 
         self.poll_agent_detection(at_prompt, cx);
+        self.agent_screen
+            .poll(&self.terminal, std::time::Instant::now());
 
         let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
 
@@ -4754,10 +4758,12 @@ impl TerminalView {
         };
 
         let session = self.terminal.agent_session();
-        if session.as_ref().is_some_and(|s| s.rich) {
+        if session.as_ref().is_some_and(|s| s.rich || s.observed()) {
             self.agent_was_rich = true;
         }
-        if self.terminal.foreground_agent().is_none() && session.is_none() {
+        if self.terminal.foreground_agent().is_none()
+            && session.as_ref().is_none_or(|s| s.agent_exited())
+        {
             self.agent_was_rich = false;
         }
 
@@ -4833,17 +4839,23 @@ impl TerminalView {
         }
         self.record_agent_read_mark(turns, cx);
 
-        let rich = session.as_ref().is_some_and(|s| s.rich);
+        let reports_turns = session.as_ref().is_some_and(|s| s.rich || s.observed());
         let agent_name = self
             .terminal
             .foreground_agent()
             .map(|a| a.display_name())
+            .or_else(|| {
+                session
+                    .as_ref()
+                    .and_then(|s| s.detection.as_ref())
+                    .map(|detection| detection.kind.as_str())
+            })
             .unwrap_or("Agent");
         match status {
             Some(AgentStatus::Working) => {
                 self.agent_turn_started = Some(std::time::Instant::now());
             }
-            Some(AgentStatus::Waiting) if rich && notify_allowed => {
+            Some(AgentStatus::Waiting) if reports_turns && notify_allowed => {
                 let body = session
                     .as_ref()
                     .and_then(|s| s.message.clone())
@@ -4851,7 +4863,7 @@ impl TerminalView {
                 self.notify_pane(Some(agent_name), &body, cx);
             }
             Some(AgentStatus::Done)
-                if rich
+                if reports_turns
                     && notify_allowed
                     && !inferred
                     && matches!(
@@ -11425,6 +11437,7 @@ mod gpui_tests {
                 inferred: false,
                 readout: Default::default(),
                 since_ms: None,
+                detection: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -11452,6 +11465,88 @@ mod gpui_tests {
             settled(None, cx),
             "a finished turn must not hold the tab open"
         );
+    }
+
+    #[gpui::test]
+    fn a_background_agent_grid_reports_a_visible_blocker_without_rendering(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::cli_agent::{AgentDetectionSession, AgentSessionState, AgentStatus};
+        use crate::daemon::protocol::ClientMsg;
+
+        struct Blank;
+        impl gpui::Render for Blank {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl gpui::IntoElement {
+                gpui::div()
+            }
+        }
+
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        let (client, mut daemon) = super::test_stream_pair();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+        });
+        let kept = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let out = kept.clone();
+        let _window = cx.add_window(move |window, cx| {
+            let terminal = RemoteTerminal::from_stream(client, TermSize::new(80, 24)).unwrap();
+            *out.borrow_mut() =
+                Some(cx.new(|cx| TerminalView::with_terminal(terminal, 1, window, cx)));
+            Blank
+        });
+        let view = kept.borrow_mut().take().unwrap();
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Working,
+            detection: Some(AgentDetectionSession {
+                kind: "codex".into(),
+                epoch: 17,
+                exited: false,
+                source: None,
+                rule: None,
+            }),
+            ..AgentSessionState::default()
+        }))
+        .encode(&mut daemon)
+        .unwrap();
+        DaemonMsg::Output(b"Allow command?\r\nPress enter to confirm or esc to cancel".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        for _ in 0..200 {
+            let ready = cx.update(|cx| {
+                let view = view.read(cx);
+                view.agent_session().is_some()
+                    && view
+                        .terminal
+                        .term
+                        .lock()
+                        .view()
+                        .glyph(GridPoint { line: 0, col: 0 })
+                        .c
+                        == 'A'
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(350));
+        cx.run_until_parked();
+        daemon
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let hint = loop {
+            if let ClientMsg::AgentScreen(hint) =
+                ClientMsg::read(&mut daemon).expect("background view reports screen evidence")
+            {
+                break hint;
+            }
+        };
+        assert_eq!(hint.epoch, 17);
+        assert_eq!(hint.rule.as_deref(), Some("live_strong_blocker"));
     }
 
     #[gpui::test]
@@ -11484,6 +11579,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            detection: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -11554,6 +11650,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            detection: None,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -12014,6 +12111,7 @@ mod gpui_tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            detection: None,
         }))
         .encode(&mut daemon)
         .unwrap();

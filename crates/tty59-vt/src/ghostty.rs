@@ -1509,6 +1509,7 @@ impl<S: VtEventListener> crate::event::EventSink for ListenerSink<'_, S> {
 pub struct VtTerm<S: VtEventListener = ()> {
     engine: Engine,
     listener: S,
+    content_revision: u64,
 }
 
 impl VtTerm<()> {
@@ -1551,7 +1552,11 @@ impl<S: VtEventListener> VtTerm<S> {
     pub fn with_listener(options: VtOptions, cols: u16, rows: u16, listener: S) -> Self {
         let engine = Engine::new(options, cols, rows)
             .expect("libghostty-vt terminals only fail to allocate");
-        Self { engine, listener }
+        Self {
+            engine,
+            listener,
+            content_revision: 0,
+        }
     }
 
     /// A borrowed session over this terminal.
@@ -1568,7 +1573,14 @@ impl<S: VtEventListener> VtTerm<S> {
     /// per read.
     #[inline]
     pub fn advance(&mut self, bytes: &[u8]) {
-        let Self { engine, listener } = self;
+        let Self {
+            engine,
+            listener,
+            content_revision,
+        } = self;
+        if !bytes.is_empty() {
+            *content_revision = content_revision.wrapping_add(1);
+        }
         let Engine {
             term, ed2, ed2_buf, ..
         } = engine;
@@ -1590,6 +1602,11 @@ impl<S: VtEventListener> VtTerm<S> {
     /// way a program would.
     pub fn stop_sync(&mut self) {
         self.engine.term.write(b"\x1b[?2026l");
+        self.content_revision = self.content_revision.wrapping_add(1);
+    }
+
+    pub fn content_revision(&self) -> u64 {
+        self.content_revision
     }
 
     /// The engine's scrollback-compression activity token (Phase 6a):
@@ -1677,6 +1694,7 @@ impl<S: VtEventListener> VtTerm<S> {
 
     pub fn resize(&mut self, cols: u16, rows: u16) {
         self.engine.resize_raw(usize::from(cols), usize::from(rows));
+        self.content_revision = self.content_revision.wrapping_add(1);
     }
 
     /// Read output. True when it brought a full-screen program's exit: the

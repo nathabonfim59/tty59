@@ -3,9 +3,10 @@ title: "Status and notifications"
 description: "Installing the hooks, reading the dots, and being told when an agent needs you."
 ---
 
-An agent working for two minutes and an agent that stopped ninety seconds ago
-waiting for permission look identical from outside. tty59 fixes that by letting
-the agent say which one it is.
+tty59 uses the foreground process to identify an agent, then reads its status
+from hooks, terminal titles and progress sequences, and visible terminal text.
+This can distinguish a working agent from one waiting for you to answer a
+question or approve an action.
 
 ## Installing the hooks
 
@@ -15,7 +16,7 @@ the agent say which one it is.
 | Agent | |
 |---|---|
 | Claude Code · Codex · TraeCode · Copilot CLI · OpenCode · Pi · Grok Build · Oh My Pi · Gemini · Droid · Qwen Code · Goose · Kimi Code · Qoder CLI · Qoder CN CLI · Crush · CodeBuddy · Cursor CLI · Prime Agent · Antigravity · Empryo · Muse Code · jcode | Hooks available |
-| Aider · Amp · Auggie · Hermes · Vibe | Detected and labelled, but no status channel yet |
+| Aider · Amp · Auggie · Hermes · Vibe | No hooks. Amp and Hermes can report status through their terminal UI. |
 
 Installing writes into that agent's own configuration directory. Once installed
 the row grows a second **Uninstall** button beside the first, which itself
@@ -29,10 +30,9 @@ ships a newer hook.
 </Note>
 
 <Note>
-  Antigravity has no session-start or permission event, so its pane goes
-  straight from no dot to working on the first model call, and a pending
-  permission prompt shows as working rather than amber. Its hooks live in a
-  `tty59` set inside `~/.gemini/config/hooks.json`, beside any sets of your own.
+  Antigravity has no permission hook. When tty59 has its live terminal screen,
+  it can still recognize a permission or question dialog. Antigravity's hooks
+  live in a `tty59` set inside `~/.gemini/config/hooks.json`.
 </Note>
 
 <Note>
@@ -55,6 +55,11 @@ screen.
 
 ## The status dot
 
+Screen detection runs on live desktop grids, including background tabs and
+remote workspace panes opened on the desktop. Sleeping panes and panes whose
+grid isn't open in a desktop window rely on the available hook, title and
+progress signals. Older remote servers do not receive screen evidence.
+
 Every tab chip and sidebar row carries a dot:
 
 | Dot | Meaning |
@@ -70,6 +75,8 @@ Every tab chip and sidebar row carries a dot:
 The same three states are what `tty59 agents` reports as `working` / `waiting` /
 `done`, and what [`tty59 wait`](/agents/orchestration) blocks on. A fourth state,
 `idle`, carries no dot — it is an agent that has not started a turn.
+After the agent process exits, the terminal can stay open at the shell. New
+clients identify that agent as exited; older clients read the status as idle.
 
 ## Notifications
 

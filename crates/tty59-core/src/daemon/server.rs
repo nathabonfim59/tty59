@@ -122,10 +122,8 @@ impl crate::host::server::PaneDirectory for Registry {
     }
 }
 
-/// How often panes are checked for an agent turn that has gone silent past
-/// [`crate::daemon::pane::AGENT_STALE_AFTER`]. The threshold is half an hour,
-/// so being up to a minute late to notice costs nothing.
-const AGENT_STALE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Wake pending OSC completion and check for foreground exit or stale work.
+const AGENT_STALE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// The pane a Codex or jcode hook's report is about, found from the report
 /// itself — where a hook runs says nothing for an agent that runs its hooks in
@@ -1351,6 +1349,9 @@ fn stream_observer(
         &mut read_stream,
         |msg| pane.tell_observer(observer_id, msg),
         |request| pane.observer_lease(observer_id, request),
+        |hint| {
+            pane.report_agent_screen(super::agent_detection::Writer::Observer(observer_id), hint)
+        },
     );
 
     pane.unobserve(observer_id);
@@ -1362,10 +1363,12 @@ fn observe_loop<R: std::io::Read>(
     read_stream: &mut R,
     mut refuse: impl FnMut(DaemonMsg) -> bool,
     mut lease: impl FnMut(LeaseRequest),
+    mut screen: impl FnMut(crate::daemon::protocol::AgentScreenHint),
 ) {
     loop {
         match ClientMsg::read(read_stream) {
             Ok(ClientMsg::Lease(request)) => lease(request),
+            Ok(ClientMsg::AgentScreen(hint)) => screen(hint),
             Ok(ClientMsg::Input(_)) | Ok(ClientMsg::Resize(_)) => {
                 if !refuse(DaemonMsg::Error(
                     "this connection is a read-only observer; attach to write".to_string(),
@@ -1427,6 +1430,12 @@ fn run_stream(
                         break 'conn;
                     }
                     pane.controller_lease(request);
+                }
+                ClientMsg::AgentScreen(hint) => {
+                    pane.report_agent_screen(
+                        super::agent_detection::Writer::Controller(epoch),
+                        hint,
+                    );
                 }
                 ClientMsg::AuthResponse {
                     request_id,
@@ -1608,6 +1617,7 @@ mod tests {
             &mut std::io::Cursor::new(wire),
             |m| tx.send(m).is_ok(),
             |_| {},
+            |_| {},
         );
         drop(tx);
 
@@ -1631,6 +1641,7 @@ mod tests {
         observe_loop(
             &mut std::io::Cursor::new(Vec::<u8>::new()),
             |m| tx.send(m).is_ok(),
+            |_| {},
             |_| {},
         );
         drop(tx);

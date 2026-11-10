@@ -185,17 +185,29 @@ fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneVi
     // while `AgentStates` is what the daemon's hook listener heard just now.
     let live = agents.iter().find(|a| a.pane_id == id);
     let agent = match live {
-        Some(live) => live
-            .agent
-            .or_else(|| record.and_then(|p| p.agent.as_ref()).map(|f| f.agent))
-            .map(|agent| agent_view(agent, &live.state)),
-        None => record
-            .and_then(|p| p.agent.as_ref())
-            .map(|facts| AgentView {
-                kind: facts.agent.slug().to_string(),
-                status: status(facts.status.unwrap_or_default()),
-                message: None,
-            }),
+        Some(live) => agent_view(
+            live.agent
+                .or_else(|| record.and_then(|p| p.agent.as_ref()).map(|f| f.agent)),
+            &live.state,
+        ),
+        None => record.and_then(|pane| {
+            pane.agent_overview
+                .as_ref()
+                .map(|overview| AgentView {
+                    kind: overview.kind.clone(),
+                    status: status(overview.status),
+                    message: None,
+                    exited: overview.exited,
+                })
+                .or_else(|| {
+                    pane.agent.as_ref().map(|facts| AgentView {
+                        kind: facts.agent.slug().to_string(),
+                        status: status(facts.status.unwrap_or_default()),
+                        message: None,
+                        exited: false,
+                    })
+                })
+        }),
     };
     PaneView {
         id,
@@ -206,12 +218,18 @@ fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneVi
     }
 }
 
-pub fn agent_view(agent: CLIAgent, state: &AgentSessionState) -> AgentView {
-    AgentView {
-        kind: agent.slug().to_string(),
+pub fn agent_view(agent: Option<CLIAgent>, state: &AgentSessionState) -> Option<AgentView> {
+    let kind = state
+        .detection
+        .as_ref()
+        .map(|detection| detection.kind.as_str())
+        .or_else(|| agent.map(CLIAgent::slug))?;
+    Some(AgentView {
+        kind: kind.to_string(),
         status: status(state.status),
         message: state.message.clone(),
-    }
+        exited: state.agent_exited(),
+    })
 }
 
 pub fn status(s: CoreStatus) -> AgentStatus {

@@ -48,6 +48,7 @@ Copy-Item LICENSE "$Stage/LICENSE.txt"
 Copy-Item "assets/licenses/alacritty-LICENSE-APACHE" "$Stage/LICENSE-Alacritty-APACHE.txt"
 Copy-Item "assets/licenses/alacritty-LICENSE-MIT" "$Stage/LICENSE-Alacritty-MIT.txt"
 Copy-Item "assets/licenses/ghostty-LICENSE" "$Stage/LICENSE-Ghostty.txt"
+Copy-Item "assets/licenses/herdr-NOTICE" "$Stage/NOTICE-Herdr.txt"
 Copy-Item README.md "$Stage/README.md"
 
 # Microsoft's redistributable ConPTY, which `portable-pty` prefers over the

@@ -5,10 +5,13 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::core::cli_agent::{
+    AgentDetectionSession, AgentSessionState, AgentStatus, AgentStatusSource, CLIAgent,
+};
 use crate::core::clipboard::{
     ClipboardSniffer, Event as ClipboardEvent, Segment as ClipboardSegment,
     Sniffed as ClipboardSniffed,
@@ -16,9 +19,10 @@ use crate::core::clipboard::{
 use crate::core::kitty_graphics::{GraphicsSniffer, Segment, Sniffed};
 use crate::core::osc::OscTokenizer;
 use crate::core::term_modes::{Query, TerminalModes};
+use crate::daemon::agent_detection::{Detector, Writer as ScreenWriter};
 use crate::daemon::protocol::{
-    AuthResponse, DaemonMsg, LeaseRequest, MAX_FRAME, NativeSshSpec, PaneInfo, RemoteContext,
-    RemoteKind, ShellSpec, WinSize,
+    AgentScreenHint, AuthResponse, DaemonMsg, LeaseRequest, MAX_FRAME, NativeSshSpec, PaneInfo,
+    RemoteContext, RemoteKind, ShellSpec, WinSize,
 };
 use crate::daemon::shell_integration;
 
@@ -840,6 +844,10 @@ struct AgentClock {
     last_event: Option<std::time::Instant>,
     /// An interrupt key is already waiting out [`INTERRUPT_SETTLE`].
     interrupt_pending: bool,
+    detector: Detector,
+    foreground_group: Option<i32>,
+    foreground_misses: u8,
+    last_foreground_check: Option<Instant>,
 }
 
 /// How long after an interrupt key a real hook event still gets to speak
@@ -1128,8 +1136,27 @@ struct ForegroundProbes {
     /// answer differently.
     group: Box<dyn Fn() -> Option<i32> + Send>,
     remote: Box<dyn Fn() -> Option<RemoteContext> + Send>,
-    agent: Box<dyn Fn() -> Option<Option<(crate::core::cli_agent::CLIAgent, Vec<String>)>> + Send>,
+    agent: Box<dyn Fn() -> Option<Option<ForegroundAgent>> + Send>,
     cwd: Box<dyn Fn() -> Option<PathBuf> + Send>,
+}
+
+struct ForegroundAgent {
+    builtin: Option<CLIAgent>,
+    kind: &'static str,
+    argv: Vec<String>,
+}
+
+fn detect_foreground_agent(argv: Vec<String>) -> Option<ForegroundAgent> {
+    let builtin =
+        CLIAgent::detect_from_argv_with(&argv, &crate::core::config::agent_detection_aliases());
+    let kind = builtin
+        .map(CLIAgent::slug)
+        .or_else(|| crate::core::cli_agent::detect_manifest_from_argv(&argv))?;
+    Some(ForegroundAgent {
+        builtin,
+        kind,
+        argv,
+    })
 }
 
 struct PtyBackend {
@@ -1229,6 +1256,7 @@ impl DeathReporter {
             return;
         }
         let subscribed = st.subscriber.is_some();
+        mark_agent_exited(&mut st);
         notify(&mut st, DaemonMsg::Exited { code });
         drop(st);
         crate::core::machine::observe_pane(pane, |p| p.live = false);
@@ -2090,6 +2118,11 @@ impl DaemonPane {
         // announce and nothing to reset. The shell below these bytes is the
         // same shell that wrote them.
         ring.resize(size);
+        let agent_generation = carried
+            .agent_session
+            .as_ref()
+            .and_then(|session| session.detection.as_ref())
+            .map_or(0, |detection| detection.epoch);
 
         Ok(Self::over_pty(
             PtyParts {
@@ -2133,7 +2166,10 @@ impl DaemonPane {
                 agent: carried.agent,
                 agent_session: carried.agent_session,
                 agent_argv: carried.agent_argv,
-                agent_clock: AgentClock::default(),
+                agent_clock: AgentClock {
+                    generation: agent_generation,
+                    ..AgentClock::default()
+                },
                 alive: true,
                 exit_code: None,
                 last_redraw_nudge: None,
@@ -2445,6 +2481,7 @@ impl DaemonPane {
                             let tr1 = trace.then(std::time::Instant::now);
                             let may_change_facts = signals.cwd.is_some()
                                 || signals.title.is_some()
+                                || signals.progress.is_some()
                                 || !signals.agent_events.is_empty()
                                 || signals.notification.is_some()
                                 || !signals.shell.is_empty()
@@ -2460,19 +2497,27 @@ impl DaemonPane {
                             record_output(&mut st, bytes);
                             fan_out_output(&mut st, bytes, frames, &gate);
                             let owed = detached_queries(&mut st);
-                            apply_signals(&mut st, signals);
                             if let Some(remote) = remote {
                                 apply_remote_context(&mut st, remote);
                             }
+                            match agent {
+                                Some(Some(agent)) => apply_foreground_agent(&mut st, Some(agent), group),
+                                _ if back_at_prompt && st.remote.is_none() => mark_agent_exited(&mut st),
+                                Some(None) if st.remote.is_none() && st.agent_clock.foreground_group.is_some() => {
+                                    st.agent_clock.foreground_misses = st.agent_clock.foreground_misses.saturating_add(1);
+                                    if st.agent_clock.foreground_misses >= 3 {
+                                        mark_agent_exited(&mut st);
+                                    }
+                                }
+                                _ => {}
+                            }
+                            apply_signals(&mut st, signals);
                             latch_remote_prompt(&mut st, saw_prompt_mark);
                             // Keep kitty file/shm transfer gated on the pane's
                             // *current* locality: an `ssh` that just took the PTY
                             // must stop us honoring host-local object names. Cheap
                             // and only meaningful when a probe follows.
                             graphics.set_local(st.remote.is_none());
-                            if let Some(agent) = agent {
-                                apply_agent(&mut st, agent);
-                            }
                             apply_probed_cwd(&mut st, probed_cwd);
                             if let Some(tr1) = tr1 {
                                 tr_disp_t += tr1.elapsed();
@@ -2680,9 +2725,103 @@ impl DaemonPane {
         agent_state_snapshot(&self.state.lock().unwrap())
     }
 
+    pub(super) fn report_agent_screen(&self, writer: ScreenWriter, hint: AgentScreenHint) {
+        let mut st = self.state.lock().unwrap();
+        let owns_stream = match writer {
+            ScreenWriter::Controller(epoch) => {
+                st.subscriber_epoch == epoch && st.subscriber.is_some()
+            }
+            ScreenWriter::Observer(id) => st.observers.iter().any(|observer| observer.id == id),
+        };
+        if !st.alive || !owns_stream {
+            return;
+        }
+        if !apply_screen_hint(&mut st, writer, hint, Instant::now()) {
+            return;
+        }
+        let after = observed_facts(&st);
+        drop(st);
+        if !self.shutting_down.load(Ordering::SeqCst) {
+            publish_facts(self.id, true, after);
+        }
+    }
+
     /// See [`expire_stale_agent`].
     pub fn expire_stale_agent(&self) {
-        expire_stale_agent(&mut self.state.lock().unwrap(), std::time::Instant::now());
+        let mut st = self.state.lock().unwrap();
+        let now = Instant::now();
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        let foreground_to_check = if st.alive
+            && st.remote.is_none()
+            && st
+                .agent_clock
+                .last_foreground_check
+                .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_secs(5))
+        {
+            st.agent_clock.last_foreground_check = Some(now);
+            st.agent_clock
+                .foreground_group
+                .zip(active_detection(&st).map(|detection| detection.epoch))
+        } else {
+            None
+        };
+        let mut changed = None;
+        let tracker = &mut st.agent_clock.detector;
+        if let Some((evidence, observed)) = tracker.pending_osc_idle
+            && now.saturating_duration_since(observed) >= Duration::from_secs(1)
+        {
+            tracker.pending_osc_idle = None;
+            if !tracker.screen_overrides_osc(now) {
+                let before = observed_facts(&st);
+                apply_detection(&mut st, evidence, AgentStatusSource::Osc, observed, now);
+                let after = observed_facts(&st);
+                if facts_changed(&before, &after) {
+                    changed = Some((st.alive, after));
+                }
+            }
+        }
+        if expire_stale_agent(&mut st, now) {
+            changed = Some((st.alive, observed_facts(&st)));
+        }
+        drop(st);
+        if let Some((alive, after)) = changed
+            && !self.shutting_down.load(Ordering::SeqCst)
+        {
+            publish_facts(self.id, alive, after);
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some((group, epoch)) = foreground_to_check {
+            self.check_agent_returned_to_shell(group, epoch);
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn check_agent_returned_to_shell(&self, group: i32, epoch: u64) {
+        let Some(pty) = self.pty() else { return };
+        let Some(shell) = pty
+            .shell_pid
+            .and_then(|pid| i32::try_from(pid).ok())
+            .filter(|pid| *pid != group)
+        else {
+            return;
+        };
+        if pty_foreground_pgid(&pty.master) != Some(shell) {
+            return;
+        }
+        let mut st = self.state.lock().unwrap();
+        if !st.alive
+            || st.remote.is_some()
+            || st.agent_clock.foreground_group != Some(group)
+            || !active_detection(&st).is_some_and(|detection| detection.epoch == epoch)
+        {
+            return;
+        }
+        mark_agent_exited(&mut st);
+        let facts = observed_facts(&st);
+        drop(st);
+        if !self.shutting_down.load(Ordering::SeqCst) {
+            publish_facts(self.id, true, facts);
+        }
     }
 
     /// Apply an agent hook's report that came over the socket rather than
@@ -2749,7 +2888,7 @@ impl DaemonPane {
         }
         let agent = self.state.lock().unwrap().agent;
         if interrupts(agent, bytes) {
-            arm_interrupt(&self.state);
+            arm_interrupt(&self.state, &self.shutting_down);
         }
         if let Ok(mut writer) = self.writer.lock() {
             let _ = writer.write_all(bytes);
@@ -3681,6 +3820,7 @@ struct ObservedFacts {
     cwd: Option<String>,
     osc_title: Option<String>,
     agent: Option<crate::core::machine::AgentFacts>,
+    agent_overview: Option<crate::core::cli_agent::AgentOverview>,
     shell: Option<ShellSpec>,
 }
 
@@ -3700,6 +3840,10 @@ fn observed_facts(st: &PaneState) -> ObservedFacts {
         cwd,
         osc_title: st.osc_title.clone(),
         agent,
+        agent_overview: st
+            .agent_session
+            .as_ref()
+            .and_then(AgentSessionState::overview),
         shell: st.shell_spec.clone(),
     }
 }
@@ -3713,6 +3857,7 @@ fn publish_facts(pane: u64, alive: bool, after: ObservedFacts) {
         // assigned either way.
         p.osc_title = after.osc_title;
         p.agent = after.agent;
+        p.agent_overview = after.agent_overview;
         if after.shell.is_some() {
             p.shell = after.shell;
         }
@@ -3726,6 +3871,7 @@ fn facts_changed(before: &ObservedFacts, after: &ObservedFacts) -> bool {
     before.cwd != after.cwd
         || before.osc_title != after.osc_title
         || agent_facts_changed(before.agent.as_ref(), after.agent.as_ref())
+        || before.agent_overview != after.agent_overview
         || before.shell != after.shell
 }
 
@@ -3752,18 +3898,19 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
             st.cwd = Some(cwd);
         }
     }
-    if let Some(title) = signals.title {
+    if let Some(title) = signals.title.as_ref() {
         // No `notify`: a window renders its own tabs from its own terminal,
         // which parsed the same sequence. This is only for the tree.
-        st.osc_title = (!title.is_empty()).then_some(title);
+        st.osc_title = (!title.is_empty()).then(|| title.clone());
     }
     for shell in signals.shell {
-        #[cfg(windows)]
-        if shell_mark_capture_changed(&st.shell, &shell) {
-            apply_agent(
-                st,
-                agent_from_shell_mark(&shell, &crate::core::config::agent_detection_aliases()),
-            );
+        if (cfg!(windows) || st.remote.is_some()) && shell_mark_capture_changed(&st.shell, &shell) {
+            let agent = shell
+                .command
+                .as_deref()
+                .map(crate::core::cli_agent::command_argv)
+                .and_then(detect_foreground_agent);
+            apply_foreground_agent(st, agent, None);
         }
         st.shell = shell.clone();
         notify(
@@ -3776,14 +3923,16 @@ fn apply_signals(st: &mut PaneState, signals: SniffSignals) {
         );
     }
     apply_agent_signals(st, signals.agent_events, signals.notification);
+    if signals.title.is_some() || signals.progress.is_some() {
+        apply_osc_evidence(st, signals.title, signals.progress, Instant::now());
+    }
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
 fn shell_mark_capture_changed(prev: &ShellState, next: &ShellState) -> bool {
     prev.command != next.command
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg(test)]
 fn agent_from_shell_mark(
     shell: &ShellState,
     custom: &std::collections::HashMap<String, String>,
@@ -3801,60 +3950,89 @@ fn agent_from_shell_mark(
 /// the agent's next finished tool ([`AgentSessionState::apply_event`]).
 ///
 /// [`AgentSessionState::apply_event`]: crate::core::cli_agent::AgentSessionState::apply_event
-fn arm_interrupt(state: &Arc<Mutex<PaneState>>) {
+fn arm_interrupt(state: &Arc<Mutex<PaneState>>, shutting_down: &Arc<AtomicBool>) {
     let generation = {
         let mut st = state.lock().unwrap();
         let armable = st
             .agent_session
             .as_ref()
             .is_some_and(|s| s.rich && s.mid_turn());
-        if !armable || st.agent_clock.interrupt_pending {
+        let has_visible_idle =
+            st.agent_session
+                .as_ref()
+                .and_then(|session| session.detection.as_ref())
+                .is_some_and(|detection| {
+                    let tracker = &st.agent_clock.detector;
+                    (tracker.screen_recent(Instant::now())
+                        || !tracker.title.is_empty()
+                        || !tracker.progress.is_empty())
+                        && tty59_agent_detect::manifest_id_for_launcher(&detection.kind)
+                            .is_some_and(|id| {
+                                tty59_agent_detect::has_visible_idle(
+                                    id,
+                                    tracker.screen_recent(Instant::now()),
+                                )
+                            })
+                });
+        if !armable || has_visible_idle || st.agent_clock.interrupt_pending {
             return;
         }
         st.agent_clock.interrupt_pending = true;
         st.agent_clock.generation
     };
     let waiter = state.clone();
+    let shutting_down = shutting_down.clone();
     let spawned = std::thread::Builder::new()
         .name("tty59-agent-interrupt".into())
         .spawn(move || {
             std::thread::sleep(INTERRUPT_SETTLE);
             let mut st = waiter.lock().unwrap();
-            settle_interrupt(&mut st, generation);
+            if settle_interrupt(&mut st, generation) && !shutting_down.load(Ordering::SeqCst) {
+                let pane = st.id;
+                let facts = observed_facts(&st);
+                drop(st);
+                publish_facts(pane, true, facts);
+            }
         });
     if spawned.is_err() {
         state.lock().unwrap().agent_clock.interrupt_pending = false;
     }
 }
 
-fn settle_interrupt(st: &mut PaneState, armed_at: u64) {
+fn settle_interrupt(st: &mut PaneState, armed_at: u64) -> bool {
     st.agent_clock.interrupt_pending = false;
     if st.agent_clock.generation != armed_at || !st.alive {
-        return;
+        return false;
     }
     let Some(sess) = st.agent_session.as_mut().filter(|s| s.mid_turn()) else {
-        return;
+        return false;
     };
     let before = sess.status;
     sess.assume_interrupted();
     sess.note_transition(Some(before), unix_ms());
     notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+    true
 }
 
 /// Give up on a turn that has said nothing for [`AGENT_STALE_AFTER`]. Run by
 /// the daemon's periodic sweep, since a silent pane produces nothing that
 /// would otherwise wake anything up to notice.
-fn expire_stale_agent(st: &mut PaneState, now: std::time::Instant) {
+fn expire_stale_agent(st: &mut PaneState, now: std::time::Instant) -> bool {
     let working = st
         .agent_session
         .as_ref()
         .is_some_and(|s| s.status == crate::core::cli_agent::AgentStatus::Working);
     if !working {
-        return;
+        return false;
     }
     let since = *st.agent_clock.last_event.get_or_insert(now);
+    let since = st
+        .agent_clock
+        .detector
+        .last_working
+        .map_or(since, |working| since.max(working));
     if now.saturating_duration_since(since) < AGENT_STALE_AFTER {
-        return;
+        return false;
     }
     if let Some(sess) = st.agent_session.as_mut() {
         let before = sess.status;
@@ -3862,6 +4040,7 @@ fn expire_stale_agent(st: &mut PaneState, now: std::time::Instant) {
         sess.note_transition(Some(before), unix_ms());
     }
     notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+    true
 }
 
 fn apply_agent_signals(
@@ -3869,8 +4048,6 @@ fn apply_agent_signals(
     events: Vec<crate::core::cli_agent::AgentEvent>,
     notification: Option<String>,
 ) {
-    use crate::core::cli_agent::{AgentSessionState, AgentStatus};
-
     if events.is_empty() && notification.is_none() {
         return;
     }
@@ -3878,6 +4055,18 @@ fn apply_agent_signals(
     let now_ms = unix_ms();
 
     for event in &events {
+        if st
+            .agent_session
+            .as_ref()
+            .is_some_and(AgentSessionState::agent_exited)
+            && !matches!(
+                event.kind,
+                crate::core::cli_agent::AgentEventKind::SessionStart
+                    | crate::core::cli_agent::AgentEventKind::PromptSubmit
+            )
+        {
+            continue;
+        }
         // A hook names the agent that emitted it. Once this pane has a
         // foreground agent, a different one's session id must not land here:
         // omp forking with a Claude UUID is "session not found".
@@ -3886,9 +4075,37 @@ fn apply_agent_signals(
         {
             continue;
         }
+        if let Some(kind) = st
+            .agent_session
+            .as_ref()
+            .and_then(|session| session.detection.as_ref())
+            && !kind.exited
+            && st.agent.is_none()
+            && event.agent.is_some()
+        {
+            continue;
+        }
         if st.agent.is_none() && event.agent.is_some() {
             st.agent = event.agent;
             notify(st, DaemonMsg::Agent(st.agent));
+        }
+        if let Some(agent) = st.agent
+            && (st.agent_session.as_ref().is_none_or(|session| {
+                session
+                    .detection
+                    .as_ref()
+                    .is_none_or(|detection| detection.exited)
+            }) || matches!(
+                event.kind,
+                crate::core::cli_agent::AgentEventKind::SessionStart
+            ) && event.session_id.as_ref().is_some_and(|id| {
+                st.agent_session
+                    .as_ref()
+                    .and_then(|session| session.session_id.as_ref())
+                    != Some(id)
+            }))
+        {
+            begin_detection(st, agent.slug(), Instant::now());
         }
         st.agent_clock.generation = st.agent_clock.generation.wrapping_add(1);
         st.agent_clock.last_event = Some(std::time::Instant::now());
@@ -3903,12 +4120,19 @@ fn apply_agent_signals(
     }
 
     if let Some(body) = notification
-        && st.agent.is_some()
+        && (st.agent.is_some()
+            || st
+                .agent_session
+                .as_ref()
+                .is_some_and(|session| session.detection.is_some() && !session.agent_exited()))
         && !st.agent_session.as_ref().is_some_and(|s| s.rich)
     {
         let sess = st
             .agent_session
             .get_or_insert_with(AgentSessionState::default);
+        if sess.status != AgentStatus::Waiting {
+            sess.clear_observation();
+        }
         sess.status = AgentStatus::Waiting;
         sess.message = Some(body);
     }
@@ -4106,32 +4330,176 @@ fn latch_remote_prompt(st: &mut PaneState, saw_prompt_mark: bool) {
     st.remote_prompt_seen |= saw_prompt_mark && st.remote.is_some();
 }
 
-fn apply_agent(
+fn apply_foreground_agent(
     st: &mut PaneState,
-    detected: Option<(crate::core::cli_agent::CLIAgent, Vec<String>)>,
+    detected: Option<ForegroundAgent>,
+    group: Option<i32>,
 ) {
-    let (agent, argv) = match detected {
-        Some((agent, argv)) => (Some(agent), Some(argv)),
-        None => (None, None),
+    let Some(detected) = detected else {
+        mark_agent_exited(st);
+        return;
     };
-    if st.agent == agent {
-        stamp_launch_argv(st, argv);
+    let existing = st
+        .agent_session
+        .as_ref()
+        .and_then(|session| session.detection.as_ref());
+    let same = existing.is_some_and(|current| !current.exited && current.kind == detected.kind)
+        && st
+            .agent_clock
+            .foreground_group
+            .zip(group)
+            .is_none_or(|(old, new)| old == new);
+    if !same {
+        if existing.is_some() || st.agent != detected.builtin {
+            st.agent_session = None;
+        }
+        if st.agent != detected.builtin {
+            st.agent = detected.builtin;
+            notify(st, DaemonMsg::Agent(st.agent));
+        }
+        st.agent_argv = None;
+        begin_detection(st, detected.kind, Instant::now());
+    }
+    st.agent_clock.foreground_group = group;
+    st.agent_clock.foreground_misses = 0;
+    st.agent_clock.last_foreground_check = Some(Instant::now());
+    if !same && detected.argv.is_empty() {
+        notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+    }
+    stamp_launch_argv(st, Some(detected.argv));
+}
+
+fn begin_detection(st: &mut PaneState, kind: &str, now: Instant) {
+    let clock = &mut st.agent_clock;
+    clock.generation = clock.generation.wrapping_add(1);
+    clock.last_event = None;
+    clock.detector.start(now);
+    let session = st
+        .agent_session
+        .get_or_insert_with(AgentSessionState::default);
+    session.detection = Some(AgentDetectionSession {
+        kind: kind.to_string(),
+        epoch: clock.generation,
+        exited: false,
+        source: None,
+        rule: None,
+    });
+    session.since_ms.get_or_insert_with(unix_ms);
+}
+
+fn mark_agent_exited(st: &mut PaneState) {
+    let agent = st.agent.take();
+    let detection = st
+        .agent_session
+        .as_ref()
+        .and_then(|session| session.detection.as_ref());
+    if agent.is_none() && detection.is_none_or(|current| current.exited) {
         return;
     }
-    // The session belongs to whoever was in the foreground. Switching from
-    // Claude to omp (or back to the shell) must not keep the previous id.
-    if st.agent_session.is_some() {
-        st.agent_session = None;
-        st.agent_clock.generation = st.agent_clock.generation.wrapping_add(1);
-        st.agent_clock.last_event = None;
-        notify(st, DaemonMsg::AgentStatus(None));
+    st.agent_argv = None;
+    let generation = st.agent_clock.generation.wrapping_add(1);
+    st.agent_clock = AgentClock {
+        generation,
+        ..AgentClock::default()
+    };
+    st.agent_session = detection.cloned().map(|mut current| {
+        current.exited = true;
+        current.epoch = generation;
+        current.source = None;
+        current.rule = None;
+        AgentSessionState {
+            detection: Some(current),
+            since_ms: Some(unix_ms()),
+            ..AgentSessionState::default()
+        }
+    });
+    notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+    if agent.is_some() {
+        notify(st, DaemonMsg::Agent(None));
     }
-    if agent.is_none() {
-        st.agent_argv = None;
+}
+
+fn active_detection(st: &PaneState) -> Option<&AgentDetectionSession> {
+    st.agent_session
+        .as_ref()?
+        .detection
+        .as_ref()
+        .filter(|detection| !detection.exited)
+}
+
+fn apply_screen_hint(
+    st: &mut PaneState,
+    writer: ScreenWriter,
+    hint: AgentScreenHint,
+    now: Instant,
+) -> bool {
+    let Some(current) = active_detection(st).filter(|current| current.epoch == hint.epoch) else {
+        return false;
+    };
+    let Some(id) = tty59_agent_detect::manifest_id_for_launcher(&current.kind) else {
+        return false;
+    };
+    let Some(evidence) = tty59_agent_detect::screen_rule(id, hint.rule.as_deref()) else {
+        return false;
+    };
+    let Some(observed) =
+        st.agent_clock
+            .detector
+            .accept_screen(writer, hint.revision, evidence, now)
+    else {
+        return false;
+    };
+    apply_detection(st, evidence, AgentStatusSource::Screen, observed, now)
+}
+
+fn apply_osc_evidence(
+    st: &mut PaneState,
+    title: Option<String>,
+    progress: Option<String>,
+    now: Instant,
+) {
+    let Some(id) = active_detection(st)
+        .and_then(|current| tty59_agent_detect::manifest_id_for_launcher(&current.kind))
+    else {
+        return;
+    };
+    let tracker = &mut st.agent_clock.detector;
+    if let Some(title) = title {
+        tracker.title = title;
     }
-    notify(st, DaemonMsg::Agent(agent));
-    st.agent = agent;
-    stamp_launch_argv(st, argv);
+    if let Some(progress) = progress {
+        tracker.progress = progress;
+    }
+    let evidence = tty59_agent_detect::detect_osc(id, &tracker.title, &tracker.progress);
+    tracker.note_osc(evidence, now);
+    if let Some(evidence) = evidence
+        && !tracker.screen_overrides_osc(now)
+    {
+        apply_detection(st, evidence, AgentStatusSource::Osc, now, now);
+    }
+}
+
+fn apply_detection(
+    st: &mut PaneState,
+    evidence: tty59_agent_detect::Detection<'static>,
+    source: AgentStatusSource,
+    observed: Instant,
+    now: Instant,
+) -> bool {
+    let Some(session) = &mut st.agent_session else {
+        return false;
+    };
+    let before = session.status;
+    let clock = &mut st.agent_clock;
+    clock
+        .detector
+        .apply(session, evidence, source, observed, now, clock.last_event);
+    if before != session.status {
+        session.note_transition(Some(before), unix_ms());
+        notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+        return true;
+    }
+    false
 }
 
 fn stamp_launch_argv(st: &mut PaneState, argv: Option<Vec<String>>) {
@@ -4265,26 +4633,16 @@ fn foreground_remote_context(
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn foreground_agent(
     master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
-) -> Option<Option<(crate::core::cli_agent::CLIAgent, Vec<String>)>> {
-    let detect = || {
-        let pid = master
-            .lock()
-            .ok()
-            .and_then(|m| m.as_ref().and_then(|m| m.process_group_leader()))?;
-        let argv = crate::daemon::remote::foreground_argv(pid)?;
-        let agent = crate::core::cli_agent::CLIAgent::detect_from_argv_with(
-            &argv,
-            &crate::core::config::agent_detection_aliases(),
-        )?;
-        Some((agent, argv))
-    };
-    Some(detect())
+) -> Option<Option<ForegroundAgent>> {
+    let pid = pty_foreground_pgid(master)?;
+    let argv = crate::daemon::remote::foreground_argv(pid)?;
+    Some(detect_foreground_agent(argv))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn foreground_agent(
     _master: &Mutex<Option<Box<dyn MasterPty + Send>>>,
-) -> Option<Option<(crate::core::cli_agent::CLIAgent, Vec<String>)>> {
+) -> Option<Option<ForegroundAgent>> {
     None
 }
 
@@ -4314,6 +4672,7 @@ struct SniffSignals {
     /// a reset — an empty OSC 0/2 clears the title rather than setting a blank
     /// one, the same way the GUI's terminal treats it.
     title: Option<String>,
+    progress: Option<String>,
     shell: Vec<ShellState>,
     agent_events: Vec<crate::core::cli_agent::AgentEvent>,
     notification: Option<String>,
@@ -4353,6 +4712,8 @@ impl OscSniffer {
                 signals.cwd = Some(path);
             } else if let Some(title) = parse_osc_title(payload) {
                 signals.title = Some(title);
+            } else if let Some(progress) = crate::core::osc::parse_progress(payload) {
+                signals.progress = Some(progress.to_string());
             } else if let Some(rest) = payload.strip_prefix(b"133;") {
                 if handle_osc133(shell, rest) {
                     match signals.shell.last_mut() {
@@ -4828,14 +5189,14 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
 
-        let (agent, argv) = detected.expect("agent detected from live PTY child");
+        let detected = detected.expect("agent detected from live PTY child");
         assert_eq!(
-            agent,
-            crate::core::cli_agent::CLIAgent::Codex,
+            detected.builtin,
+            Some(crate::core::cli_agent::CLIAgent::Codex),
             "a live PTY child with argv[0]=codex must be detected as Codex"
         );
         assert_eq!(
-            argv.first().map(String::as_str),
+            detected.argv.first().map(String::as_str),
             Some("codex"),
             "the observed argv rides along with the detection"
         );
@@ -6436,7 +6797,7 @@ mod tests {
     #[test]
     fn an_interrupt_arms_once_and_only_mid_turn() {
         let state = Arc::new(Mutex::new(test_state(true)));
-        arm_interrupt(&state);
+        arm_interrupt(&state, &Arc::default());
         assert!(
             !state.lock().unwrap().agent_clock.interrupt_pending,
             "no agent"
@@ -6446,14 +6807,14 @@ mod tests {
             rich: false,
             ..working_session()
         });
-        arm_interrupt(&state);
+        arm_interrupt(&state, &Arc::default());
         assert!(
             !state.lock().unwrap().agent_clock.interrupt_pending,
             "a status without hooks behind it has no Stop to miss"
         );
 
         state.lock().unwrap().agent_session = Some(working_session());
-        arm_interrupt(&state);
+        arm_interrupt(&state, &Arc::default());
         assert!(state.lock().unwrap().agent_clock.interrupt_pending);
     }
 
@@ -6552,6 +6913,7 @@ mod tests {
                 cwd: None,
                 osc_title: None,
                 agent: None,
+                agent_overview: None,
                 shell: None,
             }
         );
@@ -6842,9 +7204,9 @@ mod tests {
             Ok(DaemonMsg::AgentStatus(Some(s))) if s.message.as_deref().unwrap().contains("permission")
         ));
 
-        apply_agent(&mut st, None);
-        assert!(st.agent_session.is_none());
-        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::AgentStatus(None))));
+        mark_agent_exited(&mut st);
+        assert!(st.agent_session.as_ref().unwrap().agent_exited());
+        assert!(matches!(rx.try_recv(), Ok(DaemonMsg::AgentStatus(Some(s))) if s.agent_exited()));
         assert!(matches!(rx.try_recv(), Ok(DaemonMsg::Agent(None))));
     }
 
@@ -6874,11 +7236,160 @@ mod tests {
             "a Claude hook on an omp pane must not steal the session id"
         );
 
-        apply_agent(&mut st, Some((CLIAgent::Claude, vec!["claude".into()])));
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(vec!["claude".into()]),
+            Some(20),
+        );
         assert!(
-            st.agent_session.is_none(),
+            st.agent_session.as_ref().unwrap().session_id.is_none(),
             "switching the foreground agent drops the previous session"
         );
+    }
+
+    #[test]
+    fn agent_screen_blocker_corrects_working_and_live_idle_releases_waiting() {
+        let mut st = test_state(true);
+        let mut sniffer = OscSniffer::new();
+        apply_signals(
+            &mut st,
+            sniffer.feed(
+                concat!(
+                    "\x1b]777;notify;tty59://cli-agent;",
+                    r#"{"v":1,"agent":"claude","event":"prompt-submit"}"#,
+                    "\x07",
+                )
+                .as_bytes(),
+            ),
+        );
+        let epoch = active_detection(&st).unwrap().epoch;
+        let writer = ScreenWriter::Controller(1);
+        let now = Instant::now();
+        let blocker = AgentScreenHint {
+            epoch,
+            revision: 7,
+            rule: Some("live_blocked_form".into()),
+        };
+        apply_screen_hint(&mut st, writer, blocker.clone(), now);
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Working
+        );
+        let settled = now + Duration::from_secs(3);
+        apply_screen_hint(&mut st, writer, blocker.clone(), settled);
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Waiting
+        );
+        apply_screen_hint(
+            &mut st,
+            writer,
+            AgentScreenHint {
+                epoch,
+                revision: 8,
+                rule: Some("live_prompt_box".into()),
+            },
+            settled,
+        );
+        apply_screen_hint(&mut st, writer, blocker, settled);
+        let state = st.agent_session.as_ref().unwrap();
+        assert_eq!(state.status, AgentStatus::Done);
+        assert_eq!(state.turns, 1);
+        assert!(state.observed());
+        mark_agent_exited(&mut st);
+        assert!(st.agent_session.as_ref().unwrap().agent_exited());
+        assert_eq!(st.agent_session.as_ref().unwrap().status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn agent_screen_hookless_turn_debounces_a_missing_spinner_and_rejects_old_epochs() {
+        let mut st = test_state(true);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(vec!["opencode".into()]),
+            Some(20),
+        );
+        let epoch = active_detection(&st).unwrap().epoch;
+        let writer = ScreenWriter::Controller(1);
+        let now = Instant::now() + Duration::from_secs(3);
+        let working = AgentScreenHint {
+            epoch,
+            revision: 1,
+            rule: Some("interrupt_hint_working".into()),
+        };
+        apply_screen_hint(&mut st, writer, working.clone(), now);
+        let idle = AgentScreenHint {
+            epoch,
+            revision: 2,
+            rule: None,
+        };
+        apply_screen_hint(&mut st, writer, idle.clone(), now);
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Working
+        );
+        apply_screen_hint(
+            &mut st,
+            writer,
+            idle.clone(),
+            now + Duration::from_millis(300),
+        );
+        apply_screen_hint(&mut st, writer, idle, now + Duration::from_millis(600));
+        assert_eq!(st.agent_session.as_ref().unwrap().status, AgentStatus::Done);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(vec!["opencode".into()]),
+            Some(21),
+        );
+        apply_screen_hint(&mut st, writer, working, now + Duration::from_secs(3));
+        assert_eq!(st.agent_session.as_ref().unwrap().status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn agent_osc_progress_is_evidence_not_a_program_notification() {
+        let mut st = test_state(true);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(vec!["kiro-cli".into()]),
+            Some(20),
+        );
+        assert!(st.agent.is_none());
+        let mut sniffer = OscSniffer::new();
+        let signals = sniffer.feed(b"\x1b]9;4;3;\x07");
+        assert_eq!(signals.progress.as_deref(), Some("4;3;"));
+        assert!(signals.notification.is_none());
+        apply_signals(&mut st, signals);
+        let state = st.agent_session.as_ref().unwrap();
+        assert_eq!(state.status, AgentStatus::Working);
+        assert_eq!(
+            state.detection.as_ref().unwrap().source,
+            Some(AgentStatusSource::Osc)
+        );
+        let overview = observed_facts(&st).agent_overview.unwrap();
+        assert_eq!(
+            (overview.kind.as_str(), overview.status),
+            ("kiro", AgentStatus::Working)
+        );
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(vec!["grok".into()]),
+            Some(21),
+        );
+        apply_signals(&mut st, sniffer.feed(b"\x1b]9;4;1;-1\x07"));
+        assert_eq!(
+            st.agent_session.as_ref().unwrap().status,
+            AgentStatus::Working
+        );
+        apply_signals(
+            &mut st,
+            sniffer.feed(b"\x1b]777;notify;Test agent;Please review\x07"),
+        );
+        let state = st.agent_session.as_ref().unwrap();
+        assert_eq!(state.status, AgentStatus::Waiting);
+        assert_eq!(state.message.as_deref(), Some("Please review"));
+        assert!(!state.observed());
+        apply_signals(&mut st, sniffer.feed(b"\x1b]9;4;0;0\x07"));
+        assert_eq!(st.agent_session.as_ref().unwrap().status, AgentStatus::Done);
     }
 
     #[test]
@@ -6932,6 +7443,7 @@ mod tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            detection: None,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(
