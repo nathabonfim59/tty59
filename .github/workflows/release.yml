@@ -270,10 +270,15 @@ jobs:
 
           # pacman reads the version from .PKGINFO, not the filename: check
           # the package states the release it is named after.
+          # Captured, not piped into `grep -q`: -q exits on the first match,
+          # tar dies of SIGPIPE ("stdout: write error") and pipefail fails the
+          # step on a package that is fine.
           pkg="dist/tty59-${VERSION}-1-x86_64.pkg.tar.zst"
-          tar --zstd -xOf "$pkg" .PKGINFO | grep -Fxq "pkgver = ${VERSION}-1"
-          tar --zstd -tf "$pkg" | grep -Fxq usr/lib/tty59/tty59-app
-          tar --zstd -tf "$pkg" | grep -Fxq usr/lib/tty59/tty59
+          pkginfo="$(tar --zstd -xOf "$pkg" .PKGINFO)"
+          listing="$(tar --zstd -tf "$pkg")"
+          grep -Fxq "pkgver = ${VERSION}-1" <<<"$pkginfo"
+          grep -Fxq usr/lib/tty59/tty59-app <<<"$listing"
+          grep -Fxq usr/lib/tty59/tty59 <<<"$listing"
 
       # The bundled server for WSL. `continue-on-error` mirrors `server-musl`'s
       # own probe step: if there is no server asset, the release still ships and
@@ -676,8 +681,10 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${RELEASE_TAG#v}"
-          BUILT="$(git -C tty59 show "$RELEASE_TAG:Cargo.toml" \
-            | grep -m1 '^version = "' | sed -E 's/.*"([^"]+)".*/\1/')"
+          # Captured first, not piped into `grep -m1` (which exits early and
+          # can SIGPIPE git under pipefail).
+          CARGO_TOML="$(git -C tty59 show "$RELEASE_TAG:Cargo.toml")"
+          BUILT="$(grep -m1 '^version = "' <<<"$CARGO_TOML" | sed -E 's/.*"([^"]+)".*/\1/')"
           if [ "$BUILT" != "$VERSION" ]; then
             echo "::error::tag $RELEASE_TAG builds version $BUILT" >&2; exit 1
           fi
