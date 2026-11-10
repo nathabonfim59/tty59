@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=tty59
+Comment=A fast, native terminal
+Exec=tty59-app
+Icon=tty59
+Categories=System;TerminalEmulator;
+Terminal=false
+StartupWMClass=tty59

@@ -3,10 +3,23 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Run on demand against an existing tag, with the workflow as it is on the
+  # branch it is dispatched from: re-publishing a release after this file
+  # changed does not need the tag moved. Without a tag it is a dry run (every
+  # platform builds, nothing is released).
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and release, e.g. v26.11.0"
+        required: false
+        default: ""
 
 permissions:
   contents: write
+
+env:
+  # The tag being released: the pushed one, or the dispatched one.
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -65,6 +78,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: tty59
+          ref: ${{ inputs.tag || github.ref }}
 
       # gpui-component is pulled as a git dependency (see Cargo.toml's patch
       # section), so no sibling checkout is needed.
@@ -208,6 +222,43 @@ jobs:
           grep -Fxq "X-AppImage-Version=${VERSION}" \
             "$VERIFY_ROOT/squashfs-root/usr/share/applications/tty59.desktop"
 
+      # The Arch Linux package, from the same binaries the AppImage and
+      # tarball wrap (packaging/linux/nfpm.yaml). nfpm is pinned and
+      # checksum-verified, like the Zig the engine action downloads. The
+      # binaries are stripped into a staging dir first: the release profile
+      # keeps symbols, which a distro package should not carry.
+      - name: Package Arch Linux (nfpm)
+        if: matrix.os == 'linux'
+        working-directory: tty59
+        shell: bash
+        env:
+          NFPM_VERSION: 2.48.0
+          NFPM_SHA256: 6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750
+        run: |
+          set -euo pipefail
+          tarball="$RUNNER_TEMP/nfpm.tar.gz"
+          curl -fsSL -o "$tarball" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
+          echo "$NFPM_SHA256  $tarball" | sha256sum -c -
+          tar -xzf "$tarball" -C "$RUNNER_TEMP" nfpm
+
+          rm -rf target/nfpm && mkdir -p target/nfpm
+          for bin in tty59-app tty59; do
+            strip -o "target/nfpm/$bin" "target/${{ matrix.target }}/release/$bin"
+          done
+
+          VERSION="$(grep -m1 '^version = "' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          export VERSION
+          "$RUNNER_TEMP/nfpm" pkg --config packaging/linux/nfpm.yaml \
+            --packager archlinux --target dist/
+
+          # pacman reads the version from .PKGINFO, not the filename: check
+          # the package states the release it is named after.
+          pkg="dist/tty59-${VERSION}-1-x86_64.pkg.tar.zst"
+          tar --zstd -xOf "$pkg" .PKGINFO | grep -Fxq "pkgver = ${VERSION}-1"
+          tar --zstd -tf "$pkg" | grep -Fxq usr/lib/tty59/tty59-app
+          tar --zstd -tf "$pkg" | grep -Fxq usr/lib/tty59/tty59
+
       # The bundled server for WSL. `continue-on-error` mirrors `server-musl`'s
       # own probe step: if there is no server asset, the release still ships and
       # `bundle-windows.ps1` warns. It is not silent at runtime either — a WSL
@@ -253,6 +304,7 @@ jobs:
             tty59/dist/*.zip
             tty59/dist/*-setup.exe
             tty59/dist/*.AppImage
+            tty59/dist/*.pkg.tar.zst
           if-no-files-found: error
 
   # The headless server binary remote workspaces install on the far machine
@@ -285,6 +337,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: tty59
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -386,6 +439,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: tty59
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -483,6 +537,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: tty59
+          ref: ${{ inputs.tag || github.ref }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -516,19 +571,27 @@ jobs:
           if-no-files-found: error
 
   # Single assembly step, after every GUI platform and every server slice
-  # succeeds. The release object is
-  # created as a **draft** and left that way: a draft is invisible to both
-  # /releases/latest and the releases page, so nothing can prompt a user to
-  # download a version whose asset set is incomplete or whose notes are still
-  # empty. Publishing is the release skill's job — it verifies the platform assets and
-  # writes the body first, then flips the draft. See .claude/skills/release/SKILL.md.
-  draft-release:
+  # succeeds. The release object is created as a **draft** and only flipped to
+  # published at the very end, once every required asset is uploaded and the
+  # notes are written: a draft is invisible to both /releases/latest and the
+  # releases page, so nothing can prompt a user to download a version whose
+  # asset set is incomplete or whose notes are still empty. Any failure before
+  # the last step leaves the draft for a re-run to top up.
+  release:
     needs: [build, server-musl, server-macos, server-windows]
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      # The workflow's own ref (for the scripts), with full history so the
+      # released tag's CHANGELOG can be read even when it is older than them.
+      - name: Checkout tty59
+        uses: actions/checkout@v4
+        with:
+          path: tty59
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
@@ -581,10 +644,57 @@ jobs:
           # `release list` includes drafts (cf. its --exclude-drafts flag).
           EXISTING=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 \
             --json tagName -q '.[].tagName')
-          if grep -Fxq "$GITHUB_REF_NAME" <<<"$EXISTING"; then
-            echo "release $GITHUB_REF_NAME already exists; reusing it"
+          if grep -Fxq "$RELEASE_TAG" <<<"$EXISTING"; then
+            echo "release $RELEASE_TAG already exists; reusing it"
           else
-            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-              --draft --title "$GITHUB_REF_NAME" --notes ""
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --draft --title "$RELEASE_TAG" --notes ""
           fi
-          gh release upload "$GITHUB_REF_NAME" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+
+      # The tag and the version it builds must agree: every asset name and the
+      # in-app updater's version check derive from Cargo.toml, the release's
+      # name from the tag. Then the assets a release may not ship without (the
+      # experimental Windows ARM64 leg is the only one allowed to be missing).
+      - name: Check the version and the required assets
+        run: |
+          set -euo pipefail
+          VERSION="${RELEASE_TAG#v}"
+          BUILT="$(git -C tty59 show "$RELEASE_TAG:Cargo.toml" \
+            | grep -m1 '^version = "' | sed -E 's/.*"([^"]+)".*/\1/')"
+          if [ "$BUILT" != "$VERSION" ]; then
+            echo "::error::tag $RELEASE_TAG builds version $BUILT" >&2; exit 1
+          fi
+          missing=0
+          for f in \
+            "tty59-${VERSION}-1-x86_64.pkg.tar.zst" \
+            "tty59-${VERSION}-linux-x86_64.AppImage" \
+            "tty59-${VERSION}-linux-x86_64.tar.gz" \
+            "tty59-${VERSION}-macos-arm64.dmg" \
+            "tty59-${VERSION}-macos-x86_64.dmg" \
+            "tty59-${VERSION}-windows-x86_64-setup.exe" \
+            checksums.txt; do
+            [ -e "dist/$f" ] || { echo "::error::missing asset $f" >&2; missing=1; }
+          done
+          [ "$missing" = 0 ]
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      # Fork credit, a Downloads table of what was actually built, then the
+      # version's CHANGELOG section as the tag recorded it. A tag whose
+      # changelog has no section for it fails here, before anything goes public.
+      - name: Write the release notes
+        run: |
+          set -euo pipefail
+          git -C tty59 show "$RELEASE_TAG:CHANGELOG.md" > "$RUNNER_TEMP/CHANGELOG.md"
+          bash tty59/.github/scripts/release-notes.sh "$VERSION" \
+            "$RUNNER_TEMP/CHANGELOG.md" dist > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+
+      # Last: the release goes public and becomes /releases/latest, which is
+      # what the in-app update check reads.
+      - name: Publish
+        run: |
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --draft=false --latest
