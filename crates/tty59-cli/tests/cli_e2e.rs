@@ -4,7 +4,8 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use tty59_core::client::{ControlClient, PaneClient};
-use tty59_core::daemon::control::ControlHello;
+use tty59_core::core::group_key::{PinnedGroup, WorkspaceGroups};
+use tty59_core::daemon::control::{ControlHello, ControlRequest, ReplyOk};
 use tty59_core::daemon::protocol::{DaemonMsg, PROTOCOL_VERSION, ShellSpec, WinSize};
 
 const DAEMON_ENV: &str = "TTY59_CLI_E2E_DAEMON";
@@ -37,6 +38,10 @@ fn main() {
         (
             "tab_close_terminates_every_pane_in_the_tab",
             tab_close_terminates_every_pane_in_the_tab,
+        ),
+        (
+            "tab_new_files_a_tab_in_a_pinned_group",
+            tab_new_files_a_tab_in_a_pinned_group,
         ),
         (
             "every_pane_the_cli_files_names_its_workspace_as_owner",
@@ -1326,7 +1331,32 @@ fn worktree_new_sets_up_the_checkout_and_rm_takes_it_down(daemon: &Daemon) {
     let ws = daemon.run_json(&["new", &workdir()]);
     let ws = ws["id"].as_str().expect("new prints the workspace id");
     let repo_arg = repo.to_str().unwrap();
-    let made = daemon.run_json(&["worktree", "new", "e2e-wt", "--ws", ws, "--repo", repo_arg]);
+    let group = pin_group(daemon, ws);
+    let wrong_workspace = daemon.run_json(&["new", &workdir()]);
+    let wrong_workspace = wrong_workspace["id"].as_str().unwrap();
+    let refused = daemon.run(&[
+        "worktree",
+        "new",
+        "e2e-wt",
+        "--ws",
+        wrong_workspace,
+        "--repo",
+        repo_arg,
+        "--group",
+        &group,
+    ]);
+    assert_group_refused(refused, &group);
+    assert!(!repo.join(".tty59/worktrees/e2e-wt").exists());
+    assert!(
+        daemon
+            .run_ok(&["worktree", "new", "--help"])
+            .contains("--group <PINNED_GROUP_ID>")
+    );
+
+    let made = daemon.run_json(&[
+        "worktree", "new", "e2e-wt", "--ws", ws, "--repo", repo_arg, "--group", &group,
+    ]);
+    assert_tab_group(daemon, ws, &made, &group);
     let path = std::path::PathBuf::from(made["path"].as_str().expect("new prints the path"));
     let pane = made["pane"].as_u64().expect("worktree new prints the pane");
     let port = made["port"].as_u64().expect("worktree new prints the port");
@@ -1374,4 +1404,74 @@ fn worktree_new_sets_up_the_checkout_and_rm_takes_it_down(daemon: &Daemon) {
     ]);
     assert_eq!(removed["snapshot"], "refs/tty59/trash/e2e-wt", "{removed}");
     assert!(!path.exists());
+}
+
+fn pin_group(daemon: &Daemon, workspace: &str) -> String {
+    let group = PinnedGroup::label("Test group");
+    let id = group.id.to_string();
+    let control = ControlClient::connect_at(
+        &daemon.control_endpoint(),
+        &ControlHello::host_rpc("e2e-group", "e2e-group"),
+    )
+    .unwrap();
+    assert_eq!(
+        control
+            .request(ControlRequest::WorkspaceSetGroups {
+                workspace: workspace.parse().unwrap(),
+                groups: WorkspaceGroups {
+                    pinned: vec![group],
+                    ..WorkspaceGroups::default()
+                },
+            })
+            .unwrap(),
+        ReplyOk::Unit
+    );
+    id
+}
+
+fn assert_tab_group(daemon: &Daemon, workspace: &str, made: &serde_json::Value, group: &str) {
+    let listed = daemon.run_json(&["tab", "ls", workspace]);
+    let tab = listed["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tab| tab["id"] == made["tab"])
+        .expect("created tab is listed");
+    assert_eq!(tab["group"]["id"], group, "{tab}");
+}
+
+fn assert_group_refused(output: Output, group: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        stderr.contains(&format!("has no pinned group {group}")),
+        "{stderr}"
+    );
+}
+
+fn tab_new_files_a_tab_in_a_pinned_group(daemon: &Daemon) {
+    let workspace = daemon.run_json(&["new", &workdir()]);
+    let workspace = workspace["id"].as_str().unwrap();
+    let group = pin_group(daemon, workspace);
+    let other = daemon.run_json(&["ws", "new", "other"]);
+    let other = other["id"].as_str().unwrap();
+    let before = daemon.run_json(&["pane", "ls", "--all"]);
+    assert_group_refused(
+        daemon.run(&["tab", "new", other, "--group", &group]),
+        &group,
+    );
+    let after = daemon.run_json(&["pane", "ls", "--all"]);
+    assert_eq!(
+        after["panes"].as_array().unwrap().len(),
+        before["panes"].as_array().unwrap().len()
+    );
+    assert!(
+        daemon
+            .run_ok(&["tab", "new", "--help"])
+            .contains("--group <PINNED_GROUP_ID>")
+    );
+
+    let made = daemon.run_json(&["tab", "new", workspace, "--group", &group]);
+    assert_tab_group(daemon, workspace, &made, &group);
 }

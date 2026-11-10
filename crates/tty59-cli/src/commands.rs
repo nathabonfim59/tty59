@@ -2,7 +2,8 @@ use anyhow::{Context as _, Result, bail};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tty59_core::core::agent_hooks::{HookAgent, HooksState};
-use tty59_core::core::machine::{Axis, Machine, PaneSeed, Workspace};
+use tty59_core::core::group_key::GroupId;
+use tty59_core::core::machine::{Axis, Machine, PaneSeed, Tab, Workspace};
 use tty59_core::core::session::WorkspaceId;
 use tty59_core::core::tab_view::tab_views_of;
 use tty59_core::daemon::control::{CONTROL_VERSION, ControlEvent, ControlRequest, ReplyOk};
@@ -83,9 +84,19 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
         Some(Command::Capture(args)) => capture(args, ctx, backend),
         Some(Command::Procs { target }) => procs(target.as_deref(), ctx, backend),
         Some(Command::Tab(TabCmd::Ls { ws })) => tab_ls(ws.as_deref(), ctx, backend),
-        Some(Command::Tab(TabCmd::New { ws, cwd, pane })) => {
-            tab_new(ws.as_deref(), cwd, pane.as_deref(), ctx, backend)
-        }
+        Some(Command::Tab(TabCmd::New {
+            ws,
+            cwd,
+            pane,
+            group,
+        })) => tab_new(
+            ws.as_deref(),
+            cwd,
+            pane.as_deref(),
+            group.as_deref(),
+            ctx,
+            backend,
+        ),
         Some(Command::Tab(TabCmd::Close { tab })) => tab_close(&tab, backend),
         Some(Command::Tab(TabCmd::Rename { tab, name })) => tab_rename(&tab, name, backend),
         Some(Command::Tab(TabCmd::Move { tab, index })) => tab_move(&tab, index, backend),
@@ -109,6 +120,7 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
                     task,
                     no_setup,
                     ws,
+                    group,
                     repo,
                 } => worktree_new(
                     WorktreeNew {
@@ -119,6 +131,7 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
                         task,
                         no_setup,
                         ws,
+                        group,
                         repo,
                     },
                     ctx,
@@ -1011,20 +1024,58 @@ fn tab_new(
     explicit: Option<&str>,
     cwd: Option<String>,
     adopt: Option<&str>,
+    group: Option<&str>,
     ctx: &Context,
     backend: &mut dyn Backend,
 ) -> Result<Outcome> {
     let machine = fetch_machine(backend)?;
     let (id, pane, cwd) = match adopt {
-        Some(spec) => adopt_pane(spec, explicit, cwd, ctx, &machine, backend)?,
-        None => {
-            let id = resolve_ws(explicit, ctx, &machine)?;
-            let pane = backend.spawn_shell(id, cwd.clone())?;
-            (id, pane, cwd)
+        Some(spec) => {
+            let (id, pane, cwd) = adopt_pane(spec, explicit, cwd, ctx, &machine, backend)?;
+            (id, Some(pane), cwd)
         }
+        None => (resolve_ws(explicit, ctx, &machine)?, None, cwd),
     };
+    let group = resolve_pinned_group(&machine, id, group)?;
+    let pane = match pane {
+        Some(pane) => pane,
+        None => backend.spawn_shell(id, cwd.clone())?,
+    };
+    let tab = create_tab(id, pane, cwd, group, backend)?;
+    report(
+        format!("%{pane}"),
+        json!({ "tab": tab.id.to_string(), "pane": pane }),
+    )
+}
+
+fn resolve_pinned_group(
+    machine: &Machine,
+    workspace: WorkspaceId,
+    group: Option<&str>,
+) -> Result<Option<GroupId>> {
+    let Some(raw) = group else { return Ok(None) };
+    let id: GroupId = raw
+        .parse()
+        .with_context(|| format!("invalid --group ID {raw:?}"))?;
+    if !machine
+        .workspaces
+        .iter()
+        .any(|ws| ws.id == workspace && ws.groups.contains(id))
+    {
+        bail!("workspace {workspace} has no pinned group {id}");
+    }
+    Ok(Some(id))
+}
+
+fn create_tab(
+    workspace: WorkspaceId,
+    pane: u64,
+    cwd: Option<String>,
+    group: Option<GroupId>,
+    backend: &mut dyn Backend,
+) -> Result<Tab> {
     let tab = match backend.control(ControlRequest::TabCreate {
-        workspace: id,
+        workspace,
         at: None,
         pane: PaneSeed {
             pane,
@@ -1038,10 +1089,18 @@ fn tab_new(
         ReplyOk::TabTree(tab) => *tab,
         other => bail!("the server answered TabCreate with {other:?}"),
     };
-    report(
-        format!("%{pane}"),
-        json!({ "tab": tab.id.to_string(), "pane": pane }),
-    )
+    if let Some(group) = group {
+        match backend.control(ControlRequest::TabSetGroup {
+            workspace,
+            tab: tab.id,
+            group: Some(group),
+            last_auto: None,
+        })? {
+            ReplyOk::Unit => {}
+            other => bail!("the server answered TabSetGroup with {other:?}"),
+        }
+    }
+    Ok(tab)
 }
 
 /// Works out which workspace a pane that is already running goes into, and what
@@ -1162,6 +1221,7 @@ struct WorktreeNew {
     task: Option<String>,
     no_setup: bool,
     ws: Option<String>,
+    group: Option<String>,
     repo: Option<std::path::PathBuf>,
 }
 
@@ -1193,6 +1253,7 @@ fn worktree_new(args: WorktreeNew, ctx: &Context, backend: &mut dyn Backend) -> 
     // leaves no worktree behind.
     let machine = fetch_machine(backend)?;
     let ws = resolve_ws(args.ws.as_deref(), ctx, &machine)?;
+    let group = resolve_pinned_group(&machine, ws, args.group.as_deref())?;
     let defaults = worktree::defaults(&*host, &repo).map_err(anyhow::Error::msg)?;
     let name = args.name.unwrap_or(defaults.name);
     let req = WorktreeRequest {
@@ -1219,21 +1280,7 @@ fn worktree_new(args: WorktreeNew, ctx: &Context, backend: &mut dyn Backend) -> 
 
     let cwd = wt.path.to_string_lossy().into_owned();
     let pane = backend.spawn_shell(ws, Some(cwd.clone()))?;
-    let tab = match backend.control(ControlRequest::TabCreate {
-        workspace: ws,
-        at: None,
-        pane: PaneSeed {
-            pane,
-            cwd: Some(cwd.clone()),
-            ssh_spec: None,
-            agent: None,
-            shell: None,
-        },
-        tab: None,
-    })? {
-        ReplyOk::TabTree(tab) => *tab,
-        other => bail!("the server answered TabCreate with {other:?}"),
-    };
+    let tab = create_tab(ws, pane, Some(cwd.clone()), group, backend)?;
     backend.control(ControlRequest::TabRename {
         workspace: ws,
         tab: tab.id,
@@ -2375,7 +2422,6 @@ mod tests {
     use crate::testbed::two_workspace_machine;
     use clap::Parser;
     use tty59_core::core::cli_agent::CLIAgent;
-    use tty59_core::core::machine::Tab;
 
     fn cli(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("test invocations use the documented grammar")
@@ -2775,6 +2821,61 @@ mod tests {
         ws.groups.pinned.push(group);
         ws.tabs[1].group = Some(id);
         id.to_string()
+    }
+
+    #[test]
+    fn tab_new_groups_an_adopted_pane_in_its_destination_workspace() {
+        let mut backend = mock();
+        let group = pin_second_tab(&mut backend, Some("work"));
+        let workspace = backend.machine.workspaces[0].id;
+        backend.registry = vec![pane_info(37, Some(&workspace.to_string()))];
+        let tab = Tab::leaf(37);
+        backend
+            .replies
+            .push_back(ReplyOk::TabTree(Box::new(tab.clone())));
+
+        run_cli(
+            &["tty59", "tab", "new", "--pane", "%37", "--group", &group],
+            &Context::default(),
+            &mut backend,
+        );
+
+        assert!(backend.spawned.is_empty());
+        assert_eq!(
+            backend.control_calls.last(),
+            Some(&ControlRequest::TabSetGroup {
+                workspace,
+                tab: tab.id,
+                group: Some(group.parse().unwrap()),
+                last_auto: None,
+            })
+        );
+    }
+
+    #[test]
+    fn new_tab_and_worktree_reject_a_foreign_or_deleted_group_before_creating_anything() {
+        let mut backend = mock();
+        let group = pin_second_tab(&mut backend, Some("work"));
+        for workspace in ["web", "api"] {
+            for args in [
+                &["tty59", "tab", "new", workspace, "--group", &group][..],
+                &[
+                    "tty59", "worktree", "new", "test", "--ws", workspace, "--group", &group,
+                ][..],
+            ] {
+                backend.control_calls.clear();
+                let error = execute(cli(args), &Context::default(), &mut backend).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("has no pinned group {group}")),
+                    "{error:#}"
+                );
+                assert_eq!(backend.control_calls, vec![ControlRequest::MachineGet]);
+                assert!(backend.spawned.is_empty());
+            }
+            backend.machine.workspaces[0].groups.pinned.clear();
+        }
     }
 
     #[test]
