@@ -104,6 +104,17 @@ impl Detector {
             .map(|evidence| (evidence, now));
     }
 
+    /// Apply state evidence in precedence order:
+    ///
+    /// | Evidence | Effect |
+    /// | --- | --- |
+    /// | Visible blocker | Set Waiting even if a hook reported Working. |
+    /// | Fresh hook | Do not complete the turn from idle evidence. |
+    /// | Visible idle prompt | Finish a mid-turn session if the prompt is at least as recent as its last hook. |
+    /// | Plain idle | Debounce before completing a hookless turn or a screen-derived wait. |
+    ///
+    /// Transcript overlays keep the previous state. Working evidence starts a
+    /// hookless turn or releases a screen-derived wait when activity is visible.
     pub fn apply(
         &mut self,
         session: &mut AgentSessionState,
