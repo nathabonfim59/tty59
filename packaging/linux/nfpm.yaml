@@ -1,0 +1,82 @@
+# Arch Linux package for tty59, built by nfpm in the release workflow's Linux
+# leg from the very binaries the AppImage and tarball wrap:
+#
+#   VERSION=26.11.0 \
+#     nfpm pkg --config packaging/linux/nfpm.yaml --packager archlinux --target dist/
+#   -> dist/tty59-<version>-1-x86_64.pkg.tar.zst
+#
+# Paths are relative to the repository root (run nfpm from there); the
+# workflow stages the stripped tty59-app and tty59 in target/nfpm/ first.
+#
+# Layout: the binaries live together in /usr/lib/tty59 because the app finds
+# its CLI and completions/ next to its own (symlink-resolved) executable;
+# /usr/bin only holds links. The in-app updater never replaces a non-AppImage
+# Linux install, so pacman stays the owner of these files and tty59-updater is
+# not shipped.
+
+name: tty59
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: 1
+maintainer: nathabonfim59 <nathabonfim59@gmail.com>
+description: "A terminal workbench: persistent sessions, remote work, agents (VT core: libghostty-vt)"
+homepage: https://github.com/nathabonfim59/tty59
+license: Apache-2.0 AND MIT
+
+archlinux:
+  packager: nathabonfim59 <nathabonfim59@gmail.com>
+
+# NEEDED entries of tty59-app plus what gpui dlopens (EGL, wayland-client).
+# glibc 2.39 is the floor the release workflow asserts on the binary.
+depends:
+  - glibc>=2.39
+  - gcc-libs
+  - libxcb
+  - libxkbcommon
+  - libxkbcommon-x11
+  - krb5
+  - libglvnd
+  - wayland
+
+contents:
+  - src: target/nfpm/tty59-app
+    dst: /usr/lib/tty59/tty59-app
+    file_info: { mode: 0755 }
+  - src: target/nfpm/tty59
+    dst: /usr/lib/tty59/tty59
+    file_info: { mode: 0755 }
+  - src: assets/completions/*.json
+    dst: /usr/lib/tty59/completions/
+    file_info: { mode: 0644 }
+
+  - src: /usr/lib/tty59/tty59-app
+    dst: /usr/bin/tty59-app
+    type: symlink
+  - src: /usr/lib/tty59/tty59
+    dst: /usr/bin/tty59
+    type: symlink
+
+  # Same entry the AppImage ships (.github/scripts/bundle-appimage.sh).
+  - src: packaging/linux/tty59.desktop
+    dst: /usr/share/applications/tty59.desktop
+    file_info: { mode: 0644 }
+  - src: assets/app-icon.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/tty59.svg
+    file_info: { mode: 0644 }
+  - src: assets/app-icon.png
+    dst: /usr/share/pixmaps/tty59.png
+    file_info: { mode: 0644 }
+
+  - src: LICENSE
+    dst: /usr/share/licenses/tty59/LICENSE
+    file_info: { mode: 0644 }
+  - src: assets/licenses/ghostty-LICENSE
+    dst: /usr/share/licenses/tty59/LICENSE-Ghostty
+    file_info: { mode: 0644 }
+  - src: assets/licenses/alacritty-LICENSE-APACHE
+    dst: /usr/share/licenses/tty59/LICENSE-Alacritty-APACHE
+    file_info: { mode: 0644 }
+  - src: assets/licenses/alacritty-LICENSE-MIT
+    dst: /usr/share/licenses/tty59/LICENSE-Alacritty-MIT
+    file_info: { mode: 0644 }
