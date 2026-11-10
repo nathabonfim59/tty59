@@ -72,7 +72,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-14
+          - runner: macos-15
             os: macos
             arch: arm64
             target: aarch64-apple-darwin
@@ -368,7 +368,7 @@ jobs:
           - target: x86_64-apple-darwin
             arch: x86_64
             asset: tty59-server-macos-x86_64
-    runs-on: macos-latest
+    runs-on: macos-15
     env:
       RUSTFLAGS: -C strip=symbols
     steps:

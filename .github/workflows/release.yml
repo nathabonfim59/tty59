@@ -80,6 +80,16 @@ jobs:
           path: tty59
           ref: ${{ inputs.tag || github.ref }}
 
+      # The workflow's own commit, for packaging config a dispatched older tag
+      # predates (packaging/linux arrived after v26.11.0 was cut). Only fills
+      # in what the tag lacks: a tag that carries its own config packages with it.
+      - name: Checkout the workflow's packaging config
+        if: matrix.os == 'linux'
+        uses: actions/checkout@v4
+        with:
+          path: workflow-ref
+          sparse-checkout: packaging/linux
+
       # gpui-component is pulled as a git dependency (see Cargo.toml's patch
       # section), so no sibling checkout is needed.
 
@@ -241,6 +251,12 @@ jobs:
             "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_Linux_x86_64.tar.gz"
           echo "$NFPM_SHA256  $tarball" | sha256sum -c -
           tar -xzf "$tarball" -C "$RUNNER_TEMP" nfpm
+
+          if [ ! -f packaging/linux/nfpm.yaml ]; then
+            echo "::notice::$RELEASE_TAG has no packaging/linux; using the workflow ref's"
+            mkdir -p packaging/linux
+            cp ../workflow-ref/packaging/linux/* packaging/linux/
+          fi
 
           rm -rf target/nfpm && mkdir -p target/nfpm
           for bin in tty59-app tty59; do
@@ -431,7 +447,7 @@ jobs:
           - target: x86_64-apple-darwin
             arch: x86_64
             asset: tty59-server-macos-x86_64
-    runs-on: macos-latest
+    runs-on: macos-15
     env:
       RUSTFLAGS: -C strip=symbols
     steps:
