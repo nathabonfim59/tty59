@@ -76,6 +76,22 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         SwitcherAcrossBack,
         Some("Switcher"),
     ));
+    // Alt+←/→ steps the machine rail, and it has to win over the input's own
+    // word movement for the picker's search box only. Actions are dispatched
+    // before key listeners, so the old key handler never saw a chord the input
+    // had bound; naming the search box's own context puts this binding at the
+    // same depth as the input's, where the later one wins. Ctrl+←/→ keeps
+    // moving by words, and rename/create inputs are not under this context.
+    bindings.push(KeyBinding::new(
+        "alt-left",
+        SwitcherMachinePrev,
+        Some("SwitcherSearch > Input"),
+    ));
+    bindings.push(KeyBinding::new(
+        "alt-right",
+        SwitcherMachineNext,
+        Some("SwitcherSearch > Input"),
+    ));
     // Tab walks the search's tabs. Bound on the search's own context for the
     // switcher's reason: Root's focus walker would otherwise take it out of
     // the modal, onto whichever chrome tile is behind it, ring and all.

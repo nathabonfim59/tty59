@@ -12,7 +12,9 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use tty59_core::core::machine::TabId;
 use tty59_core::core::session::{RemoteTarget, RouteSnapshot, WorkspaceId};
 
-use crate::core::actions::{SwitcherAcross, SwitcherAcrossBack};
+use crate::core::actions::{
+    SwitcherAcross, SwitcherAcrossBack, SwitcherMachineNext, SwitcherMachinePrev,
+};
 use crate::core::session::WorkspaceStore;
 use crate::daemon::install::InstallPhase;
 use crate::terminal::pane_liveness::Liveness;
@@ -1777,9 +1779,10 @@ impl Tty59App {
         self.sync_window_title(window, cx);
     }
 
-    /// Arrow keys and Enter for the panel. These run ahead of the text input's
-    /// own `MoveUp`/`MoveDown` bindings, so anything handled here must stop
-    /// propagating or the cursor jumps inside the search box instead.
+    /// Arrow keys and Enter for the panel. Anything handled here stops
+    /// propagating, or the cursor would also move inside the search box.
+    /// Chords the box binds itself are routed as actions: the machine steps in
+    /// `ui::keymap`, and Backspace through the capture handler below.
     fn on_switcher_key(
         &mut self,
         ev: &gpui::KeyDownEvent,
@@ -1814,38 +1817,18 @@ impl Tty59App {
             return;
         }
         let column = sw.column;
-        // Backspace on an empty search box steps back out of a machine. Shift
-        // keeps the same deletion meaning (the input binds shift-backspace to
-        // Backspace), while Alt and Ctrl turn it into word deletion, so they
-        // stay the input's.
-        let leave_machine = key == "backspace"
-            && !mods.alt
-            && !mods.function
-            && !mods.control
-            && !mods.secondary()
-            && sw.scope != MachineScope::All
-            && sw.query.read(cx).value().is_empty();
-        if leave_machine {
-            cx.stop_propagation();
-            self.set_switcher_scope(MachineScope::All, cx);
-            return;
-        }
         let layout = self.switcher_layout(cx);
         match key_intent(key, mods) {
             // Escape already returned above; closing again is harmless and
             // beats a panic in the render path if that ever stops being true.
             Key::Close => self.close_switcher(window, cx),
             Key::Pass => {}
-            Key::Machine(delta) => {
-                cx.stop_propagation();
-                // Step from the chip the list is effectively showing — a
-                // half-typed `@token`'s preview included — so "next" is
-                // where the user is looking, and let the pick drop the token
-                // so its preview cannot undo it. The rail carries itself to
-                // the new chip through `render_rail`, like every scope move.
-                let scope = machine_scope::step(&layout.rail, &layout.scope, delta);
-                self.select_switcher_machine(scope, window, cx);
-            }
+            // The rail binding wins the chord from the input (see
+            // `ui::keymap` and `SwitcherMachinePrev`), so this stays the path
+            // for a directly-delivered event; both step from the chip the
+            // list is effectively showing and drop the token that previewed
+            // it, so its preview cannot undo the step.
+            Key::Machine(delta) => self.switcher_step_machine(delta, window, cx),
             Key::Step(forward) => {
                 cx.stop_propagation();
                 match column {
@@ -2151,6 +2134,23 @@ impl Tty59App {
                 .on_action(cx.listener(|this, _: &SwitcherAcrossBack, window, cx| {
                     let layout = this.switcher_layout(cx);
                     this.switcher_step_right(&layout, false, window, cx);
+                }))
+                // Actions resolve before key listeners, so the input's own
+                // Backspace would otherwise swallow the key. Capture runs
+                // ahead of that handler and only stops it when the pick
+                // actually steps out of a machine.
+                .capture_action(cx.listener(
+                    |this, _: &gpui_component::input::Backspace, _window, cx| {
+                        if this.switcher_backspace_to_all(cx) {
+                            cx.stop_propagation();
+                        }
+                    },
+                ))
+                .on_action(cx.listener(|this, _: &SwitcherMachinePrev, window, cx| {
+                    this.switcher_step_machine(-1, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &SwitcherMachineNext, window, cx| {
+                    this.switcher_step_machine(1, window, cx);
                 }))
                 .on_key_down(cx.listener(Self::on_switcher_key))
                 .on_mouse_down(
@@ -2476,6 +2476,45 @@ impl Tty59App {
         cx.notify();
     }
 
+    /// Alt+←/→ from the search box: one chip either way. The input's word
+    /// movement would otherwise win the chord — actions resolve before key
+    /// listeners — so `ui::keymap` binds these on the search box's own
+    /// context to this pair of actions. Steps from the chip the list is
+    /// effectively showing (a half-typed `@token`'s preview included) and
+    /// lets the pick drop the token so its preview cannot undo the step.
+    fn switcher_step_machine(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sw) = self.switcher.as_ref() else {
+            return;
+        };
+        if matches!(sw.page, Page::Create(_)) || sw.renaming.is_some() {
+            return;
+        }
+        let layout = self.switcher_layout(cx);
+        let scope = machine_scope::step(&layout.rail, &layout.scope, delta);
+        cx.stop_propagation();
+        self.select_switcher_machine(scope, window, cx);
+    }
+
+    /// Backspace on an empty search box steps out of the machine. Runs from
+    /// the capture phase, ahead of the input's own Backspace, and says
+    /// whether it consumed the key. A box holding text — whitespace included
+    /// — keeps deleting; the create form's inputs and a rename box are their
+    /// own.
+    fn switcher_backspace_to_all(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(sw) = self.switcher.as_ref() else {
+            return false;
+        };
+        let leaves = !matches!(sw.page, Page::Create(_))
+            && sw.renaming.is_none()
+            && sw.scope != MachineScope::All
+            && sw.query.read(cx).value().is_empty();
+        if !leaves {
+            return false;
+        }
+        self.set_switcher_scope(MachineScope::All, cx);
+        true
+    }
+
     /// Turns a committed `@machine` token into the stored scope, the way the
     /// space after it is meant to: the token leaves the box and the rest of
     /// the query keeps searching. A half-typed token still previews, and an
@@ -2548,11 +2587,18 @@ impl Tty59App {
             .border_color(border)
             .child(Icon::new(IconName::Search).size(px(12.)).text_color(muted))
             .child(
-                div().flex_1().min_w_0().children(
-                    self.switcher
-                        .as_ref()
-                        .map(|sw| Input::new(&sw.query).appearance(false).pl_0()),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    // Alt+←/→ bindings in `ui::keymap` name this context, so
+                    // the machine step wins over the input's word movement
+                    // here and nowhere else.
+                    .key_context("SwitcherSearch")
+                    .children(
+                        self.switcher
+                            .as_ref()
+                            .map(|sw| Input::new(&sw.query).appearance(false).pl_0()),
+                    ),
             )
             .child(keycap("esc", cx))
     }
@@ -5368,6 +5414,72 @@ mod gpui_tests {
             assert_eq!(sw.scope, MachineScope::Machine("devbox".into()));
             assert_eq!((sw.left_sel, sw.right_sel), (0, 0));
             assert_eq!(sw.column, Column::Left);
+        });
+    }
+
+    /// The machine keys have to survive the focused search box: actions
+    /// resolve before key listeners, so without a binding of its own the
+    /// picker's Alt+←/→ would be the input's word movement. Real keystrokes
+    /// from a drawn frame prove the dispatch path, not just the handler.
+    #[gpui::test]
+    fn alt_arrows_step_the_rail_from_the_focused_search(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        vcx.simulate_keystrokes("alt-right");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::local(),
+                "one step right of All is this computer"
+            );
+        });
+        vcx.simulate_keystrokes("alt-right");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::Machine(key.clone()),
+                "the next step lands on the only remote"
+            );
+        });
+        vcx.simulate_keystrokes("alt-left");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::local()
+            );
+        });
+
+        // Ctrl+← is still the search box's word movement; the rail stays put.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("api v2", window, cx));
+        });
+        vcx.simulate_keystrokes("ctrl-left");
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::local());
+            assert_eq!(sw.query.read(cx).value(), "api v2");
         });
     }
 
