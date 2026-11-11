@@ -45,6 +45,7 @@ impl Tty59App {
                     terminal.agent_result_unread(),
                 ) {
                     pane.pane_position = (count > 1).then_some((position + 1, count));
+                    pane.last_line = terminal.agent_preview();
                     panes.push(pane);
                 }
             }

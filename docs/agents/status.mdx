@@ -122,6 +122,42 @@ agents on machines whose clocks disagree can show ages, and queue, slightly off.
 Turn it off with **Settings → General → Show tray icon**
 (`show_tray_icon: false`).
 
+## Inbox and Kanban
+
+The **Agents (n)** button in the terminal area's top bar opens the agent Inbox.
+The count is the number of agents needing attention in the current workspace.
+Use **Workbench** to return, or toggle with <kbd>⌘ ⇧ Y</kbd> / <kbd>Ctrl ⇧ Y</kbd>
+(`ToggleAgentVision`). **Settings → General → Start windows in agent mode**
+opens new windows in the Inbox; Workbench is the default.
+
+The projects column uses the current workspace's existing sidebar groups.
+**All in workspace** clears the project filter. The normal workspace switcher
+and <kbd>⌘ ⇧ O</kbd> / <kbd>Ctrl ⇧ O</kbd> work here too. **Search agents…**
+filters by title, agent kind, project and reason in both Inbox and Kanban.
+
+Each entry is one agent pane. Split tabs show a **pane i/n** marker, and the
+reading pane contains only that pane's live terminal. Plain shells and editors
+do not appear. Waiting agents come first, then finished turns you have not seen;
+**Other agents** expands the working, idle, handled and exited entries.
+
+While the list has focus, use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>j</kbd>/<kbd>k</kbd>
+to select and <kbd>Enter</kbd> to answer in the terminal. <kbd>Esc</kbd> returns
+to the list. <kbd>[</kbd>/<kbd>]</kbd> changes project. Search keeps these plain
+keys for typing; <kbd>Down</kbd> or <kbd>Enter</kbd> moves from search to the list.
+
+In agent mode, **Next needing attention** (<kbd>⌘ ⇧ U</kbd> / <kbd>Ctrl ⇧ U</kbd>)
+marks the current event handled and focuses the next agent in this workspace.
+It can clear the project/search filter to reach that agent. With nobody else
+needing you, it stays put. **Mark handled** uses <kbd>⌘ ⌥ ⇧ U</kbd> /
+<kbd>Ctrl Alt ⇧ U</kbd>. Handling affects read state; the status dot continues
+to show the agent's actual status. A new attention event makes it unread again.
+
+**Kanban** groups the same agents into Waiting, Working, Done, Idle and Exited.
+Use <kbd>←</kbd>/<kbd>→</kbd> or <kbd>h</kbd>/<kbd>l</kbd> to change columns and
+<kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>j</kbd>/<kbd>k</kbd> to select a card.
+<kbd>Enter</kbd> opens its terminal in the Inbox. Toggle Inbox/Kanban with
+<kbd>⌘ ⌥ ⇧ Y</kbd> / <kbd>Ctrl Alt ⇧ Y</kbd> (`ToggleAgentBoard`).
+
 ## Sending an agent some context
 
 Two Search Everywhere actions hand what is in front of you to the agent running in

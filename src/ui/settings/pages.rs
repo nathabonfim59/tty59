@@ -126,6 +126,12 @@ impl Tty59App {
         let tray = self.settings_switch("wt-tray-icon", show_tray_icon, cx, |this, on, _, cx| {
             this.set_show_tray_icon(on, cx)
         });
+        let agent_default = self.settings_switch(
+            "wt-agent-vision-default",
+            cx.global::<Config>().agent_vision_default,
+            cx,
+            |this, on, _, cx| this.update_config(cx, |cfg| cfg.agent_vision_default = on),
+        );
         let notify = self.settings_choice(
             "wt-notify",
             &[
@@ -169,6 +175,12 @@ impl Tty59App {
                         t(L10nKey::SettingsStartupWindow),
                         t(L10nKey::SettingsStartupWindowDesc),
                         startup,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::VisionDefault),
+                        t(L10nKey::VisionDefaultDesc),
+                        agent_default,
                         cx,
                     ),
                     self.settings_row(

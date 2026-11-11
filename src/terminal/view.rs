@@ -2363,6 +2363,11 @@ impl TerminalView {
         self.agent_result_unread
     }
 
+    /// Bounded visible-screen preview, cached until the grid changes.
+    pub(crate) fn agent_preview(&self) -> Option<String> {
+        self.agent_screen.preview(&self.terminal)
+    }
+
     pub fn mark_agent_result_unread(&mut self, refocus_incoming: bool, cx: &mut App) {
         self.agent_result_unread = true;
         self.keep_unread_on_focus = refocus_incoming;
@@ -4368,6 +4373,11 @@ impl TerminalView {
         self.poll_agent_detection(at_prompt, cx);
         self.agent_screen
             .poll(&self.terminal, std::time::Instant::now());
+        if (self.agent().is_some() || self.agent_session().is_some())
+            && self.agent_screen.refresh_preview(&self.terminal)
+        {
+            cx.notify();
+        }
 
         let turn_finished = self.poll_agent_status(notify_allowed, window, cx);
 

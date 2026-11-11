@@ -15,6 +15,13 @@ const CONFIRM_IDLE: Duration = Duration::from_millis(280);
 #[derive(Default)]
 pub(super) struct ScreenAgent {
     sample: Option<Sample>,
+    preview: std::cell::RefCell<Option<Preview>>,
+}
+
+struct Preview {
+    revision: u64,
+    sampled: Instant,
+    line: Option<String>,
 }
 
 struct Sample {
@@ -45,6 +52,47 @@ fn manifest_epoch(session: &AgentSessionState) -> Option<(&'static str, u64)> {
 }
 
 impl ScreenAgent {
+    pub(super) fn refresh_preview(&self, terminal: &RemoteTerminal) -> bool {
+        let previous = self
+            .preview
+            .borrow()
+            .as_ref()
+            .and_then(|preview| preview.line.clone());
+        previous != self.preview(terminal)
+    }
+
+    pub(super) fn preview(&self, terminal: &RemoteTerminal) -> Option<String> {
+        let term = terminal.term.lock();
+        let revision = term.content_revision();
+        let now = Instant::now();
+        if let Some(cached) = self.preview.borrow().as_ref()
+            && (cached.revision == revision
+                || now.duration_since(cached.sampled) < Duration::from_millis(300)
+                || term.sync_timeout().is_some())
+        {
+            return cached.line.clone();
+        }
+        let grid = term.view();
+        let rows = super::composer::screen_rows_bounded(
+            &grid,
+            grid.screen_lines().saturating_sub(MAX_ROWS),
+            grid.columns().min(180),
+        );
+        drop(term);
+        let line: Option<String> = rows
+            .iter()
+            .rev()
+            .map(|line| line.trim())
+            .find(|line| line.chars().filter(|c| c.is_alphanumeric()).take(4).count() == 4)
+            .map(|line| line.chars().take(180).collect());
+        *self.preview.borrow_mut() = Some(Preview {
+            revision,
+            sampled: now,
+            line: line.clone(),
+        });
+        line
+    }
+
     pub(super) fn poll(&mut self, terminal: &RemoteTerminal, now: Instant) {
         let Some(session) = terminal.agent_session() else {
             self.sample = None;

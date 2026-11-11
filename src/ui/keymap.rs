@@ -478,6 +478,9 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // that user rebinds this one, the price every Ctrl+Shift letter pays
         // to some input method or other.
         ("FocusNextAgentNeedingAttention", "secondary-shift-u"),
+        ("ToggleAgentVision", "secondary-shift-y"),
+        ("ToggleAgentBoard", "secondary-alt-shift-y"),
+        ("MarkAgentHandled", "secondary-alt-shift-u"),
         ("StopWorkspace", ""),
         ("DeleteWorkspace", ""),
         ("RenameWorkspace", ""),
@@ -1233,6 +1236,9 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::CmdCopySessionId).to_string(),
         ),
         "NewAgentTab" => (CommandGroup::Agents, t(L10nKey::CmdNewAgentTab).to_string()),
+        "ToggleAgentVision" => (CommandGroup::Agents, t(L10nKey::VisionToggle).to_string()),
+        "ToggleAgentBoard" => (CommandGroup::Agents, t(L10nKey::VisionKanban).to_string()),
+        "MarkAgentHandled" => (CommandGroup::Agents, t(L10nKey::VisionHandled).to_string()),
         "FocusNextAgentNeedingAttention" => (
             CommandGroup::Agents,
             t(L10nKey::CmdNextAgentNeedingAttention).to_string(),
@@ -1836,6 +1842,9 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ForkAgentSessionUp" => KeyBinding::new(keystroke, ForkAgentSessionUp, None),
         "CopyAgentSessionId" => KeyBinding::new(keystroke, CopyAgentSessionId, None),
         "NewAgentTab" => KeyBinding::new(keystroke, NewAgentTab, None),
+        "ToggleAgentVision" => KeyBinding::new(keystroke, ToggleAgentVision, None),
+        "ToggleAgentBoard" => KeyBinding::new(keystroke, ToggleAgentBoard, None),
+        "MarkAgentHandled" => KeyBinding::new(keystroke, MarkAgentHandled, None),
         "FocusNextAgentNeedingAttention" => {
             KeyBinding::new(keystroke, FocusNextAgentNeedingAttention, None)
         }

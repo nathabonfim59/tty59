@@ -38,6 +38,17 @@ fn ids(rows: &[&PaneSummary]) -> Vec<u64> {
     rows.iter().map(|row| row.location.key.pane).collect()
 }
 
+#[test]
+fn agent_search_matches_title_kind_project_and_reason_together() {
+    let workspace = WorkspaceId::new();
+    let mut pane = agent(workspace, 1, AgentStatus::Waiting, Some(30), false);
+    pane.location.tab_title = "Review authentication".into();
+    pane.reason = Some("Approve the test command".into());
+    assert!(pane.matches_search("authentication codex payments approve", "Payments"));
+    assert!(!pane.matches_search("authentication another-project", "Payments"));
+    assert!(pane.matches_search("", "Payments"));
+}
+
 fn repo_group(path: &str) -> Option<GroupKey> {
     Some(GroupKey::Auto(AutoKey::Repo(path.into())))
 }

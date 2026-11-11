@@ -8,7 +8,12 @@ use tty59_core::core::session::WorkspaceId;
 use tty59_core::host::HostId;
 
 mod navigation;
+mod render;
+mod runtime;
 mod summary;
+#[cfg(test)]
+mod ui_tests;
+pub(in crate::ui) use runtime::AgentVision;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct PaneKey {
@@ -71,6 +76,8 @@ pub(super) struct PaneSummary {
     pub since_ms: Option<u64>,
     /// One-based position among all tab panes, including non-agent panes.
     pub pane_position: Option<(usize, usize)>,
+    pub reason: Option<String>,
+    pub last_line: Option<String>,
     epoch: Option<u64>,
     turns: u64,
     unseen_done: bool,
@@ -84,7 +91,9 @@ impl PaneSummary {
         unseen_done: bool,
     ) -> Option<Self> {
         if let Some(overview) = session.and_then(AgentSessionState::overview) {
-            return Some(Self::from_overview(location, agent, overview, unseen_done));
+            let mut pane = Self::from_overview(location, agent, overview, unseen_done);
+            pane.reason = session.and_then(|session| session.message.clone());
+            return Some(pane);
         }
         let agent = agent?;
         Some(Self {
@@ -96,6 +105,8 @@ impl PaneSummary {
                 .into(),
             since_ms: session.and_then(|state| state.since_ms),
             pane_position: None,
+            reason: session.and_then(|session| session.message.clone()),
+            last_line: None,
             epoch: None,
             turns: session.map_or(0, |state| state.turns),
             unseen_done,
@@ -127,6 +138,8 @@ impl PaneSummary {
             state: facts.status.unwrap_or_default().into(),
             since_ms: None,
             pane_position: None,
+            reason: None,
+            last_line: None,
             epoch: None,
             turns: 0,
             unseen_done,
@@ -150,6 +163,8 @@ impl PaneSummary {
             },
             since_ms: overview.since_ms,
             pane_position: None,
+            reason: None,
+            last_line: None,
             epoch: Some(overview.epoch),
             turns: overview.turns,
             unseen_done,
@@ -183,6 +198,20 @@ impl PaneSummary {
             epoch: self.epoch,
             since_ms: self.since_ms,
             turns: self.turns,
+        })
+    }
+
+    pub fn matches_search(&self, query: &str, project: &str) -> bool {
+        query.split_whitespace().all(|word| {
+            [
+                self.location.tab_title.as_str(),
+                self.agent_name(),
+                &self.kind,
+                project,
+                self.reason.as_deref().unwrap_or(self.state.label()),
+            ]
+            .iter()
+            .any(|text| text.to_lowercase().contains(word))
         })
     }
 }

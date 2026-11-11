@@ -2268,12 +2268,14 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let active = self.active;
+        let agent_mode = self.agent_mode_active();
+        let panel_open = !agent_mode && self.right_panel_open(cx);
         let badge_positions = show_chips.then(|| self.tab_badge_positions(cx)).flatten();
         // On macOS an open detail panel draws its own chrome in the title bar,
         // so the strip stops at the panel's edge rather than running the width
         // of the window. Sizing it to the whole viewport made it overrun that
         // edge, and what got pushed out past it was the New Tab button.
-        let panel_w = match cfg!(target_os = "macos") && self.right_panel_open(cx) {
+        let panel_w = match cfg!(target_os = "macos") && panel_open {
             true => self.right_panel_px(window, cx),
             false => 0.,
         };
@@ -2286,7 +2288,11 @@ impl Tty59App {
         // is drawn over its trailing end, so the width is reserved as a corner
         // instead: that header carries no fill of its own, and a chip left
         // under it showed through the file name while staying clickable.
-        let document_w = self.document_dock_px(window, cx).unwrap_or(0.);
+        let document_w = if agent_mode {
+            0.
+        } else {
+            self.document_dock_px(window, cx).unwrap_or(0.)
+        };
         let controls_w = crate::ui::app::window_controls_w(window.is_fullscreen());
         let pad = gpui_component::window_paddings(window);
         let strip_w = if cfg!(target_os = "macos") {
@@ -2304,7 +2310,7 @@ impl Tty59App {
                 140.,
             )
         };
-        let chrome_band_w = (!cfg!(target_os = "macos") && self.right_panel_open(cx))
+        let chrome_band_w = (!cfg!(target_os = "macos") && panel_open)
             .then(|| (self.right_panel_px(window, cx) - controls_w - 1.).max(0.));
         // `corner_w` reserves the trailing window chrome. With the panel open on
         // macOS that chrome belongs to the panel's own header, which the strip
@@ -2619,7 +2625,7 @@ impl Tty59App {
         let auto_hide_chrome = cx.global::<Config>().auto_hide_titlebar_buttons;
         let strip_chrome_shown =
             crate::ui::app::titlebar_chrome_shown(auto_hide_chrome, self.strip_chrome_hover.get());
-        let rail_collapsed = !show_chips && !self.left_panel_open(cx);
+        let rail_collapsed = !self.agent_mode_active() && !show_chips && !self.left_panel_open(cx);
         let left_group = rail_collapsed.then(|| {
             h_flex()
                 .flex_shrink_0()
@@ -2677,8 +2683,8 @@ impl Tty59App {
         // beside the panel's own tab row — which is painted whenever the panel
         // is, so a band that grew a button on hover read as a glitch next to
         // it. Once the panel is open they belong to its chrome, and stay.
-        let right_chrome_shown = strip_chrome_shown || self.right_panel_open(cx);
-        let right_chrome = strip_chrome.then(|| {
+        let right_chrome_shown = strip_chrome_shown || panel_open;
+        let right_chrome = (strip_chrome && !self.agent_mode_active()).then(|| {
             crate::ui::app::resting_chrome(div().flex_shrink_0(), right_chrome_shown)
                 .child(self.window_chrome(cx))
         });
@@ -2694,7 +2700,7 @@ impl Tty59App {
         // panel is docked, and centred on all of it the box landed under the
         // document's hoisted header, which has no fill to hide it.
         let docked_right = document_w
-            + match self.right_panel_open(cx) {
+            + match panel_open {
                 true => self.right_panel_px(window, cx),
                 false => 0.,
             };
@@ -2713,7 +2719,12 @@ impl Tty59App {
                 .map(|spec| crate::ui::keymap::key_tokens(&spec).join(""));
             // Two equal springs either side keep the box centred; each stops
             // at the band's `clear`, and past that it is the box that gives.
-            let spring = || div().flex_1().min_w(px(band.clear));
+            // Reserve the agent-mode controls on both sides while keeping the
+            // command search centred. On narrow windows the field shrinks.
+            let clear = band
+                .clear
+                .max(if self.agent_mode_active() { 140. } else { 110. });
+            let spring = || div().flex_1().min_w(px(clear));
             div()
                 .absolute()
                 .top_0()
@@ -2783,9 +2794,13 @@ impl Tty59App {
             .min_w_0()
             .when_some(centre_search, |this, search| this.child(search))
             .when_some(left_group, |this, g| this.child(g))
+            .when(self.agent_mode_active(), |this| {
+                this.child(self.agent_view_switch(cx))
+            })
             .child(chips)
             .when(show_chips, move |this| this.child(add_button))
             .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
+            .child(self.agent_mode_button(cx))
             .when_some(right_chrome, |this, chrome| match chrome_band_w {
                 Some(w) => this.child(
                     h_flex()

@@ -2,7 +2,36 @@ use super::L10nKey;
 
 pub fn translate_en(key: L10nKey) -> &'static str {
     match key {
+        L10nKey::VisionToggle => "Alternative vision for agents",
+        L10nKey::VisionAgents => "Agents",
+        L10nKey::VisionWorkbench => "Workbench",
+        L10nKey::VisionInbox => "Inbox",
+        L10nKey::VisionKanban => "Kanban",
+        L10nKey::VisionAll => "All in workspace",
+        L10nKey::VisionProjects => "Projects",
+        L10nKey::VisionSearch => "Search agents…",
+        L10nKey::VisionNeedsYou => "Needs you",
+        L10nKey::VisionOther => "Other agents",
+        L10nKey::VisionEmpty => "No agents need you here",
+        L10nKey::VisionNoAgents => "No matching agents",
+        L10nKey::VisionSelect => "Select an agent to work with",
+        L10nKey::VisionHandled => "Mark handled",
+        L10nKey::VisionNext => "Next needing attention",
+        L10nKey::VisionNothingNext => "Nothing else in this workspace needs you",
+        L10nKey::VisionOpenWorkbench => "Open in Workbench",
+        L10nKey::VisionListHelp => "↑ ↓ / j k select · Enter answer · [ ] project",
+        L10nKey::VisionBoardHelp => "← → / h l column · ↑ ↓ / j k card · Enter answer",
+        L10nKey::VisionTerminalHelp => "Esc returns to the list",
+        L10nKey::VisionWaiting => "Waiting",
+        L10nKey::VisionWorking => "Working",
+        L10nKey::VisionDone => "Done",
+        L10nKey::VisionIdle => "Idle",
+        L10nKey::VisionExited => "Exited",
         L10nKey::VisionPane => "pane {i}/{n}",
+        L10nKey::VisionDefault => "Start windows in agent mode",
+        L10nKey::VisionDefaultDesc => {
+            "Open new windows in the Inbox. Workbench stays available from the top bar."
+        }
         L10nKey::SettingsNoMatchesShort => "No matches",
         L10nKey::SettingsModifiedTitle => "Modified",
         L10nKey::SettingsMatchCount => "{count} matches",

@@ -702,6 +702,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: VisionDefault,
+            keywords: VisionDefaultDesc,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsRememberWindowSize,
             keywords: SettingsSearchRememberWindowSizeKeywords,
         },
@@ -896,6 +901,7 @@ impl SearchEntry {
             L10nKey::SettingsTabCompletion => "tab_completion",
             L10nKey::SettingsHistorySearch => "history_search",
             L10nKey::SettingsStartupWindow => "startup_mode",
+            L10nKey::VisionDefault => "agent_vision_default",
             L10nKey::SettingsRememberWindowSize => "remember_window_size",
             L10nKey::SettingsCheckUpdatesOnLaunch => "check_for_updates",
             L10nKey::SettingsAutoDownload => "auto_download_updates",
@@ -984,6 +990,7 @@ impl SearchEntry {
             L10nKey::SettingsCopyJoinWrapped => t(L10nKey::SettingsCopyJoinWrappedDesc),
             L10nKey::SettingsVerifyHostKeys => t(L10nKey::SettingsVerifyHostKeysDesc),
             L10nKey::SettingsStartupWindow => t(L10nKey::SettingsStartupWindowDesc),
+            L10nKey::VisionDefault => t(L10nKey::VisionDefaultDesc),
             L10nKey::SettingsRememberWindowSize => t(L10nKey::SettingsRememberWindowSizeDesc),
             L10nKey::SettingsRestoreLastLayout => t(L10nKey::SettingsRestoreLastLayoutDesc),
             L10nKey::SettingsShowTrayIcon => t(L10nKey::SettingsShowTrayIconDesc),
@@ -1098,6 +1105,7 @@ impl SearchEntry {
             L10nKey::SettingsTabCompletion => cfg.tab_completion != defaults.tab_completion,
             L10nKey::SettingsHistorySearch => cfg.history_search != defaults.history_search,
             L10nKey::SettingsStartupWindow => cfg.startup_mode != defaults.startup_mode,
+            L10nKey::VisionDefault => cfg.agent_vision_default != defaults.agent_vision_default,
             L10nKey::SettingsRememberWindowSize => {
                 cfg.remember_window_size != defaults.remember_window_size
             }

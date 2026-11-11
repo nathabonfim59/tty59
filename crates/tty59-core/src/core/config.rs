@@ -422,6 +422,9 @@ pub struct Config {
     pub word_separators: String,
     #[serde(default, deserialize_with = "de_lenient")]
     pub startup_mode: StartupMode,
+    /// New windows open in the agent Inbox. Existing windows keep their mode.
+    #[serde(default)]
+    pub agent_vision_default: bool,
     #[serde(default = "default_true")]
     pub remember_window_size: bool,
 
@@ -895,6 +898,7 @@ impl Default for Config {
             smart_select: true,
             word_separators: default_word_separators(),
             startup_mode: StartupMode::Normal,
+            agent_vision_default: false,
             remember_window_size: true,
             working_directory: WorkingDirectory::default(),
             env: HashMap::new(),
