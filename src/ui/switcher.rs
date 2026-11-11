@@ -2889,8 +2889,9 @@ impl Tty59App {
             return div().into_any_element();
         };
         let muted_text = gpui::rems(11. / 16.);
-        // The failure, when there is one, gives way first: the endpoint stays
-        // whole so the card still says where the connect would go.
+        // The failure truncates first and the endpoint is capped at
+        // ENDPOINT_MAX_W, truncating as well: the two share the column, so
+        // neither string can push the other out of the card.
         let detail: AnyElement = match offline_card_detail(group) {
             (Some(error), endpoint) => h_flex()
                 .items_center()
