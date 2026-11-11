@@ -400,17 +400,9 @@ impl VisionState {
     ) -> WorkspaceSummary<'a> {
         let mut counts = HashMap::<&Option<GroupKey>, AttentionCount>::new();
         let mut all = AttentionCount::default();
-        for pane in panes
-            .iter()
-            .filter(|pane| pane.location.workspace == self.workspace)
-        {
-            if let Some(event) = reads.attention(pane) {
-                all.add(event.kind);
-                counts
-                    .entry(&pane.location.group)
-                    .or_default()
-                    .add(event.kind);
-            }
+        for (pane, kind) in self.workspace_attention(panes, reads) {
+            all.add(kind);
+            counts.entry(&pane.location.group).or_default().add(kind);
         }
         WorkspaceSummary {
             all,
@@ -424,20 +416,34 @@ impl VisionState {
         }
     }
 
+    pub fn attention_count(&self, panes: &[PaneSummary], reads: &InboxReadState) -> AttentionCount {
+        let mut count = AttentionCount::default();
+        for (_, kind) in self.workspace_attention(panes, reads) {
+            count.add(kind);
+        }
+        count
+    }
+
+    fn workspace_attention<'a, 'model>(
+        &'model self,
+        panes: &'a [PaneSummary],
+        reads: &'model InboxReadState,
+    ) -> impl Iterator<Item = (&'a PaneSummary, Attention)> + use<'a, 'model> {
+        panes
+            .iter()
+            .filter(move |pane| pane.location.workspace == self.workspace)
+            .filter_map(move |pane| reads.attention(pane).map(|event| (pane, event.kind)))
+    }
+
     pub fn next_needing_attention(
         &mut self,
         panes: &[PaneSummary],
         reads: &mut InboxReadState,
     ) -> Option<PaneTarget> {
-        let next = panes
-            .iter()
-            .filter(|pane| {
-                pane.location.workspace == self.workspace
-                    && Some(pane.location.key) != self.selected
-            })
-            .filter_map(|pane| reads.attention(pane).map(|event| (event.kind, pane)))
-            .min_by_key(|(kind, pane)| (*kind, recency(pane)))?
-            .1;
+        let (next, _) = self
+            .workspace_attention(panes, reads)
+            .filter(|(pane, _)| Some(pane.location.key) != self.selected)
+            .min_by_key(|(pane, kind)| (*kind, recency(pane)))?;
         if let Some(current) = panes.iter().find(|pane| {
             pane.location.workspace == self.workspace && Some(pane.location.key) == self.selected
         }) {
@@ -584,16 +590,6 @@ impl InboxReadState {
             attention: attention.into_iter().map(|(_, pane)| pane).collect(),
             other,
         }
-    }
-
-    pub fn global_attention(&self, panes: &[PaneSummary]) -> AttentionCount {
-        let mut count = AttentionCount::default();
-        for pane in panes {
-            if let Some(event) = self.attention(pane) {
-                count.add(event.kind);
-            }
-        }
-        count
     }
 }
 

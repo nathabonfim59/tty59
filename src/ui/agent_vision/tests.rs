@@ -97,7 +97,7 @@ fn inbox_orders_waiting_then_unseen_done_and_counts_each_project() {
     assert_eq!(counts.projects[1].needs_attention.total(), 3);
     assert_eq!(counts.projects[2].needs_attention.total(), 0);
     assert_eq!(counts.all.total(), 5);
-    assert_eq!(reads.global_attention(&panes).total(), 6);
+    assert_eq!(vision.attention_count(&panes, &reads), counts.all);
     reads.mark_read(&panes[0]);
     assert_eq!(
         vision.workspace_summary(&projects, &panes, &reads).projects[0]
@@ -160,7 +160,7 @@ fn next_attention_does_not_leave_the_workspace_when_no_other_agent_is_waiting() 
     assert_eq!(vision.focus(), FocusZone::Terminal);
     assert_eq!(vision.selected(), Some(panes[0].location.key));
     assert_eq!(vision.project_filter(), &ProjectFilter::Group(group));
-    assert_eq!(reads.global_attention(&panes).total(), 2);
+    assert_eq!(vision.attention_count(&panes, &reads).total(), 1);
 }
 
 #[test]
