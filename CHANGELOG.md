@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.12.0] - 2026-11-11
+
+### Added
+
+- **Agent status from the screen, not only from hooks**: tty59 now reads
+  what a coding agent shows (its approval prompt, its spinner, its idle
+  prompt), its terminal title and its progress reports, using per-agent
+  rules ported from herdr (Apache-2.0). An approval menu on screen counts
+  as waiting even when a hook says otherwise, so a dismissed prompt no
+  longer stays stuck on "waiting". A finished turn is recognised by the
+  idle prompt instead of guessed from Esc/Ctrl+C and a second of silence.
+  Agents without hooks get a status too. The screen is matched in the
+  window and only the matched rule is sent to the session daemon, never
+  the text; older daemons and mobile clients keep working.
+- **Terminal | Agents in the workbench sidebar**: a selector at the bottom
+  of the sidebar switches the list between your tabs and your agents, one
+  row per agent pane, marked `pane 1/2` when a tab is split. Clicking an
+  agent opens its pane maximized, as Ctrl+Shift+Enter does; pressing it
+  again shows the split. The selector can be hidden in Settings.
+- **Inbox and Kanban views for agents** (Ctrl/Cmd+Shift+Y): the Inbox
+  lists the current workspace's agents that need you, waiting ones first,
+  then finished ones you haven't seen, next to a live terminal to answer
+  in. Kanban lays every agent out by state. Both share the workspace
+  switcher, a projects list built from the sidebar groups, agent search
+  and keyboard navigation (j/k, h/l, Enter, Esc). "Next needing attention"
+  and the needs-you count stay within the current workspace.
+- **`--group` for `tty59 tab new` and `tty59 worktree new`**: file the new
+  tab under a pinned sidebar group.
+
+### Changed
+
+- **The unread count on a tab row shows only from two up**: one finished,
+  unseen agent is a plain green circle; a split tab with two or more shows
+  the number.
+
 ## [26.11.0] - 2026-11-10
 
 ### Added
