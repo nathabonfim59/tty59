@@ -1811,7 +1811,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherThisComputer => "このコンピュータ",
         L10nKey::SwitcherMachineAll => "すべて",
         L10nKey::SwitcherAddMachine => "マシンを追加",
-        L10nKey::SwitcherMachineHint => "Alt ← → マシン切替",
+        L10nKey::SwitcherMachineHint => "{modifier} ← → マシン切替",
         L10nKey::SwitcherOpenInWindow => "ウィンドウで開く",
         L10nKey::SwitcherOnThisMachine => "このマシン上（ここでは未オープン）",
         L10nKey::SwitcherMachineNotConnected => "{machine} に接続されていません",

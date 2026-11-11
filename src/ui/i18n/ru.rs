@@ -1970,7 +1970,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SwitcherThisComputer => "Этот компьютер",
         L10nKey::SwitcherMachineAll => "Все",
         L10nKey::SwitcherAddMachine => "Добавить машину",
-        L10nKey::SwitcherMachineHint => "Alt ← → выбор машины",
+        L10nKey::SwitcherMachineHint => "{modifier} ← → выбор машины",
         L10nKey::SwitcherOpenInWindow => "Открыть в окне",
         L10nKey::SwitcherOnThisMachine => "На этом компьютере, здесь не открыто",
         L10nKey::SwitcherMachineNotConnected => "Нет подключения к {machine}",
