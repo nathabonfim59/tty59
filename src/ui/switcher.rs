@@ -633,6 +633,13 @@ fn connect_choice(group: &Group) -> Option<HostChoice> {
     })
 }
 
+/// What the offline card's second line has to say: the failure that took the
+/// machine down (the row truncates it) and the endpoint it would dial. A group
+/// with no failure behind it only has the endpoint to show.
+fn offline_card_detail(group: &Group) -> (Option<String>, String) {
+    (group.error.clone(), group_endpoint(group))
+}
+
 /// Orphan panes are this computer's; under a remote scope they are not
 /// something the list is about.
 fn orphans_visible(scope: &MachineScope) -> bool {
@@ -649,6 +656,24 @@ fn empty_list_text(scope: &MachineScope, groups: &[Group]) -> String {
         ),
         None => t(L10nKey::SwitcherNoMatch).to_string(),
     }
+}
+
+/// The sub-line under a workspace's name: its path, led by the machine only in
+/// the blended All list. A scoped row lives on the one machine the list is
+/// about, so repeating its name there is noise.
+fn row_meta(group: &Group, row: &Row, show_machine: bool) -> Vec<String> {
+    let mut meta: Vec<String> = Vec::new();
+    if show_machine {
+        meta.push(if group.target.is_some() {
+            group.label.clone()
+        } else {
+            t(L10nKey::SwitcherLocalHost).to_string()
+        });
+    }
+    if !row.path.is_empty() {
+        meta.push(row.path.clone());
+    }
+    meta
 }
 
 /// One of the scoped list's section headings.
@@ -2627,6 +2652,11 @@ impl Tty59App {
     /// here — its state dot rides on its workspace rows.
     fn render_banners(&self, layout: &Layout, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out: Vec<AnyElement> = Vec::new();
+        // The connect card already says what went wrong and offers the way
+        // back; the error band under it would be the same sentence twice.
+        // Only the carded group's band steps aside — a parked or in-flight
+        // machine has no card and keeps its own banner.
+        let carded = offline_connect_group(&layout.scope, &layout.groups).map(|g| g.key.as_str());
         for group in layout.groups.iter().filter(|g| layout.scope.admits(g)) {
             if group.target.is_none() {
                 continue;
@@ -2643,7 +2673,9 @@ impl Tty59App {
                 if !self.parked_dismissed.contains(&group.key) {
                     out.push(self.render_parked_notice(group, cx).into_any_element());
                 }
-            } else if let Some(error) = group.error.clone() {
+            } else if let Some(error) = group.error.clone()
+                && carded != Some(group.key.as_str())
+            {
                 out.push(self.render_error_band(group, &error, cx));
             } else if matches!(group.link, Link::Connecting | Link::Reconnecting { .. }) {
                 let theme = cx.theme();
@@ -2851,7 +2883,26 @@ impl Tty59App {
         let Some(choice) = connect_choice(group) else {
             return div().into_any_element();
         };
-        let endpoint = choice.detail.clone();
+        let muted_text = gpui::rems(11. / 16.);
+        // The failure, when there is one, gives way first: the endpoint stays
+        // whole so the card still says where the connect would go.
+        let detail: AnyElement = match offline_card_detail(group) {
+            (Some(error), endpoint) => h_flex()
+                .items_center()
+                .gap(px(6.))
+                .min_w_0()
+                .text_size(muted_text)
+                .text_color(muted)
+                .child(div().flex_1().min_w_0().truncate().child(error))
+                .child(div().flex_shrink_0().whitespace_nowrap().child(endpoint))
+                .into_any_element(),
+            (None, endpoint) => div()
+                .truncate()
+                .text_size(muted_text)
+                .text_color(muted)
+                .child(endpoint)
+                .into_any_element(),
+        };
         v_flex()
             .gap(px(4.))
             .mx(px(4.))
@@ -2872,13 +2923,7 @@ impl Tty59App {
                         &[("machine", &group.label)],
                     )),
             )
-            .child(
-                div()
-                    .truncate()
-                    .text_size(gpui::rems(11. / 16.))
-                    .text_color(muted)
-                    .child(endpoint),
-            )
+            .child(detail)
             .child(
                 h_flex().pt(px(2.)).child(
                     Button::new(gpui::SharedString::from(format!(
@@ -3154,27 +3199,18 @@ impl Tty59App {
         // workspace name plus path plus badge plus timestamp on one row pushes
         // the trailing pieces straight out over the divider. The second line
         // leads with the machine the workspace lives on — the flat list's only
-        // grouping. A reachable workspace carries nothing extra; an offline
-        // one says so in the state column and dims its disc. Only the states
-        // that want attention — a connect in flight, a failure, a machine
-        // another client took over — keep a dot on the disc.
+        // grouping — except in scope, where every row is on that machine. A
+        // reachable workspace carries nothing extra; an offline one says so in
+        // the state column and dims its disc. Only the states that want
+        // attention — a connect in flight, a failure, a machine another client
+        // took over — keep a dot on the disc.
         let state_dot = match group.link {
             Link::Connected if group.preempted => Some(warn),
             Link::Connecting | Link::Reconnecting { .. } => Some(warn),
             Link::Failed => Some(theme.danger),
             Link::Local | Link::Connected | Link::Offline => None,
         };
-        let host_label = match group.target.is_some() {
-            true => group.label.clone(),
-            false => t(L10nKey::SwitcherLocalHost).to_string(),
-        };
-        let mut meta: Vec<String> = Vec::new();
-        if show_machine {
-            meta.push(host_label);
-        }
-        if !row.path.is_empty() {
-            meta.push(row.path.clone());
-        }
+        let meta = row_meta(group, row, show_machine);
         let row_fill = if picked {
             picked_bg
         } else {
@@ -4744,39 +4780,10 @@ mod tests {
             .collect()
     }
 
-    /// The order this list used before a scope split it into two sections.
-    /// Kept here so the regression below can show the old comparator putting
-    /// the closed row first.
-    fn legacy_order(query: &str, a: &Row, b: &Row) -> std::cmp::Ordering {
-        a.name_match(query)
-            .cmp(&b.name_match(query))
-            .then_with(|| b.current.cmp(&a.current))
-            .then_with(|| b.last_active.cmp(&a.last_active))
-            .then_with(|| a.name.cmp(&b.name))
-    }
-
-    fn legacy_flatten(groups: &[Group], query: &str, scope: &MachineScope) -> Vec<Nav> {
-        let mut nav: Vec<Nav> = Vec::new();
-        for (g, group) in groups.iter().enumerate() {
-            if !scope.admits(group) {
-                continue;
-            }
-            let matched_host = group.label.to_lowercase().contains(query);
-            for (r, row) in group.rows.iter().enumerate() {
-                if query.is_empty() || matched_host || row.matches(query) {
-                    nav.push((g, r));
-                }
-            }
-        }
-        nav.sort_by(|&(ga, ra), &(gb, rb)| {
-            legacy_order(query, &groups[ga].rows[ra], &groups[gb].rows[rb])
-        });
-        nav
-    }
-
     /// The regression the whole split exists for: narrowing to this computer
     /// puts its open workspaces together, so a recently closed one no longer
-    /// sits above a live one.
+    /// sits above a live one. The old comparator's order is recorded in the
+    /// milestone review, not reproduced here.
     #[test]
     fn a_scoped_list_puts_open_rows_before_a_more_recent_closed_one() {
         let groups = vec![group(vec![
@@ -4784,11 +4791,6 @@ mod tests {
             closed(aged(row("notes", vec![]), 90)),
         ])];
         let scope = MachineScope::local();
-        assert_eq!(
-            names_of(&groups, &legacy_flatten(&groups, "", &scope)),
-            vec!["notes", "deploy"],
-            "the old comparator took the recency order, which is what the split changes"
-        );
         assert_eq!(
             names_of(&groups, &flatten(&groups, "", &scope)),
             vec!["deploy", "notes"]
@@ -4812,10 +4814,6 @@ mod tests {
             ],
         )];
         let scope = MachineScope::Machine("devbox".into());
-        assert_eq!(
-            names_of(&groups, &legacy_flatten(&groups, "", &scope)),
-            vec!["web", "api"]
-        );
         assert_eq!(
             names_of(&groups, &flatten(&groups, "", &scope)),
             vec!["api", "web"]
@@ -4932,6 +4930,49 @@ mod tests {
         assert!(
             connect_choice(&group(vec![])).is_none(),
             "this computer connects to nothing"
+        );
+    }
+
+    #[test]
+    fn a_scoped_row_drops_the_machine_from_its_metadata_line() {
+        let api = row("api", vec![]);
+        let devbox = named_group("devbox", vec![]);
+        assert_eq!(
+            row_meta(&devbox, &api, true),
+            vec!["devbox".to_string(), "~/code".to_string()]
+        );
+        assert_eq!(
+            row_meta(&devbox, &api, false),
+            vec!["~/code".to_string()],
+            "the scope already says which machine these rows are on"
+        );
+        let local = group(vec![]);
+        assert_eq!(
+            row_meta(&local, &api, true),
+            vec![
+                t(L10nKey::SwitcherLocalHost).to_string(),
+                "~/code".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_offline_card_shows_the_failure_then_the_endpoint() {
+        let mut machine = named_group("devbox", vec![]);
+        machine.endpoint = "me@devbox.example:2222".into();
+        assert_eq!(
+            offline_card_detail(&machine),
+            (None, "me@devbox.example:2222".to_string()),
+            "a machine with no failure behind it has only the endpoint to print"
+        );
+        machine.error = Some("connection refused".into());
+        assert_eq!(
+            offline_card_detail(&machine),
+            (
+                Some("connection refused".to_string()),
+                "me@devbox.example:2222".to_string()
+            ),
+            "the failure rides on the line and the endpoint stays after it"
         );
     }
 
@@ -6482,6 +6523,63 @@ mod gpui_tests {
                 )
                 .is_none(),
                 "a parked machine must not offer a connect that can only fail"
+            );
+        });
+    }
+
+    /// The offline card carries the failure, so the scoped error band must not
+    /// repeat it. Every other state keeps the band it had: All still shows it,
+    /// and a parked or in-flight machine (which has no card) keeps its own.
+    #[gpui::test]
+    fn the_offline_card_replaces_the_scoped_error_band_only(cx: &mut TestAppContext) {
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let machine = |link, error: Option<&str>, parked| {
+            let mut group = super::tests::named_group("devbox", vec![]);
+            group.link = link;
+            group.error = error.map(str::to_string);
+            group.parked = parked;
+            group
+        };
+        let scoped = |group| super::Layout {
+            groups: vec![group],
+            nav: Vec::new(),
+            rail: Vec::new(),
+            scope: super::MachineScope::Machine("devbox".into()),
+        };
+
+        app.update(cx, |app, cx| {
+            let failed = || machine(super::Link::Failed, Some("connection refused"), false);
+            assert!(
+                app.render_banners(&scoped(failed()), cx).is_empty(),
+                "the offline card already names the failure"
+            );
+            let all = super::Layout {
+                scope: super::MachineScope::All,
+                ..scoped(failed())
+            };
+            assert_eq!(
+                app.render_banners(&all, cx).len(),
+                1,
+                "All keeps the error band it always had"
+            );
+            assert_eq!(
+                app.render_banners(
+                    &scoped(machine(
+                        super::Link::Failed,
+                        Some("connection refused"),
+                        true
+                    )),
+                    cx
+                )
+                .len(),
+                1,
+                "a parked machine has no card, so its banner stays"
+            );
+            assert_eq!(
+                app.render_banners(&scoped(machine(super::Link::Connecting, None, false)), cx)
+                    .len(),
+                1,
+                "a connect in flight has no card and keeps its own band"
             );
         });
     }
