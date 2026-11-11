@@ -1747,6 +1747,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "No running coding agent found — start one (claude, codex, …) in a pane first."
         }
         L10nKey::SwitcherThisComputer => "This Computer",
+        L10nKey::SwitcherMachineAll => "All",
         L10nKey::SwitcherStartingServer => "Starting tty59's server…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "Downloading tty59's server… {done} / {total}"

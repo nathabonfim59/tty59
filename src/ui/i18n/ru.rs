@@ -1967,6 +1967,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Работающий агент не найден. Сначала запустите агента (claude, codex, …) в панели."
         }
         L10nKey::SwitcherThisComputer => "Этот компьютер",
+        L10nKey::SwitcherMachineAll => "Все",
         L10nKey::SwitcherStartingServer => "Запуск сервера tty59…",
         L10nKey::SwitcherDownloadingServerWithTotal => "Загрузка сервера tty59… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "Загрузка сервера tty59… {done}",

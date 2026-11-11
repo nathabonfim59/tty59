@@ -21,6 +21,10 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
 
+mod machine_scope;
+pub(crate) use machine_scope::MachineScope;
+use machine_scope::RailEntry;
+
 const CARD_W: f32 = 760.0;
 
 /// The create form's card. Narrower than the list — it is a form, not a
@@ -342,6 +346,10 @@ pub(crate) struct Switcher {
     /// button.
     orphan_failures: HashMap<u64, String>,
     column: Column,
+    /// The machine the left column is narrowed to. Starts at All on every
+    /// open; a leading `@token` in the query previews another machine on top
+    /// of it (see `machine_scope::effective`).
+    scope: MachineScope,
     left_sel: usize,
     right_sel: usize,
     /// Order the tab column most-recently-used first. Set when Ctrl+Tab opened
@@ -387,6 +395,11 @@ impl Switcher {
 struct Layout {
     groups: Vec<Group>,
     nav: Vec<Nav>,
+    /// The machine rail's chips, left to right.
+    rail: Vec<RailEntry>,
+    /// What the list is narrowed to this frame: the stored scope, or the
+    /// machine a half-typed `@token` previews.
+    scope: MachineScope,
 }
 
 impl Layout {
@@ -405,9 +418,12 @@ impl Layout {
 /// workspace, most recently used first with this window's own workspace on
 /// top. A query matching a machine's name keeps all of that machine's rows —
 /// searching "devbox" is how the old per-machine grouping is asked for now.
-fn flatten(groups: &[Group], query: &str) -> Vec<Nav> {
+fn flatten(groups: &[Group], query: &str, scope: &MachineScope) -> Vec<Nav> {
     let mut nav: Vec<Nav> = Vec::new();
     for (g, group) in groups.iter().enumerate() {
+        if !scope.admits(group) {
+            continue;
+        }
         let matched_host = group.label.to_lowercase().contains(query);
         for (r, row) in group.rows.iter().enumerate() {
             if query.is_empty() || matched_host || row.matches(query) {
@@ -515,6 +531,7 @@ impl Tty59App {
             orphans: Vec::new(),
             orphan_failures: HashMap::new(),
             column,
+            scope: MachineScope::All,
             left_sel: 0,
             right_sel: 0,
             mru,
@@ -820,6 +837,29 @@ impl Tty59App {
             });
         }
 
+        // Every machine the user has configured is on the rail, connected or
+        // not, so a machine never visited can still be picked and connected
+        // from here. Empty until a connect lists its workspaces.
+        for host in &configured {
+            let key = host.target.to_string();
+            if index.contains_key(&key) {
+                continue;
+            }
+            index.insert(key.clone(), groups.len());
+            groups.push(Group {
+                key,
+                label: host.label.clone(),
+                endpoint: String::new(),
+                target: Some(host.target.clone()),
+                link: Link::Offline,
+                error: None,
+                installing: None,
+                preempted: false,
+                parked: false,
+                rows: Vec::new(),
+            });
+        }
+
         if !index.contains_key("") {
             groups.insert(
                 0,
@@ -1106,8 +1146,20 @@ impl Tty59App {
             .as_ref()
             .map(|sw| sw.text(cx))
             .unwrap_or_default();
-        let nav = flatten(&groups, &query);
-        Layout { groups, nav }
+        let rail = machine_scope::rail_entries(&groups, t(L10nKey::SwitcherMachineAll));
+        let stored = self
+            .switcher
+            .as_ref()
+            .map(|sw| sw.scope.clone())
+            .unwrap_or_default();
+        let (scope, rest) = machine_scope::effective(&stored, &query, &rail);
+        let nav = flatten(&groups, rest, &scope);
+        Layout {
+            groups,
+            nav,
+            rail,
+            scope,
+        }
     }
 
     fn pending_machines(&self) -> Vec<RemoteTarget> {
@@ -1896,10 +1948,38 @@ impl Tty59App {
             .rounded(px(CARD_RADIUS))
             .overflow_hidden()
             .child(self.render_search(cx))
+            .child(self.render_rail(&layout, cx))
             .child(body)
             .children(self.render_banners(&layout, cx))
             .child(self.render_footer(cx))
             .into_any_element()
+    }
+
+    /// The machine rail between the search box and the columns: one chip per
+    /// `layout.rail` entry, the effective scope's chip marked, clicking a chip
+    /// calls `set_switcher_scope`. Work package 3 draws it; until then it is
+    /// an empty strip so the wiring around it is already in place.
+    fn render_rail(&self, layout: &Layout, cx: &mut Context<Self>) -> AnyElement {
+        let _ = (&layout.rail, &layout.scope, cx);
+        div().into_any_element()
+    }
+
+    /// Narrows the left column to `scope` — the one way the rail, Alt+←/→ and
+    /// a committed `@token` change it. The cursor goes back to the top so the
+    /// tab column shows the new list's first workspace.
+    #[allow(dead_code)] // used by the rail, keys and `@`-commit packages
+    pub(crate) fn set_switcher_scope(&mut self, scope: MachineScope, cx: &mut Context<Self>) {
+        let Some(sw) = self.switcher.as_mut() else {
+            return;
+        };
+        if sw.scope == scope {
+            return;
+        }
+        sw.scope = scope;
+        sw.left_sel = 0;
+        sw.right_sel = 0;
+        sw.column = Column::Left;
+        cx.notify();
     }
 
     fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -3809,7 +3889,7 @@ mod tests {
         }
     }
 
-    fn row(name: &str, tabs: Vec<TabRow>) -> Row {
+    pub(super) fn row(name: &str, tabs: Vec<TabRow>) -> Row {
         Row {
             id: WorkspaceId::new(),
             name: name.to_string(),
@@ -3832,7 +3912,7 @@ mod tests {
         r
     }
 
-    fn group(rows: Vec<Row>) -> Group {
+    pub(super) fn group(rows: Vec<Row>) -> Group {
         Group {
             key: String::new(),
             label: "This Computer".to_string(),
@@ -3847,7 +3927,7 @@ mod tests {
         }
     }
 
-    fn named_group(label: &str, rows: Vec<Row>) -> Group {
+    pub(super) fn named_group(label: &str, rows: Vec<Row>) -> Group {
         Group {
             key: label.to_lowercase(),
             label: label.to_string(),
@@ -3948,7 +4028,7 @@ mod tests {
             ]),
             named_group("devbox", vec![aged(row("remote", vec![]), 30)]),
         ];
-        let names: Vec<&str> = flatten(&groups, "")
+        let names: Vec<&str> = flatten(&groups, "", &MachineScope::All)
             .into_iter()
             .map(|(g, r)| groups[g].rows[r].name.as_str())
             .collect();
@@ -3960,7 +4040,7 @@ mod tests {
         let mut here = aged(row("here", vec![]), 1);
         here.current = true;
         let groups = vec![group(vec![aged(row("busy", vec![]), 99), here])];
-        let first = flatten(&groups, "")[0];
+        let first = flatten(&groups, "", &MachineScope::All)[0];
         assert_eq!(groups[first.0].rows[first.1].name, "here");
     }
 
@@ -3972,7 +4052,7 @@ mod tests {
         let mut here = aged(row("keen-crane", vec![tab("zsh", "/tmp/t7qa/fixture")]), 50);
         here.current = true;
         let groups = vec![group(vec![here, aged(row("qa", vec![]), 10)])];
-        let first = flatten(&groups, "qa")[0];
+        let first = flatten(&groups, "qa", &MachineScope::All)[0];
         assert_eq!(groups[first.0].rows[first.1].name, "qa");
     }
 
@@ -3985,9 +4065,28 @@ mod tests {
             group(vec![row("local-notes", vec![])]),
             named_group("devbox", vec![row("api", vec![]), row("web", vec![])]),
         ];
-        let hits = flatten(&groups, "devbox");
+        let hits = flatten(&groups, "devbox", &MachineScope::All);
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|&(g, _)| g == 1));
+    }
+
+    #[test]
+    fn a_machine_scope_lists_only_that_machines_rows_still_recent_first() {
+        let groups = vec![
+            group(vec![aged(row("local", vec![]), 50)]),
+            named_group(
+                "devbox",
+                vec![aged(row("api", vec![]), 10), aged(row("web", vec![]), 30)],
+            ),
+        ];
+        let scope = MachineScope::Machine("devbox".into());
+        let names: Vec<&str> = flatten(&groups, "", &scope)
+            .into_iter()
+            .map(|(g, r)| groups[g].rows[r].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["web", "api"]);
+        assert!(flatten(&groups, "local", &scope).is_empty());
+        assert_eq!(flatten(&groups, "", &MachineScope::local()).len(), 1);
     }
 
     #[test]
@@ -3995,6 +4094,8 @@ mod tests {
         let layout = Layout {
             groups: vec![group(vec![row("a", vec![]), row("b", vec![])])],
             nav: vec![(0, 1), (0, 0)],
+            rail: Vec::new(),
+            scope: MachineScope::All,
         };
         assert_eq!(layout.subject(0), Some((0, 1)));
         assert_eq!(layout.subject(1), Some((0, 0)));

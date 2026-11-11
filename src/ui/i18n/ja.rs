@@ -1808,6 +1808,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "実行中のコーディングエージェントが見つかりません — 先にペインでコーディングエージェントを起動してください（claude、codex など）"
         }
         L10nKey::SwitcherThisComputer => "このコンピュータ",
+        L10nKey::SwitcherMachineAll => "すべて",
         L10nKey::SwitcherStartingServer => "tty59 のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "tty59 のサーバーをダウンロード中… {done} / {total}"
