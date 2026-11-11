@@ -615,7 +615,7 @@ pub(crate) const RAIL_TILE: f32 = 26.;
 /// A sidebar row's trailing status dot, and the box it is centred in (wide
 /// enough for the unread pill that replaces it).
 pub(crate) const ROW_STATUS_DOT: f32 = 5.;
-pub(crate) const ROW_STATUS_SLOT: f32 = 14.;
+pub(crate) const ROW_STATUS_SLOT: f32 = 18.;
 pub(crate) const RAIL_TILE_GLYPH: f32 = 14.;
 pub(crate) const RAIL_TILE_RADIUS: f32 = 6.;
 
@@ -779,7 +779,16 @@ const MENU_AGENTS: usize = 3;
 /// The Search Everywhere button in the middle of the title bar: the width of
 /// a field that reads as one, and the 28px of the rail's own search.
 const TITLEBAR_SEARCH_W: f32 = 360.;
-const TITLEBAR_SEARCH_H: f32 = 28.;
+pub(in crate::ui) const TITLEBAR_SEARCH_H: f32 = 28.;
+pub(in crate::ui) const TITLEBAR_SEARCH_RADIUS: f32 = 7.;
+
+pub(in crate::ui) fn titlebar_search_fill(cx: &App) -> gpui::Hsla {
+    gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().rail.base).into()
+}
+
+fn unread_count_label(unread: usize) -> Option<String> {
+    (unread > 1).then(|| unread.min(9).to_string())
+}
 
 /// Air between the search box and the nearest chrome tile when the bar is too
 /// narrow for the box to sit at its full width.
@@ -1566,14 +1575,15 @@ impl Tty59App {
             true => bg.blend(gpui::Hsla::from(gpui::rgb(rgb)).opacity(0.4)),
             false => gpui::rgb(rgb).into(),
         };
-        if unread > 0 {
+        if let Some(label) = unread_count_label(unread) {
             let nd = (size * 0.72).max(13.0);
-            let label = unread.min(9).to_string();
-            div()
+            let pill = div()
                 .absolute()
                 .right(px(-(nd - d) / 2.0 - d * 0.22))
                 .bottom(px(-(nd - d) / 2.0 - d * 0.22))
-                .size(px(nd))
+                .h(px(nd))
+                .min_w(px(18.))
+                .px(px(4.))
                 .rounded_full()
                 .border_1()
                 .border_color(bg)
@@ -1582,12 +1592,16 @@ impl Tty59App {
                 .items_center()
                 .justify_center()
                 .text_size(px((nd * 0.62).round()))
+                .line_height(px(nd))
+                .font_features(crate::ui::theme::tabular_figures())
                 .font_weight(FontWeight::BOLD)
                 .text_color(gpui::white())
-                .child(label)
-                .into_any_element()
+                .child(label);
+            #[cfg(test)]
+            let pill = pill.debug_selector(move || format!("avatar-status-count-{unread}"));
+            pill.into_any_element()
         } else {
-            div()
+            let dot = div()
                 .absolute()
                 .right(px(-(d * 0.22)))
                 .bottom(px(-(d * 0.22)))
@@ -1601,8 +1615,10 @@ impl Tty59App {
                         .items_center()
                         .justify_center()
                         .child(div().size(px((d * 0.36).max(2.5))).rounded_full().bg(bg))
-                })
-                .into_any_element()
+                });
+            #[cfg(test)]
+            let dot = dot.debug_selector(move || format!("avatar-status-circle-{unread}"));
+            dot.into_any_element()
         }
     }
 
@@ -1639,7 +1655,7 @@ impl Tty59App {
 
     /// A row's trailing status mark: a 5px dot in the state's colour, hollow
     /// while the agent waits on the user, blinking while it works — or the
-    /// unread count in a small pill once there is something to read. `None`
+    /// count in a wider pill only when more than one result is unread. `None`
     /// for a row with nothing to report.
     pub(crate) fn row_status_dot(
         &self,
@@ -1662,33 +1678,39 @@ impl Tty59App {
             .items_center()
             .justify_center()
             .min_w(px(ROW_STATUS_SLOT));
-        Some(
-            match unread > 0 {
-                true => slot.child(
-                    div()
-                        .h(px(14.))
-                        .min_w(px(14.))
-                        .px(px(3.))
-                        .rounded_full()
-                        .bg(fill)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(9.))
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(gpui::white())
-                        .child(unread.min(9).to_string()),
-                ),
-                false => slot.child(
-                    div()
-                        .size(px(ROW_STATUS_DOT))
-                        .rounded_full()
-                        .when(!hollow, |d| d.bg(fill))
-                        .when(hollow, |d| d.border_1().border_color(fill)),
-                ),
+        let mark = match unread_count_label(unread) {
+            Some(label) => {
+                let pill = div()
+                    .h(px(14.))
+                    .min_w(px(18.))
+                    .px(px(4.))
+                    .rounded_full()
+                    .bg(fill)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(9.))
+                    .line_height(px(14.))
+                    .font_features(crate::ui::theme::tabular_figures())
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(gpui::white())
+                    .child(label);
+                #[cfg(test)]
+                let pill = pill.debug_selector(move || format!("row-status-count-{unread}"));
+                pill.into_any_element()
             }
-            .into_any_element(),
-        )
+            None => {
+                let dot = div()
+                    .size(px(ROW_STATUS_DOT))
+                    .rounded_full()
+                    .when(!hollow, |d| d.bg(fill))
+                    .when(hollow, |d| d.border_1().border_color(fill));
+                #[cfg(test)]
+                let dot = dot.debug_selector(move || format!("row-status-circle-{unread}"));
+                dot.into_any_element()
+            }
+        };
+        Some(slot.child(mark).into_any_element())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2750,13 +2772,11 @@ impl Tty59App {
                         .gap(px(7.))
                         .pl(px(10.))
                         .pr(px(10.))
-                        .rounded(px(7.))
+                        .rounded(px(TITLEBAR_SEARCH_RADIUS))
                         // The left rail's fill (`Surfaces::rail`, #f5f5f3 /
                         // #1e1e20 on the default pair) — not `sidebar`, which
                         // is the window's own fill and vanished into the bar.
-                        .bg(gpui::rgb(
-                            cx.global::<crate::ui::presets::Surfaces>().rail.base,
-                        ))
+                        .bg(titlebar_search_fill(cx))
                         .cursor_pointer()
                         .text_size(window.rem_size() * 0.8125)
                         .text_color(cx.theme().muted_foreground)
@@ -3113,6 +3133,84 @@ mod tests {
     use gpui::TestAppContext;
     use std::path::Path;
     use unicode_segmentation::UnicodeSegmentation;
+
+    #[test]
+    fn unread_counts_only_label_multiple_results() {
+        assert_eq!(unread_count_label(0), None);
+        assert_eq!(unread_count_label(1), None);
+        assert_eq!(unread_count_label(2).as_deref(), Some("2"));
+        assert_eq!(unread_count_label(12).as_deref(), Some("9"));
+    }
+
+    #[gpui::test]
+    fn one_unread_result_draws_circles_and_two_draw_wide_pills(cx: &mut TestAppContext) {
+        struct StatusMarks(gpui::Entity<Tty59App>);
+        impl gpui::Render for StatusMarks {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let app = self.0.read(cx);
+                let status = crate::core::cli_agent::AgentStatus::Done;
+                let surface = cx.theme().background;
+                div().flex().children((0..=2).flat_map(|unread| {
+                    [
+                        div()
+                            .relative()
+                            .size(px(32.))
+                            .children(app.row_status_dot(Some(status), unread, surface))
+                            .into_any_element(),
+                        div()
+                            .relative()
+                            .size(px(32.))
+                            .child(Tty59App::status_dot(
+                                status.dot_rgb().unwrap(),
+                                unread,
+                                18.,
+                                surface,
+                                false,
+                                false,
+                            ))
+                            .into_any_element(),
+                    ]
+                }))
+            }
+        }
+        let (app, _app_window) = crate::ui::app::test_window::harness(cx);
+        let window = cx.add_window(|_, _| StatusMarks(app));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        for (circles, counts, two_circle, two_count) in [
+            (
+                ["row-status-circle-0", "row-status-circle-1"],
+                ["row-status-count-0", "row-status-count-1"],
+                "row-status-circle-2",
+                "row-status-count-2",
+            ),
+            (
+                ["avatar-status-circle-0", "avatar-status-circle-1"],
+                ["avatar-status-count-0", "avatar-status-count-1"],
+                "avatar-status-circle-2",
+                "avatar-status-count-2",
+            ),
+        ] {
+            for circle in circles {
+                assert!(vcx.debug_bounds(circle).is_some(), "{circle} was painted");
+            }
+            for count in counts {
+                assert!(vcx.debug_bounds(count).is_none(), "{count} was not painted");
+            }
+            assert!(vcx.debug_bounds(two_circle).is_none());
+            let pill = vcx
+                .debug_bounds(two_count)
+                .expect("two unread results paint a count pill");
+            assert!(
+                pill.size.width >= px(18.),
+                "the count has room on both sides"
+            );
+            assert!(pill.size.height >= px(13.));
+        }
+    }
 
     /// #1169: under Linux client-side decorations the viewport measures the
     /// whole surface, shadow included, while the title bar row sits inside the

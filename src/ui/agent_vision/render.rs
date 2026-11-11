@@ -48,7 +48,18 @@ impl Tty59App {
         Button::new("agent-mode-toggle")
             .label(label)
             .small()
-            .ghost()
+            .custom(
+                gpui_component::button::ButtonCustomVariant::new(cx)
+                    .color(crate::ui::tab_strip::titlebar_search_fill(cx))
+                    .foreground(cx.theme().foreground)
+                    .hover(rgb(cx.global::<crate::ui::presets::Surfaces>().rail.hover).into())
+                    .active(rgb(cx.global::<crate::ui::presets::Surfaces>().rail.pressed).into()),
+            )
+            .h(px(crate::ui::tab_strip::TITLEBAR_SEARCH_H))
+            .px(px(10.))
+            .rounded(px(crate::ui::tab_strip::TITLEBAR_SEARCH_RADIUS))
+            .bg(crate::ui::tab_strip::titlebar_search_fill(cx))
+            .text_size(gpui::rems(0.8125))
             .tooltip_element(crate::ui::tab_strip::chord_tooltip(
                 t(L10nKey::VisionToggle),
                 "ToggleAgentVision",
@@ -216,25 +227,6 @@ impl Tty59App {
                                 }))
                         },
                     )),
-            )
-            .child(
-                v_flex()
-                    .px_4()
-                    .py_3()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .gap_2()
-                    .child(t(L10nKey::VisionListHelp))
-                    .when_some(
-                        crate::ui::keymap::effective_key("FocusNextAgentNeedingAttention", cx),
-                        |footer, key| {
-                            footer.child(format!(
-                                "{} · {}",
-                                t(L10nKey::VisionNext),
-                                crate::ui::keymap::key_tokens(&key).join("")
-                            ))
-                        },
-                    ),
             )
             .into_any_element()
     }
@@ -601,14 +593,6 @@ impl Tty59App {
                                     reader.child(terminal)
                                 }),
                         )
-                        .child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(t(L10nKey::VisionTerminalHelp)),
-                        )
                 })
                 .when(selected.is_none(), |reader| {
                     reader.child(
@@ -636,16 +620,6 @@ impl Tty59App {
                 view.key_context("AgentVisionList")
             })
             .child(div().flex_1().min_h_0().min_w_0().child(body))
-            .when(self.agent_vision.state.mode() == ViewMode::Kanban, |view| {
-                view.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(t(L10nKey::VisionBoardHelp)),
-                )
-            })
             .into_any_element()
     }
 }
