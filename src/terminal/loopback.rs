@@ -119,21 +119,29 @@ pub(super) fn loopback_url_span_at(text: &str, col: usize) -> Option<(usize, usi
         .then(|| (start, end, parsed.normalized()))
 }
 
+/// Strips wrapping punctuation off the inclusive span `start..=end`.
+///
+/// Works on a half-open `start..stop` so the trailing scan cannot get stuck:
+/// with an inclusive `end` and a saturating decrement, a token at column 0
+/// made only of trailing characters (`>>`, `}`, `});`) left `end` pinned at 0
+/// with `start <= end` forever true — a spin on the UI thread every time the
+/// pointer hovered such a line.
 fn trim_wrapped_token(start: usize, end: usize, chars: &[char]) -> (usize, usize, String) {
     let mut start = start;
-    let mut end = end;
-    while start <= end && matches!(chars[start], '(' | '[' | '<' | '\'' | '"' | '{') {
+    let mut stop = end + 1;
+    while start < stop && matches!(chars[start], '(' | '[' | '<' | '\'' | '"' | '{') {
         start += 1;
     }
-    while start <= end && matches!(chars[end], ')' | ']' | '>' | '\'' | '"' | '}' | ',' | ';') {
-        end = end.saturating_sub(1);
+    while start < stop
+        && matches!(
+            chars[stop - 1],
+            ')' | ']' | '>' | '\'' | '"' | '}' | ',' | ';'
+        )
+    {
+        stop -= 1;
     }
-    let token = if start <= end {
-        chars[start..=end].iter().collect()
-    } else {
-        String::new()
-    };
-    (start, end, token)
+    let token = chars[start..stop].iter().collect();
+    (start, stop.saturating_sub(1), token)
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
@@ -206,5 +214,37 @@ mod tests {
         assert_eq!((start, end), (6, 24));
         assert_eq!(url, "http://localhost:3000/path");
         assert!(loopback_url_span_at(text, 5).is_none());
+    }
+
+    /// A token made only of trailing delimiters at column 0 used to spin the
+    /// trim loop forever (`>> dns i…` hung the GUI on hover). Runs on a
+    /// thread so a regression fails the test instead of hanging the suite.
+    #[test]
+    fn delimiter_only_token_at_column_zero_terminates() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            for text in [">> dns ixfr", "}", ")", "});", "> x", "'\"", "(", "({[<"] {
+                for col in 0..text.chars().count() {
+                    out.push(loopback_url_span_at(text, col));
+                }
+            }
+            let _ = tx.send(out);
+        });
+        let spans = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("trim_wrapped_token did not terminate");
+        assert!(spans.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn trims_wrapping_delimiters() {
+        let chars: Vec<char> = "(http://localhost:3000),".chars().collect();
+        let (start, end, token) = trim_wrapped_token(0, chars.len() - 1, &chars);
+        assert_eq!(token, "http://localhost:3000");
+        assert_eq!((start, end), (1, 21));
+
+        let chars: Vec<char> = ">>".chars().collect();
+        assert_eq!(trim_wrapped_token(0, 1, &chars).2, "");
     }
 }
