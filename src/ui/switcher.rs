@@ -109,17 +109,50 @@ fn link_is_engaged(link: Link) -> bool {
     matches!(link, Link::Connected | Link::Reconnecting { .. })
 }
 
-/// The attention dot a machine chip on the rail wears — the same inks and
-/// the same silence as the row avatars: only the states that want attention
-/// (a connect in flight, a retry, a failure) speak, everything else lets the
-/// list do the talking. The row's takeover case (`Connected` on a preempted
-/// machine) stays a row matter: `RailEntry` carries the link alone, and
-/// which workspace was taken over is not the machine's news.
-fn rail_link_dot(link: Link, cx: &App) -> Option<gpui::Hsla> {
+/// What a machine chip's dot says about its link state. Pure over `Link`, so
+/// an ordinary test pins every variant without a window; the inks are the
+/// renderer's business.
+///
+/// The rail is the machine list, so unlike the row avatars — where the quiet
+/// states say nothing and only the exceptions speak — every machine answers
+/// "is it reachable?" at a glance: reachable is a solid success dot, and a
+/// configured machine with no link is a hollow ring — the chip is there,
+/// nothing answers behind it yet. The states that want attention keep the
+/// rows' inks. The row's takeover case (`Connected` on a preempted machine)
+/// stays a row matter: `RailEntry` carries the link alone, and which
+/// workspace was taken over is not the machine's news.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailDotStyle {
+    /// Reachable: this computer, or a link that is up.
+    Solid,
+    /// On the rail, configured, and not connected.
+    Hollow,
+    /// A connect in flight, or a retry on its backoff.
+    Warn,
+    /// The last attempt failed.
+    Danger,
+}
+
+/// The dot style one link state puts on its machine chip.
+fn rail_dot_style(link: Link) -> RailDotStyle {
     match link {
-        Link::Connecting | Link::Reconnecting { .. } => Some(cx.theme().warning),
-        Link::Failed => Some(cx.theme().danger),
-        Link::Local | Link::Connected | Link::Offline => None,
+        Link::Local | Link::Connected => RailDotStyle::Solid,
+        Link::Offline => RailDotStyle::Hollow,
+        Link::Connecting | Link::Reconnecting { .. } => RailDotStyle::Warn,
+        Link::Failed => RailDotStyle::Danger,
+    }
+}
+
+/// The dot itself: the style above dressed in the theme's inks. The hollow
+/// ring is a muted border and no fill, so it reads as an outline at the same
+/// size its solid neighbours fill.
+fn rail_dot(style: RailDotStyle, theme: &gpui_component::Theme) -> gpui::Div {
+    let dot = div().size(px(6.)).flex_shrink_0().rounded_full();
+    match style {
+        RailDotStyle::Solid => dot.bg(theme.success),
+        RailDotStyle::Hollow => dot.border(px(1.5)).border_color(theme.muted_foreground),
+        RailDotStyle::Warn => dot.bg(theme.warning),
+        RailDotStyle::Danger => dot.bg(theme.danger),
     }
 }
 
@@ -2305,8 +2338,8 @@ impl Tty59App {
                     .children(
                         entry
                             .link
-                            .and_then(|link| rail_link_dot(link, cx))
-                            .map(|dot| div().size(px(6.)).flex_shrink_0().rounded_full().bg(dot)),
+                            .map(rail_dot_style)
+                            .map(|style| rail_dot(style, theme)),
                     )
                     .child(entry.label.clone())
                     // Zero says nothing: an empty machine is exactly what its
@@ -2379,7 +2412,20 @@ impl Tty59App {
                     .flex_shrink_0()
                     .text_size(gpui::rems(12.5 / 16.))
                     .text_color(muted)
-                    .child(t(L10nKey::SwitcherMachineHint)),
+                    // The modifier names itself the way the footer's
+                    // shortcuts do — a glyph on macOS, a word elsewhere —
+                    // and the localized template places it.
+                    .child(t_fmt(
+                        L10nKey::SwitcherMachineHint,
+                        &[(
+                            "modifier",
+                            if cfg!(target_os = "macos") {
+                                "⌥"
+                            } else {
+                                "Alt"
+                            },
+                        )],
+                    )),
             )
             .into_any_element()
     }
@@ -4635,6 +4681,23 @@ mod tests {
         assert!(hits.iter().all(|&(g, _)| g == 1));
     }
 
+    /// Every link state names the dot its machine chip wears — reachable
+    /// solid, configured-but-off hollow, the attention states in the rows'
+    /// inks. The mapping is the behavior; the inks are the theme's, and no
+    /// window is needed to pin one to the other.
+    #[test]
+    fn every_link_state_names_its_rail_dot() {
+        assert_eq!(rail_dot_style(Link::Local), RailDotStyle::Solid);
+        assert_eq!(rail_dot_style(Link::Connected), RailDotStyle::Solid);
+        assert_eq!(rail_dot_style(Link::Offline), RailDotStyle::Hollow);
+        assert_eq!(rail_dot_style(Link::Connecting), RailDotStyle::Warn);
+        assert_eq!(
+            rail_dot_style(Link::Reconnecting { attempt: 4 }),
+            RailDotStyle::Warn
+        );
+        assert_eq!(rail_dot_style(Link::Failed), RailDotStyle::Danger);
+    }
+
     #[test]
     fn a_machine_scope_lists_only_that_machines_rows_still_recent_first() {
         let groups = vec![
@@ -5779,24 +5842,12 @@ mod gpui_tests {
             "the rail re-centered itself on a frame where nothing moved"
         );
 
-        // Alt+→ from a preview: the step starts where the eye is — the
-        // previewed chip — picks the one after it as the stored scope, and
-        // the token that previewed goes with it.
-        app.update_in(&mut vcx, |app, window, cx| {
-            app.on_switcher_key(
-                &gpui::KeyDownEvent {
-                    keystroke: gpui::Keystroke {
-                        modifiers: gpui::Modifiers::alt(),
-                        key: "right".to_string(),
-                        key_char: None,
-                    },
-                    is_held: false,
-                    prefer_character_input: false,
-                },
-                window,
-                cx,
-            );
-        });
+        // Alt+→ from a preview, dispatched as a real keystroke through the
+        // focused search box rather than handed to the handler: the step
+        // must survive the route a user's key actually takes. It starts
+        // where the eye is — the previewed chip — picks the one after it as
+        // the stored scope, and the token that previewed goes with it.
+        vcx.simulate_keystrokes("alt-right");
         settle(&mut vcx);
 
         let (text, scope, rail) = app.update_in(&mut vcx, |app, _, cx| {
