@@ -397,15 +397,15 @@ pub(crate) struct Switcher {
     right_anchor: gpui::ScrollAnchor,
     /// The machine rail's own scroll, horizontal. The chips are its direct
     /// children, so `scroll_to_item` can find the effective scope's chip:
-    /// `render_rail` asks for it whenever the effective scope moves — a
-    /// click, Alt+←/→, or a `@token` being typed into the box — and gpui
-    /// carries the rail along by the minimal amount, which is why a hand
-    /// browsing the rail is never fought on a steady frame.
+    /// `render_rail` asks for it whenever that chip moves — a click,
+    /// Alt+←/→, or a `@token` being typed into the box — and gpui carries
+    /// the rail along by the minimal amount, which is why a hand browsing
+    /// the rail is never fought on a steady frame.
     rail_scroll: gpui::ScrollHandle,
-    /// The effective scope whose chip the rail last asked to show. Interior
-    /// because `render_rail` renders from `&self`, and it is what tells a
-    /// scope move from a steady frame.
-    rail_followed: std::cell::Cell<Option<MachineScope>>,
+    /// The index of the chip the rail last asked to show. Interior because
+    /// `render_rail` renders from `&self`, and it is what tells a move from
+    /// a steady frame.
+    rail_followed: std::cell::Cell<Option<usize>>,
     _subs: Vec<Subscription>,
 }
 
@@ -2020,12 +2020,16 @@ impl Tty59App {
         let rail_scroll = sw.rail_scroll.clone();
         // The rail follows the effective scope wherever the move came from —
         // a click, Alt+←/→, or a `@token` typed into the box — but only when
-        // it actually moved, and by the minimal amount: a rail that asked on
-        // every frame would fight a hand that is only browsing along it. The
-        // chips are the scroller's direct children, which is the index
-        // `scroll_to_item` speaks.
-        if sw.rail_followed.replace(Some(layout.scope.clone())) != Some(layout.scope.clone())
-            && let Some(ix) = layout.rail.iter().position(|e| e.scope == layout.scope)
+        // the chip it points at actually moved, and by the minimal amount: a
+        // rail that asked on every frame would fight a hand that is only
+        // browsing along it. What is followed is the chip's *index*, not the
+        // scope: a configured host regrouping from empty to populated keeps
+        // its scope but changes places on the rail, and the rail should
+        // carry to the new place. The chips are the scroller's direct
+        // children, which is the index `scroll_to_item` speaks.
+        let picked_ix = layout.rail.iter().position(|e| e.scope == layout.scope);
+        if sw.rail_followed.replace(picked_ix) != picked_ix
+            && let Some(ix) = picked_ix
         {
             rail_scroll.scroll_to_item(ix);
         }
@@ -2049,7 +2053,9 @@ impl Tty59App {
                     .when(picked, |chip| chip.bg(picked_bg))
                     .hover(move |chip| chip.bg(if picked { picked_bg } else { hover }))
                     .children(
-                        rail_link_dot(entry.link, cx)
+                        entry
+                            .link
+                            .and_then(|link| rail_link_dot(link, cx))
                             .map(|dot| div().size(px(6.)).flex_shrink_0().rounded_full().bg(dot)),
                     )
                     .child(entry.label.clone())
@@ -4565,24 +4571,33 @@ mod gpui_tests {
     /// The rail carries itself to whichever chip the list is effectively
     /// scoped to — including the machine a half-typed `@token` previews,
     /// which is the one move no click or key asks for by name. The request
-    /// is issued only when the effective scope moves, so a steady frame
-    /// never drags the rail back and a hand browsing along it is not fought.
+    /// is issued only when the chip's index moves, so a steady frame never
+    /// drags the rail back and a hand browsing along it is not fought.
     ///
     /// The assertions reach real rendering, not a plan for it: the
     /// scroller's prepaint records its own bounds and its direct children's
     /// bounds into the `ScrollHandle` and consumes any pending
-    /// `scroll_to_item` request in the same pass, so once the window has
-    /// drawn, `offset()`, `bounds()` and `bounds_for_item` are the geometry
-    /// the last frame actually painted.
+    /// `scroll_to_item` request in the same pass. Prepaint only runs when a
+    /// frame is actually drawn, so every state change below is followed by
+    /// an explicit draw before anything is claimed about `offset()`,
+    /// `bounds()` or `bounds_for_item`.
     #[gpui::test]
     fn the_rail_scrolls_a_distant_at_preview_into_view(cx: &mut TestAppContext) {
-        use gpui::{point, px, size};
+        use gpui::{VisualTestContext, point, px, size};
         use tty59_core::core::session::RemoteTarget;
+
+        fn settle(vcx: &mut VisualTestContext) {
+            // `run_until_parked` only drains the executor; `draw` is what
+            // paints a frame, and with it the scroll geometry under test.
+            vcx.run_until_parked();
+            let _ = vcx.update(|window, cx| window.draw(cx));
+        }
 
         let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
         vcx.simulate_resize(size(px(1200.), px(800.)));
         // Enough machines that the rail overflows the card several chips
-        // over, with the one the token previews far past the right edge.
+        // over, with the ones the token previews and the step lands on far
+        // past the right edge.
         app.update(cx, |app, _| {
             for name in [
                 "aa-mill",
@@ -4613,7 +4628,7 @@ mod gpui_tests {
             }
         });
         app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
-        vcx.run_until_parked();
+        settle(&mut vcx);
         assert_eq!(
             app.update_in(&mut vcx, |app, _, _| app
                 .switcher
@@ -4630,25 +4645,26 @@ mod gpui_tests {
         // so it alone has to carry the rail along.
         app.update_in(&mut vcx, |app, window, cx| {
             let query = app.switcher.as_ref().expect("panel is open").query.clone();
-            query.update(cx, |state, cx| state.set_value("@nn", window, cx));
+            query.update(cx, |state, cx| state.set_value("@mm", window, cx));
         });
-        vcx.run_until_parked();
+        settle(&mut vcx);
 
-        let rail = app.update_in(&mut vcx, |app, _, cx| {
+        let (offset, chip, view) = app.update_in(&mut vcx, |app, _, cx| {
             let sw = app.switcher.as_ref().expect("panel is up");
             let ix = app
                 .switcher_layout(cx)
                 .rail
                 .iter()
-                .position(|e| e.scope == MachineScope::Machine("nn-yard".into()))
+                .position(|e| e.scope == MachineScope::Machine("mm-wharf".into()))
                 .expect("the previewed machine has a chip");
             (
                 sw.rail_scroll.offset().x,
-                sw.rail_scroll.bounds_for_item(ix),
+                sw.rail_scroll
+                    .bounds_for_item(ix)
+                    .expect("chips are drawn children"),
                 sw.rail_scroll.bounds(),
             )
         });
-        let (offset, chip, view) = (rail.0, rail.1.expect("chips are drawn children"), rail.2);
         assert!(
             offset < px(0.),
             "the rail never followed the preview: still at {offset:?}"
@@ -4669,7 +4685,7 @@ mod gpui_tests {
                 .set_offset(point(px(0.), px(0.)));
             cx.notify();
         });
-        vcx.run_until_parked();
+        settle(&mut vcx);
         assert_eq!(
             app.update_in(&mut vcx, |app, _, _| app
                 .switcher
@@ -4680,6 +4696,68 @@ mod gpui_tests {
                 .x),
             px(0.),
             "the rail re-centered itself on a frame where nothing moved"
+        );
+
+        // Alt+→ from a preview: the step starts where the eye is — the
+        // previewed chip — picks the one after it as the stored scope, and
+        // the token that previewed goes with it.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.on_switcher_key(
+                &gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke {
+                        modifiers: gpui::Modifiers::alt(),
+                        key: "right".to_string(),
+                        key_char: None,
+                    },
+                    is_held: false,
+                    prefer_character_input: false,
+                },
+                window,
+                cx,
+            );
+        });
+        settle(&mut vcx);
+
+        let (text, scope, rail) = app.update_in(&mut vcx, |app, _, cx| {
+            let sw = app.switcher.as_ref().expect("panel is up");
+            let ix = app
+                .switcher_layout(cx)
+                .rail
+                .iter()
+                .position(|e| e.scope == MachineScope::Machine("nn-yard".into()))
+                .expect("the stepped-to machine has a chip");
+            (
+                sw.query.read(cx).value().to_string(),
+                sw.scope.clone(),
+                (
+                    sw.rail_followed.get() == Some(ix),
+                    sw.rail_scroll.offset().x,
+                    sw.rail_scroll
+                        .bounds_for_item(ix)
+                        .expect("chips are drawn children"),
+                    sw.rail_scroll.bounds(),
+                ),
+            )
+        });
+        let (followed, offset, chip, view) = rail;
+        assert_eq!(text, "", "the step took the half-typed token with it");
+        assert_eq!(
+            scope,
+            MachineScope::Machine("nn-yard".into()),
+            "Alt+→ stepped from the previewed chip to the one after it"
+        );
+        assert!(
+            followed,
+            "the rail asked for the stepped-to chip, not the one before it"
+        );
+        assert!(
+            offset < px(0.),
+            "the rail never followed the step: still at {offset:?}"
+        );
+        assert!(
+            chip.left() + offset >= view.left() - px(1.)
+                && chip.right() + offset <= view.right() + px(1.),
+            "the stepped-to chip {chip:?} never came into view {view:?} at {offset:?}"
         );
     }
 
