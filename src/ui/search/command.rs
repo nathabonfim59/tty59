@@ -17,6 +17,7 @@ pub enum CommandKind {
     NewTab,
     NewWorkspace,
     OpenWorkspacePicker,
+    OpenWorkspaceOnMachine,
     RenameWorkspace,
     StopWorkspace,
     DeleteWorkspace,
@@ -198,6 +199,7 @@ impl CommandKind {
             NewTab => "new-tab",
             NewWorkspace => "new-workspace",
             OpenWorkspacePicker => "switch-workspace",
+            OpenWorkspaceOnMachine => "open-workspace-on-machine",
             RenameWorkspace => "rename-workspace",
             StopWorkspace => "stop-workspace",
             DeleteWorkspace => "delete-workspace",
@@ -465,6 +467,7 @@ impl CommandKind {
             | UpdateLocalServer
             | UpdateRemoteServer
             | OpenWorkspacePicker
+            | OpenWorkspaceOnMachine
             | OpenThemePicker
             | SearchHosts
             | OpenSshConnect(_)
@@ -683,6 +686,7 @@ impl Item {
         let workspaces = [
             Item::localized(L10nKey::CmdNewWorkspace, NewWorkspace),
             Item::localized(L10nKey::CmdSwitchWorkspace, OpenWorkspacePicker),
+            Item::localized(L10nKey::CmdOpenWorkspaceOnMachine, OpenWorkspaceOnMachine),
             Item::localized(L10nKey::CmdRenameWorkspace, RenameWorkspace),
             Item::localized(L10nKey::CmdStopWorkspace, StopWorkspace)
                 .with_subtitle(t(L10nKey::CmdStopWorkspaceSubtitle)),
@@ -1065,6 +1069,23 @@ mod gpui_tests {
             // View stays a list of things to show and hide.
             assert!(!cmds.iter().any(|c| c.group == Some(CommandGroup::View)
                 && c.kind.id().unwrap_or("").starts_with("git-")),);
+        });
+    }
+
+    #[gpui::test]
+    fn open_workspace_on_machine_is_a_workspaces_command(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            cx.set_global(Config::default());
+            crate::ui::i18n::set_locale("en");
+            let cmds = Item::actions(cx, chrome(None));
+            let row = cmds
+                .iter()
+                .find(|c| c.kind == CommandKind::OpenWorkspaceOnMachine)
+                .expect("the palette offers the machine picker");
+            assert_eq!(row.kind.id(), Some("open-workspace-on-machine"));
+            assert_eq!(row.group, Some(CommandGroup::Workspaces));
+            assert_eq!(row.title, "Open Workspace on Machine…");
         });
     }
 

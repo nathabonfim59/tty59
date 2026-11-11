@@ -9,10 +9,6 @@
 //! Everything here is pure over `&[Group]` so it can be tested without a
 //! window. Rendering lives in `render_rail` in the parent module.
 
-// Wired up piece by piece by the rail, key and `@`-commit packages; the
-// last of them removes this.
-#![allow(dead_code)]
-
 use super::{Group, Link};
 
 /// What the picker's left column is narrowed to. Reset to `All` every time the

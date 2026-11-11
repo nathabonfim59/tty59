@@ -1717,6 +1717,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::RemoteStripPreempted => "このワークスペースは {by} で開かれました",
         L10nKey::RemoteStripFailed => "{machine} に未接続です — {error}",
+        L10nKey::RemoteOpenWorkspacesOnMachine => "このマシンのワークスペースを開く",
         L10nKey::RemoteStripRouteLost => "{machine} の接続設定は存在しません — 再接続できません",
         L10nKey::RemoteRouteParkedHint => {
             "接続設定が存在しないため、自動再接続しません。リモートのセッションは残っています — 新しいプロファイルで接続すると、ワークスペース一覧に戻ります。"
@@ -1809,6 +1810,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherThisComputer => "このコンピュータ",
         L10nKey::SwitcherMachineAll => "すべて",
+        L10nKey::SwitcherAddMachine => "マシンを追加",
+        L10nKey::SwitcherMachineHint => "{modifier} ← → マシン切替",
+        L10nKey::SwitcherOpenInWindow => "ウィンドウで開く",
+        L10nKey::SwitcherOnThisMachine => "このマシン上（ここでは未オープン）",
+        L10nKey::SwitcherMachineNotConnected => "{machine} に接続されていません",
+        L10nKey::SwitcherLastKnownWorkspaces => "最後に確認したワークスペース",
+        L10nKey::SwitcherNoWorkspacesOnMachine => "{machine} にワークスペースはありません",
+        L10nKey::SwitcherNewWorkspaceOnMachine => "{machine} で新しいワークスペース…",
         L10nKey::SwitcherStartingServer => "tty59 のサーバーを起動中…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "tty59 のサーバーをダウンロード中… {done} / {total}"
@@ -1945,6 +1954,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdReopenClosedTab => "閉じたタブをもう一度開く",
         L10nKey::CmdNewWorkspace => "新しいワークスペース…",
         L10nKey::CmdSwitchWorkspace => "ワークスペースを切り替える…",
+        L10nKey::CmdOpenWorkspaceOnMachine => "マシン上でワークスペースを開く…",
         L10nKey::CmdRenameWorkspace => "ワークスペースの名前を変更…",
         L10nKey::CmdStopWorkspace => "ワークスペースを停止…",
         L10nKey::CmdStopWorkspaceSubtitle => "シェルを終了し、レイアウトを保持",

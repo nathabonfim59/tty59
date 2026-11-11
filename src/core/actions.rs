@@ -170,6 +170,8 @@ actions!(
         SendBackTab,
         SwitcherAcross,
         SwitcherAcrossBack,
+        SwitcherMachinePrev,
+        SwitcherMachineNext,
         SearchNextTab,
         SearchPrevTab,
         Quit
