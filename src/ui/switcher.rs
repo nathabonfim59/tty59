@@ -373,6 +373,9 @@ pub(crate) struct Switcher {
     /// open; a leading `@token` in the query previews another machine on top
     /// of it (see `machine_scope::effective`).
     scope: MachineScope,
+    /// Set while a committed `@token` rewrites the query, so the write is not
+    /// mistaken for fresh typing if the input ever emits for it.
+    committing_token: bool,
     left_sel: usize,
     right_sel: usize,
     /// Order the tab column most-recently-used first. Set when Ctrl+Tab opened
@@ -644,6 +647,32 @@ impl Tty59App {
         self.open_switcher_in(Column::Left, false, None, window, cx);
     }
 
+    /// The palette's Open Workspace on Machine: an ordinary picker with a bare
+    /// `@` already in the box, so the next keystrokes narrow the rail while
+    /// the list still previews. Nothing is scoped until a name matches.
+    pub(crate) fn open_switcher_on_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_switcher(window, cx);
+        let Some(query) = self.switcher.as_ref().map(|sw| sw.query.clone()) else {
+            return;
+        };
+        query.update(cx, |state, cx| state.set_value("@", window, cx));
+        cx.notify();
+    }
+
+    /// Opens a fresh picker already narrowed to `scope`, for the places that
+    /// know the machine before the picker exists. Opening first means the
+    /// ordinary All reset happens, then the scope is a real change.
+    #[allow(dead_code)] // the status-strip entry point is deferred
+    pub(crate) fn open_switcher_scoped(
+        &mut self,
+        scope: MachineScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_switcher(window, cx);
+        self.select_switcher_machine(scope, window, cx);
+    }
+
     fn open_switcher_in(
         &mut self,
         column: Column,
@@ -671,8 +700,9 @@ impl Tty59App {
         let subs = vec![cx.subscribe_in(
             &query,
             window,
-            |this, _input, ev: &InputEvent, _window, cx| {
+            |this, input, ev: &InputEvent, window, cx| {
                 if matches!(ev, InputEvent::Change) {
+                    this.commit_query_machine_token(input, window, cx);
                     // A narrower list can strand the cursor past its end. Land
                     // it on the first hit so the tab column shows the hits
                     // straight away.
@@ -697,6 +727,7 @@ impl Tty59App {
             orphan_failures: HashMap::new(),
             column,
             scope: MachineScope::All,
+            committing_token: false,
             left_sel: 0,
             right_sel: 0,
             mru,
@@ -1440,14 +1471,53 @@ impl Tty59App {
         cx.notify();
     }
 
+    /// The footer's New Workspace wording and the host the create form starts
+    /// on, both from the effective scope: a machine picked by a chip, Alt+←/→
+    /// or a half-typed `@token` names itself, and All means this computer's
+    /// own form (no host).
+    fn create_preset(&self, cx: &mut Context<Self>) -> (String, Option<HostChoice>) {
+        let groups = self.switcher_groups(cx);
+        let rail = machine_scope::rail_entries(&groups, t(L10nKey::SwitcherMachineAll));
+        let stored = self
+            .switcher
+            .as_ref()
+            .map(|sw| sw.scope.clone())
+            .unwrap_or_default();
+        let query = self
+            .switcher
+            .as_ref()
+            .map(|sw| sw.text(cx))
+            .unwrap_or_default();
+        let (scope, _) = machine_scope::effective(&stored, &query, &rail);
+        let MachineScope::Machine(key) = &scope else {
+            return (t(L10nKey::AppMenuNewWorkspace).to_string(), None);
+        };
+        let Some(group) = groups.iter().find(|g| &g.key == key) else {
+            return (t(L10nKey::AppMenuNewWorkspace).to_string(), None);
+        };
+        (
+            t_fmt(
+                L10nKey::SwitcherNewWorkspaceOnMachine,
+                &[("machine", group.label.as_str())],
+            ),
+            group.target.clone().map(|target| HostChoice {
+                target,
+                label: group.label.clone(),
+                detail: group.endpoint.clone(),
+            }),
+        )
+    }
+
     /// `⌘⇧N` and the footer button. Raises the switcher if it is down and
-    /// flips the card to the create form, host defaulting to this computer —
-    /// so `⌘⇧N`, a name, then Enter is a fresh local workspace.
+    /// flips the card to the create form. A fresh panel is All, so the usual
+    /// `⌘⇧N`, a name, then Enter is a local workspace; a panel that is already
+    /// scoped hands the form that machine instead.
     pub(crate) fn open_workspace_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_none() {
             self.open_switcher(window, cx);
         }
-        self.switcher_to_form(None, window, cx);
+        let (_, chosen) = self.create_preset(cx);
+        self.switcher_to_form(chosen, window, cx);
     }
 
     fn switcher_to_form(
@@ -1684,6 +1754,22 @@ impl Tty59App {
             return;
         }
         let column = sw.column;
+        // Backspace on an empty search box steps back out of a machine. Shift
+        // keeps the same deletion meaning (the input binds shift-backspace to
+        // Backspace), while Alt and Ctrl turn it into word deletion, so they
+        // stay the input's.
+        let leave_machine = key == "backspace"
+            && !mods.alt
+            && !mods.function
+            && !mods.control
+            && !mods.secondary()
+            && sw.scope != MachineScope::All
+            && sw.query.read(cx).value().is_empty();
+        if leave_machine {
+            cx.stop_propagation();
+            self.set_switcher_scope(MachineScope::All, cx);
+            return;
+        }
         let layout = self.switcher_layout(cx);
         match key_intent(key, mods) {
             // Escape already returned above; closing again is harmless and
@@ -2319,6 +2405,42 @@ impl Tty59App {
         cx.notify();
     }
 
+    /// Turns a committed `@machine` token into the stored scope, the way the
+    /// space after it is meant to: the token leaves the box and the rest of
+    /// the query keeps searching. A half-typed token still previews, and an
+    /// unresolved one is left for the search to find nothing with.
+    fn commit_query_machine_token(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.switcher.as_ref().is_none_or(|sw| sw.committing_token) {
+            return;
+        }
+        let text = input.read(cx).value().to_string();
+        let Some(token) = machine_scope::parse_at_token(&text) else {
+            return;
+        };
+        if !token.committed {
+            return;
+        }
+        let (needle, rest) = (token.needle.to_string(), token.rest.to_string());
+        let entries =
+            machine_scope::rail_entries(&self.switcher_groups(cx), t(L10nKey::SwitcherMachineAll));
+        let Some(scope) = machine_scope::resolve_needle(&entries, &needle) else {
+            return;
+        };
+        self.set_switcher_scope(scope, cx);
+        if let Some(sw) = self.switcher.as_mut() {
+            sw.committing_token = true;
+        }
+        input.update(cx, |state, cx| state.set_value(rest, window, cx));
+        if let Some(sw) = self.switcher.as_mut() {
+            sw.committing_token = false;
+        }
+    }
+
     /// Picks a machine from the rail — a chip click or an Alt+←/→ step — by
     /// setting the stored scope and dropping a leading `@token` from the
     /// query. The token previews its own machine every frame, so leaving it
@@ -2377,6 +2499,7 @@ impl Tty59App {
             .switcher
             .as_ref()
             .is_some_and(|sw| !sw.text(cx).trim().is_empty());
+        let (create_label, _) = self.create_preset(cx);
         let hint = |keys: Vec<AnyElement>, label: String| {
             h_flex()
                 .items_center()
@@ -2439,9 +2562,10 @@ impl Tty59App {
                     .text_size(gpui::rems(12.5 / 16.))
                     .text_color(fg)
                     .child(Icon::new(IconName::Plus).size(px(10.)).text_color(muted))
-                    .child(t(L10nKey::AppMenuNewWorkspace))
+                    .child(create_label)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.switcher_to_form(None, window, cx);
+                        let (_, chosen) = this.create_preset(cx);
+                        this.switcher_to_form(chosen, window, cx);
                     })),
             )
             .child(
@@ -3923,7 +4047,7 @@ fn host_menu(
     let Some(target) = host.target.clone() else {
         return menu;
     };
-    let (a1, a2, a3, a4) = (app.clone(), app.clone(), app.clone(), app);
+    let (a1, a2, a3, a4, a5) = (app.clone(), app.clone(), app.clone(), app.clone(), app);
     let menu = menu
         .separator()
         .item(PopupMenuItem::label(host.label.clone()));
@@ -3939,6 +4063,18 @@ fn host_menu(
                 this.switcher_to_form(Some(create_choice.clone()), window, cx);
             });
         }),
+    );
+    // The picker is already up — this menu belongs to one of its rows — so
+    // the machine is one click away, its `@token` (if any) included.
+    let scope = MachineScope::Machine(target.to_string());
+    let menu = menu.item(
+        PopupMenuItem::new(t(L10nKey::RemoteOpenWorkspacesOnMachine)).on_click(
+            move |_, window, cx| {
+                let _ = a5.update(cx, |this, cx| {
+                    this.select_switcher_machine(scope.clone(), window, cx);
+                });
+            },
+        ),
     );
     // The host as it is configured, reachable from the one place it is on
     // screen. A machine dialled by address has no profile yet, so the same
@@ -4999,11 +5135,24 @@ mod gpui_tests {
 
         app.update_in(&mut vcx, |app, window, cx| {
             let devbox = MachineScope::Machine("devbox".into());
+            {
+                let sw = app.switcher.as_mut().expect("panel is open");
+                sw.left_sel = 5;
+                sw.right_sel = 4;
+                sw.column = Column::Right;
+            }
             assert_eq!(
                 select(app, window, cx, "api", devbox.clone()),
                 ("api".to_string(), devbox.clone()),
                 "a plain query is the search and stays untouched"
             );
+            let sw = app.switcher.as_ref().expect("still open");
+            assert_eq!(
+                (sw.left_sel, sw.right_sel),
+                (0, 0),
+                "a pick sends both cursors back to the top"
+            );
+            assert_eq!(sw.column, Column::Left);
             assert_eq!(
                 select(app, window, cx, "@dev api x", devbox.clone()),
                 ("api x".to_string(), devbox.clone()),
@@ -5024,6 +5173,400 @@ mod gpui_tests {
                 select(app, window, cx, "", MachineScope::All),
                 (String::new(), MachineScope::All),
                 "an empty box has no token to drop"
+            );
+        });
+    }
+
+    /// Typing `@machine` and a space commits the token: the stored scope moves
+    /// to that machine and only the rest of the query stays in the box. A
+    /// half-typed or unresolved token is left for the per-frame preview, and
+    /// once the token is gone further typing does not move the scope again.
+    #[gpui::test]
+    fn a_committed_machine_token_sets_the_scope_and_rewrites_the_query(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        let type_into_query =
+            |app: &mut Tty59App, window: &mut Window, cx: &mut Context<Tty59App>, text: &str| {
+                let query = app.switcher.as_ref().expect("panel is open").query.clone();
+                // `replace` replaces the selection, not the document, so clear
+                // first. `set_value` is silent in this dependency; `replace`
+                // takes the same path as typing, so the Change subscriber runs.
+                query.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                    state.replace(text, window, cx);
+                });
+            };
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            type_into_query(app, window, cx, "@dev")
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::All, "a half-typed token previews");
+            assert_eq!(sw.query.read(cx).value(), "@dev", "and stays in the box");
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            type_into_query(app, window, cx, "@nope ")
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::All,
+                "an unresolved token commits nothing"
+            );
+            assert_eq!(sw.query.read(cx).value(), "@nope ");
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            type_into_query(app, window, cx, "@dev api")
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::Machine(key.clone()),
+                "the committed token moves the stored scope"
+            );
+            assert_eq!(
+                sw.query.read(cx).value(),
+                "api",
+                "the token leaves and the rest keeps searching"
+            );
+            assert!(
+                !sw.committing_token,
+                "the rewrite is over, so the next Change is read as typing"
+            );
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            type_into_query(app, window, cx, "api v2")
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::Machine(key.clone()),
+                "later typing without a token leaves the scope alone"
+            );
+            assert_eq!(sw.query.read(cx).value(), "api v2");
+        });
+    }
+
+    /// Backspace is the way back out of a machine when there is nothing left
+    /// to delete. A chorded Backspace still belongs to the input, and a
+    /// non-empty box still deletes a character.
+    #[gpui::test]
+    fn backspace_on_an_empty_scoped_search_returns_to_all(cx: &mut TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_switcher(window, cx);
+            app.set_switcher_scope(MachineScope::local(), cx);
+        });
+        // The key listener lives on the rendered card.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        vcx.simulate_keystrokes("alt-backspace");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::local(),
+                "a chorded Backspace is the input's"
+            );
+        });
+
+        // A non-empty box still deletes a character, and the machine stays.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("api", window, cx));
+        });
+        vcx.simulate_keystrokes("backspace");
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::local());
+            assert_eq!(
+                sw.query.read(cx).value(),
+                "ap",
+                "the input deleted the char"
+            );
+        });
+
+        // Shift keeps Backspace's meaning, so an empty scoped box steps out.
+        vcx.simulate_keystrokes("backspace");
+        vcx.simulate_keystrokes("shift-backspace");
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::local(),
+                "both presses had a character to delete"
+            );
+            assert_eq!(sw.query.read(cx).value(), "");
+        });
+
+        // Whitespace is text: Backspace deletes it before the scope goes.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value(" ", window, cx));
+        });
+        vcx.simulate_keystrokes("backspace");
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::local(),
+                "the space was deleted first"
+            );
+            assert_eq!(sw.query.read(cx).value(), "");
+        });
+
+        vcx.simulate_keystrokes("backspace");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::All
+            );
+        });
+
+        // Not scoped: the bare key stays the input's own.
+        vcx.simulate_keystrokes("backspace");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::All
+            );
+        });
+    }
+
+    /// The footer and the create form read the same effective scope as the
+    /// list, so All and this computer start a local form, a machine fills in
+    /// its own host, and a half-typed `@token` previews it before the space.
+    #[gpui::test]
+    fn the_create_preset_follows_the_effective_scope(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+        use crate::ui::i18n::{L10nKey, t, t_fmt};
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (label, chosen) = app.create_preset(cx);
+            assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
+            assert!(chosen.is_none(), "All starts on this computer");
+
+            app.set_switcher_scope(MachineScope::local(), cx);
+            let (label, chosen) = app.create_preset(cx);
+            assert_eq!(
+                label,
+                t_fmt(
+                    L10nKey::SwitcherNewWorkspaceOnMachine,
+                    &[("machine", t(L10nKey::SwitcherThisComputer))],
+                )
+            );
+            assert!(chosen.is_none(), "this computer has no host to connect");
+
+            app.set_switcher_scope(MachineScope::Machine(key.clone()), cx);
+            let (label, chosen) = app.create_preset(cx);
+            assert_eq!(
+                label,
+                t_fmt(
+                    L10nKey::SwitcherNewWorkspaceOnMachine,
+                    &[("machine", "devbox")],
+                )
+            );
+            let chosen = chosen.expect("a remote scope supplies its host");
+            assert_eq!(chosen.target, target);
+            assert_eq!(chosen.label, "devbox");
+
+            // Half-typed token: stored All, but the preview is devbox.
+            app.set_switcher_scope(MachineScope::All, cx);
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("@dev", window, cx));
+            let (label, chosen) = app.create_preset(cx);
+            assert_eq!(
+                label,
+                t_fmt(
+                    L10nKey::SwitcherNewWorkspaceOnMachine,
+                    &[("machine", "devbox")],
+                )
+            );
+            assert_eq!(
+                chosen.expect("the preview supplies its host").target,
+                target
+            );
+        });
+    }
+
+    /// Opening the create form while scoped presets it, but a host the caller
+    /// names (the row menu's own New Workspace) is never replaced. A machine
+    /// with no link queues the existing PendingCreate path.
+    #[gpui::test]
+    fn the_scoped_preset_is_used_unless_a_host_is_named(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+
+        use super::{HostChoice, HostSnapshot, Page};
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let scoped = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let explicit = RemoteTarget::Alias {
+            alias: "ws-scope-testbox".into(),
+        };
+        app.update(cx, |app, _| {
+            for target in [scoped.clone(), explicit.clone()] {
+                app.host_snapshots.insert(
+                    target.host_id(),
+                    HostSnapshot {
+                        target: target.clone(),
+                        rows: vec![],
+                    },
+                );
+            }
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_switcher(window, cx);
+            app.set_switcher_scope(MachineScope::Machine(scoped.to_string()), cx);
+            app.open_workspace_form(window, cx);
+            let sw = app.switcher.as_ref().expect("panel is open");
+            let Page::Create(form) = &sw.page else {
+                panic!("the form is up");
+            };
+            assert_eq!(
+                form.chosen.as_ref().map(|c| c.target.clone()),
+                Some(scoped.clone()),
+                "the scope presets the form"
+            );
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.switcher_back_to_list(window, cx);
+            app.set_switcher_scope(MachineScope::Machine(scoped.to_string()), cx);
+            app.switcher_to_form(
+                Some(HostChoice {
+                    target: explicit.clone(),
+                    label: "explicit".into(),
+                    detail: String::new(),
+                }),
+                window,
+                cx,
+            );
+            let sw = app.switcher.as_ref().expect("panel is open");
+            let Page::Create(form) = &sw.page else {
+                panic!("the form is up");
+            };
+            assert_eq!(
+                form.chosen.as_ref().map(|c| c.target.clone()),
+                Some(explicit.clone()),
+                "an explicit host choice wins over the scope"
+            );
+            let name = form.name.clone();
+            name.update(cx, |state, cx| state.set_value("demo", window, cx));
+            app.switcher_form_create(window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            let pending = app
+                .pending_create
+                .as_ref()
+                .expect("a machine with no link waits for its connect");
+            assert_eq!(pending.target, explicit);
+            assert_eq!(pending.name.as_deref(), Some("demo"));
+            assert!(
+                matches!(app.connect, Some(super::ConnectFlow::Failed { .. })),
+                "the test alias resolves to no ssh config entry, so the \
+                 existing connect path reports the failure"
+            );
+            assert!(matches!(
+                app.switcher.as_ref().expect("panel is open").page,
+                Page::List
+            ));
+        });
+    }
+
+    /// A scoped open lands on the machine with a reset cursor, and a plain
+    /// open after it goes back to All.
+    #[gpui::test]
+    fn a_scoped_open_resets_the_cursor_and_a_plain_open_resets_the_scope(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_switcher(window, cx);
+            let sw = app.switcher.as_mut().expect("panel is open");
+            sw.left_sel = 3;
+            sw.right_sel = 2;
+            sw.column = Column::Right;
+            app.open_switcher_scoped(MachineScope::Machine(key.clone()), window, cx);
+        });
+        app.update(cx, |app, _| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::Machine(key.clone()));
+            assert_eq!((sw.left_sel, sw.right_sel), (0, 0));
+            assert_eq!(sw.column, Column::Left);
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_switcher(window, cx);
+            app.open_switcher(window, cx);
+        });
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::All,
+                "ordinary opens always restart from All"
             );
         });
     }

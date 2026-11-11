@@ -6993,6 +6993,7 @@ impl Tty59App {
             NewWorkspace => self.open_workspace_form(window, cx),
             NewWindow => self.new_window(cx),
             OpenWorkspacePicker => self.open_switcher(window, cx),
+            OpenWorkspaceOnMachine => self.open_switcher_on_machine(window, cx),
             StopWorkspace => self.stop_workspace(self.workspace, window, cx),
             DeleteWorkspace => self.delete_workspace(self.workspace, window, cx),
             CloseWindow => self.close_window(window, cx),
@@ -14966,4 +14967,26 @@ fn remember_sessions(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(host, found);
+}
+
+#[cfg(test)]
+mod open_workspace_on_machine_tests {
+    use super::test_window::harness;
+    use crate::ui::search::command::CommandKind;
+    use gpui::TestAppContext;
+
+    /// The palette row is more than a label: it has to raise the picker with
+    /// the `@` seed already in the box. The scope stays All — it is private to
+    /// the picker and the switcher's own tests cover the scoped resets.
+    #[gpui::test]
+    fn the_command_opens_the_picker_with_a_machine_token(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.run_command(CommandKind::OpenWorkspaceOnMachine, window, cx);
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("the command opens the picker");
+            assert_eq!(sw.query.read(cx).value(), "@");
+        });
+    }
 }
