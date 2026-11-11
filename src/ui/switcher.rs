@@ -77,6 +77,11 @@ const RUN_DOT: f32 = 5.0;
 /// The list rows' corner.
 const LIST_RADIUS: f32 = 8.0;
 
+/// How much of the left column the offline card's endpoint may take. The card
+/// lives in that column too, and an unbounded `user@host:port` beside the
+/// failure text squeezed the text to nothing.
+const ENDPOINT_MAX_W: f32 = 140.0;
+
 /// The create form's rows and the rename field keep the compact height.
 const ROW_H: f32 = 34.0;
 const HOST_H: f32 = 28.0;
@@ -2894,7 +2899,14 @@ impl Tty59App {
                 .text_size(muted_text)
                 .text_color(muted)
                 .child(div().flex_1().min_w_0().truncate().child(error))
-                .child(div().flex_shrink_0().whitespace_nowrap().child(endpoint))
+                .child(
+                    div()
+                        .flex_shrink_1()
+                        .min_w_0()
+                        .max_w(px(ENDPOINT_MAX_W))
+                        .truncate()
+                        .child(endpoint),
+                )
                 .into_any_element(),
             (None, endpoint) => div()
                 .truncate()
@@ -4782,8 +4794,7 @@ mod tests {
 
     /// The regression the whole split exists for: narrowing to this computer
     /// puts its open workspaces together, so a recently closed one no longer
-    /// sits above a live one. The old comparator's order is recorded in the
-    /// milestone review, not reproduced here.
+    /// sits above a live one. All keeps the blended order.
     #[test]
     fn a_scoped_list_puts_open_rows_before_a_more_recent_closed_one() {
         let groups = vec![group(vec![
