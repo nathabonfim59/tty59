@@ -115,7 +115,7 @@ fn link_is_engaged(link: Link) -> bool {
 /// list do the talking. The row's takeover case (`Connected` on a preempted
 /// machine) stays a row matter: `RailEntry` carries the link alone, and
 /// which workspace was taken over is not the machine's news.
-fn rail_link_dot(link: Link, cx: &App) -> Option<gpui::Rgba> {
+fn rail_link_dot(link: Link, cx: &App) -> Option<gpui::Hsla> {
     match link {
         Link::Connecting | Link::Reconnecting { .. } => Some(cx.theme().warning),
         Link::Failed => Some(cx.theme().danger),
@@ -2071,7 +2071,9 @@ impl Tty59App {
                         )
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.select_switcher_machine(scope, window, cx);
+                        // The listener is an Fn that outlives the click, so
+                        // the captured scope travels by clone.
+                        this.select_switcher_machine(scope.clone(), window, cx);
                     }))
                     .into_any_element(),
             );
