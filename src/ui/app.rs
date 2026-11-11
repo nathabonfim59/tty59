@@ -14972,7 +14972,7 @@ fn remember_sessions(
 #[cfg(test)]
 mod open_workspace_on_machine_tests {
     use super::test_window::harness;
-    use crate::ui::search::command::CommandKind;
+    use crate::ui::search::CommandKind;
     use gpui::TestAppContext;
 
     /// The palette row is more than a label: it has to raise the picker with
