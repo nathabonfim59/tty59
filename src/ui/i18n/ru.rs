@@ -832,6 +832,16 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ConfirmCloseAlways => "Всегда",
         L10nKey::SettingsTabBarPosition => "Положение вкладок",
         L10nKey::SettingsTabBarPositionDesc => "Полоса сверху или боковая панель слева.",
+        L10nKey::SidebarListTerminal => "Терминал",
+        L10nKey::SidebarListAgents => "Агенты",
+        L10nKey::SidebarNoAgents => "В этом рабочем пространстве нет агентов",
+        L10nKey::SettingsSidebarAgentsToggle => "Переключатель Терминал | Агенты",
+        L10nKey::SettingsSidebarAgentsToggleDesc => {
+            "Показывать переключатель списков внизу боковой панели рабочего стола."
+        }
+        L10nKey::SettingsSearchSidebarAgentsToggleKeywords => {
+            "боковая панель терминал агенты список переключатель"
+        }
         L10nKey::SettingsSidebarGrouping => "Автогруппировка",
         L10nKey::SettingsSidebarGroupingDesc => {
             "Группировать незакреплённые вкладки по репозиторию Git, SSH-вкладки по хосту."
