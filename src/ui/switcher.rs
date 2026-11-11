@@ -640,6 +640,24 @@ fn connect_choice(group: &Group) -> Option<HostChoice> {
     })
 }
 
+/// The footer's New Workspace wording and the host the create form starts on,
+/// both from the frame's effective scope. A machine picked by a chip,
+/// Alt+←/→ or a half-typed `@token` names itself and supplies the same choice
+/// its offline card would connect with; All (or a scope whose group left the
+/// frame) means this computer's own form, with no host.
+fn create_preset_of(layout: &Layout) -> (String, Option<HostChoice>) {
+    let Some(group) = layout.scope.group(&layout.groups) else {
+        return (t(L10nKey::AppMenuNewWorkspace).to_string(), None);
+    };
+    (
+        t_fmt(
+            L10nKey::SwitcherNewWorkspaceOnMachine,
+            &[("machine", group.label.as_str())],
+        ),
+        connect_choice(group),
+    )
+}
+
 /// What the offline card's second line has to say: the failure that took the
 /// machine down (the row truncates it) and the endpoint it would dial. A group
 /// with no failure behind it only has the endpoint to show.
@@ -1533,43 +1551,6 @@ impl Tty59App {
         cx.notify();
     }
 
-    /// The footer's New Workspace wording and the host the create form starts
-    /// on, both from the effective scope: a machine picked by a chip, Alt+←/→
-    /// or a half-typed `@token` names itself, and All means this computer's
-    /// own form (no host).
-    fn create_preset(&self, cx: &mut Context<Self>) -> (String, Option<HostChoice>) {
-        let groups = self.switcher_groups(cx);
-        let rail = machine_scope::rail_entries(&groups, t(L10nKey::SwitcherMachineAll));
-        let stored = self
-            .switcher
-            .as_ref()
-            .map(|sw| sw.scope.clone())
-            .unwrap_or_default();
-        let query = self
-            .switcher
-            .as_ref()
-            .map(|sw| sw.text(cx))
-            .unwrap_or_default();
-        let (scope, _) = machine_scope::effective(&stored, &query, &rail);
-        let MachineScope::Machine(key) = &scope else {
-            return (t(L10nKey::AppMenuNewWorkspace).to_string(), None);
-        };
-        let Some(group) = groups.iter().find(|g| &g.key == key) else {
-            return (t(L10nKey::AppMenuNewWorkspace).to_string(), None);
-        };
-        (
-            t_fmt(
-                L10nKey::SwitcherNewWorkspaceOnMachine,
-                &[("machine", group.label.as_str())],
-            ),
-            group.target.clone().map(|target| HostChoice {
-                target,
-                label: group.label.clone(),
-                detail: group.endpoint.clone(),
-            }),
-        )
-    }
-
     /// `⌘⇧N` and the footer button. Raises the switcher if it is down and
     /// flips the card to the create form. A fresh panel is All, so the usual
     /// `⌘⇧N`, a name, then Enter is a local workspace; a panel that is already
@@ -1578,7 +1559,8 @@ impl Tty59App {
         if self.switcher.is_none() {
             self.open_switcher(window, cx);
         }
-        let (_, chosen) = self.create_preset(cx);
+        let layout = self.switcher_layout(cx);
+        let (_, chosen) = create_preset_of(&layout);
         self.switcher_to_form(chosen, window, cx);
     }
 
@@ -2314,7 +2296,7 @@ impl Tty59App {
             .child(self.render_rail(&layout, cx))
             .child(body)
             .children(self.render_banners(&layout, cx))
-            .child(self.render_footer(cx))
+            .child(self.render_footer(&layout, cx))
             .into_any_element()
     }
 
@@ -2603,7 +2585,7 @@ impl Tty59App {
             .child(keycap("esc", cx))
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_footer(&self, layout: &Layout, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
         let hover = hover_fill(cx);
@@ -2615,7 +2597,7 @@ impl Tty59App {
             .switcher
             .as_ref()
             .is_some_and(|sw| !sw.text(cx).trim().is_empty());
-        let (create_label, _) = self.create_preset(cx);
+        let (create_label, _) = create_preset_of(layout);
         let hint = |keys: Vec<AnyElement>, label: String| {
             h_flex()
                 .items_center()
@@ -2680,7 +2662,8 @@ impl Tty59App {
                     .child(Icon::new(IconName::Plus).size(px(10.)).text_color(muted))
                     .child(create_label)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        let (_, chosen) = this.create_preset(cx);
+                        let layout = this.switcher_layout(cx);
+                        let (_, chosen) = create_preset_of(&layout);
                         this.switcher_to_form(chosen, window, cx);
                     })),
             )
@@ -5049,6 +5032,63 @@ mod tests {
         );
     }
 
+    /// The footer's wording and preset come from the frame's effective scope
+    /// and the group already in it. The endpoint is the same line the offline
+    /// card dials, so a machine with no configured route still names itself,
+    /// and a scope whose group left the frame falls back to this computer.
+    #[test]
+    fn the_create_preset_reads_the_layouts_scope_and_group() {
+        crate::ui::i18n::set_locale("en");
+        let mut configured = named_group("devbox", vec![]);
+        configured.endpoint = "dev@build:2222".to_string();
+        let bare = named_group("staging", vec![]);
+        let groups = vec![group(vec![]), configured.clone(), bare];
+        let layout = |scope| Layout {
+            groups: groups.clone(),
+            nav: Vec::new(),
+            rail: Vec::new(),
+            scope,
+        };
+
+        let (label, chosen) = create_preset_of(&layout(MachineScope::All));
+        assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
+        assert!(chosen.is_none(), "All starts on this computer");
+
+        let (label, chosen) = create_preset_of(&layout(MachineScope::local()));
+        assert_eq!(
+            label,
+            t_fmt(
+                L10nKey::SwitcherNewWorkspaceOnMachine,
+                &[("machine", t(L10nKey::SwitcherThisComputer))],
+            )
+        );
+        assert!(chosen.is_none(), "this computer has no host to connect");
+
+        let (label, chosen) = create_preset_of(&layout(MachineScope::Machine("devbox".into())));
+        assert_eq!(
+            label,
+            t_fmt(
+                L10nKey::SwitcherNewWorkspaceOnMachine,
+                &[("machine", "devbox")],
+            )
+        );
+        let chosen = chosen.expect("a configured machine supplies its host");
+        assert_eq!(chosen.target, configured.target.clone().unwrap());
+        assert_eq!(chosen.label, "devbox");
+        assert_eq!(chosen.detail, "dev@build:2222");
+
+        // No configured route: the detail falls back to the target's own
+        // spelling, the same endpoint the offline card would print.
+        let (_, chosen) = create_preset_of(&layout(MachineScope::Machine("staging".into())));
+        let chosen = chosen.expect("a machine with no endpoint still connects by target");
+        assert_eq!(chosen.detail, chosen.target.to_string());
+
+        // A stored scope can outlive its group while the groups are rebuilt.
+        let (label, chosen) = create_preset_of(&layout(MachineScope::Machine("ghost".into())));
+        assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
+        assert!(chosen.is_none());
+    }
+
     #[test]
     fn the_tab_column_follows_the_flat_cursor() {
         let layout = Layout {
@@ -5692,12 +5732,14 @@ mod gpui_tests {
         app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
 
         app.update_in(&mut vcx, |app, window, cx| {
-            let (label, chosen) = app.create_preset(cx);
+            let layout = app.switcher_layout(cx);
+            let (label, chosen) = super::create_preset_of(&layout);
             assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
             assert!(chosen.is_none(), "All starts on this computer");
 
             app.set_switcher_scope(MachineScope::local(), cx);
-            let (label, chosen) = app.create_preset(cx);
+            let layout = app.switcher_layout(cx);
+            let (label, chosen) = super::create_preset_of(&layout);
             assert_eq!(
                 label,
                 t_fmt(
@@ -5708,7 +5750,8 @@ mod gpui_tests {
             assert!(chosen.is_none(), "this computer has no host to connect");
 
             app.set_switcher_scope(MachineScope::Machine(key.clone()), cx);
-            let (label, chosen) = app.create_preset(cx);
+            let layout = app.switcher_layout(cx);
+            let (label, chosen) = super::create_preset_of(&layout);
             assert_eq!(
                 label,
                 t_fmt(
@@ -5724,7 +5767,8 @@ mod gpui_tests {
             app.set_switcher_scope(MachineScope::All, cx);
             let query = app.switcher.as_ref().expect("panel is open").query.clone();
             query.update(cx, |state, cx| state.set_value("@dev", window, cx));
-            let (label, chosen) = app.create_preset(cx);
+            let layout = app.switcher_layout(cx);
+            let (label, chosen) = super::create_preset_of(&layout);
             assert_eq!(
                 label,
                 t_fmt(
