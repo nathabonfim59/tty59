@@ -5029,7 +5029,8 @@ mod gpui_tests {
     /// Where that part of the card lands on screen. The card is centred and
     /// its columns are laid out from `CARD_W` / `LEFT_W`, so the geometry is
     /// worth recomputing here rather than hard-coding pixels that move with
-    /// the window size.
+    /// the window size. Vertically the columns sit under the search row and
+    /// the machine rail, both of which the spots have to step over.
     fn card_point(vcx: &mut gpui::VisualTestContext, spot: Spot) -> gpui::Point<gpui::Pixels> {
         use gpui::{point, px};
 
@@ -5040,11 +5041,18 @@ mod gpui_tests {
         let left_w = super::LEFT_W.min(card_w * 0.5);
         let card_left = (viewport.width.as_f32() - card_w) / 2.;
         let (dx, dy) = match spot {
-            Spot::Workspaces => (20., super::SEARCH_H + super::COLUMN_PAD + 16.),
+            Spot::Workspaces => (
+                20.,
+                super::SEARCH_H + super::RAIL_H + super::COLUMN_PAD + 16.,
+            ),
             // Past the tab column's own header row, onto its first tab.
             Spot::Tabs => (
                 left_w + 40.,
-                super::SEARCH_H + super::COLUMN_PAD + super::HOST_H + super::TAB_ROW_H / 2.,
+                super::SEARCH_H
+                    + super::RAIL_H
+                    + super::COLUMN_PAD
+                    + super::HOST_H
+                    + super::TAB_ROW_H / 2.,
             ),
         };
         point(px(card_left + dx), px(super::CARD_TOP + dy))
