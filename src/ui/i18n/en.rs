@@ -1749,6 +1749,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SwitcherThisComputer => "This Computer",
         L10nKey::SwitcherMachineAll => "All",
+        L10nKey::SwitcherAddMachine => "Add machine",
         L10nKey::SwitcherMachineHint => "Alt ← → machine",
         L10nKey::SwitcherOpenInWindow => "Open in a window",
         L10nKey::SwitcherOnThisMachine => "On this machine, not open here",

@@ -1467,6 +1467,7 @@ l10n_keys! {
     AppNoRunningCodingAgent,
     SwitcherThisComputer,
     SwitcherMachineAll,
+    SwitcherAddMachine,
     SwitcherMachineHint,
     SwitcherOpenInWindow,
     SwitcherOnThisMachine,

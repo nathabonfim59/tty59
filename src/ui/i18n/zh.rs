@@ -1620,6 +1620,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherThisComputer => "本机",
         L10nKey::SwitcherMachineAll => "全部",
+        L10nKey::SwitcherAddMachine => "添加机器",
         L10nKey::SwitcherMachineHint => "Alt ← → 切换机器",
         L10nKey::SwitcherOpenInWindow => "在窗口中打开",
         L10nKey::SwitcherOnThisMachine => "在这台机器上，此处未打开",
