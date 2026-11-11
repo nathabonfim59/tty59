@@ -603,10 +603,7 @@ fn connect_choice(group: &Group) -> Option<HostChoice> {
 /// Orphan panes are this computer's; under a remote scope they are not
 /// something the list is about.
 fn orphans_visible(scope: &MachineScope) -> bool {
-    match scope {
-        MachineScope::All => true,
-        MachineScope::Machine(key) => key.is_empty(),
-    }
+    matches!(scope, MachineScope::All) || scope == &MachineScope::local()
 }
 
 /// What the empty list says. Unscoped keeps the ordinary no-match wording; a
@@ -2390,7 +2387,6 @@ impl Tty59App {
     /// Narrows the left column to `scope` — the one way the rail, Alt+←/→ and
     /// a committed `@token` change it. The cursor goes back to the top so the
     /// tab column shows the new list's first workspace.
-    #[allow(dead_code)] // used by the rail, keys and `@`-commit packages
     pub(crate) fn set_switcher_scope(&mut self, scope: MachineScope, cx: &mut Context<Self>) {
         let Some(sw) = self.switcher.as_mut() else {
             return;
@@ -2446,7 +2442,6 @@ impl Tty59App {
     /// query. The token previews its own machine every frame, so leaving it
     /// in place would undo the pick; whatever was typed after it is the
     /// search that stays.
-    #[allow(dead_code)] // used by the rail and key packages
     pub(crate) fn select_switcher_machine(
         &mut self,
         scope: MachineScope,
