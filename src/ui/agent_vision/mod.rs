@@ -2,9 +2,12 @@ use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use tty59_core::core::cli_agent::{AgentOverview, AgentSessionState, AgentStatus, CLIAgent};
+use tty59_core::core::group_key::GroupKey;
 use tty59_core::core::machine::{PaneRecord, TabId};
 use tty59_core::core::session::WorkspaceId;
 use tty59_core::host::HostId;
+
+mod navigation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct PaneKey {
@@ -18,6 +21,24 @@ pub(super) struct PaneLocation {
     pub workspace: WorkspaceId,
     pub tab: TabId,
     pub tab_title: String,
+    pub group: Option<GroupKey>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PaneTarget {
+    pub key: PaneKey,
+    pub workspace: WorkspaceId,
+    pub tab: TabId,
+}
+
+impl From<&PaneLocation> for PaneTarget {
+    fn from(location: &PaneLocation) -> Self {
+        Self {
+            key: location.key,
+            workspace: location.workspace,
+            tab: location.tab,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,8 +188,290 @@ struct AttentionEvent {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Project {
-    pub id: WorkspaceId,
+    pub group: Option<GroupKey>,
     pub name: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum ViewMode {
+    #[default]
+    Workbench,
+    Inbox,
+    Kanban,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum FocusZone {
+    #[default]
+    List,
+    Terminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NavigationKey {
+    PreviousProject,
+    NextProject,
+    Up,
+    Down,
+    Left,
+    Right,
+    Enter,
+    Escape,
+}
+
+impl NavigationKey {
+    pub fn from_key(key: &str) -> Option<Self> {
+        Some(match key {
+            "[" => Self::PreviousProject,
+            "]" => Self::NextProject,
+            "k" | "up" => Self::Up,
+            "j" | "down" => Self::Down,
+            "h" | "left" => Self::Left,
+            "l" | "right" => Self::Right,
+            "enter" => Self::Enter,
+            "escape" => Self::Escape,
+            _ => return None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NavigationResult {
+    Unhandled,
+    List,
+    Terminal(PaneTarget),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum ProjectFilter {
+    #[default]
+    All,
+    Group(Option<GroupKey>),
+}
+
+impl ProjectFilter {
+    pub fn contains(&self, group: &Option<GroupKey>) -> bool {
+        match self {
+            Self::All => true,
+            Self::Group(selected) => selected == group,
+        }
+    }
+
+    pub fn panes<'a, 'filter>(
+        &'filter self,
+        workspace: WorkspaceId,
+        panes: &'a [PaneSummary],
+    ) -> impl Iterator<Item = &'a PaneSummary> + use<'a, 'filter> {
+        panes.iter().filter(move |pane| {
+            pane.location.workspace == workspace && self.contains(&pane.location.group)
+        })
+    }
+
+    pub fn cycle(&self, projects: &[Project], forward: bool) -> Self {
+        let current = match self {
+            Self::All => 0,
+            Self::Group(group) => projects
+                .iter()
+                .position(|project| &project.group == group)
+                .map_or(0, |index| index + 1),
+        };
+        let count = projects.len() + 1;
+        let next = if forward {
+            (current + 1) % count
+        } else {
+            (current + count - 1) % count
+        };
+        next.checked_sub(1).map_or(Self::All, |index| {
+            Self::Group(projects[index].group.clone())
+        })
+    }
+
+    pub fn reconcile(&mut self, projects: &[Project]) {
+        if let Self::Group(group) = self
+            && !projects
+                .iter()
+                .any(|project| project.group.as_ref() == group.as_ref())
+        {
+            *self = Self::All;
+        }
+    }
+}
+
+pub(super) struct VisionState {
+    workspace: WorkspaceId,
+    mode: ViewMode,
+    project_filter: ProjectFilter,
+    focus: FocusZone,
+    selected: Option<PaneKey>,
+    pub show_other: bool,
+}
+
+impl VisionState {
+    pub fn new(workspace: WorkspaceId) -> Self {
+        Self {
+            workspace,
+            mode: ViewMode::default(),
+            project_filter: ProjectFilter::default(),
+            focus: FocusZone::default(),
+            selected: None,
+            show_other: false,
+        }
+    }
+
+    pub fn set_workspace(&mut self, workspace: WorkspaceId) {
+        if self.workspace != workspace {
+            self.workspace = workspace;
+            self.project_filter = ProjectFilter::All;
+            self.reset_list_focus();
+        }
+    }
+
+    pub fn mode(&self) -> ViewMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: ViewMode) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.reset_list_focus();
+        }
+    }
+
+    pub fn project_filter(&self) -> &ProjectFilter {
+        &self.project_filter
+    }
+
+    pub fn set_project_filter(&mut self, project_filter: ProjectFilter) {
+        self.project_filter = project_filter;
+        self.reset_list_focus();
+    }
+
+    pub fn focus(&self) -> FocusZone {
+        self.focus
+    }
+
+    pub fn selected(&self) -> Option<PaneKey> {
+        self.selected
+    }
+
+    fn reset_list_focus(&mut self) {
+        self.focus = FocusZone::List;
+        self.selected = None;
+    }
+
+    pub fn inbox_rows<'a>(
+        &self,
+        panes: &'a [PaneSummary],
+        reads: &InboxReadState,
+    ) -> InboxRows<'a> {
+        reads.rows(self.project_filter.panes(self.workspace, panes))
+    }
+
+    pub fn kanban_panes<'a, 'state>(
+        &'state self,
+        panes: &'a [PaneSummary],
+    ) -> impl Iterator<Item = &'a PaneSummary> + use<'a, 'state> {
+        self.project_filter.panes(self.workspace, panes)
+    }
+
+    pub fn kanban_columns<'a>(&self, panes: &'a [PaneSummary]) -> KanbanColumns<'a> {
+        let mut columns = std::array::from_fn(|_| Vec::new());
+        for pane in self.kanban_panes(panes) {
+            columns[pane.state.kanban_index()].push(pane);
+        }
+        for column in &mut columns {
+            column.sort_by_key(|pane| {
+                (
+                    pane.since_ms.is_none(),
+                    pane.since_ms,
+                    pane.location.key.host.0,
+                    pane.location.key.pane,
+                )
+            });
+        }
+        KanbanColumns(columns)
+    }
+
+    pub fn workspace_summary<'a>(
+        &self,
+        projects: &'a [Project],
+        panes: &[PaneSummary],
+        reads: &InboxReadState,
+    ) -> WorkspaceSummary<'a> {
+        let mut counts = HashMap::<&Option<GroupKey>, AttentionCount>::new();
+        let mut all = AttentionCount::default();
+        for pane in panes
+            .iter()
+            .filter(|pane| pane.location.workspace == self.workspace)
+        {
+            if let Some(event) = reads.attention(pane) {
+                all.add(event.kind);
+                counts
+                    .entry(&pane.location.group)
+                    .or_default()
+                    .add(event.kind);
+            }
+        }
+        WorkspaceSummary {
+            all,
+            projects: projects
+                .iter()
+                .map(|project| ProjectSummary {
+                    project,
+                    needs_attention: counts.get(&project.group).copied().unwrap_or_default(),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn next_needing_attention(
+        &mut self,
+        panes: &[PaneSummary],
+        reads: &mut InboxReadState,
+    ) -> Option<PaneTarget> {
+        let next = panes
+            .iter()
+            .filter(|pane| {
+                pane.location.workspace == self.workspace
+                    && Some(pane.location.key) != self.selected
+            })
+            .filter_map(|pane| reads.attention(pane).map(|event| (event.kind, pane)))
+            .min_by_key(|(kind, pane)| (*kind, recency(pane)))?
+            .1;
+        if let Some(current) = panes.iter().find(|pane| {
+            pane.location.workspace == self.workspace && Some(pane.location.key) == self.selected
+        }) {
+            reads.mark_read(current);
+        }
+        if !self.project_filter.contains(&next.location.group) {
+            self.project_filter = ProjectFilter::All;
+        }
+        self.mode = ViewMode::Inbox;
+        self.focus_list_item(next.location.key);
+        Some(PaneTarget::from(&next.location))
+    }
+}
+
+pub(super) struct KanbanColumns<'a>(pub [Vec<&'a PaneSummary>; 5]);
+
+impl State {
+    pub const KANBAN_ORDER: [Self; 5] = [
+        Self::Waiting,
+        Self::Working,
+        Self::Done,
+        Self::Idle,
+        Self::Exited,
+    ];
+
+    fn kanban_index(self) -> usize {
+        match self {
+            Self::Waiting => 0,
+            Self::Working => 1,
+            Self::Done => 2,
+            Self::Idle => 3,
+            Self::Exited => 4,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -181,9 +484,21 @@ impl AttentionCount {
     pub fn total(self) -> usize {
         self.waiting + self.finished
     }
+
+    fn add(&mut self, kind: Attention) {
+        match kind {
+            Attention::Waiting => self.waiting += 1,
+            Attention::Finished => self.finished += 1,
+        }
+    }
 }
 
 pub(super) struct WorkspaceSummary<'a> {
+    pub all: AttentionCount,
+    pub projects: Vec<ProjectSummary<'a>>,
+}
+
+pub(super) struct ProjectSummary<'a> {
     pub project: &'a Project,
     pub needs_attention: AttentionCount,
 }
@@ -198,7 +513,18 @@ pub(super) struct InboxRows<'a> {
     pub other: Vec<&'a PaneSummary>,
 }
 
-impl InboxRows<'_> {
+impl<'a> InboxRows<'a> {
+    fn visible(&self, show_other: bool) -> impl Iterator<Item = &'a PaneSummary> + '_ {
+        self.attention
+            .iter()
+            .chain(
+                self.other
+                    .iter()
+                    .take(if show_other { self.other.len() } else { 0 }),
+            )
+            .copied()
+    }
+
     pub fn keep_selection(&self, selected: Option<PaneKey>) -> Option<PaneKey> {
         let rows = self.attention.iter().chain(&self.other);
         if let Some(key) = selected
@@ -242,29 +568,16 @@ impl InboxReadState {
             .filter(|event| self.read.get(&pane.location.key) != Some(event))
     }
 
-    pub fn rows<'a>(
-        &self,
-        panes: &'a [PaneSummary],
-        project: Option<WorkspaceId>,
-    ) -> InboxRows<'a> {
+    pub fn rows<'a>(&self, panes: impl IntoIterator<Item = &'a PaneSummary>) -> InboxRows<'a> {
         let mut attention = Vec::new();
         let mut other = Vec::new();
-        for pane in panes.iter().filter(|pane| {
-            pane.state != State::Exited && project.is_none_or(|id| pane.location.workspace == id)
-        }) {
+        for pane in panes {
             if let Some(event) = self.attention(pane) {
                 attention.push((event.kind, pane));
             } else {
                 other.push(pane);
             }
         }
-        let recency = |pane: &PaneSummary| {
-            (
-                Reverse(pane.since_ms),
-                pane.location.key.host.0,
-                pane.location.key.pane,
-            )
-        };
         attention.sort_by_key(|(kind, pane)| (*kind, recency(pane)));
         other.sort_by_key(|pane| recency(pane));
         InboxRows {
@@ -273,45 +586,23 @@ impl InboxReadState {
         }
     }
 
-    pub fn workspaces<'a>(
-        &self,
-        projects: &'a [Project],
-        panes: &[PaneSummary],
-    ) -> Vec<WorkspaceSummary<'a>> {
-        let mut counts = HashMap::<WorkspaceId, AttentionCount>::new();
+    pub fn global_attention(&self, panes: &[PaneSummary]) -> AttentionCount {
+        let mut count = AttentionCount::default();
         for pane in panes {
             if let Some(event) = self.attention(pane) {
-                let count = counts.entry(pane.location.workspace).or_default();
-                match event.kind {
-                    Attention::Waiting => count.waiting += 1,
-                    Attention::Finished => count.finished += 1,
-                }
+                count.add(event.kind);
             }
         }
-        projects
-            .iter()
-            .map(|project| WorkspaceSummary {
-                project,
-                needs_attention: counts.get(&project.id).copied().unwrap_or_default(),
-            })
-            .collect()
+        count
     }
+}
 
-    pub fn handle_and_advance(
-        &mut self,
-        panes: &[PaneSummary],
-        current: Option<PaneKey>,
-    ) -> Option<PaneKey> {
-        if let Some(current) = current
-            && let Some(pane) = panes.iter().find(|pane| pane.location.key == current)
-        {
-            self.mark_read(pane);
-        }
-        self.rows(panes, None)
-            .attention
-            .first()
-            .map(|pane| pane.location.key)
-    }
+fn recency(pane: &PaneSummary) -> (Reverse<Option<u64>>, u64, u64) {
+    (
+        Reverse(pane.since_ms),
+        pane.location.key.host.0,
+        pane.location.key.pane,
+    )
 }
 
 #[cfg(test)]
