@@ -2,6 +2,7 @@ use super::L10nKey;
 
 pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
     Some(match key {
+        L10nKey::VisionPane => "панель {i}/{n}",
         L10nKey::SettingsNoMatchesShort => "Нет совпадений",
         L10nKey::SettingsModifiedTitle => "Изменено",
         L10nKey::SettingsMatchCount => "Совпадений: {count}",

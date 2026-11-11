@@ -2,6 +2,7 @@ use super::L10nKey;
 
 pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
     Some(match key {
+        L10nKey::VisionPane => "窗格 {i}/{n}",
         L10nKey::SettingsNoMatchesShort => "没有匹配项",
         L10nKey::SettingsModifiedTitle => "已修改",
         L10nKey::SettingsMatchCount => "{count} 个结果",

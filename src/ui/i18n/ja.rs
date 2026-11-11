@@ -2,6 +2,7 @@ use super::L10nKey;
 
 pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
     Some(match key {
+        L10nKey::VisionPane => "ペイン {i}/{n}",
         L10nKey::SettingsNoMatchesShort => "一致なし",
         L10nKey::SettingsModifiedTitle => "変更済み",
         L10nKey::SettingsMatchCount => "{count} 件",

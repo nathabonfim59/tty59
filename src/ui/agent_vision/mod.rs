@@ -69,6 +69,8 @@ pub(super) struct PaneSummary {
     pub kind: String,
     pub state: State,
     pub since_ms: Option<u64>,
+    /// One-based position among all tab panes, including non-agent panes.
+    pub pane_position: Option<(usize, usize)>,
     epoch: Option<u64>,
     turns: u64,
     unseen_done: bool,
@@ -93,6 +95,7 @@ impl PaneSummary {
                 .map_or(AgentStatus::Idle, |state| state.status)
                 .into(),
             since_ms: session.and_then(|state| state.since_ms),
+            pane_position: None,
             epoch: None,
             turns: session.map_or(0, |state| state.turns),
             unseen_done,
@@ -123,6 +126,7 @@ impl PaneSummary {
             kind: facts.agent.slug().into(),
             state: facts.status.unwrap_or_default().into(),
             since_ms: None,
+            pane_position: None,
             epoch: None,
             turns: 0,
             unseen_done,
@@ -145,6 +149,7 @@ impl PaneSummary {
                 overview.status.into()
             },
             since_ms: overview.since_ms,
+            pane_position: None,
             epoch: Some(overview.epoch),
             turns: overview.turns,
             unseen_done,
@@ -156,6 +161,15 @@ impl PaneSummary {
             Some(agent) => agent.display_name(),
             None => &self.kind,
         }
+    }
+
+    pub fn pane_marker(&self) -> Option<String> {
+        self.pane_position.map(|(index, total)| {
+            crate::ui::i18n::t_fmt(
+                crate::ui::i18n::L10nKey::VisionPane,
+                &[("i", &index.to_string()), ("n", &total.to_string())],
+            )
+        })
     }
 
     fn event(&self) -> Option<AttentionEvent> {

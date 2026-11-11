@@ -76,6 +76,7 @@ macro_rules! l10n_keys {
 }
 
 l10n_keys! {
+    VisionPane,
     SettingsNoMatchesShort,
     SettingsModifiedTitle,
     SettingsMatchCount,

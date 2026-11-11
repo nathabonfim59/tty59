@@ -2,6 +2,7 @@ use super::L10nKey;
 
 pub fn translate_en(key: L10nKey) -> &'static str {
     match key {
+        L10nKey::VisionPane => "pane {i}/{n}",
         L10nKey::SettingsNoMatchesShort => "No matches",
         L10nKey::SettingsModifiedTitle => "Modified",
         L10nKey::SettingsMatchCount => "{count} matches",
