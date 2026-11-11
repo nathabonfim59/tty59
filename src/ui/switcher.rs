@@ -2386,14 +2386,13 @@ impl Tty59App {
 
     /// Narrows the left column to `scope` — the one way the rail, Alt+←/→ and
     /// a committed `@token` change it. The cursor goes back to the top so the
-    /// tab column shows the new list's first workspace.
+    /// tab column shows the new list's first workspace, even when the scope
+    /// is the one already stored: clicking the selected chip is how the
+    /// keyboard user gets back to the top.
     pub(crate) fn set_switcher_scope(&mut self, scope: MachineScope, cx: &mut Context<Self>) {
         let Some(sw) = self.switcher.as_mut() else {
             return;
         };
-        if sw.scope == scope {
-            return;
-        }
         sw.scope = scope;
         sw.left_sel = 0;
         sw.right_sel = 0;
@@ -5169,6 +5168,90 @@ mod gpui_tests {
                 (String::new(), MachineScope::All),
                 "an empty box has no token to drop"
             );
+        });
+    }
+
+    /// The stored scope and the preview can disagree: with All stored and
+    /// `@dev` typed, the list shows devbox. Picking All must drop the token
+    /// and reset the cursor even though the stored scope does not change — the
+    /// early return that skipped the assignments left the tab column where it
+    /// was.
+    #[gpui::test]
+    fn selecting_all_over_a_resolved_preview_clears_the_token_and_resets_the_cursor(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("@dev", window, cx));
+            assert_eq!(
+                app.switcher_layout(cx).scope,
+                MachineScope::Machine(key.clone()),
+                "the half-typed token previews devbox"
+            );
+            {
+                let sw = app.switcher.as_mut().expect("panel is open");
+                sw.left_sel = 4;
+                sw.right_sel = 3;
+                sw.column = Column::Right;
+            }
+            app.select_switcher_machine(MachineScope::All, window, cx);
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::All);
+            assert_eq!(sw.query.read(cx).value(), "", "the preview token is gone");
+            assert_eq!(
+                (sw.left_sel, sw.right_sel),
+                (0, 0),
+                "the unchanged stored scope still sends the cursors to the top"
+            );
+            assert_eq!(sw.column, Column::Left);
+        });
+    }
+
+    /// Clicking the chip whose scope is already stored is still a pick: it
+    /// puts the keyboard cursor back on the top row.
+    #[gpui::test]
+    fn picking_the_scope_already_stored_still_resets_the_cursor(cx: &mut TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let devbox = MachineScope::Machine("devbox".into());
+            app.select_switcher_machine(devbox.clone(), window, cx);
+            {
+                let sw = app.switcher.as_mut().expect("panel is open");
+                sw.left_sel = 2;
+                sw.right_sel = 1;
+                sw.column = Column::Right;
+            }
+            app.select_switcher_machine(devbox, window, cx);
+        });
+        app.update(cx, |app, _| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::Machine("devbox".into()));
+            assert_eq!((sw.left_sel, sw.right_sel), (0, 0));
+            assert_eq!(sw.column, Column::Left);
         });
     }
 
