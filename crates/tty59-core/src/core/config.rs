@@ -297,6 +297,9 @@ pub struct Config {
     /// either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
+    /// Show the Terminal | Agents selector at the bottom of the workbench sidebar.
+    #[serde(default = "default_true")]
+    pub sidebar_agents_toggle: bool,
     /// Whether tab number shortcuts (`ActivateTab1`…`ActivateTab9`) are scoped
     /// to the active group and group-switching shortcuts
     /// (`ActivateTabGroup1`…`ActivateTabGroup9`) and their hold-to-show badges
@@ -862,6 +865,7 @@ impl Default for Config {
             editor_lsp: true,
             editor_git_gutter: true,
             sidebar_auto_grouping: true,
+            sidebar_agents_toggle: true,
             tab_group_shortcuts: false,
             tab_group_activation: TabGroupActivation::Recent,
             notify_on_command_finish: NotifyMode::Unfocused,
@@ -1946,6 +1950,17 @@ mod tests {
         // Unknown values fall back rather than refusing the whole file.
         let garbage: Config = serde_json::from_str(r#"{"link_file_open":"emacs"}"#).unwrap();
         assert_eq!(garbage.file_open_mode(), LinkFileOpen::Internal);
+    }
+
+    #[test]
+    fn sidebar_agents_toggle_defaults_on_and_round_trips() {
+        assert!(Config::default().sidebar_agents_toggle);
+        let old: Config = serde_json::from_str("{}").unwrap();
+        assert!(old.sidebar_agents_toggle);
+        let off: Config = serde_json::from_str(r#"{"sidebar_agents_toggle":false}"#).unwrap();
+        assert!(!off.sidebar_agents_toggle);
+        let back: Config = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!back.sidebar_agents_toggle);
     }
 
     #[test]

@@ -697,7 +697,7 @@ impl Tab {
         self.asleep.as_ref().and_then(|a| a.view.agent)
     }
 
-    fn focus_target(&self) -> Option<crate::ui::pane::PaneSlot> {
+    pub(crate) fn focus_target(&self) -> Option<crate::ui::pane::PaneSlot> {
         match self.last_focused {
             Some(id) => self.pane.leaf_matching_or_first(|l| l.entity_id() == id),
             None => self.pane.first_leaf(),
@@ -1090,6 +1090,8 @@ pub struct Tty59App {
     pub(crate) right_panel_visible: bool,
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
+    pub(crate) sidebar_list: crate::ui::tab_sidebar::SidebarList,
+    pub(in crate::ui) sidebar_agent_reveal: Rc<Cell<Option<crate::ui::agent_vision::PaneKey>>>,
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
     /// The tab whose sidebar row is brought into view the next time it is
     /// drawn. Read by the row, not by `activate`: a new tab has no row yet,
@@ -1798,6 +1800,8 @@ impl Tty59App {
             right_panel_visible,
             right_panel_tab,
             sidebar_collapsed,
+            sidebar_list: Default::default(),
+            sidebar_agent_reveal: Rc::new(Cell::new(None)),
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_reveal: Rc::new(Cell::new(None)),
             reorder: Rc::new(RefCell::new(None)),
@@ -4016,6 +4020,14 @@ impl Tty59App {
         self.update_config(cx, |cfg| cfg.sidebar_auto_grouping = on);
     }
 
+    pub(crate) fn set_sidebar_agents_toggle(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.sidebar_agents_toggle = on);
+        if !on {
+            self.sidebar_list = Default::default();
+        }
+        cx.notify();
+    }
+
     pub(crate) fn set_tab_group_shortcuts(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.tab_group_shortcuts = on);
         crate::ui::keymap::rebind(cx);
@@ -5421,6 +5433,10 @@ impl Tty59App {
     /// the ends — no switcher, no MRU (#867). "Shows" matters with the
     /// sidebar grouping tabs: the next row is not always the next index.
     fn cycle_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_agents_mode(cx) {
+            self.cycle_sidebar_agent(forward, window, cx);
+            return;
+        }
         let order = self.visual_tab_order(cx);
         if let Some(next) = step_in_order(&order, self.active, forward) {
             self.activate(next, window, cx);
@@ -5677,11 +5693,32 @@ impl Tty59App {
             .or_else(|| tab.focus_target())
             .and_then(|slot| slot.terminal().cloned());
         if let Some(leaf) = leaf {
-            let handle = leaf.read(cx).focus_handle.clone();
-            self.maximized = Some(leaf);
-            window.focus(&handle, cx);
-            cx.notify();
+            self.maximize_pane(leaf, window, cx);
         }
+    }
+
+    pub(crate) fn maximize_pane(
+        &mut self,
+        leaf: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        if !tab
+            .pane
+            .leaves()
+            .iter()
+            .any(|slot| slot.entity_id() == leaf.entity_id())
+        {
+            return;
+        }
+        remember_leaf_in(&mut self.tabs, leaf.entity_id());
+        let handle = leaf.read(cx).focus_handle.clone();
+        self.maximized = (self.tabs[self.active].pane.leaves().len() > 1).then_some(leaf);
+        window.focus(&handle, cx);
+        cx.notify();
     }
 
     pub(crate) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -7276,6 +7313,9 @@ impl Tty59App {
             }
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
+            }
+            L10nKey::SettingsSidebarAgentsToggle => {
+                self.set_sidebar_agents_toggle(defaults.sidebar_agents_toggle, cx)
             }
             L10nKey::SettingsTabGroupShortcuts => {
                 self.set_tab_group_shortcuts(defaults.tab_group_shortcuts, cx)

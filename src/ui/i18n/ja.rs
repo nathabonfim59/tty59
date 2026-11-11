@@ -757,6 +757,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTabBarPositionDesc => {
             "タブを上部の横一列または左側の縦サイドバーとして表示"
         }
+        L10nKey::SidebarListTerminal => "ターミナル",
+        L10nKey::SidebarListAgents => "エージェント",
+        L10nKey::SidebarNoAgents => "このワークスペースにエージェントはありません",
+        L10nKey::SettingsSidebarAgentsToggle => "ターミナル | エージェント切り替え",
+        L10nKey::SettingsSidebarAgentsToggleDesc => {
+            "ワークベンチのサイドバー下部にリスト切り替えを表示します。"
+        }
+        L10nKey::SettingsSearchSidebarAgentsToggleKeywords => {
+            "サイドバー ターミナル エージェント リスト 切り替え"
+        }
         L10nKey::SettingsSidebarGrouping => "自動グループ化",
         L10nKey::SettingsSidebarGroupingDesc => {
             "固定していないタブを git リポジトリごと、SSH タブをホストごとにまとめます"

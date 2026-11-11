@@ -655,6 +655,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ConfirmCloseAlways => "总是",
         L10nKey::SettingsTabBarPosition => "标签栏位置",
         L10nKey::SettingsTabBarPositionDesc => "将标签页显示为顶部横向条或左侧垂直侧栏。",
+        L10nKey::SidebarListTerminal => "终端",
+        L10nKey::SidebarListAgents => "智能体",
+        L10nKey::SidebarNoAgents => "此工作区中没有智能体",
+        L10nKey::SettingsSidebarAgentsToggle => "终端 | 智能体切换",
+        L10nKey::SettingsSidebarAgentsToggleDesc => "在工作台侧栏底部显示列表切换控件。",
+        L10nKey::SettingsSearchSidebarAgentsToggleKeywords => "侧栏 终端 智能体 列表 切换",
         L10nKey::SettingsSidebarGrouping => "自动分组",
         L10nKey::SettingsSidebarGroupingDesc => {
             "未固定的标签页按 git 仓库分组，SSH 标签页按主机分组。"

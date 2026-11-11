@@ -732,6 +732,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsSidebarAgentsToggle,
+            keywords: SettingsSearchSidebarAgentsToggleKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsSidebarGrouping,
             keywords: SettingsSearchSidebarGroupingKeywords,
         },
@@ -868,6 +873,7 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
+            L10nKey::SettingsSidebarAgentsToggle => "sidebar_agents_toggle",
             L10nKey::SettingsTabGroupShortcuts => "tab_group_shortcuts",
             L10nKey::SettingsTabGroupActivation => "tab_group_activation",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
@@ -991,6 +997,7 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
+            L10nKey::SettingsSidebarAgentsToggle => t(L10nKey::SettingsSidebarAgentsToggleDesc),
             L10nKey::SettingsTabGroupShortcuts => t(L10nKey::SettingsTabGroupShortcutsDesc),
             L10nKey::SettingsTabGroupActivation => t(L10nKey::SettingsTabGroupActivationDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
@@ -1046,6 +1053,9 @@ impl SearchEntry {
             L10nKey::SettingsTabBarPosition => cfg.tab_bar_position != defaults.tab_bar_position,
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
+            }
+            L10nKey::SettingsSidebarAgentsToggle => {
+                cfg.sidebar_agents_toggle != defaults.sidebar_agents_toggle
             }
             L10nKey::SettingsTabGroupShortcuts => {
                 cfg.tab_group_shortcuts != defaults.tab_group_shortcuts
