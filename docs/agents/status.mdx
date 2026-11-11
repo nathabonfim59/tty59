@@ -3,9 +3,10 @@ title: "Status and notifications"
 description: "Installing the hooks, reading the dots, and being told when an agent needs you."
 ---
 
-An agent working for two minutes and an agent that stopped ninety seconds ago
-waiting for permission look identical from outside. tty59 fixes that by letting
-the agent say which one it is.
+tty59 uses the foreground process to identify an agent, then reads its status
+from hooks, terminal titles and progress sequences, and visible terminal text.
+This can distinguish a working agent from one waiting for you to answer a
+question or approve an action.
 
 ## Installing the hooks
 
@@ -15,7 +16,7 @@ the agent say which one it is.
 | Agent | |
 |---|---|
 | Claude Code · Codex · TraeCode · Copilot CLI · OpenCode · Pi · Grok Build · Oh My Pi · Gemini · Droid · Qwen Code · Goose · Kimi Code · Qoder CLI · Qoder CN CLI · Crush · CodeBuddy · Cursor CLI · Prime Agent · Antigravity · Empryo · Muse Code · jcode | Hooks available |
-| Aider · Amp · Auggie · Hermes · Vibe | Detected and labelled, but no status channel yet |
+| Aider · Amp · Auggie · Hermes · Vibe | No hooks. Amp and Hermes can report status through their terminal UI. |
 
 Installing writes into that agent's own configuration directory. Once installed
 the row grows a second **Uninstall** button beside the first, which itself
@@ -29,10 +30,9 @@ ships a newer hook.
 </Note>
 
 <Note>
-  Antigravity has no session-start or permission event, so its pane goes
-  straight from no dot to working on the first model call, and a pending
-  permission prompt shows as working rather than amber. Its hooks live in a
-  `tty59` set inside `~/.gemini/config/hooks.json`, beside any sets of your own.
+  Antigravity has no permission hook. When tty59 has its live terminal screen,
+  it can still recognize a permission or question dialog. Antigravity's hooks
+  live in a `tty59` set inside `~/.gemini/config/hooks.json`.
 </Note>
 
 <Note>
@@ -55,6 +55,11 @@ screen.
 
 ## The status dot
 
+Screen detection runs on live desktop grids, including background tabs and
+remote workspace panes opened on the desktop. Sleeping panes and panes whose
+grid isn't open in a desktop window rely on the available hook, title and
+progress signals. Older remote servers do not receive screen evidence.
+
 Every tab chip and sidebar row carries a dot:
 
 | Dot | Meaning |
@@ -70,6 +75,8 @@ Every tab chip and sidebar row carries a dot:
 The same three states are what `tty59 agents` reports as `working` / `waiting` /
 `done`, and what [`tty59 wait`](/agents/orchestration) blocks on. A fourth state,
 `idle`, carries no dot — it is an agent that has not started a turn.
+After the agent process exits, the terminal can stay open at the shell. New
+clients identify that agent as exited; older clients read the status as idle.
 
 ## Notifications
 
@@ -114,6 +121,42 @@ agents on machines whose clocks disagree can show ages, and queue, slightly off.
 
 Turn it off with **Settings → General → Show tray icon**
 (`show_tray_icon: false`).
+
+## Inbox and Kanban
+
+The **Agents (n)** button in the terminal area's top bar opens the agent Inbox.
+The count is the number of agents needing attention in the current workspace.
+Use **Workbench** to return, or toggle with <kbd>⌘ ⇧ Y</kbd> / <kbd>Ctrl ⇧ Y</kbd>
+(`ToggleAgentVision`). **Settings → General → Start windows in agent mode**
+opens new windows in the Inbox; Workbench is the default.
+
+The projects column uses the current workspace's existing sidebar groups.
+**All in workspace** clears the project filter. The normal workspace switcher
+and <kbd>⌘ ⇧ O</kbd> / <kbd>Ctrl ⇧ O</kbd> work here too. **Search agents…**
+filters by title, agent kind, project and reason in both Inbox and Kanban.
+
+Each entry is one agent pane. Split tabs show a **pane i/n** marker, and the
+reading pane contains only that pane's live terminal. Plain shells and editors
+do not appear. Waiting agents come first, then finished turns you have not seen;
+**Other agents** expands the working, idle, handled and exited entries.
+
+While the list has focus, use <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>j</kbd>/<kbd>k</kbd>
+to select and <kbd>Enter</kbd> to answer in the terminal. <kbd>Esc</kbd> returns
+to the list. <kbd>[</kbd>/<kbd>]</kbd> changes project. Search keeps these plain
+keys for typing; <kbd>Down</kbd> or <kbd>Enter</kbd> moves from search to the list.
+
+In agent mode, **Next needing attention** (<kbd>⌘ ⇧ U</kbd> / <kbd>Ctrl ⇧ U</kbd>)
+marks the current event handled and focuses the next agent in this workspace.
+It can clear the project/search filter to reach that agent. With nobody else
+needing you, it stays put. **Mark handled** uses <kbd>⌘ ⌥ ⇧ U</kbd> /
+<kbd>Ctrl Alt ⇧ U</kbd>. Handling affects read state; the status dot continues
+to show the agent's actual status. A new attention event makes it unread again.
+
+**Kanban** groups the same agents into Waiting, Working, Done, Idle and Exited.
+Use <kbd>←</kbd>/<kbd>→</kbd> or <kbd>h</kbd>/<kbd>l</kbd> to change columns and
+<kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>j</kbd>/<kbd>k</kbd> to select a card.
+<kbd>Enter</kbd> opens its terminal in the Inbox. Toggle Inbox/Kanban with
+<kbd>⌘ ⌥ ⇧ Y</kbd> / <kbd>Ctrl Alt ⇧ Y</kbd> (`ToggleAgentBoard`).
 
 ## Sending an agent some context
 

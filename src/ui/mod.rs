@@ -1,4 +1,6 @@
 pub mod agent_launch;
+#[allow(dead_code)]
+mod agent_vision;
 pub mod app;
 pub mod assets;
 pub mod code_editor;

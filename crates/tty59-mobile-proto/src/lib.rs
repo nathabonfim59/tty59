@@ -362,6 +362,31 @@ pub struct AgentView {
     pub status: AgentStatus,
     #[serde(default)]
     pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exited: bool,
+}
+
+#[cfg(test)]
+#[test]
+fn old_mobile_peers_read_an_exited_agent_as_idle() {
+    #[derive(Deserialize)]
+    struct LegacyAgent {
+        status: AgentStatus,
+    }
+
+    let exited = AgentView {
+        kind: "codex".into(),
+        status: AgentStatus::Idle,
+        message: None,
+        exited: true,
+    };
+    let wire = serde_json::to_value(&exited).unwrap();
+    assert_eq!(
+        serde_json::from_value::<LegacyAgent>(wire).unwrap().status,
+        AgentStatus::Idle
+    );
+    let old: AgentView = serde_json::from_str(r#"{"kind":"codex","status":"waiting"}"#).unwrap();
+    assert!(!old.exited);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

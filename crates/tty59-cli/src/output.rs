@@ -328,8 +328,18 @@ pub fn agents_table(states: &[PaneAgentState]) -> String {
                 format!("%{}", s.pane_id),
                 s.agent
                     .map(|a| format!("{a:?}").to_lowercase())
+                    .or_else(|| {
+                        s.state
+                            .detection
+                            .as_ref()
+                            .map(|detection| detection.kind.clone())
+                    })
                     .unwrap_or_else(|| "-".to_string()),
-                format!("{:?}", s.state.status).to_lowercase(),
+                if s.state.agent_exited() {
+                    "exited".to_string()
+                } else {
+                    format!("{:?}", s.state.status).to_lowercase()
+                },
                 s.state
                     .status_age_secs(now_ms)
                     .map_or_else(|| "-".to_string(), status_age),

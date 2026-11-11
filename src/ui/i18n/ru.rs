@@ -2,6 +2,36 @@ use super::L10nKey;
 
 pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
     Some(match key {
+        L10nKey::VisionToggle => "Рабочий обзор агентов",
+        L10nKey::VisionAgents => "Агенты",
+        L10nKey::VisionWorkbench => "Терминалы",
+        L10nKey::VisionInbox => "Входящие",
+        L10nKey::VisionKanban => "Доска",
+        L10nKey::VisionAll => "Всё в рабочем пространстве",
+        L10nKey::VisionProjects => "Проекты",
+        L10nKey::VisionSearch => "Поиск агентов…",
+        L10nKey::VisionNeedsYou => "Ждут вас",
+        L10nKey::VisionOther => "Остальные агенты",
+        L10nKey::VisionEmpty => "Здесь нет агентов, которым вы нужны",
+        L10nKey::VisionNoAgents => "Нет подходящих агентов",
+        L10nKey::VisionSelect => "Выберите агента для работы",
+        L10nKey::VisionHandled => "Отметить обработанным",
+        L10nKey::VisionNext => "Следующий ожидающий агент",
+        L10nKey::VisionNothingNext => "В этом рабочем пространстве больше никто вас не ждёт",
+        L10nKey::VisionOpenWorkbench => "Открыть в терминалах",
+        L10nKey::VisionListHelp => "↑ ↓ / j k выбор · Enter ответ · [ ] проект",
+        L10nKey::VisionBoardHelp => "← → / h l колонка · ↑ ↓ / j k карточка · Enter ответ",
+        L10nKey::VisionTerminalHelp => "Esc — вернуться к списку",
+        L10nKey::VisionWaiting => "Ожидают",
+        L10nKey::VisionWorking => "Работают",
+        L10nKey::VisionDone => "Завершены",
+        L10nKey::VisionIdle => "Бездействуют",
+        L10nKey::VisionExited => "Завершили сеанс",
+        L10nKey::VisionPane => "панель {i}/{n}",
+        L10nKey::VisionDefault => "Открывать окна в режиме агентов",
+        L10nKey::VisionDefaultDesc => {
+            "Новые окна открывают входящие. Терминалы доступны на верхней панели."
+        }
         L10nKey::SettingsNoMatchesShort => "Нет совпадений",
         L10nKey::SettingsModifiedTitle => "Изменено",
         L10nKey::SettingsMatchCount => "Совпадений: {count}",
@@ -802,6 +832,16 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ConfirmCloseAlways => "Всегда",
         L10nKey::SettingsTabBarPosition => "Положение вкладок",
         L10nKey::SettingsTabBarPositionDesc => "Полоса сверху или боковая панель слева.",
+        L10nKey::SidebarListTerminal => "Терминал",
+        L10nKey::SidebarListAgents => "Агенты",
+        L10nKey::SidebarNoAgents => "В этом рабочем пространстве нет агентов",
+        L10nKey::SettingsSidebarAgentsToggle => "Переключатель Терминал | Агенты",
+        L10nKey::SettingsSidebarAgentsToggleDesc => {
+            "Показывать переключатель списков внизу боковой панели рабочего стола."
+        }
+        L10nKey::SettingsSearchSidebarAgentsToggleKeywords => {
+            "боковая панель терминал агенты список переключатель"
+        }
         L10nKey::SettingsSidebarGrouping => "Автогруппировка",
         L10nKey::SettingsSidebarGroupingDesc => {
             "Группировать незакреплённые вкладки по репозиторию Git, SSH-вкладки по хосту."

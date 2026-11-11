@@ -45,6 +45,62 @@ pub const FEATURE_UPDATE_SERVER: &str = "update-server";
 /// and drops the connection.
 pub const FEATURE_SIZE_LEASE: &str = "size-lease";
 
+pub const FEATURE_AGENT_SCREEN: &str = "agent-screen";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentScreenHint {
+    pub epoch: u64,
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
+#[cfg(test)]
+#[test]
+fn agent_exit_and_epoch_metadata_keep_the_legacy_status_decodable() {
+    use crate::core::cli_agent::{AgentDetectionSession, AgentSessionState, AgentStatus};
+
+    #[derive(Deserialize)]
+    struct LegacyStatus {
+        status: LegacyAgentStatus,
+    }
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum LegacyAgentStatus {
+        Idle,
+        Working,
+        Waiting,
+        Done,
+    }
+
+    let newer = AgentSessionState {
+        detection: Some(AgentDetectionSession {
+            kind: "devin".into(),
+            epoch: 3,
+            exited: true,
+            source: None,
+            rule: None,
+        }),
+        ..AgentSessionState::default()
+    };
+    let wire = serde_json::to_vec(&newer).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<LegacyStatus>(&wire)
+            .unwrap()
+            .status,
+        LegacyAgentStatus::Idle
+    );
+    assert!(
+        serde_json::from_slice::<AgentSessionState>(&wire)
+            .unwrap()
+            .agent_exited()
+    );
+    let older: AgentSessionState = serde_json::from_str(r#"{"status":"working"}"#).unwrap();
+    assert_eq!(older.status, AgentStatus::Working);
+    assert!(older.detection.is_none());
+}
+
 /// What a [`ClientMsg::Lease`] asks. The first two are an observer's, the last
 /// two the controller's; each side's are ignored from the other.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +137,7 @@ impl DaemonVersion {
             FEATURE_RESTORE_SCROLLBACK.to_string(),
             FEATURE_UPDATE_SERVER.to_string(),
             FEATURE_SIZE_LEASE.to_string(),
+            FEATURE_AGENT_SCREEN.to_string(),
         ];
         if cfg!(unix) {
             features.push(FEATURE_HANDOFF.to_string());
@@ -989,6 +1046,7 @@ pub enum ClientMsg {
     Version,
     /// Only after the daemon advertised [`FEATURE_SIZE_LEASE`].
     Lease(LeaseRequest),
+    AgentScreen(AgentScreenHint),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1091,6 +1149,7 @@ mod kind {
     pub const HANDOFF: u8 = 56;
     pub const LEASE: u8 = 57;
     pub const AGENT_EVENT: u8 = 58;
+    pub const AGENT_SCREEN: u8 = 59;
 
     pub const SPAWNED: u8 = 1;
     pub const SNAPSHOT: u8 = 2;
@@ -1327,6 +1386,7 @@ impl ClientMsg {
             ClientMsg::Shutdown => write_frame(w, kind::SHUTDOWN, &[]),
             ClientMsg::Handoff { exe } => write_frame(w, kind::HANDOFF, &to_json(exe)?),
             ClientMsg::Lease(request) => write_frame(w, kind::LEASE, &to_json(request)?),
+            ClientMsg::AgentScreen(hint) => write_frame(w, kind::AGENT_SCREEN, &to_json(hint)?),
             ClientMsg::EnsureLoopbackForward(req) => {
                 write_frame(w, kind::ENSURE_LOOPBACK_FORWARD, &to_json(req)?)
             }
@@ -1463,6 +1523,7 @@ impl ClientMsg {
             kind::LIST => ClientMsg::List,
             kind::SHUTDOWN => ClientMsg::Shutdown,
             kind::LEASE => ClientMsg::Lease(from_json(&payload)?),
+            kind::AGENT_SCREEN => ClientMsg::AgentScreen(from_json(&payload)?),
             kind::HANDOFF => ClientMsg::Handoff {
                 exe: from_json(&payload)?,
             },
@@ -1748,6 +1809,11 @@ mod tests {
             ClientMsg::Lease(LeaseRequest::Release),
             ClientMsg::Lease(LeaseRequest::Watch),
             ClientMsg::Lease(LeaseRequest::TakeBack),
+            ClientMsg::AgentScreen(AgentScreenHint {
+                epoch: 7,
+                revision: 2,
+                rule: Some("live_prompt_box".into()),
+            }),
             ClientMsg::Spawn {
                 cwd: Some(PathBuf::from("/tmp/x")),
                 size: SIZE,
@@ -2004,6 +2070,7 @@ mod tests {
                 inferred: false,
                 readout: Default::default(),
                 since_ms: Some(1_760_000_000_000),
+                detection: None,
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),

@@ -7,7 +7,9 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent};
 use gpui_component::menu::{ContextMenu, ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -19,6 +21,7 @@ use crate::core::group_key::{
     place,
 };
 use crate::terminal::git_status::GitStatusCache;
+use crate::ui::agent_vision::{PaneKey, PaneSummary, State};
 use crate::ui::app::{TITLE_BAR_BORDER, Tab, TitleStripRow as _, Tty59App};
 use crate::ui::hints::{badge_positions_from_order, tab_badge_label};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
@@ -34,6 +37,88 @@ pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
 const GRAB_HANDLE_W: f32 = 48.;
 
 const ROW_GAP: f32 = 1.;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SidebarList {
+    #[default]
+    Terminal,
+    Agents,
+}
+
+#[derive(Clone, Debug)]
+struct AgentRow {
+    tab: usize,
+    summary: PaneSummary,
+}
+
+impl AgentRow {
+    fn marker(&self) -> Option<String> {
+        self.summary.pane_marker()
+    }
+
+    fn status(&self) -> Option<crate::core::cli_agent::AgentStatus> {
+        use crate::core::cli_agent::AgentStatus;
+        match self.summary.state {
+            State::Idle => Some(AgentStatus::Idle),
+            State::Working => Some(AgentStatus::Working),
+            State::Waiting => Some(AgentStatus::Waiting),
+            State::Done => Some(AgentStatus::Done),
+            State::Exited => None,
+        }
+    }
+}
+
+/// Follow tab and split order, matching machine and pane together. Shells
+/// have no summary and therefore cannot produce a row.
+fn build_agent_rows(
+    workspace: crate::core::session::WorkspaceId,
+    layout: &[(usize, tty59_core::core::machine::TabId, Vec<PaneKey>)],
+    summaries: &[PaneSummary],
+) -> Vec<AgentRow> {
+    layout
+        .iter()
+        .flat_map(|(tab, id, panes)| {
+            panes.iter().filter_map(move |key| {
+                let summary = summaries.iter().find(|summary| {
+                    summary.location.workspace == workspace
+                        && summary.location.tab == *id
+                        && summary.location.key == *key
+                })?;
+                Some(AgentRow {
+                    tab: *tab,
+                    summary: summary.clone(),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Shared row chrome for tab rows and agent-pane rows.
+fn sidebar_row_chrome(
+    id: impl Into<gpui::ElementId>,
+    active: bool,
+    sf: crate::ui::presets::Surface,
+) -> Stateful<Div> {
+    h_flex()
+        .id(id)
+        .cursor_pointer()
+        .w_full()
+        .h(px(ROW_HEIGHT))
+        .flex_shrink_0()
+        .items_center()
+        .justify_between()
+        .gap(px(row_metrics::GAP))
+        .px_2()
+        .rounded(crate::ui::rounding::ROW_RADIUS)
+        .when(active, |s| {
+            s.bg(gpui::rgb(sf.selected))
+                .text_color(gpui::rgb(sf.text_selected))
+        })
+        .when(!active, |s| {
+            s.text_color(gpui::rgb(sf.text_resting))
+                .hover(|s| s.bg(gpui::rgb(sf.hover)))
+        })
+}
 
 /// What marks a kept group, and what the header button that keeps one reads.
 ///
@@ -253,6 +338,248 @@ impl Tty59App {
             .clamp(MIN_SIDEBAR_WIDTH, self.sidebar_max_px(window, cx))
     }
 
+    pub(crate) fn sidebar_agents_mode(&self, cx: &gpui::App) -> bool {
+        self.sidebar_open(cx)
+            && cx.global::<Config>().sidebar_agents_toggle
+            && self.sidebar_list == SidebarList::Agents
+    }
+
+    fn sidebar_agent_rows(&self, summaries: &[PaneSummary], cx: &gpui::App) -> Vec<AgentRow> {
+        let layout: Vec<_> = self
+            .visual_tab_order(cx)
+            .into_iter()
+            .map(|i| {
+                let tab = &self.tabs[i];
+                let panes = tab
+                    .pane
+                    .leaves()
+                    .iter()
+                    .filter_map(|slot| {
+                        let view = slot.terminal()?.read(cx);
+                        Some(PaneKey {
+                            host: view.host_id(),
+                            pane: view.pane_id,
+                        })
+                    })
+                    .collect();
+                (i, tab.tree_id.get(), panes)
+            })
+            .collect();
+        build_agent_rows(self.workspace, &layout, summaries)
+    }
+
+    fn select_sidebar_list(&mut self, mode: SidebarList, cx: &mut Context<Self>) {
+        self.sidebar_list = mode;
+        self.sidebar_scroll.set_offset(gpui::point(px(0.), px(0.)));
+        self.sidebar_reveal.set(None);
+        self.sidebar_agent_reveal.set(None);
+        cx.notify();
+    }
+
+    fn sidebar_list_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let control = h_flex().flex_shrink_0().p_3().gap_1().children(
+            [
+                (SidebarList::Terminal, L10nKey::SidebarListTerminal),
+                (SidebarList::Agents, L10nKey::SidebarListAgents),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (mode, key))| {
+                let selected = self.sidebar_list == mode;
+                Button::new(("sidebar-list-mode", i))
+                    .label(t(key))
+                    .custom(crate::ui::tab_strip::chrome_tile_variant_for(selected, cx))
+                    .selected(selected)
+                    .small()
+                    .flex_1()
+                    .min_w_0()
+                    .h(px(HEAD_CONTROL_HEIGHT))
+                    .rounded(px(HEAD_CONTROL_RADIUS))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_sidebar_list(mode, cx)))
+            }),
+        );
+        #[cfg(test)]
+        let control = control.debug_selector(|| "sidebar-list-toggle".into());
+        control
+    }
+
+    fn sidebar_agent_row(
+        &self,
+        row: &AgentRow,
+        slot: usize,
+        badge: Option<usize>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
+        let key = row.summary.location.key;
+        let tab = &self.tabs[row.tab];
+        let selected = row.tab == self.active
+            && tab
+                .pane
+                .focused_leaf(window, cx)
+                .or_else(|| tab.focus_target())
+                .and_then(|leaf| leaf.terminal().cloned())
+                .is_some_and(|view| {
+                    let view = view.read(cx);
+                    view.host_id() == key.host && view.pane_id == key.pane
+                });
+        let status = row.status();
+        let title = row.summary.location.tab_title.clone();
+        let marker = row.marker();
+        let row = sidebar_row_chrome(("sidebar-agent-row", slot), selected, sf)
+            .child(
+                canvas(
+                    {
+                        let reveal = self.sidebar_agent_reveal.clone();
+                        let scroll = self.sidebar_scroll.clone();
+                        move |bounds, window, _cx| {
+                            if reveal.get() == Some(key) {
+                                reveal.set(None);
+                                let view = scroll.bounds();
+                                let shift = reveal_shift(
+                                    (bounds.top(), bounds.bottom()),
+                                    px(0.),
+                                    (view.top(), view.bottom()),
+                                );
+                                if shift != px(0.) {
+                                    let mut offset = scroll.offset();
+                                    offset.y += shift;
+                                    scroll.set_offset(offset);
+                                    window.refresh();
+                                }
+                            }
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            )
+            .role(gpui::Role::Tab)
+            .aria_selected(selected)
+            .aria_label(SharedString::from(match &marker {
+                Some(marker) => format!("{title}, {marker}"),
+                None => title.clone(),
+            }))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.activate_sidebar_agent(key, window, cx);
+            }))
+            .child(self.tab_avatar_plain(
+                ("sidebar-agent-avatar", slot),
+                row.summary.agent,
+                status,
+                self.tab_ssh_dot(tab, cx),
+                row_metrics::AVATAR,
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
+                            .child(title),
+                    )
+                    .when_some(marker, |d, marker| {
+                        d.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(marker),
+                        )
+                    }),
+            )
+            .children(self.row_status_dot(status, 0, gpui::rgb(sf.base).into()))
+            .when_some(badge, |d, pos| {
+                let badge = div().flex_shrink_0().text_xs().child(tab_badge_label(pos));
+                #[cfg(test)]
+                let badge = badge.debug_selector(move || format!("sidebar-agent-badge-{slot}"));
+                d.child(badge)
+            });
+        #[cfg(test)]
+        let row = row.debug_selector(move || format!("sidebar-agent-row-{slot}"));
+        row
+    }
+
+    fn sidebar_agent_shortcut_rows(&self, cx: &gpui::App) -> Vec<AgentRow> {
+        let group = cx
+            .global::<Config>()
+            .tab_group_shortcuts
+            .then(|| self.active_group_tab_order(cx));
+        self.sidebar_agent_rows(&self.agent_pane_summaries(cx), cx)
+            .into_iter()
+            .filter(|row| group.as_ref().is_none_or(|tabs| tabs.contains(&row.tab)))
+            .collect()
+    }
+
+    pub(crate) fn cycle_sidebar_agent(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.sidebar_agent_rows(&self.agent_pane_summaries(cx), cx);
+        if rows.is_empty() {
+            return;
+        }
+        let key = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| {
+                tab.pane
+                    .focused_leaf(window, cx)
+                    .or_else(|| tab.focus_target())
+            })
+            .and_then(|slot| slot.terminal().cloned())
+            .map(|leaf| {
+                let view = leaf.read(cx);
+                PaneKey {
+                    host: view.host_id(),
+                    pane: view.pane_id,
+                }
+            });
+        let current = rows
+            .iter()
+            .position(|row| Some(row.summary.location.key) == key);
+        let next = match (current, forward) {
+            (Some(i), true) => (i + 1) % rows.len(),
+            (Some(i), false) => (i + rows.len() - 1) % rows.len(),
+            (None, true) => 0,
+            (None, false) => rows.len() - 1,
+        };
+        self.activate_sidebar_agent(rows[next].summary.location.key, window, cx);
+    }
+
+    pub(in crate::ui) fn activate_sidebar_agent(
+        &mut self,
+        key: PaneKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = self.tabs.iter().enumerate().find_map(|(i, tab)| {
+            tab.pane.leaves().iter().find_map(|slot| {
+                let leaf = slot.terminal()?;
+                let view = leaf.read(cx);
+                (view.host_id() == key.host && view.pane_id == key.pane).then(|| (i, leaf.clone()))
+            })
+        });
+        if let Some((i, leaf)) = target {
+            self.activate(i, window, cx);
+            self.maximize_pane(leaf, window, cx);
+            self.sidebar_agent_reveal.set(Some(key));
+        }
+    }
+
     pub(crate) fn tab_sidebar(
         &self,
         window: &mut Window,
@@ -262,6 +589,22 @@ impl Tty59App {
         let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
         let width = self.sidebar_px(window, cx);
         let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
+        let agents_mode = self.sidebar_agents_mode(cx);
+        let agent_rows = if agents_mode {
+            self.sidebar_agent_rows(&self.agent_pane_summaries(cx), cx)
+        } else {
+            Vec::new()
+        };
+        let agent_badges: Vec<PaneKey> =
+            if agents_mode && self.mod_hint_badges && !self.mod_hint_group {
+                self.sidebar_agent_shortcut_rows(cx)
+                    .into_iter()
+                    .take(crate::ui::hints::MAX_TAB_BADGES)
+                    .map(|row| row.summary.location.key)
+                    .collect()
+            } else {
+                Vec::new()
+            };
         // Blanked here, written again from paint: a row filtered out by the
         // search — or hidden with its collapsed group — must leave no rectangle
         // behind for a pane to be dropped between.
@@ -327,18 +670,28 @@ impl Tty59App {
                     .iter()
                     .copied()
                     .filter(|&i| {
-                        query.is_empty()
-                            || self
-                                .tab_label(&self.tabs[i], i, Some(window), cx)
-                                .to_lowercase()
-                                .contains(&query)
-                            || self.tabs[i]
-                                .leaf_title(Some(window), cx)
-                                .to_lowercase()
-                                .contains(&query)
-                            || self.tabs[i]
-                                .git_status(Some(window), cx)
-                                .is_some_and(|g| g.branch.to_lowercase().contains(&query))
+                        (!agents_mode || agent_rows.iter().any(|row| row.tab == i))
+                            && (query.is_empty()
+                                || (agents_mode
+                                    && agent_rows.iter().any(|row| {
+                                        row.tab == i
+                                            && row
+                                                .summary
+                                                .agent_name()
+                                                .to_lowercase()
+                                                .contains(&query)
+                                    }))
+                                || self
+                                    .tab_label(&self.tabs[i], i, Some(window), cx)
+                                    .to_lowercase()
+                                    .contains(&query)
+                                || self.tabs[i]
+                                    .leaf_title(Some(window), cx)
+                                    .to_lowercase()
+                                    .contains(&query)
+                                || self.tabs[i]
+                                    .git_status(Some(window), cx)
+                                    .is_some_and(|g| g.branch.to_lowercase().contains(&query)))
                     })
                     .collect()
             })
@@ -538,7 +891,14 @@ impl Tty59App {
             // the new tab with the group it came from — puts the new tab
             // behind the chevron: the pane area shows the fresh shell and the
             // header count goes up, but the row waits for the group to open.
-            let row_count = visible_by_section[group_ix].len();
+            let row_count = if agents_mode {
+                agent_rows
+                    .iter()
+                    .filter(|row| visible_by_section[group_ix].contains(&row.tab))
+                    .count()
+            } else {
+                visible_by_section[group_ix].len()
+            };
             let visible: Vec<usize> = match folded {
                 true => Vec::new(),
                 false => visible_by_section[group_ix].clone(),
@@ -546,12 +906,16 @@ impl Tty59App {
             let visible_tabs: Vec<usize> = visible.clone();
             let row_slots: Rc<RefCell<Vec<Bounds<Pixels>>>> =
                 Rc::new(RefCell::new(vec![Bounds::default(); visible.len()]));
-            let row_preview = reorder::preview(
-                &self.reorder,
-                &Surface::SidebarRows(group_key.clone()),
-                visible.len(),
-                pointer,
-            );
+            let row_preview = (!agents_mode)
+                .then(|| {
+                    reorder::preview(
+                        &self.reorder,
+                        &Surface::SidebarRows(group_key.clone()),
+                        visible.len(),
+                        pointer,
+                    )
+                })
+                .flatten();
             // A group whose rows all sit on the same branch with the same
             // diff says so once, on its header, instead of once per row.
             // Four copies of `pr-818 +94 −26` under one heading describe the
@@ -596,6 +960,40 @@ impl Tty59App {
                 })
                 .flatten();
             for (slot, i) in visible.into_iter().enumerate() {
+                if agents_mode {
+                    for (agent_slot, agent_row) in agent_rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, row)| row.tab == i)
+                    {
+                        let group_badge = if self.mod_hint_group
+                            && section.name.is_none()
+                            && agent_rows
+                                .iter()
+                                .find(|row| section.tabs.contains(&row.tab))
+                                .is_some_and(|first| {
+                                    first.summary.location.key == agent_row.summary.location.key
+                                }) {
+                            section
+                                .tabs
+                                .first()
+                                .and_then(|i| badge_positions.as_ref()?.get(*i).copied().flatten())
+                        } else {
+                            None
+                        };
+                        let badge = group_badge.or_else(|| {
+                            agent_badges
+                                .iter()
+                                .position(|key| *key == agent_row.summary.location.key)
+                        });
+                        let row = self.sidebar_agent_row(agent_row, agent_slot, badge, window, cx);
+                        let menu_app = cx.entity().downgrade();
+                        rows.push(row.context_menu(move |menu, window, cx| {
+                            Tty59App::tab_context_menu(menu, i, true, &menu_app, window, cx)
+                        }));
+                    }
+                    continue;
+                }
                 let badge_pos = if group_badges {
                     None
                 } else {
@@ -989,8 +1387,7 @@ impl Tty59App {
                         .into_any_element(),
                 };
 
-                let row = h_flex()
-                    .id(("tab-row", i))
+                let row = sidebar_row_chrome(("tab-row", i), is_active, sf)
                     // What a screen reader announces and presses: the full
                     // title, not the elided one drawn.
                     .role(gpui::Role::Tab)
@@ -1019,22 +1416,7 @@ impl Tty59App {
                             cx.new(|_| DragTab)
                         }
                     })
-                    .w_full()
                     .h(px(row_h))
-                    .flex_shrink_0()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(row_metrics::GAP))
-                    .px_2()
-                    .rounded(crate::ui::rounding::ROW_RADIUS)
-                    .when(is_active, |s| {
-                        s.bg(gpui::rgb(sf.selected))
-                            .text_color(gpui::rgb(sf.text_selected))
-                    })
-                    .when(!is_active, |s| {
-                        s.text_color(gpui::rgb(sf.text_resting))
-                            .hover(|s| s.bg(gpui::rgb(sf.hover)))
-                    })
                     // Faded as well as marked, the way the strip's chip is: the
                     // tabs holding nothing should be the quiet ones in the column.
                     .when(asleep, |s| s.opacity(0.6))
@@ -1750,6 +2132,16 @@ impl Tty59App {
                 }),
         );
 
+        if agents_mode && agent_rows.is_empty() && query.is_empty() {
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_3()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(t(L10nKey::SidebarNoAgents)),
+            );
+        }
         if !any_rows && !query.is_empty() {
             list = list.child(
                 div()
@@ -1977,7 +2369,10 @@ impl Tty59App {
                         "tab-sidebar-scrollbar",
                         list,
                         &self.sidebar_scroll,
-                    )),
+                    ))
+                    .when(cx.global::<Config>().sidebar_agents_toggle, |rail| {
+                        rail.child(self.sidebar_list_toggle(cx))
+                    }),
             )
             .child(handle)
             .when(auto_hide_chrome, |rail| {
@@ -2839,6 +3234,12 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.sidebar_agents_mode(cx) {
+            if let Some(row) = self.sidebar_agent_shortcut_rows(cx).get(n) {
+                self.activate_sidebar_agent(row.summary.location.key, window, cx);
+            }
+            return;
+        }
         let order = if cx.global::<Config>().tab_group_shortcuts {
             self.active_group_tab_order(cx)
         } else {
@@ -2887,9 +3288,19 @@ impl Tty59App {
             return None;
         }
         let positions = if self.mod_hint_group {
+            let agents = self
+                .sidebar_agents_mode(cx)
+                .then(|| self.sidebar_agent_rows(&self.agent_pane_summaries(cx), cx));
             badge_positions_from_order(
                 self.tabs.len(),
-                sections.iter().filter_map(|s| s.tabs.first().copied()),
+                sections
+                    .iter()
+                    .filter(|s| {
+                        agents
+                            .as_ref()
+                            .is_none_or(|rows| rows.iter().any(|row| s.tabs.contains(&row.tab)))
+                    })
+                    .filter_map(|s| s.tabs.first().copied()),
             )
         } else if group_shortcuts {
             let active_tabs = sections
@@ -2918,10 +3329,20 @@ impl Tty59App {
             return;
         }
         let activation = cfg.tab_group_activation;
+        let agents = self
+            .sidebar_agents_mode(cx)
+            .then(|| self.sidebar_agent_rows(&self.agent_pane_summaries(cx), cx));
         let keys = self.sidebar_group_keys(cx);
         let Some(section) = sidebar_sections(&keys, &self.sidebar_groups)
             .into_iter()
-            .filter(|s| !s.tabs.is_empty())
+            .filter_map(|mut section| {
+                if let Some(rows) = &agents {
+                    section
+                        .tabs
+                        .retain(|i| rows.iter().any(|row| row.tab == *i));
+                }
+                (!section.tabs.is_empty()).then_some(section)
+            })
             .nth(n)
         else {
             return;
@@ -2942,7 +3363,27 @@ impl Tty59App {
             if self.sidebar_groups.is_folded(section.key.as_ref()) {
                 self.toggle_sidebar_group(section.key.as_ref(), cx);
             }
-            self.activate(i, window, cx);
+            if let Some(rows) = agents {
+                let remembered = self.tabs[i]
+                    .focus_target()
+                    .and_then(|slot| slot.terminal().cloned())
+                    .map(|leaf| {
+                        let view = leaf.read(cx);
+                        PaneKey {
+                            host: view.host_id(),
+                            pane: view.pane_id,
+                        }
+                    });
+                if let Some(row) = rows
+                    .iter()
+                    .find(|row| row.tab == i && Some(row.summary.location.key) == remembered)
+                    .or_else(|| rows.iter().find(|row| row.tab == i))
+                {
+                    self.activate_sidebar_agent(row.summary.location.key, window, cx);
+                }
+            } else {
+                self.activate(i, window, cx);
+            }
         }
     }
 
@@ -4914,5 +5355,385 @@ mod tests {
     #[test]
     fn the_heading_keeps_a_floor_on_a_narrow_sidebar() {
         assert_eq!(header_name_avail(60., Some(400.)), HEADER_NAME_FLOOR);
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+    use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
+    use crate::core::session::WorkspaceId;
+    use crate::ui::agent_vision::PaneLocation;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::host_ops::HostId;
+    use tty59_core::core::machine::TabId;
+
+    fn summary(workspace: WorkspaceId, tab: TabId, host: HostId, pane: u64) -> PaneSummary {
+        PaneSummary::from_live(
+            PaneLocation {
+                key: PaneKey { host, pane },
+                workspace,
+                tab,
+                tab_title: "Task".into(),
+                group: None,
+            },
+            Some(CLIAgent::Codex),
+            Some(&AgentSessionState {
+                status: AgentStatus::Waiting,
+                ..Default::default()
+            }),
+            false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_rows_follow_grouped_tabs_and_match_machine_pane_and_workspace() {
+        let workspace = WorkspaceId::new();
+        let first = TabId::new();
+        let second = TabId::new();
+        let local = PaneKey {
+            host: HostId::LOCAL,
+            pane: 7,
+        };
+        let remote = PaneKey {
+            host: HostId(42),
+            pane: 7,
+        };
+        let shell = PaneKey {
+            host: HostId::LOCAL,
+            pane: 8,
+        };
+        let summaries = vec![
+            summary(workspace, first, local.host, local.pane),
+            summary(workspace, second, remote.host, remote.pane),
+            summary(WorkspaceId::new(), first, shell.host, shell.pane),
+        ];
+        // Tab 1 is drawn before tab 0 because it belongs to the first group.
+        let layout = [(1, second, vec![remote]), (0, first, vec![shell, local])];
+        let rows = build_agent_rows(workspace, &layout, &summaries);
+        assert_eq!(rows.len(), 2, "the shell and other workspace are excluded");
+        assert_eq!(rows.iter().map(|row| row.tab).collect::<Vec<_>>(), [1, 0]);
+        assert_eq!(rows[0].summary.location.key, remote);
+        assert_eq!(rows[1].summary.location.key, local);
+        assert_eq!(rows[1].status(), Some(AgentStatus::Waiting));
+    }
+
+    #[gpui::test]
+    fn agent_rows_use_the_real_sidebar_project_order(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        app.update_in(&mut vcx, |app, _, cx| {
+            let project = PinnedGroup::label("Project");
+            app.tabs[2].group.set(Some(project.id));
+            app.sidebar_groups.pinned.push(project);
+            let summaries: Vec<_> = [0, 2]
+                .into_iter()
+                .map(|i| {
+                    let pane = app.tabs[i].pane.first_leaf().unwrap();
+                    let view = pane.terminal().unwrap().read(cx);
+                    summary(
+                        app.workspace,
+                        app.tabs[i].tree_id.get(),
+                        view.host_id(),
+                        view.pane_id,
+                    )
+                })
+                .collect();
+            let rows = app.sidebar_agent_rows(&summaries, cx);
+            assert_eq!(rows.iter().map(|row| row.tab).collect::<Vec<_>>(), [2, 0]);
+            let keys = app.sidebar_group_keys(cx);
+            assert!(matches!(keys[2], Some(GroupKey::Pinned(_))));
+            assert_eq!(rows[0].summary.location.tab, app.tabs[2].tree_id.get());
+        });
+    }
+
+    #[gpui::test]
+    fn agent_selection_activates_the_tab_and_sets_maximize_idempotently(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (sibling, _stream) = quiet_test_pane(9, window, cx);
+            let first = app.tabs[1].pane.first_leaf().unwrap();
+            let original = first.terminal().unwrap().clone();
+            app.tabs[1].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::leaf(PaneSlot::Ready(sibling.clone())),
+            );
+            let key = PaneKey {
+                host: original.read(cx).host_id(),
+                pane: original.read(cx).pane_id,
+            };
+            app.activate_sidebar_agent(key, window, cx);
+            assert_eq!(app.active, 1);
+            assert_eq!(app.maximized.as_ref(), Some(&original));
+            app.activate_sidebar_agent(key, window, cx);
+            assert_eq!(
+                app.maximized.as_ref(),
+                Some(&original),
+                "repeated row selection keeps its maximize"
+            );
+            let sibling_key = PaneKey {
+                host: sibling.read(cx).host_id(),
+                pane: 9,
+            };
+            app.activate_sidebar_agent(sibling_key, window, cx);
+            assert_eq!(
+                app.maximized.as_ref(),
+                Some(&sibling),
+                "selecting a sibling replaces the maximize"
+            );
+            assert!(sibling.read(cx).focus_handle.is_focused(window));
+            // A key from another host must never resolve to the local pane.
+            app.activate_sidebar_agent(
+                PaneKey {
+                    host: HostId(42),
+                    pane: 9,
+                },
+                window,
+                cx,
+            );
+            assert_eq!(app.maximized.as_ref(), Some(&sibling));
+        });
+    }
+
+    #[gpui::test]
+    fn sidebar_list_is_window_local_defaults_to_terminal_and_settings_disable_agents(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (first, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        first.update_in(&mut vcx, |app, _, cx| {
+            assert_eq!(app.sidebar_list, SidebarList::Terminal);
+            assert!(!app.sidebar_agents_mode(cx));
+            app.select_sidebar_list(SidebarList::Agents, cx);
+            assert!(app.sidebar_agents_mode(cx));
+            app.set_sidebar_agents_toggle(false, cx);
+            assert_eq!(app.sidebar_list, SidebarList::Terminal);
+            assert!(!app.sidebar_agents_mode(cx));
+            app.set_sidebar_agents_toggle(true, cx);
+            assert!(!app.sidebar_agents_mode(cx));
+            app.select_sidebar_list(SidebarList::Agents, cx);
+        });
+        let (second, mut second_vcx, _other_streams) = harness_with_tabs(cx, 1);
+        second.update_in(&mut second_vcx, |app, _, _| {
+            assert_eq!(app.sidebar_list, SidebarList::Terminal)
+        });
+        assert_eq!(
+            first.read_with(&vcx, |app, _| app.sidebar_list),
+            SidebarList::Agents
+        );
+    }
+
+    #[gpui::test]
+    fn sidebar_list_toggle_stays_visible_while_the_tab_list_scrolls(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 25);
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let before = vcx
+            .debug_bounds("sidebar-list-toggle")
+            .expect("the bottom selector was painted");
+        assert!(before.size.height > px(0.));
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        assert!(
+            before.top() >= px(0.) && before.bottom() <= viewport.height,
+            "the selector is inside the visible window"
+        );
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.sidebar_scroll
+                .set_offset(gpui::point(px(0.), px(-400.)));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let after = vcx.debug_bounds("sidebar-list-toggle").unwrap();
+        assert!(
+            app.read_with(&vcx, |app, _| app.sidebar_scroll.offset().y < px(0.)),
+            "the test actually scrolled the overflowing list"
+        );
+        assert_eq!(
+            after, before,
+            "scrolling the tab rows does not move the selector"
+        );
+    }
+
+    fn report_agent(stream: &mut crate::daemon::transport::Stream, status: AgentStatus) {
+        use crate::daemon::protocol::DaemonMsg;
+        DaemonMsg::Agent(Some(CLIAgent::Codex))
+            .encode(stream)
+            .unwrap();
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status,
+            ..Default::default()
+        }))
+        .encode(stream)
+        .unwrap();
+    }
+
+    #[gpui::test]
+    fn agent_rows_render_live_and_clicks_use_the_maximize_path(cx: &mut gpui::TestAppContext) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 2);
+        let mut sibling_stream = app.update_in(&mut vcx, |app, window, cx| {
+            let (sibling, stream) = quiet_test_pane(9, window, cx);
+            let (shell, shell_stream) = quiet_test_pane(10, window, cx);
+            streams.push(shell_stream);
+            let first = app.tabs[0].pane.first_leaf().unwrap();
+            app.tabs[0].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::split_node(
+                    gpui::Axis::Vertical,
+                    0.5,
+                    Pane::leaf(PaneSlot::Ready(sibling)),
+                    Pane::leaf(PaneSlot::Ready(shell)),
+                ),
+            );
+            let shell_project = PinnedGroup::label("Shells");
+            let agent_project = PinnedGroup::label("Project");
+            app.tabs[1].group.set(Some(shell_project.id));
+            app.tabs[0].group.set(Some(agent_project.id));
+            app.sidebar_groups
+                .pinned
+                .extend([shell_project, agent_project]);
+            app.select_sidebar_list(SidebarList::Agents, cx);
+            stream
+        });
+        report_agent(&mut streams[0], AgentStatus::Working);
+        report_agent(&mut sibling_stream, AgentStatus::Waiting);
+        let mut ready = false;
+        for _ in 0..200 {
+            ready = app.read_with(&vcx, |app, cx| app.agent_pane_summaries(cx).len() == 2);
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            ready,
+            "both daemon agent reports reached the shared collector"
+        );
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let row = vcx
+            .debug_bounds("sidebar-agent-row-1")
+            .expect("second agent row was painted");
+        vcx.simulate_click(row.center(), gpui::Modifiers::none());
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.active, 0);
+            let maximized = app
+                .maximized
+                .as_ref()
+                .expect("agent row click maximized the pane");
+            assert_eq!(maximized.read(cx).pane_id, 9);
+            assert!(maximized.read(cx).focus_handle.is_focused(window));
+            let rows = app.sidebar_agent_rows(&app.agent_pane_summaries(cx), cx);
+            assert_eq!(rows.len(), 2, "the unrelated shell is absent");
+            assert_eq!(rows[1].status(), Some(AgentStatus::Waiting));
+            assert!(
+                rows[1].marker().unwrap().contains("2/3"),
+                "split positions count the shell pane too"
+            );
+            app.activate_visual(0, window, cx);
+            assert_eq!(
+                app.maximized.as_ref().unwrap().read(cx).pane_id,
+                1,
+                "number shortcuts target agent panes"
+            );
+            app.cycle_sidebar_agent(true, window, cx);
+            assert_eq!(
+                app.maximized.as_ref().unwrap().read(cx).pane_id,
+                9,
+                "next skips shells"
+            );
+            app.set_tab_group_shortcuts(true, cx);
+            app.activate(1, window, cx);
+            app.activate_group_visual(0, window, cx);
+            assert_eq!(
+                app.active, 0,
+                "group shortcuts skip the project with only a shell"
+            );
+            assert_eq!(app.maximized.as_ref().unwrap().read(cx).pane_id, 9);
+            app.mod_hint_badges = true;
+            app.mod_hint_group = true;
+            let sections = sidebar_sections(&app.sidebar_group_keys(cx), &app.sidebar_groups);
+            let positions = app.sidebar_badge_positions(&sections, cx).unwrap();
+            assert_eq!(positions[0], Some(0));
+            assert_eq!(
+                positions[1], None,
+                "the shell-only project's header has no shortcut badge"
+            );
+            app.mod_hint_badges = false;
+        });
+        report_agent(&mut sibling_stream, AgentStatus::Done);
+        let mut updated = false;
+        for _ in 0..200 {
+            updated = app.read_with(&vcx, |app, cx| {
+                app.sidebar_agent_rows(&app.agent_pane_summaries(cx), cx)
+                    .get(1)
+                    .is_some_and(|row| row.status() == Some(AgentStatus::Done))
+            });
+            if updated {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(updated, "daemon status changes reach the row model live");
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.sidebar_groups.pinned.clear();
+            for tab in &app.tabs {
+                tab.group.set(None);
+            }
+            app.mod_hint_badges = true;
+            app.mod_hint_group = true;
+            cx.notify();
+        });
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        assert!(
+            vcx.debug_bounds("sidebar-agent-badge-0").is_some(),
+            "a headerless project's shortcut badge appears on its first agent row"
+        );
+        assert!(
+            vcx.debug_bounds("sidebar-agent-badge-1").is_none(),
+            "the project badge appears only once"
+        );
+        vcx.dispatch_action(crate::core::actions::ToggleMaximizePane);
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(
+                app.maximized.is_none(),
+                "the existing maximize shortcut restores the split"
+            );
+            assert_eq!(
+                app.tabs[0]
+                    .pane
+                    .focused_leaf(window, cx)
+                    .unwrap()
+                    .terminal()
+                    .unwrap()
+                    .read(cx)
+                    .pane_id,
+                9
+            );
+        });
     }
 }

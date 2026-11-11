@@ -126,6 +126,12 @@ impl Tty59App {
         let tray = self.settings_switch("wt-tray-icon", show_tray_icon, cx, |this, on, _, cx| {
             this.set_show_tray_icon(on, cx)
         });
+        let agent_default = self.settings_switch(
+            "wt-agent-vision-default",
+            cx.global::<Config>().agent_vision_default,
+            cx,
+            |this, on, _, cx| this.update_config(cx, |cfg| cfg.agent_vision_default = on),
+        );
         let notify = self.settings_choice(
             "wt-notify",
             &[
@@ -169,6 +175,12 @@ impl Tty59App {
                         t(L10nKey::SettingsStartupWindow),
                         t(L10nKey::SettingsStartupWindowDesc),
                         startup,
+                        cx,
+                    ),
+                    self.settings_row(
+                        t(L10nKey::VisionDefault),
+                        t(L10nKey::VisionDefaultDesc),
+                        agent_default,
                         cx,
                     ),
                     self.settings_row(
@@ -1400,6 +1412,7 @@ impl Tty59App {
             TabBarPosition::Left => 1,
         };
         let sidebar_auto_grouping = cfg.sidebar_auto_grouping;
+        let sidebar_agents_toggle = cfg.sidebar_agents_toggle;
         let tab_group_shortcuts = cfg.tab_group_shortcuts;
         let group_activation_idx = match cfg.tab_group_activation {
             TabGroupActivation::Recent => 0,
@@ -1460,6 +1473,12 @@ impl Tty59App {
                 );
             },
         );
+        let agents_toggle = self.settings_switch(
+            "wt-sidebar-agents-toggle",
+            sidebar_agents_toggle,
+            cx,
+            |this, on, _, cx| this.set_sidebar_agents_toggle(on, cx),
+        );
         let grouping = self.settings_switch(
             "wt-sidebar-auto-grouping",
             sidebar_auto_grouping,
@@ -1502,6 +1521,12 @@ impl Tty59App {
                     t(L10nKey::SettingsTabBarPosition),
                     t(L10nKey::SettingsTabBarPositionDesc),
                     tab_bar,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsSidebarAgentsToggle),
+                    t(L10nKey::SettingsSidebarAgentsToggleDesc),
+                    agents_toggle,
                     cx,
                 ),
                 self.settings_row(

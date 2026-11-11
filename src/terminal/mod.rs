@@ -30,6 +30,7 @@ pub(crate) mod parked_cursor;
 pub(crate) mod prompt_reflow;
 mod remote;
 mod reverse_search;
+mod screen_agent;
 pub(crate) mod scrollbar;
 pub mod search;
 mod signature;

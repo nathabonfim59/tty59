@@ -11948,6 +11948,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tty59-agent-detect"
+version = "26.11.0"
+dependencies = [
+ "regex",
+ "serde",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
 name = "tty59-cli"
 version = "26.11.0"
 dependencies = [
@@ -11996,6 +12005,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml_edit 0.25.15+spec-1.1.0",
+ "tty59-agent-detect",
  "ureq",
  "uuid",
  "windows-sys 0.59.0",

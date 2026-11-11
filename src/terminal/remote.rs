@@ -2284,6 +2284,18 @@ impl RemoteTerminal {
         self.agent_session.lock().ok().and_then(|g| g.state.clone())
     }
 
+    pub(super) fn report_agent_screen(&self, hint: crate::daemon::protocol::AgentScreenHint) {
+        let advertised = self.agent_session.lock().is_ok_and(|slot| {
+            slot.state
+                .as_ref()
+                .and_then(|state| state.detection.as_ref())
+                .is_some_and(|detection| !detection.exited && detection.epoch == hint.epoch)
+        });
+        if advertised {
+            self.link.send(ClientMsg::AgentScreen(hint));
+        }
+    }
+
     /// The status the daemon replayed when this link attached, handed out once.
     ///
     /// `Some(status)` means what [`Self::agent_session`] reports right now is
@@ -7370,6 +7382,7 @@ mod tests {
                 inferred: false,
                 readout: Default::default(),
                 since_ms: None,
+                detection: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -7434,6 +7447,7 @@ mod tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            detection: None,
         }))
         .encode(&mut daemon_side)
         .unwrap();
@@ -7487,6 +7501,7 @@ mod tests {
             inferred: false,
             readout: Default::default(),
             since_ms: None,
+            detection: None,
         }))
         .encode(&mut daemon_side)
         .unwrap();

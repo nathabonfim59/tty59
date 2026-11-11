@@ -1560,9 +1560,17 @@ fn rgb_to_hsla(c: tty59_vt::model::Rgb) -> gpui::Hsla {
 /// The screen as text, one string per line, wide characters' spacer cells
 /// left out.
 fn screen_rows(term: &VtTermView) -> Vec<String> {
-    (0..term.screen_lines())
+    screen_rows_bounded(term, 0, term.columns())
+}
+
+pub(super) fn screen_rows_bounded(
+    term: &VtTermView,
+    first_row: usize,
+    columns: usize,
+) -> Vec<String> {
+    (first_row..term.screen_lines())
         .map(|l| {
-            (0..term.columns())
+            (0..columns)
                 .map(|c| {
                     term.glyph(GridPoint {
                         line: l as i32,

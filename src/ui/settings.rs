@@ -702,6 +702,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: VisionDefault,
+            keywords: VisionDefaultDesc,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsRememberWindowSize,
             keywords: SettingsSearchRememberWindowSizeKeywords,
         },
@@ -729,6 +734,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: General,
             title: SettingsConfirmClose,
             keywords: SettingsSearchConfirmCloseKeywords,
+        },
+        SearchEntry {
+            section: General,
+            title: SettingsSidebarAgentsToggle,
+            keywords: SettingsSearchSidebarAgentsToggleKeywords,
         },
         SearchEntry {
             section: General,
@@ -868,6 +878,7 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => "confirm_close",
             L10nKey::SettingsTabBarPosition => "tab_bar_position",
             L10nKey::SettingsSidebarGrouping => "sidebar_auto_grouping",
+            L10nKey::SettingsSidebarAgentsToggle => "sidebar_agents_toggle",
             L10nKey::SettingsTabGroupShortcuts => "tab_group_shortcuts",
             L10nKey::SettingsTabGroupActivation => "tab_group_activation",
             L10nKey::SettingsEditorGitGutter => "editor_git_gutter",
@@ -896,6 +907,7 @@ impl SearchEntry {
             L10nKey::SettingsTabCompletion => "tab_completion",
             L10nKey::SettingsHistorySearch => "history_search",
             L10nKey::SettingsStartupWindow => "startup_mode",
+            L10nKey::VisionDefault => "agent_vision_default",
             L10nKey::SettingsRememberWindowSize => "remember_window_size",
             L10nKey::SettingsCheckUpdatesOnLaunch => "check_for_updates",
             L10nKey::SettingsAutoDownload => "auto_download_updates",
@@ -984,6 +996,7 @@ impl SearchEntry {
             L10nKey::SettingsCopyJoinWrapped => t(L10nKey::SettingsCopyJoinWrappedDesc),
             L10nKey::SettingsVerifyHostKeys => t(L10nKey::SettingsVerifyHostKeysDesc),
             L10nKey::SettingsStartupWindow => t(L10nKey::SettingsStartupWindowDesc),
+            L10nKey::VisionDefault => t(L10nKey::VisionDefaultDesc),
             L10nKey::SettingsRememberWindowSize => t(L10nKey::SettingsRememberWindowSizeDesc),
             L10nKey::SettingsRestoreLastLayout => t(L10nKey::SettingsRestoreLastLayoutDesc),
             L10nKey::SettingsShowTrayIcon => t(L10nKey::SettingsShowTrayIconDesc),
@@ -991,6 +1004,7 @@ impl SearchEntry {
             L10nKey::SettingsConfirmClose => t(L10nKey::SettingsConfirmCloseDesc),
             L10nKey::SettingsTabBarPosition => t(L10nKey::SettingsTabBarPositionDesc),
             L10nKey::SettingsSidebarGrouping => t(L10nKey::SettingsSidebarGroupingDesc),
+            L10nKey::SettingsSidebarAgentsToggle => t(L10nKey::SettingsSidebarAgentsToggleDesc),
             L10nKey::SettingsTabGroupShortcuts => t(L10nKey::SettingsTabGroupShortcutsDesc),
             L10nKey::SettingsTabGroupActivation => t(L10nKey::SettingsTabGroupActivationDesc),
             L10nKey::SettingsEditorGitGutter => t(L10nKey::SettingsEditorGitGutterDesc),
@@ -1047,6 +1061,9 @@ impl SearchEntry {
             L10nKey::SettingsSidebarGrouping => {
                 cfg.sidebar_auto_grouping != defaults.sidebar_auto_grouping
             }
+            L10nKey::SettingsSidebarAgentsToggle => {
+                cfg.sidebar_agents_toggle != defaults.sidebar_agents_toggle
+            }
             L10nKey::SettingsTabGroupShortcuts => {
                 cfg.tab_group_shortcuts != defaults.tab_group_shortcuts
             }
@@ -1098,6 +1115,7 @@ impl SearchEntry {
             L10nKey::SettingsTabCompletion => cfg.tab_completion != defaults.tab_completion,
             L10nKey::SettingsHistorySearch => cfg.history_search != defaults.history_search,
             L10nKey::SettingsStartupWindow => cfg.startup_mode != defaults.startup_mode,
+            L10nKey::VisionDefault => cfg.agent_vision_default != defaults.agent_vision_default,
             L10nKey::SettingsRememberWindowSize => {
                 cfg.remember_window_size != defaults.remember_window_size
             }

@@ -1,0 +1,5 @@
+The agent detection rule engine and bundled rules in tty59 derive from herdr:
+https://github.com/herdrdev/herdr, commit ee5bfb50, Apache License 2.0.
+
+tty59 modified the engine for bundled rules and separate screen and OSC
+evidence. The Apache License 2.0 is provided with tty59 as LICENSE.

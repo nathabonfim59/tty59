@@ -542,6 +542,12 @@ pub enum TabCmd {
             help = "Working directory for the tab's shell"
         )]
         cwd: Option<String>,
+        #[arg(
+            long,
+            value_name = "PINNED_GROUP_ID",
+            help = "File the tab in this pinned group of the workspace"
+        )]
+        group: Option<String>,
 
         // The recovery half of `pane ls --all`. Until this existed, a pane that
         // came out from under its tab — an interrupted `run`, or a client that
@@ -628,6 +634,12 @@ pub enum WorktreeCmd {
             help = "Workspace for the tab (default: this one)"
         )]
         ws: Option<String>,
+        #[arg(
+            long,
+            value_name = "PINNED_GROUP_ID",
+            help = "File the tab in this pinned group of the workspace"
+        )]
+        group: Option<String>,
         #[arg(
             long,
             value_name = "DIR",
@@ -969,12 +981,12 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["tty59", "tab", "new", "api", "--cwd", "C:\\proj"]).command,
-            Some(Command::Tab(TabCmd::New { ws: Some(w), cwd: Some(c), pane: None }))
+            Some(Command::Tab(TabCmd::New { ws: Some(w), cwd: Some(c), pane: None, group: None }))
                 if w == "api" && c == "C:\\proj"
         ));
         assert!(matches!(
             parse(&["tty59", "tab", "new", "--pane", "%37"]).command,
-            Some(Command::Tab(TabCmd::New { ws: None, cwd: None, pane: Some(p) })) if p == "%37"
+            Some(Command::Tab(TabCmd::New { ws: None, cwd: None, pane: Some(p), group: None })) if p == "%37"
         ));
         assert!(matches!(
             parse(&["tty59", "tab", "close", "@7"]).command,

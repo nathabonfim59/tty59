@@ -12,6 +12,7 @@ publish = false
 # `tty59-server` is), so nothing windowing-, rendering- or GUI-shaped belongs in
 # these dependencies.
 [dependencies]
+tty59-agent-detect = { path = "../tty59-agent-detect" }
 anyhow.workspace = true
 log.workspace = true
 serde = { workspace = true }

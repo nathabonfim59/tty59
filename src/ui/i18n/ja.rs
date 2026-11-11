@@ -2,6 +2,36 @@ use super::L10nKey;
 
 pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
     Some(match key {
+        L10nKey::VisionToggle => "エージェント作業ビュー",
+        L10nKey::VisionAgents => "エージェント",
+        L10nKey::VisionWorkbench => "ワークベンチ",
+        L10nKey::VisionInbox => "受信トレイ",
+        L10nKey::VisionKanban => "カンバン",
+        L10nKey::VisionAll => "ワークスペース全体",
+        L10nKey::VisionProjects => "プロジェクト",
+        L10nKey::VisionSearch => "エージェントを検索…",
+        L10nKey::VisionNeedsYou => "対応が必要",
+        L10nKey::VisionOther => "その他のエージェント",
+        L10nKey::VisionEmpty => "対応が必要なエージェントはいません",
+        L10nKey::VisionNoAgents => "一致するエージェントはいません",
+        L10nKey::VisionSelect => "エージェントを選んで作業を開始",
+        L10nKey::VisionHandled => "対応済みにする",
+        L10nKey::VisionNext => "次の要対応エージェント",
+        L10nKey::VisionNothingNext => "このワークスペースに他の要対応エージェントはいません",
+        L10nKey::VisionOpenWorkbench => "ワークベンチで開く",
+        L10nKey::VisionListHelp => "↑ ↓ / j k 選択 · Enter 応答 · [ ] プロジェクト",
+        L10nKey::VisionBoardHelp => "← → / h l 列 · ↑ ↓ / j k カード · Enter 応答",
+        L10nKey::VisionTerminalHelp => "Esc でリストに戻る",
+        L10nKey::VisionWaiting => "応答待ち",
+        L10nKey::VisionWorking => "作業中",
+        L10nKey::VisionDone => "完了",
+        L10nKey::VisionIdle => "待機中",
+        L10nKey::VisionExited => "終了",
+        L10nKey::VisionPane => "ペイン {i}/{n}",
+        L10nKey::VisionDefault => "新規ウィンドウをエージェントビューで開く",
+        L10nKey::VisionDefaultDesc => {
+            "新規ウィンドウを受信トレイで開きます。上部バーからワークベンチに戻れます。"
+        }
         L10nKey::SettingsNoMatchesShort => "一致なし",
         L10nKey::SettingsModifiedTitle => "変更済み",
         L10nKey::SettingsMatchCount => "{count} 件",
@@ -755,6 +785,16 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTabBarPosition => "タブバーの位置",
         L10nKey::SettingsTabBarPositionDesc => {
             "タブを上部の横一列または左側の縦サイドバーとして表示"
+        }
+        L10nKey::SidebarListTerminal => "ターミナル",
+        L10nKey::SidebarListAgents => "エージェント",
+        L10nKey::SidebarNoAgents => "このワークスペースにエージェントはありません",
+        L10nKey::SettingsSidebarAgentsToggle => "ターミナル | エージェント切り替え",
+        L10nKey::SettingsSidebarAgentsToggleDesc => {
+            "ワークベンチのサイドバー下部にリスト切り替えを表示します。"
+        }
+        L10nKey::SettingsSearchSidebarAgentsToggleKeywords => {
+            "サイドバー ターミナル エージェント リスト 切り替え"
         }
         L10nKey::SettingsSidebarGrouping => "自動グループ化",
         L10nKey::SettingsSidebarGroupingDesc => {

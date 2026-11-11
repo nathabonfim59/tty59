@@ -97,7 +97,8 @@ pub(crate) fn urgency(status: AgentStatus) -> u8 {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AgentRow {
     pub leaf_id: u64,
-    pub agent: crate::core::cli_agent::CLIAgent,
+    pub agent: Option<crate::core::cli_agent::CLIAgent>,
+    pub name: String,
     pub status: AgentStatus,
     pub detail: String,
     /// When the agent entered `status`, by its daemon's clock.
@@ -234,9 +235,9 @@ pub(crate) fn menu_spec(snap: &TraySnapshot) -> Vec<SpecItem> {
         };
         items.push(SpecItem::Item {
             id: format!("agent:{}", a.leaf_id),
-            label: format!("{} · {}{state}", a.agent.display_name(), a.detail),
+            label: format!("{} · {}{state}", a.name, a.detail),
             checked: None,
-            avatar: Some((a.agent, a.status)),
+            avatar: a.agent.map(|agent| (agent, a.status)),
         });
     }
     if !snap.agents.is_empty() {
@@ -301,7 +302,8 @@ mod tests {
         TraySnapshot {
             agents: vec![AgentRow {
                 leaf_id: 42,
-                agent: crate::core::cli_agent::CLIAgent::Claude,
+                agent: Some(crate::core::cli_agent::CLIAgent::Claude),
+                name: "Claude Code".into(),
                 status,
                 detail: "tty59 @ main".into(),
                 since_ms: None,
@@ -315,7 +317,8 @@ mod tests {
     fn row(leaf_id: u64, status: AgentStatus, since_ms: Option<u64>, unread: bool) -> AgentRow {
         AgentRow {
             leaf_id,
-            agent: crate::core::cli_agent::CLIAgent::Claude,
+            agent: Some(crate::core::cli_agent::CLIAgent::Claude),
+            name: "Claude Code".into(),
             status,
             detail: String::new(),
             since_ms,

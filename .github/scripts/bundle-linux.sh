@@ -46,6 +46,7 @@ cp LICENSE "$STAGE/LICENSE"
 cp assets/licenses/alacritty-LICENSE-APACHE "$STAGE/LICENSE-Alacritty-APACHE"
 cp assets/licenses/alacritty-LICENSE-MIT "$STAGE/LICENSE-Alacritty-MIT"
 cp assets/licenses/ghostty-LICENSE "$STAGE/LICENSE-Ghostty"
+cp assets/licenses/herdr-NOTICE "$STAGE/NOTICE-Herdr"
 cp README.md "$STAGE/README.md"
 
 tar -C dist -czf "dist/${NAME}.tar.gz" "$NAME"

@@ -58,6 +58,7 @@ pub fn two_workspace_machine() -> Machine {
         osc_title: None,
         ssh_spec: None,
         agent: None,
+        agent_overview: None,
         shell: None,
         live: true,
     };

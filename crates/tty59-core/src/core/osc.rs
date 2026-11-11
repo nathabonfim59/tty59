@@ -128,6 +128,19 @@ impl OscTokenizer {
 /// A desktop notification: its title, if it has one, and its body.
 pub type Note = (Option<String>, String);
 
+pub fn parse_progress(payload: &[u8]) -> Option<&str> {
+    let progress = payload.strip_prefix(b"9;4;")?;
+    let mut fields = progress.splitn(2, |byte| *byte == b';');
+    let state = fields.next()?;
+    let value = fields.next().unwrap_or_default();
+    if !matches!(state, b"0" | b"1" | b"2" | b"3" | b"4")
+        || (value != b"-1" && (value.len() > 3 || !value.iter().all(u8::is_ascii_digit)))
+    {
+        return None;
+    }
+    std::str::from_utf8(&payload[2..]).ok()
+}
+
 pub fn parse_notification(payload: &[u8]) -> Option<Note> {
     if let Some(rest) = payload.strip_prefix(b"9;") {
         let first = rest.split(|&b| b == b';').next().unwrap_or(rest);

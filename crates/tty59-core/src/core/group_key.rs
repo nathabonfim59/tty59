@@ -46,6 +46,14 @@ impl std::fmt::Display for GroupId {
     }
 }
 
+impl std::str::FromStr for GroupId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse().map(Self)
+    }
+}
+
 /// A group the user chose to keep.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinnedGroup {

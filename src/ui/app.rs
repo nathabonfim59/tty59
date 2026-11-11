@@ -697,7 +697,7 @@ impl Tab {
         self.asleep.as_ref().and_then(|a| a.view.agent)
     }
 
-    fn focus_target(&self) -> Option<crate::ui::pane::PaneSlot> {
+    pub(crate) fn focus_target(&self) -> Option<crate::ui::pane::PaneSlot> {
         match self.last_focused {
             Some(id) => self.pane.leaf_matching_or_first(|l| l.entity_id() == id),
             None => self.pane.first_leaf(),
@@ -847,47 +847,25 @@ impl Tab {
             .find_map(|l| l.read(cx).agent())
     }
 
-    /// The tab's most urgent agent leaf, named and reported by that one leaf.
-    ///
-    /// `agent` and `agent_status` answer independently — the *first* leaf
-    /// carrying an agent, and the highest urgency found *anywhere* in the tab
-    /// — so reading them as a pair can put one pane's name beside another
-    /// pane's state, a row no leaf ever had. Anywhere both halves are shown
-    /// at once reads them from here instead (#543).
-    pub(crate) fn agent_row(
-        &self,
-        cx: &App,
-    ) -> Option<(
-        crate::core::cli_agent::CLIAgent,
-        crate::core::cli_agent::AgentStatus,
-    )> {
-        use crate::core::cli_agent::AgentStatus;
-        let urgency = |s: AgentStatus| match s {
-            AgentStatus::Waiting => 3,
-            AgentStatus::Working => 2,
-            AgentStatus::Done => 1,
-            AgentStatus::Idle => 0,
-        };
+    /// The most urgent agent state in any live pane of this tab.
+    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
         self.pane
             .terminals()
             .into_iter()
-            .filter_map(|l| {
-                let view = l.read(cx);
-                let agent = view.agent()?;
-                // A pane whose agent is running but has never reported a
-                // session reads as idle, the same reading the badge has always
-                // given it.
-                let status = view
-                    .agent_session()
-                    .map(|s| s.status)
-                    .unwrap_or(AgentStatus::Idle);
-                Some((agent, status))
+            .filter_map(|leaf| {
+                let view = leaf.read(cx);
+                view.agent_session()
+                    .filter(|session| {
+                        !session.agent_exited()
+                            && (view.agent().is_some() || session.detection.is_some())
+                    })
+                    .map(|session| session.status)
+                    .or_else(|| {
+                        view.agent()
+                            .map(|_| crate::core::cli_agent::AgentStatus::Idle)
+                    })
             })
-            .max_by_key(|(_, status)| urgency(*status))
-    }
-
-    pub(crate) fn agent_status(&self, cx: &App) -> Option<crate::core::cli_agent::AgentStatus> {
-        self.agent_row(cx).map(|(_, status)| status)
+            .max_by_key(|status| crate::ui::tray::urgency(*status))
     }
 
     pub(crate) fn agent_unread_count(&self, cx: &App) -> usize {
@@ -1012,6 +990,7 @@ pub(crate) struct LoopbackForwardPanelState {
 }
 
 pub struct Tty59App {
+    pub(in crate::ui) agent_vision: crate::ui::agent_vision::AgentVision,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
     /// Hands out `Tab::last_used` stamps. A counter rather than a clock so two
@@ -1112,6 +1091,8 @@ pub struct Tty59App {
     pub(crate) right_panel_visible: bool,
     pub(crate) right_panel_tab: RightPanelTab,
     pub(crate) sidebar_collapsed: bool,
+    pub(crate) sidebar_list: crate::ui::tab_sidebar::SidebarList,
+    pub(in crate::ui) sidebar_agent_reveal: Rc<Cell<Option<crate::ui::agent_vision::PaneKey>>>,
     pub(crate) sidebar_scroll: gpui::ScrollHandle,
     /// The tab whose sidebar row is brought into view the next time it is
     /// drawn. Read by the row, not by `activate`: a new tab has no row yet,
@@ -1741,6 +1722,7 @@ impl Tty59App {
         let panel_search =
             crate::ui::panel_search::PanelSearchState::new(file_search.clone(), window, cx);
         let mut app = Self {
+            agent_vision: crate::ui::agent_vision::AgentVision::new(workspace, window, cx),
             tabs,
             active,
             tab_use_seq: std::cell::Cell::new(0),
@@ -1820,6 +1802,8 @@ impl Tty59App {
             right_panel_visible,
             right_panel_tab,
             sidebar_collapsed,
+            sidebar_list: Default::default(),
+            sidebar_agent_reveal: Rc::new(Cell::new(None)),
             sidebar_scroll: gpui::ScrollHandle::new(),
             sidebar_reveal: Rc::new(Cell::new(None)),
             reorder: Rc::new(RefCell::new(None)),
@@ -1951,6 +1935,9 @@ impl Tty59App {
         });
 
         app.focus_active(window, cx);
+        if app.agent_mode_active() {
+            window.focus(&app.agent_vision.list_focus, cx);
+        }
         app
     }
 
@@ -2380,8 +2367,19 @@ impl Tty59App {
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let view = leaf.read(cx);
-                let Some(agent) = view.agent() else { continue };
                 let session = view.agent_session();
+                if session.as_ref().is_some_and(|state| state.agent_exited()) {
+                    continue;
+                }
+                let agent = view.agent();
+                let Some(name) = agent.map(|agent| agent.display_name()).or_else(|| {
+                    session
+                        .as_ref()
+                        .and_then(|state| state.detection.as_ref())
+                        .map(|detection| detection.kind.as_str())
+                }) else {
+                    continue;
+                };
                 let status = session.as_ref().map_or(AgentStatus::Idle, |s| s.status);
                 let since_ms = session.as_ref().and_then(|s| s.since_ms);
                 let waited = session
@@ -2401,6 +2399,7 @@ impl Tty59App {
                 agents.push(crate::ui::tray::AgentRow {
                     leaf_id: leaf.entity_id().as_u64(),
                     agent,
+                    name: name.to_string(),
                     status,
                     detail,
                     since_ms,
@@ -2422,6 +2421,10 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.agent_mode_active() {
+            self.next_agent_attention(window, cx);
+            return;
+        }
         // In window order, so ties break the same way whichever window the
         // press lands in. This window's own rows are read from `self`: its
         // entity is mid-update and cannot be read through the registry.
@@ -4026,6 +4029,14 @@ impl Tty59App {
         self.update_config(cx, |cfg| cfg.sidebar_auto_grouping = on);
     }
 
+    pub(crate) fn set_sidebar_agents_toggle(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.update_config(cx, |cfg| cfg.sidebar_agents_toggle = on);
+        if !on {
+            self.sidebar_list = Default::default();
+        }
+        cx.notify();
+    }
+
     pub(crate) fn set_tab_group_shortcuts(&mut self, on: bool, cx: &mut Context<Self>) {
         self.update_config(cx, |cfg| cfg.tab_group_shortcuts = on);
         crate::ui::keymap::rebind(cx);
@@ -5393,13 +5404,30 @@ impl Tty59App {
     /// around.
     fn declare_displayed_panes(&self, cx: &App) {
         let active = self.active;
+        let reader = if self.agent_mode_active() {
+            (self.agent_vision.state.mode() == crate::ui::agent_vision::ViewMode::Inbox)
+                .then(|| self.agent_vision.state.selected())
+                .flatten()
+                .and_then(|key| self.agent_terminal(key, cx))
+                .map(|terminal| terminal.entity_id())
+        } else {
+            None
+        };
+        let agent_mode = self.agent_mode_active();
         crate::terminal::view::declare_displayed(
             cx,
             self.tabs.iter().enumerate().flat_map(|(i, tab)| {
-                tab.pane
-                    .leaves()
-                    .into_iter()
-                    .filter_map(move |slot| Some((slot.terminal()?.entity_id(), i == active)))
+                tab.pane.leaves().into_iter().filter_map(move |slot| {
+                    let id = slot.terminal()?.entity_id();
+                    Some((
+                        id,
+                        if agent_mode {
+                            Some(id) == reader
+                        } else {
+                            i == active
+                        },
+                    ))
+                })
             }),
         );
     }
@@ -5431,6 +5459,10 @@ impl Tty59App {
     /// the ends — no switcher, no MRU (#867). "Shows" matters with the
     /// sidebar grouping tabs: the next row is not always the next index.
     fn cycle_tab(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sidebar_agents_mode(cx) {
+            self.cycle_sidebar_agent(forward, window, cx);
+            return;
+        }
         let order = self.visual_tab_order(cx);
         if let Some(next) = step_in_order(&order, self.active, forward) {
             self.activate(next, window, cx);
@@ -5687,11 +5719,32 @@ impl Tty59App {
             .or_else(|| tab.focus_target())
             .and_then(|slot| slot.terminal().cloned());
         if let Some(leaf) = leaf {
-            let handle = leaf.read(cx).focus_handle.clone();
-            self.maximized = Some(leaf);
-            window.focus(&handle, cx);
-            cx.notify();
+            self.maximize_pane(leaf, window, cx);
         }
+    }
+
+    pub(crate) fn maximize_pane(
+        &mut self,
+        leaf: Entity<TerminalView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        if !tab
+            .pane
+            .leaves()
+            .iter()
+            .any(|slot| slot.entity_id() == leaf.entity_id())
+        {
+            return;
+        }
+        remember_leaf_in(&mut self.tabs, leaf.entity_id());
+        let handle = leaf.read(cx).focus_handle.clone();
+        self.maximized = (self.tabs[self.active].pane.leaves().len() > 1).then_some(leaf);
+        window.focus(&handle, cx);
+        cx.notify();
     }
 
     pub(crate) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -6443,7 +6496,11 @@ impl Tty59App {
         crate::ui::tree_sync::rename_workspace(cx, id, (!value.is_empty()).then_some(value));
         crate::ui::windows::refresh_menu(cx);
         self.sync_window_title(window, cx);
-        self.focus_active(window, cx);
+        if self.agent_mode_active() {
+            self.focus_agent_list(window, cx);
+        } else {
+            self.focus_active(window, cx);
+        }
         cx.notify();
     }
 
@@ -7033,6 +7090,13 @@ impl Tty59App {
             HibernateTab => self.hibernate_tab(self.active, window, cx),
             ForkAgentSession => self.fork_active_pane_session(ForkPlacement::NewTab, window, cx),
             NewAgentTab => self.new_agent_tab(window, cx),
+            ToggleAgentVision => self.toggle_agent_vision(window, cx),
+            ToggleAgentBoard => self.toggle_agent_board(window, cx),
+            MarkAgentHandled => {
+                if self.agent_mode_active() {
+                    self.handle_agent_attention(window, cx)
+                }
+            }
             FocusNextAgentNeedingAttention => self.focus_next_agent_needing_attention(window, cx),
             // Picked from the palette with ⌥ held, the way a New Tab menu row
             // is: a split beside the focused pane instead of a tab.
@@ -7265,6 +7329,9 @@ impl Tty59App {
     ) {
         let defaults = Config::default();
         match title {
+            L10nKey::VisionDefault => self.update_config(cx, |cfg| {
+                cfg.agent_vision_default = defaults.agent_vision_default
+            }),
             L10nKey::SettingsDimInactivePanes => {
                 self.set_dim_inactive_panes(defaults.dim_inactive_panes, cx)
             }
@@ -7286,6 +7353,9 @@ impl Tty59App {
             }
             L10nKey::SettingsSidebarGrouping => {
                 self.set_sidebar_auto_grouping(defaults.sidebar_auto_grouping, cx)
+            }
+            L10nKey::SettingsSidebarAgentsToggle => {
+                self.set_sidebar_agents_toggle(defaults.sidebar_agents_toggle, cx)
             }
             L10nKey::SettingsTabGroupShortcuts => {
                 self.set_tab_group_shortcuts(defaults.tab_group_shortcuts, cx)
@@ -7759,6 +7829,9 @@ impl Tty59App {
     }
 
     pub(crate) fn refresh_locale_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.agent_vision.input.update(cx, |state, cx| {
+            state.set_placeholder(t(L10nKey::VisionSearch), window, cx)
+        });
         self.sidebar_search.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::SearchTabs), window, cx)
         });
@@ -9547,6 +9620,7 @@ impl Render for Tty59App {
         // Before anything asks where a tab is drawn: a tab that walked into a
         // pinned folder since the last frame is filed there on this one.
         self.settle_sidebar_groups(cx);
+        self.refresh_agent_vision(window, cx);
         self.touch_active_tab();
         self.declare_displayed_panes(cx);
         self.scm_sync_watchers(window, cx);
@@ -9604,12 +9678,14 @@ impl Render for Tty59App {
         {
             cx.set_active_drag_cursor_style(held, window);
         }
-        let vertical = matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
-            && !self.tabs.is_empty();
+        let agent_mode = self.agent_mode_active();
+        let vertical = agent_mode
+            || matches!(cx.global::<Config>().tab_bar_position, TabBarPosition::Left)
+                && !self.tabs.is_empty();
         // Asked through the predicate the right panel sizes itself against —
         // two spellings of "is the rail up" is one more than the layout can
         // afford to have disagree.
-        let rail = self.sidebar_open(cx);
+        let rail = agent_mode || self.sidebar_open(cx);
         // A hover flag is only written by its sheet, and only on a change of
         // state it saw. A sheet that is not in the tree sees none: the rail
         // hidden by its own tile with the pointer on it, or the switch turned
@@ -9631,43 +9707,52 @@ impl Render for Tty59App {
         let tab_landing = self.tab_landing(window, cx);
         let detach_caret = self.detach_caret(window, cx);
         let strip = self.tab_strip(!vertical, window, cx);
-        let sidebar = rail.then(|| self.tab_sidebar(window, cx));
+        let sidebar = rail.then(|| {
+            if agent_mode {
+                self.agent_projects_sidebar(window, cx)
+            } else {
+                self.tab_sidebar(window, cx).into_any_element()
+            }
+        });
         let ssh_status = self
             .tabs
             .get(self.active)
             .and_then(|t| t.pane.focused_or_first(window, cx))
             .and_then(|leaf| self.render_ssh_status_strip(&leaf, cx));
-        let body = match self.tabs.get(self.active) {
-            None => self.render_home(cx).into_any_element(),
-            Some(active_tab) => {
-                let maximized = self.maximized.as_ref().filter(|leaf| {
-                    active_tab
-                        .pane
-                        .leaves()
-                        .iter()
-                        .any(|l| l.entity_id() == leaf.entity_id())
-                });
-                match maximized {
-                    Some(leaf) => div()
-                        .size_full()
-                        .overflow_hidden()
-                        .child(leaf.clone())
-                        .into_any_element(),
-                    None => {
-                        let several = active_tab.pane.leaves().len() > 1;
-                        let chrome = crate::ui::pane::PaneChrome {
-                            dim_inactive: several && cx.global::<Config>().dim_inactive_panes,
-                            rearrangeable: several,
-                            hovered: self.pane_hover.clone(),
-                            lifted: crate::ui::pane_drag::lifted(&self.pane_drag),
-                            drag: self.pane_drag.clone(),
-                        };
-                        active_tab.pane.render(&chrome, window, cx)
+        let body = if agent_mode {
+            self.agent_vision_body(window, cx)
+        } else {
+            match self.tabs.get(self.active) {
+                None => self.render_home(cx).into_any_element(),
+                Some(active_tab) => {
+                    let maximized = self.maximized.as_ref().filter(|leaf| {
+                        active_tab
+                            .pane
+                            .leaves()
+                            .iter()
+                            .any(|l| l.entity_id() == leaf.entity_id())
+                    });
+                    match maximized {
+                        Some(leaf) => div()
+                            .size_full()
+                            .overflow_hidden()
+                            .child(leaf.clone())
+                            .into_any_element(),
+                        None => {
+                            let several = active_tab.pane.leaves().len() > 1;
+                            let chrome = crate::ui::pane::PaneChrome {
+                                dim_inactive: several && cx.global::<Config>().dim_inactive_panes,
+                                rearrangeable: several,
+                                hovered: self.pane_hover.clone(),
+                                lifted: crate::ui::pane_drag::lifted(&self.pane_drag),
+                                drag: self.pane_drag.clone(),
+                            };
+                            active_tab.pane.render(&chrome, window, cx)
+                        }
                     }
                 }
             }
         };
-
         // No window buttons in fullscreen, where they cannot work: the window
         // has no caption for the platform to hit-test, so they would draw,
         // light up under the pointer and do nothing when clicked. `TitleBar`
@@ -9746,7 +9831,11 @@ impl Render for Tty59App {
         // pair and starts choosing between them. Filling, nothing changes: both
         // are rendered, ordered by `overlay_top`, and the front one wins on
         // paint order as it always has.
-        let document_dock_px = self.document_dock_px(window, cx);
+        let document_dock_px = if agent_mode {
+            None
+        } else {
+            self.document_dock_px(window, cx)
+        };
         // Where the docked header sits. Everywhere but macOS the title bar
         // spans the workspace and leaves the strip above the column empty, so
         // the header goes up into it; on macOS the column already reaches the
@@ -9766,16 +9855,24 @@ impl Render for Tty59App {
                 self.render_document_column(w, document_chrome, window, cx),
             ),
             None => {
-                let diff_overlay = self.render_diff_overlay(
-                    crate::ui::document_column::DocumentChrome::Fill,
-                    window,
-                    cx,
-                );
-                let code_overlay = self.render_code_overlay(
-                    crate::ui::document_column::DocumentChrome::Fill,
-                    window,
-                    cx,
-                );
+                let diff_overlay = (!agent_mode)
+                    .then(|| {
+                        self.render_diff_overlay(
+                            crate::ui::document_column::DocumentChrome::Fill,
+                            window,
+                            cx,
+                        )
+                    })
+                    .flatten();
+                let code_overlay = (!agent_mode)
+                    .then(|| {
+                        self.render_code_overlay(
+                            crate::ui::document_column::DocumentChrome::Fill,
+                            window,
+                            cx,
+                        )
+                    })
+                    .flatten();
                 let mut pair = vec![
                     (OverlayTop::Diff, diff_overlay),
                     (OverlayTop::Code, code_overlay),
@@ -9799,7 +9896,9 @@ impl Render for Tty59App {
             .as_ref()
             .map_or(0., |_| document_dock_px.unwrap_or_default());
 
-        let right_panel = self.render_right_panel(window, cx);
+        let right_panel = (!agent_mode)
+            .then(|| self.render_right_panel(window, cx))
+            .flatten();
         // A docked document takes the same fork the right panel does: on
         // Windows and Linux the window controls live at the right end of the
         // title bar, so the bar has to span the workspace rather than sit
@@ -9955,6 +10054,18 @@ impl Render for Tty59App {
                 .flex_col()
                 .bg(window_bg)
                 .text_color(cx.theme().foreground)
+                .capture_key_down(cx.listener(Self::agent_vision_key))
+                .on_action(cx.listener(|this, _: &ToggleAgentVision, window, cx| {
+                    this.toggle_agent_vision(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &ToggleAgentBoard, window, cx| {
+                    this.toggle_agent_board(window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &MarkAgentHandled, window, cx| {
+                    if this.agent_mode_active() {
+                        this.handle_agent_attention(window, cx);
+                    }
+                }))
                 .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
                 .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                 .on_action(cx.listener(|this, _: &SelectWorkspace1, window, cx| {

@@ -860,6 +860,37 @@ impl CLIAgent {
     }
 }
 
+pub use tty59_agent_detect::{
+    State as AgentScreenState, detect_screen, manifest_id_for_launcher as agent_manifest_id,
+};
+
+/// The manifest identity for an agent without a built-in CLI integration.
+/// Only the launcher or a wrapper's script name is considered.
+pub fn detect_manifest_from_argv(argv: &[String]) -> Option<&'static str> {
+    let mut args = argv
+        .iter()
+        .map(String::as_str)
+        .skip_while(|arg| is_env_assignment(arg));
+    let launcher = base_stem(args.next()?);
+    let manifest = tty59_agent_detect::manifest_id_for_launcher;
+    if let Some(id) = manifest(launcher) {
+        return Some(id);
+    }
+    if !is_interpreter(launcher) && !is_shell(launcher) {
+        return None;
+    }
+    for arg in args {
+        match arg {
+            "-c" | "-e" | "-m" | "-p" | "--eval" | "--print" => return None,
+            arg if !arg.starts_with('-') && !is_env_assignment(arg) => {
+                return manifest(base_stem(arg));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Splits a shell-integration command capture into argv tokens, preserving
 /// case so the result can serve as `launch_argv` for flag replay on resume.
 /// Quoted arguments containing spaces come out split; `replay_flags` rejects
@@ -1029,6 +1060,39 @@ pub enum AgentStatus {
     Done,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatusSource {
+    Screen,
+    Osc,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDetectionSession {
+    pub kind: String,
+    pub epoch: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exited: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<AgentStatusSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
+/// The status an open or detached workspace can show without the pane's grid.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentOverview {
+    pub kind: String,
+    pub status: AgentStatus,
+    pub epoch: u64,
+    #[serde(default)]
+    pub since_ms: Option<u64>,
+    #[serde(default)]
+    pub turns: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exited: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSessionState {
     #[serde(default = "AgentSessionState::default_status")]
@@ -1068,6 +1132,8 @@ pub struct AgentSessionState {
     /// told apart from the newest. `None` from a daemon that predates it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detection: Option<AgentDetectionSession>,
 }
 
 /// What an agent says about how it is set up — what the message composer's
@@ -1119,6 +1185,37 @@ impl AgentSessionState {
         AgentStatus::Idle
     }
 
+    pub fn observed(&self) -> bool {
+        self.detection
+            .as_ref()
+            .is_some_and(|detection| detection.source.is_some())
+    }
+
+    pub(crate) fn clear_observation(&mut self) {
+        if let Some(detection) = &mut self.detection {
+            detection.source = None;
+            detection.rule = None;
+        }
+    }
+
+    pub fn agent_exited(&self) -> bool {
+        self.detection
+            .as_ref()
+            .is_some_and(|detection| detection.exited)
+    }
+
+    pub fn overview(&self) -> Option<AgentOverview> {
+        let detection = self.detection.as_ref()?;
+        Some(AgentOverview {
+            kind: detection.kind.clone(),
+            status: self.status,
+            epoch: detection.epoch,
+            since_ms: self.since_ms,
+            turns: self.turns,
+            exited: detection.exited,
+        })
+    }
+
     /// Whether a turn is in flight: the only statuses a user interrupt or a
     /// lost `Stop` can leave behind.
     pub fn mid_turn(&self) -> bool {
@@ -1140,6 +1237,7 @@ impl AgentSessionState {
         self.status = AgentStatus::Done;
         self.message = None;
         self.inferred = true;
+        self.clear_observation();
     }
 
     /// Give up on a turn that has gone silent for longer than any real one
@@ -1152,6 +1250,7 @@ impl AgentSessionState {
         self.status = AgentStatus::Idle;
         self.message = None;
         self.inferred = true;
+        self.clear_observation();
     }
 
     /// Stamp [`Self::since_ms`] when the status is no longer the one it was
@@ -1172,6 +1271,7 @@ impl AgentSessionState {
     }
 
     pub fn apply_event(&mut self, ev: &AgentEvent) {
+        let before = self.status;
         // A status set before the first hook came from a desktop notification
         // — Crush's "turn completed", say — which says the pane wants a look,
         // not that a question is open. Taken for one, the first tool report
@@ -1227,6 +1327,14 @@ impl AgentSessionState {
                 self.message = None;
                 self.cwd = None;
             }
+        }
+        if before != self.status
+            || !matches!(
+                ev.kind,
+                AgentEventKind::Notification | AgentEventKind::ToolComplete
+            )
+        {
+            self.clear_observation();
         }
     }
 }

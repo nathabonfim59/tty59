@@ -327,8 +327,8 @@ resolve it immediately before use. A full tab UUID also works: `@<uuid>`.
 | Command | Effect | JSON |
 |---|---|---|
 | `tab ls [WORKSPACE]` | Tabs of a workspace | `{"workspace","tabs":[{"ordinal","id","name","label","agent","group","panes":[…],"hibernated"}]}` |
-| `tab new [WORKSPACE] [--cwd DIR]` | Add a tab with a fresh shell | `{"tab","pane"}` |
-| `tab new [WORKSPACE] --pane %PANE` | Add a tab around a pane already running | `{"tab","pane"}` |
+| `tab new [WORKSPACE] [--cwd DIR] [--group PINNED_GROUP_ID]` | Add a tab with a fresh shell | `{"tab","pane"}` |
+| `tab new [WORKSPACE] --pane %PANE [--group PINNED_GROUP_ID]` | Add a tab around a pane already running | `{"tab","pane"}` |
 | `tab close @TAB` | Close the tab and every pane in it | `{"closed"}` |
 | `tab rename @TAB NAME` | Name or rename | `{"tab","name"}` |
 | `tab move @TAB INDEX` | Reposition within its workspace | `{"tab","to"}` |
@@ -349,6 +349,8 @@ segment of its folder — and `-` for a tab the GUI groups automatically. The JS
 carries the group's `id`, `name` and `folder` (or `null`). Auto groups are not
 listed: the GUI works them out from each tab's working directory and stores
 nothing about them.
+Pass a `group.id` from `tab ls --json` to `tab new --group` to file the new
+tab in that pinned group. The ID must belong to the destination workspace.
 
 `label` falls back through the best evidence available — the name if someone set
 one, else the agent running there, else the last segment of the cwd, else the
@@ -363,7 +365,7 @@ agents. Runs git on this machine only; `-m` is refused.
 
 | Command | Effect | JSON |
 |---|---|---|
-| `worktree new [NAME] [--branch B] [--from REF] [--agent A] [--task TEXT] [--no-setup] [--ws WORKSPACE] [--repo DIR]` | Create the worktree, open a tab in it, run `.tty59/setup` then the agent there | `{"path","branch","base","tab","pane","setup","port","copied","skipped","command"}` |
+| `worktree new [NAME] [--branch B] [--from REF] [--agent A] [--task TEXT] [--no-setup] [--ws WORKSPACE] [--group PINNED_GROUP_ID] [--repo DIR]` | Create the worktree, open a tab in it, run `.tty59/setup` then the agent there | `{"path","branch","base","tab","pane","setup","port","copied","skipped","command"}` |
 | `worktree ls [--repo DIR]` | Every checkout of the repo; tty59's are marked, with the panes working in each | `{"worktrees":[{"path","branch","main","managed","panes"}]}` |
 | `worktree rm NAME\|PATH [--force] [--close-panes] [--repo DIR]` | Remove a tty59 worktree, snapshotting it first | `{"path","branch","snapshot","branch_kept","closed_panes"}` |
 
@@ -372,6 +374,7 @@ tty59 worktree new --agent claude --task "fix the flaky login test"
 ```
 
 `new` prints the path first, so `cd "$(tty59 worktree new | head -1)"` works.
+`--group` files the worktree tab in a pinned group of its destination workspace.
 Setup runs unless `--no-setup`: the GUI asks before running a repo's script for
 the first time, but anyone who can run this command can already run the script
 by hand. `rm` refuses while a pane is still working inside the checkout; pass

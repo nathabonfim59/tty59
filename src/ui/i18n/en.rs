@@ -2,6 +2,36 @@ use super::L10nKey;
 
 pub fn translate_en(key: L10nKey) -> &'static str {
     match key {
+        L10nKey::VisionToggle => "Alternative vision for agents",
+        L10nKey::VisionAgents => "Agents",
+        L10nKey::VisionWorkbench => "Workbench",
+        L10nKey::VisionInbox => "Inbox",
+        L10nKey::VisionKanban => "Kanban",
+        L10nKey::VisionAll => "All in workspace",
+        L10nKey::VisionProjects => "Projects",
+        L10nKey::VisionSearch => "Search agents…",
+        L10nKey::VisionNeedsYou => "Needs you",
+        L10nKey::VisionOther => "Other agents",
+        L10nKey::VisionEmpty => "No agents need you here",
+        L10nKey::VisionNoAgents => "No matching agents",
+        L10nKey::VisionSelect => "Select an agent to work with",
+        L10nKey::VisionHandled => "Mark handled",
+        L10nKey::VisionNext => "Next needing attention",
+        L10nKey::VisionNothingNext => "Nothing else in this workspace needs you",
+        L10nKey::VisionOpenWorkbench => "Open in Workbench",
+        L10nKey::VisionListHelp => "↑ ↓ / j k select · Enter answer · [ ] project",
+        L10nKey::VisionBoardHelp => "← → / h l column · ↑ ↓ / j k card · Enter answer",
+        L10nKey::VisionTerminalHelp => "Esc returns to the list",
+        L10nKey::VisionWaiting => "Waiting",
+        L10nKey::VisionWorking => "Working",
+        L10nKey::VisionDone => "Done",
+        L10nKey::VisionIdle => "Idle",
+        L10nKey::VisionExited => "Exited",
+        L10nKey::VisionPane => "pane {i}/{n}",
+        L10nKey::VisionDefault => "Start windows in agent mode",
+        L10nKey::VisionDefaultDesc => {
+            "Open new windows in the Inbox. Workbench stays available from the top bar."
+        }
         L10nKey::SettingsNoMatchesShort => "No matches",
         L10nKey::SettingsModifiedTitle => "Modified",
         L10nKey::SettingsMatchCount => "{count} matches",
@@ -747,6 +777,16 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ConfirmCloseAlways => "Always",
         L10nKey::SettingsTabBarPosition => "Tab bar position",
         L10nKey::SettingsTabBarPositionDesc => "A strip on top or a sidebar on the left.",
+        L10nKey::SidebarListTerminal => "Terminal",
+        L10nKey::SidebarListAgents => "Agents",
+        L10nKey::SidebarNoAgents => "No agents in this workspace",
+        L10nKey::SettingsSidebarAgentsToggle => "Terminal | Agents selector",
+        L10nKey::SettingsSidebarAgentsToggleDesc => {
+            "Show the list selector at the bottom of the workbench sidebar."
+        }
+        L10nKey::SettingsSearchSidebarAgentsToggleKeywords => {
+            "sidebar terminal agents list selector toggle"
+        }
         L10nKey::SettingsSidebarGrouping => "Auto grouping",
         L10nKey::SettingsSidebarGroupingDesc => {
             "Group unpinned tabs by git repository, SSH tabs by host."

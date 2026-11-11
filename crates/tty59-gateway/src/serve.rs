@@ -880,10 +880,7 @@ fn lease_size(size: GridSize) -> WinSize {
 
 fn agent_event(agent: Option<CLIAgent>, status: Option<&AgentSessionState>) -> PaneEvent {
     PaneEvent::Agent {
-        agent: agent.map(|agent| {
-            let idle = AgentSessionState::default();
-            tree::agent_view(agent, status.unwrap_or(&idle))
-        }),
+        agent: tree::agent_view(agent, status.unwrap_or(&AgentSessionState::default())),
     }
 }
 

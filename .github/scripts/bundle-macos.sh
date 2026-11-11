@@ -71,6 +71,7 @@ cp assets/completions/*.json "$APP/Contents/Resources/completions/"
 cp assets/licenses/alacritty-LICENSE-APACHE "$APP/Contents/Resources/LICENSE-Alacritty-APACHE"
 cp assets/licenses/alacritty-LICENSE-MIT "$APP/Contents/Resources/LICENSE-Alacritty-MIT"
 cp assets/licenses/ghostty-LICENSE "$APP/Contents/Resources/LICENSE-Ghostty"
+cp assets/licenses/herdr-NOTICE "$APP/Contents/Resources/NOTICE-Herdr"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 if [[ -n "${TTY59_LOCAL_BUILD_ID:-}" ]]; then
     # A local install's build id, which a running app can watch to offer a restart.
