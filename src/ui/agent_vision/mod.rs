@@ -8,6 +8,7 @@ use tty59_core::core::session::WorkspaceId;
 use tty59_core::host::HostId;
 
 mod navigation;
+mod summary;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct PaneKey {
