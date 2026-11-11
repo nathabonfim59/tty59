@@ -1982,6 +1982,30 @@ impl Tty59App {
         cx.notify();
     }
 
+    /// Picks a machine from the rail — a chip click or an Alt+←/→ step — by
+    /// setting the stored scope and dropping a leading `@token` from the
+    /// query. The token previews its own machine every frame, so leaving it
+    /// in place would undo the pick; whatever was typed after it is the
+    /// search that stays.
+    #[allow(dead_code)] // used by the rail and key packages
+    pub(crate) fn select_switcher_machine(
+        &mut self,
+        scope: MachineScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sw) = self.switcher.as_ref() else {
+            return;
+        };
+        let query = sw.query.clone();
+        let text = query.read(cx).value().to_string();
+        let rest = machine_scope::parse_at_token(&text).map(|token| token.rest.to_string());
+        self.set_switcher_scope(scope, cx);
+        if let Some(rest) = rest {
+            query.update(cx, |state, cx| state.set_value(rest, window, cx));
+        }
+    }
+
     fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (muted, border) = (theme.muted_foreground, theme.border);
@@ -4217,9 +4241,11 @@ mod tests {
 
 #[cfg(test)]
 mod gpui_tests {
-    use gpui::{Modifiers, TestAppContext};
+    use gpui::{Context, Modifiers, TestAppContext, Window};
 
     use super::Column;
+    use super::MachineScope;
+    use crate::ui::app::Tty59App;
     use crate::ui::app::test_window::harness_with_tabs;
 
     /// Deleting a remote workspace has to take the listing snapshot's row with
@@ -4298,6 +4324,62 @@ mod gpui_tests {
             assert!(
                 listed.contains(&kept_ws),
                 "its machine's other workspaces are still on offer"
+            );
+        });
+    }
+
+    /// The rail's chip click and Alt+←/→ both enter through this helper: the
+    /// stored scope moves, and a leading `@token` — committed, half-typed or
+    /// unresolved — leaves the query so its per-frame preview cannot override
+    /// the pick. Everything typed after the token is still the search.
+    #[gpui::test]
+    fn selecting_a_machine_rewrites_the_query_and_sets_the_scope(cx: &mut TestAppContext) {
+        fn select(
+            app: &mut Tty59App,
+            window: &mut Window,
+            cx: &mut Context<Tty59App>,
+            typed: &str,
+            scope: MachineScope,
+        ) -> (String, MachineScope) {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value(typed, window, cx));
+            app.select_switcher_machine(scope, window, cx);
+            (
+                query.read(cx).value().to_string(),
+                app.switcher.as_ref().expect("still open").scope.clone(),
+            )
+        }
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let devbox = MachineScope::Machine("devbox".into());
+            assert_eq!(
+                select(app, window, cx, "api", devbox.clone()),
+                ("api".to_string(), devbox.clone()),
+                "a plain query is the search and stays untouched"
+            );
+            assert_eq!(
+                select(app, window, cx, "@dev api x", devbox.clone()),
+                ("api x".to_string(), devbox.clone()),
+                "a committed token goes and the rest stays"
+            );
+            assert_eq!(
+                select(app, window, cx, "@dev", devbox.clone()),
+                (String::new(), devbox.clone()),
+                "a half-typed token takes the box with it"
+            );
+            let local = MachineScope::local();
+            assert_eq!(
+                select(app, window, cx, "@nope api", local.clone()),
+                ("api".to_string(), local.clone()),
+                "a click wins over an unresolved token"
+            );
+            assert_eq!(
+                select(app, window, cx, "", MachineScope::All),
+                (String::new(), MachineScope::All),
+                "an empty box has no token to drop"
             );
         });
     }
