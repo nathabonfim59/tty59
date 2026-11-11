@@ -39,11 +39,20 @@ const LEFT_W: f32 = 340.0;
 pub(crate) const CARD_TOP: f32 = 112.0;
 
 /// Breathing room the card keeps from the window edge, and the height its own
-/// search row and footer take on top of the body.
+/// search row, machine rail and footer take on top of the body.
 const CARD_MARGIN: f32 = 24.0;
 const SEARCH_H: f32 = 48.0;
 const FOOTER_H: f32 = 40.0;
-const CARD_CHROME_H: f32 = SEARCH_H + FOOTER_H + 2.0;
+
+/// The machine rail's strip: tall enough for its chips to breathe, short
+/// enough that they stay within a glance of the search box. Every height the
+/// card spends on the rail hangs off this one constant.
+const RAIL_H: f32 = 40.0;
+const RAIL_CHIP_H: f32 = 26.0;
+
+/// The chrome's own borders: the search row, the rail and the footer each
+/// draw one.
+const CARD_CHROME_H: f32 = SEARCH_H + RAIL_H + FOOTER_H + 3.0;
 
 const BODY_H: f32 = 420.0;
 
@@ -98,6 +107,20 @@ enum Link {
 /// verb is for, so it has to stay enabled.
 fn link_is_engaged(link: Link) -> bool {
     matches!(link, Link::Connected | Link::Reconnecting { .. })
+}
+
+/// The attention dot a machine chip on the rail wears — the same inks and
+/// the same silence as the row avatars: only the states that want attention
+/// (a connect in flight, a retry, a failure) speak, everything else lets the
+/// list do the talking. The row's takeover case (`Connected` on a preempted
+/// machine) stays a row matter: `RailEntry` carries the link alone, and
+/// which workspace was taken over is not the machine's news.
+fn rail_link_dot(link: Link, cx: &App) -> Option<gpui::Rgba> {
+    match link {
+        Link::Connecting | Link::Reconnecting { .. } => Some(cx.theme().warning),
+        Link::Failed => Some(cx.theme().danger),
+        Link::Local | Link::Connected | Link::Offline => None,
+    }
 }
 
 /// How one machine's row is drawn, from the two things that know.
@@ -372,6 +395,17 @@ pub(crate) struct Switcher {
     /// the bottom of the column.
     left_anchor: gpui::ScrollAnchor,
     right_anchor: gpui::ScrollAnchor,
+    /// The machine rail's own scroll, horizontal. The chips are its direct
+    /// children, so `scroll_to_item` can find the effective scope's chip:
+    /// `render_rail` asks for it whenever the effective scope moves — a
+    /// click, Alt+←/→, or a `@token` being typed into the box — and gpui
+    /// carries the rail along by the minimal amount, which is why a hand
+    /// browsing the rail is never fought on a steady frame.
+    rail_scroll: gpui::ScrollHandle,
+    /// The effective scope whose chip the rail last asked to show. Interior
+    /// because `render_rail` renders from `&self`, and it is what tells a
+    /// scope move from a steady frame.
+    rail_followed: std::cell::Cell<Option<MachineScope>>,
     _subs: Vec<Subscription>,
 }
 
@@ -523,7 +557,11 @@ impl Tty59App {
                 }
             },
         )];
-        let (left_scroll, right_scroll) = (gpui::ScrollHandle::new(), gpui::ScrollHandle::new());
+        let (left_scroll, right_scroll, rail_scroll) = (
+            gpui::ScrollHandle::new(),
+            gpui::ScrollHandle::new(),
+            gpui::ScrollHandle::new(),
+        );
         self.switcher = Some(Switcher {
             query,
             page: Page::List,
@@ -542,6 +580,8 @@ impl Tty59App {
             right_scroll: right_scroll.clone(),
             left_anchor: gpui::ScrollAnchor::for_handle(left_scroll),
             right_anchor: gpui::ScrollAnchor::for_handle(right_scroll),
+            rail_scroll,
+            rail_followed: std::cell::Cell::new(None),
             _subs: subs,
         });
         // Park the left cursor on this window's own workspace so the tab column
@@ -1523,6 +1563,16 @@ impl Tty59App {
             // beats a panic in the render path if that ever stops being true.
             Key::Close => self.close_switcher(window, cx),
             Key::Pass => {}
+            Key::Machine(delta) => {
+                cx.stop_propagation();
+                // Step from the chip the list is effectively showing — a
+                // half-typed `@token`'s preview included — so "next" is
+                // where the user is looking, and let the pick drop the token
+                // so its preview cannot undo it. The rail carries itself to
+                // the new chip through `render_rail`, like every scope move.
+                let scope = machine_scope::step(&layout.rail, &layout.scope, delta);
+                self.select_switcher_machine(scope, window, cx);
+            }
             Key::Step(forward) => {
                 cx.stop_propagation();
                 match column {
@@ -1956,12 +2006,124 @@ impl Tty59App {
     }
 
     /// The machine rail between the search box and the columns: one chip per
-    /// `layout.rail` entry, the effective scope's chip marked, clicking a chip
-    /// calls `set_switcher_scope`. Work package 3 draws it; until then it is
-    /// an empty strip so the wiring around it is already in place.
+    /// `layout.rail` entry — All, this computer, then every configured host —
+    /// plus "Add machine" at the end. The chip the list is effectively scoped
+    /// to is marked, a half-typed `@token`'s preview included, and picking a
+    /// chip (click or Alt+←/→) goes through `select_switcher_machine` so the
+    /// stored scope wins over any token left in the box.
     fn render_rail(&self, layout: &Layout, cx: &mut Context<Self>) -> AnyElement {
-        let _ = (&layout.rail, &layout.scope, cx);
-        div().into_any_element()
+        let sw = self.switcher.as_ref().expect("only rendered while up");
+        let theme = cx.theme();
+        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
+        let sf = rungs(cx);
+        let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.selected));
+        let rail_scroll = sw.rail_scroll.clone();
+        // The rail follows the effective scope wherever the move came from —
+        // a click, Alt+←/→, or a `@token` typed into the box — but only when
+        // it actually moved, and by the minimal amount: a rail that asked on
+        // every frame would fight a hand that is only browsing along it. The
+        // chips are the scroller's direct children, which is the index
+        // `scroll_to_item` speaks.
+        if sw.rail_followed.replace(Some(layout.scope.clone())) != Some(layout.scope.clone())
+            && let Some(ix) = layout.rail.iter().position(|e| e.scope == layout.scope)
+        {
+            rail_scroll.scroll_to_item(ix);
+        }
+
+        let mut chips: Vec<AnyElement> = Vec::with_capacity(layout.rail.len() + 1);
+        for (ix, entry) in layout.rail.iter().enumerate() {
+            let picked = entry.scope == layout.scope;
+            let scope = entry.scope.clone();
+            chips.push(
+                h_flex()
+                    .id(("switcher-rail-chip", ix))
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(RAIL_CHIP_H))
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(gpui::rems(12.5 / 16.))
+                    .text_color(fg)
+                    .when(picked, |chip| chip.bg(picked_bg))
+                    .hover(move |chip| chip.bg(if picked { picked_bg } else { hover }))
+                    .children(
+                        rail_link_dot(entry.link, cx)
+                            .map(|dot| div().size(px(6.)).flex_shrink_0().rounded_full().bg(dot)),
+                    )
+                    .child(entry.label.clone())
+                    // Zero says nothing: an empty machine is exactly what its
+                    // chip is there to name, and the count would only add
+                    // noise to the machines that matter.
+                    .when(entry.count > 0, |chip| {
+                        chip.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(muted)
+                                .child(entry.count.to_string()),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_switcher_machine(scope, window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        // The way out when the machine wanted is not configured yet — the
+        // same exit the create form's host dropdown offers, reached one step
+        // earlier.
+        chips.push(
+            h_flex()
+                .id("switcher-rail-add")
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(6.))
+                .h(px(RAIL_CHIP_H))
+                .px(px(10.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(gpui::rems(12.5 / 16.))
+                .text_color(muted)
+                .hover(move |chip| chip.bg(hover))
+                .child(Icon::new(IconName::Plus).size(px(10.)).text_color(muted))
+                .child(t(L10nKey::SwitcherAddMachine))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_switcher(window, cx);
+                    this.open_new_ssh_host(window, cx);
+                }))
+                .into_any_element(),
+        );
+
+        h_flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(RAIL_H))
+            .px(px(COLUMN_PAD))
+            .border_b_1()
+            .border_color(border)
+            .child(
+                // The chips scroll once the configured machines outrun the
+                // card; the hint stays pinned past them so it is always where
+                // the eye left it.
+                h_flex()
+                    .id("switcher-rail")
+                    .track_scroll(&rail_scroll)
+                    .min_w_0()
+                    .flex_1()
+                    .items_center()
+                    .gap(px(6.))
+                    .overflow_x_scroll()
+                    .children(chips),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(gpui::rems(12.5 / 16.))
+                    .text_color(muted)
+                    .child(t(L10nKey::SwitcherMachineHint)),
+            )
+            .into_any_element()
     }
 
     /// Narrows the left column to `scope` — the one way the rail, Alt+←/→ and
@@ -3615,6 +3777,9 @@ fn hover_fill(cx: &App) -> gpui::Rgba {
 enum Key {
     Close,
     Step(bool),
+    /// Alt+←/→: step the machine rail by one chip. Signed, so `+1` is a
+    /// step to the right.
+    Machine(isize),
     ToColumn(Column),
     Tab(bool),
     Confirm(bool),
@@ -3624,6 +3789,19 @@ enum Key {
 fn key_intent(key: &str, mods: gpui::Modifiers) -> Key {
     if key == "escape" {
         return Key::Close;
+    }
+    // Alt+←/→ walks the machine rail, taken ahead of the Alt pass-through
+    // below — which is the price: those chords were the search box's word
+    // jumps. Alt alone, or not at all: Fn or any other modifier riding along
+    // is somebody else's gesture and keeps passing through untouched.
+    if mods.alt
+        && !mods.function
+        && !mods.control
+        && !mods.secondary()
+        && !mods.shift
+        && matches!(key, "left" | "right")
+    {
+        return Key::Machine(if key == "left" { -1 } else { 1 });
     }
     // Alt and Fn belong to whoever else wants them, whatever the key.
     if mods.alt || mods.function {
@@ -4384,6 +4562,127 @@ mod gpui_tests {
         });
     }
 
+    /// The rail carries itself to whichever chip the list is effectively
+    /// scoped to — including the machine a half-typed `@token` previews,
+    /// which is the one move no click or key asks for by name. The request
+    /// is issued only when the effective scope moves, so a steady frame
+    /// never drags the rail back and a hand browsing along it is not fought.
+    ///
+    /// The assertions reach real rendering, not a plan for it: the
+    /// scroller's prepaint records its own bounds and its direct children's
+    /// bounds into the `ScrollHandle` and consumes any pending
+    /// `scroll_to_item` request in the same pass, so once the window has
+    /// drawn, `offset()`, `bounds()` and `bounds_for_item` are the geometry
+    /// the last frame actually painted.
+    #[gpui::test]
+    fn the_rail_scrolls_a_distant_at_preview_into_view(cx: &mut TestAppContext) {
+        use gpui::{point, px, size};
+        use tty59_core::core::session::RemoteTarget;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        vcx.simulate_resize(size(px(1200.), px(800.)));
+        // Enough machines that the rail overflows the card several chips
+        // over, with the one the token previews far past the right edge.
+        app.update(cx, |app, _| {
+            for name in [
+                "aa-mill",
+                "bb-press",
+                "cc-drill",
+                "dd-lathe",
+                "ee-forge",
+                "ff-motor",
+                "gg-piston",
+                "hh-rocket",
+                "ii-saucer",
+                "jj-tender",
+                "kk-ultra",
+                "ll-vapor",
+                "mm-wharf",
+                "nn-yard",
+            ] {
+                let target = RemoteTarget::Alias {
+                    alias: name.to_string(),
+                };
+                app.host_snapshots.insert(
+                    target.host_id(),
+                    super::HostSnapshot {
+                        target,
+                        rows: Vec::new(),
+                    },
+                );
+            }
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            app.update_in(&mut vcx, |app, _, _| app
+                .switcher
+                .as_ref()
+                .expect("panel is open")
+                .rail_scroll
+                .offset()
+                .x),
+            px(0.),
+            "a rail that opens on All has nothing to scroll to"
+        );
+
+        // Half a token, never committed: the preview alone narrows the list,
+        // so it alone has to carry the rail along.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("@nn", window, cx));
+        });
+        vcx.run_until_parked();
+
+        let rail = app.update_in(&mut vcx, |app, _, cx| {
+            let sw = app.switcher.as_ref().expect("panel is up");
+            let ix = app
+                .switcher_layout(cx)
+                .rail
+                .iter()
+                .position(|e| e.scope == MachineScope::Machine("nn-yard".into()))
+                .expect("the previewed machine has a chip");
+            (
+                sw.rail_scroll.offset().x,
+                sw.rail_scroll.bounds_for_item(ix),
+                sw.rail_scroll.bounds(),
+            )
+        });
+        let (offset, chip, view) = (rail.0, rail.1.expect("chips are drawn children"), rail.2);
+        assert!(
+            offset < px(0.),
+            "the rail never followed the preview: still at {offset:?}"
+        );
+        assert!(
+            chip.left() + offset >= view.left() - px(1.)
+                && chip.right() + offset <= view.right() + px(1.),
+            "the previewed chip {chip:?} never came into view {view:?} at {offset:?}"
+        );
+
+        // A hand that scrolls the rail back while the scope stands still is
+        // not fought: a steady frame issues no new request.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.switcher
+                .as_ref()
+                .expect("panel is up")
+                .rail_scroll
+                .set_offset(point(px(0.), px(0.)));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            app.update_in(&mut vcx, |app, _, _| app
+                .switcher
+                .as_ref()
+                .expect("panel is up")
+                .rail_scroll
+                .offset()
+                .x),
+            px(0.),
+            "the rail re-centered itself on a frame where nothing moved"
+        );
+    }
+
     #[gpui::test]
     fn ctrl_tab_raises_the_panel_on_the_previously_used_tab(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
@@ -4823,6 +5122,60 @@ mod key_tests {
             false => assert_eq!(key_intent("tab", ctrl), Key::Pass),
         }
         assert_eq!(key_intent("up", ctrl), Key::Pass);
+    }
+
+    #[test]
+    fn alt_arrows_step_the_machine_rail_in_both_directions() {
+        // Alt+←/→ is the rail's gesture, classified ahead of the Alt
+        // pass-through — the price is the search box's word jumps.
+        assert_eq!(key_intent("left", Modifiers::alt()), Key::Machine(-1));
+        assert_eq!(key_intent("right", Modifiers::alt()), Key::Machine(1));
+    }
+
+    #[test]
+    fn alt_arrows_with_company_are_somebody_elses_chord() {
+        // The rail wants Alt alone. Fn riding along is the macOS
+        // function-key family, Shift selects, Ctrl and the secondary belong
+        // elsewhere — every one of those still passes through untouched, so
+        // the search box only ever loses exactly two chords.
+        let alt = Modifiers::alt();
+        assert_eq!(
+            key_intent(
+                "left",
+                Modifiers {
+                    function: true,
+                    ..alt
+                }
+            ),
+            Key::Pass
+        );
+        assert_eq!(
+            key_intent("right", Modifiers { shift: true, ..alt }),
+            Key::Pass
+        );
+        assert_eq!(
+            key_intent(
+                "left",
+                Modifiers {
+                    control: true,
+                    ..alt
+                }
+            ),
+            Key::Pass
+        );
+        assert_eq!(
+            key_intent(
+                "right",
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::secondary_key()
+                }
+            ),
+            Key::Pass
+        );
+        // Fn on its own keeps its arrows too.
+        assert_eq!(key_intent("left", Modifiers::function()), Key::Pass);
+        assert_eq!(key_intent("right", Modifiers::function()), Key::Pass);
     }
 
     #[test]
