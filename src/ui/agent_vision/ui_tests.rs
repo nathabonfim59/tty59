@@ -49,6 +49,42 @@ fn agents(
 }
 
 #[gpui::test]
+fn multiline_agent_icons_align_with_titles_and_keep_card_padding(cx: &mut TestAppContext) {
+    let (app, mut vcx, _streams) = agents(cx);
+    for (mode, inset) in [(ViewMode::Inbox, 8.), (ViewMode::Kanban, 9.)] {
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.set_agent_mode(mode, window, cx);
+        });
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let row = vcx
+            .debug_bounds("agent-row-frame-0-1")
+            .expect("agent row was painted");
+        let icon = vcx
+            .debug_bounds("agent-row-icon-0-1")
+            .expect("agent icon was painted");
+        let title = vcx
+            .debug_bounds("agent-row-title-0-1")
+            .expect("agent title was painted");
+        assert!(
+            row.size.height > icon.size.height + gpui::px(16.),
+            "fixture has multiple lines"
+        );
+        assert!(
+            (icon.top() - title.top()).abs() <= gpui::px(0.5),
+            "agent icon must align with title in {mode:?}: icon {icon:?}, title {title:?}"
+        );
+        assert_eq!(icon.size.height, gpui::px(22.));
+        assert_eq!(icon.top() - row.top(), gpui::px(inset));
+        assert_eq!(icon.left() - row.left(), gpui::px(inset));
+    }
+}
+
+#[gpui::test]
 fn list_enter_focuses_the_existing_terminal_and_escape_returns_to_list(cx: &mut TestAppContext) {
     let (app, mut vcx, _streams) = agents(cx);
     let first = app.update_in(&mut vcx, |app, _, _| {

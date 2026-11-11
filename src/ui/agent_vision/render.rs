@@ -298,14 +298,26 @@ impl Tty59App {
                     self.agent_vision.inbox_anchor.clone()
                 }
             }))
-            .child(self.tab_avatar_plain(
-                SharedString::from(format!("agent-icon-{}-{}", key.host.0, key.pane)),
-                pane.agent,
-                Some(pane.state.status()),
-                None,
-                22.,
-                cx,
-            ))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .self_start()
+                    .map(|icon| {
+                        #[cfg(test)]
+                        let icon = icon.debug_selector(move || {
+                            format!("agent-row-icon-{}-{}", key.host.0, key.pane)
+                        });
+                        icon
+                    })
+                    .child(self.tab_avatar_plain(
+                        SharedString::from(format!("agent-icon-{}-{}", key.host.0, key.pane)),
+                        pane.agent,
+                        Some(pane.state.status()),
+                        None,
+                        22.,
+                        cx,
+                    )),
+            )
             .child(
                 v_flex()
                     .flex_1()
@@ -316,6 +328,13 @@ impl Tty59App {
                             .truncate()
                             .text_sm()
                             .when(selected, |row| row.font_weight(FontWeight::MEDIUM))
+                            .map(|title| {
+                                #[cfg(test)]
+                                let title = title.debug_selector(move || {
+                                    format!("agent-row-title-{}-{}", key.host.0, key.pane)
+                                });
+                                title
+                            })
                             .child(title),
                     )
                     .child(div().truncate().text_xs().child(reason.to_string()))
@@ -349,6 +368,9 @@ impl Tty59App {
             .on_click(
                 cx.listener(move |app, _, window, cx| app.open_agent_terminal(key, window, cx)),
             );
+        #[cfg(test)]
+        let row =
+            row.debug_selector(move || format!("agent-row-frame-{}-{}", key.host.0, key.pane));
         row.into_any_element()
     }
 
