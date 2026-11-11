@@ -1882,6 +1882,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::RemoteStripPreempted => "Эта рабочая область открыта на {by}",
         L10nKey::RemoteStripFailed => "Нет соединения с {machine}: {error}",
+        L10nKey::RemoteOpenWorkspacesOnMachine => "Открыть рабочие области на этом компьютере",
         L10nKey::RemoteStripRouteLost => {
             "Профиль подключения к {machine} больше не существует. Переподключение невозможно"
         }
@@ -1968,6 +1969,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SwitcherThisComputer => "Этот компьютер",
         L10nKey::SwitcherMachineAll => "Все",
+        L10nKey::SwitcherMachineHint => "Alt ← → выбор машины",
+        L10nKey::SwitcherOpenInWindow => "Открыть в окне",
+        L10nKey::SwitcherOnThisMachine => "На этом компьютере, здесь не открыто",
+        L10nKey::SwitcherMachineNotConnected => "Нет подключения к {machine}",
+        L10nKey::SwitcherLastKnownWorkspaces => "Последние известные рабочие области",
+        L10nKey::SwitcherNoWorkspacesOnMachine => "На {machine} нет рабочих областей",
+        L10nKey::SwitcherNewWorkspaceOnMachine => "Новая рабочая область на {machine}…",
         L10nKey::SwitcherStartingServer => "Запуск сервера tty59…",
         L10nKey::SwitcherDownloadingServerWithTotal => "Загрузка сервера tty59… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "Загрузка сервера tty59… {done}",
@@ -2104,6 +2112,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdReopenClosedTab => "Снова открыть закрытую вкладку",
         L10nKey::CmdNewWorkspace => "Новая рабочая область…",
         L10nKey::CmdSwitchWorkspace => "Сменить рабочую область…",
+        L10nKey::CmdOpenWorkspaceOnMachine => "Открыть рабочую область на машине…",
         L10nKey::CmdRenameWorkspace => "Переименовать рабочую область…",
         L10nKey::CmdStopWorkspace => "Остановить рабочую область…",
         L10nKey::CmdStopWorkspaceSubtitle => "завершить оболочки, сохранить расположение",
