@@ -452,6 +452,8 @@ impl Layout {
 /// workspace, most recently used first with this window's own workspace on
 /// top. A query matching a machine's name keeps all of that machine's rows —
 /// searching "devbox" is how the old per-machine grouping is asked for now.
+/// Narrowed to one machine, open workspaces come first so the list can wear
+/// its two headings; All keeps the single blended order.
 fn flatten(groups: &[Group], query: &str, scope: &MachineScope) -> Vec<Nav> {
     let mut nav: Vec<Nav> = Vec::new();
     for (g, group) in groups.iter().enumerate() {
@@ -465,18 +467,77 @@ fn flatten(groups: &[Group], query: &str, scope: &MachineScope) -> Vec<Nav> {
             }
         }
     }
+    // Narrowed to one machine the list has two headings, so its rows have to
+    // come out in two runs or a heading would have to repeat. All keeps the
+    // single blended order it has always had.
+    let scoped = !matches!(scope, MachineScope::All);
     nav.sort_by(|&(ga, ra), &(gb, rb)| {
-        let (a, b) = (&groups[ga].rows[ra], &groups[gb].rows[rb]);
-        // How a row matched comes before which one is current: "qa" is the
-        // workspace named qa, not this window's one whose tabs sit in
-        // `/tmp/t7qa`, and Enter takes the top row.
-        a.name_match(query)
-            .cmp(&b.name_match(query))
-            .then_with(|| b.current.cmp(&a.current))
-            .then_with(|| b.last_active.cmp(&a.last_active))
-            .then_with(|| a.name.cmp(&b.name))
+        row_order(query, scoped, &groups[ga].rows[ra], &groups[gb].rows[rb])
     });
     nav
+}
+
+/// One left-column row against another. Open rows lead when the list is
+/// narrowed to a machine — that is what separates "Open in a window" from the
+/// rest of the list. Everything after that is the order the flat list already
+/// had: how well the name matched, this window, recency, then name.
+fn row_order(query: &str, scoped: bool, a: &Row, b: &Row) -> std::cmp::Ordering {
+    let open = if scoped {
+        b.open.cmp(&a.open)
+    } else {
+        std::cmp::Ordering::Equal
+    };
+    // How a row matched comes before which one is current: "qa" is the
+    // workspace named qa, not this window's one whose tabs sit in
+    // `/tmp/t7qa`, and Enter takes the top row.
+    open.then_with(|| a.name_match(query).cmp(&b.name_match(query)))
+        .then_with(|| b.current.cmp(&a.current))
+        .then_with(|| b.last_active.cmp(&a.last_active))
+        .then_with(|| a.name.cmp(&b.name))
+}
+
+/// Which heading a row of a scoped list falls under. A change between
+/// neighbouring rows is where the heading is drawn; nothing is added to `nav`,
+/// so the arrow keys still walk exactly the rows on screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Section {
+    Open,
+    Closed,
+    /// The rows of a machine that is not connected are remembered ones; a
+    /// single heading says so instead of splitting them by open state.
+    LastKnown,
+}
+
+impl Section {
+    fn key(self) -> L10nKey {
+        match self {
+            Section::Open => L10nKey::SwitcherOpenInWindow,
+            Section::Closed => L10nKey::SwitcherOnThisMachine,
+            Section::LastKnown => L10nKey::SwitcherLastKnownWorkspaces,
+        }
+    }
+}
+
+/// The heading under which each navigation slot falls, in nav order. `None`
+/// for the unscoped list, which has no headings.
+fn nav_sections(
+    nav: &[Nav],
+    groups: &[Group],
+    scope: &MachineScope,
+    last_known: bool,
+) -> Vec<Option<Section>> {
+    if matches!(scope, MachineScope::All) {
+        return vec![None; nav.len()];
+    }
+    nav.iter()
+        .map(|&(g, r)| {
+            Some(match (last_known, groups[g].rows[r].open) {
+                (true, _) => Section::LastKnown,
+                (false, true) => Section::Open,
+                (false, false) => Section::Closed,
+            })
+        })
+        .collect()
 }
 
 /// One line of the create form's host dropdown.
@@ -502,6 +563,72 @@ fn host_items(hosts: Vec<HostChoice>, query: &str, local_label: &str) -> Vec<Hos
     );
     items.push(HostItem::AddHost);
     items
+}
+
+/// The scoped machine that is waiting on a connect, if any: remote, not
+/// parked, and neither connected nor in flight. A parked route can never be
+/// connected (#485), and an attempt already on the wire has its own banner.
+fn offline_connect_group<'a>(scope: &MachineScope, groups: &'a [Group]) -> Option<&'a Group> {
+    let group = scope.group(groups)?;
+    group.target.as_ref()?;
+    (!group.parked && matches!(group.link, Link::Offline | Link::Failed)).then_some(group)
+}
+
+/// The endpoint line the offline card prints: the configured route's detail,
+/// or the target's own spelling when the machine was never configured.
+fn group_endpoint(group: &Group) -> String {
+    match group.endpoint.trim() {
+        "" => group
+            .target
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        endpoint => endpoint.to_string(),
+    }
+}
+
+/// The connect the offline card's button asks for. `None` only for a group
+/// with no target, which the card never shows.
+fn connect_choice(group: &Group) -> Option<HostChoice> {
+    Some(HostChoice {
+        target: group.target.clone()?,
+        label: group.label.clone(),
+        detail: group_endpoint(group),
+    })
+}
+
+/// Orphan panes are this computer's; under a remote scope they are not
+/// something the list is about.
+fn orphans_visible(scope: &MachineScope) -> bool {
+    match scope {
+        MachineScope::All => true,
+        MachineScope::Machine(key) => key.is_empty(),
+    }
+}
+
+/// What the empty list says. Unscoped keeps the ordinary no-match wording; a
+/// machine names itself, since "no match" is not what an empty machine is.
+fn empty_list_text(scope: &MachineScope, groups: &[Group]) -> String {
+    match scope.group(groups) {
+        Some(group) => t_fmt(
+            L10nKey::SwitcherNoWorkspacesOnMachine,
+            &[("machine", &group.label)],
+        ),
+        None => t(L10nKey::SwitcherNoMatch).to_string(),
+    }
+}
+
+/// One of the scoped list's section headings.
+fn section_heading(section: Section, cx: &App) -> AnyElement {
+    div()
+        .px(px(ROW_PAD))
+        .pt(px(8.))
+        .pb(px(2.))
+        .text_size(gpui::rems(10.5 / 16.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(t(section.key()))
+        .into_any_element()
 }
 
 impl Tty59App {
@@ -1776,11 +1903,26 @@ impl Tty59App {
             return;
         };
         let (sel, column, right_sel) = (sw.left_sel, sw.column, sw.right_sel);
-        if column == Column::Right {
-            let query = sw.text(cx);
-            let Some(row) = layout.subject_row(sel) else {
+        let query = sw.text(cx);
+        // Nothing under the cursor — an empty list, or a filter that left no
+        // row to stand on. This sits ahead of the column split so the tab
+        // column cannot swallow it: it can stay the active column after a
+        // query narrowed the list away. On a machine that is not connected,
+        // Enter is the obvious way to ask for the connection; a selected row
+        // keeps its own open/reconnect path below.
+        let Some(&(g, r)) = layout.nav.get(sel) else {
+            if new_window {
                 return;
-            };
+            }
+            if let Some(group) = offline_connect_group(&layout.scope, &layout.groups)
+                && let Some(choice) = connect_choice(group)
+            {
+                self.connect_to_host(choice, cx);
+            }
+            return;
+        };
+        if column == Column::Right {
+            let row = &layout.groups[g].rows[r];
             let Some(tab) = visible_tabs(row, &query)
                 .get(right_sel)
                 .and_then(|i| row.tabs.get(*i))
@@ -1791,11 +1933,9 @@ impl Tty59App {
             self.switcher_open_tab(ws, id, new_window, window, cx);
             return;
         }
-        if let Some(&(g, r)) = layout.nav.get(sel) {
-            let group = &layout.groups[g];
-            let row = RowRef::of(group, &group.rows[r]);
-            self.switcher_open(row, new_window, window, cx);
-        }
+        let group = &layout.groups[g];
+        let row = RowRef::of(group, &group.rows[r]);
+        self.switcher_open(row, new_window, window, cx);
     }
 
     fn switcher_open_tab(
@@ -1906,10 +2046,36 @@ impl Tty59App {
         let border = theme.border;
 
         let mut list = v_flex().gap(px(1.));
-        for (at, &(g, r)) in layout.nav.iter().enumerate() {
+        // A machine that is not connected says so above its remembered rows,
+        // and the memory is not split by open state: none of it can be opened
+        // until the connect lands.
+        let offline = offline_connect_group(&layout.scope, &layout.groups);
+        let last_known = offline.is_some();
+        if let Some(group) = offline {
+            list = list.child(self.render_offline_card(group, cx));
+        }
+        let sections = nav_sections(&layout.nav, &layout.groups, &layout.scope, last_known);
+        let mut heading: Option<Section> = None;
+        for (at, (&(g, r), section)) in layout.nav.iter().zip(sections).enumerate() {
+            if let Some(section) = section
+                && heading != Some(section)
+            {
+                list = list.child(section_heading(section, cx));
+                heading = Some(section);
+            }
             let picked = sel == at && column == Column::Left;
             let group = &layout.groups[g];
-            list = list.child(self.render_row(group, &group.rows[r], picked, Some(at), cx));
+            // Scoped rows live on the one machine the list is about; repeating
+            // its name on every sub-line is noise.
+            let show_machine = matches!(layout.scope, MachineScope::All);
+            list = list.child(self.render_row(
+                group,
+                &group.rows[r],
+                picked,
+                Some(at),
+                show_machine,
+                cx,
+            ));
         }
         if layout.nav.is_empty() {
             list = list.child(
@@ -1918,15 +2084,16 @@ impl Tty59App {
                     .py(px(14.))
                     .text_size(gpui::rems(13. / 16.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(t(L10nKey::SwitcherNoMatch)),
+                    .child(empty_list_text(&layout.scope, &layout.groups)),
             );
         }
         // Orphan panes belong to the machine, not to a workspace, so they are
         // not rows and join no navigation — the bottom of the workspace list
         // is simply where a user looking for them finds them (#596). A search
         // narrows the panel to workspaces, and the box steps out of the way
-        // for one.
-        if !sw.orphans.is_empty() && sw.text(cx).is_empty() {
+        // for one. A remote scope is about another computer's workspaces, so
+        // this machine's leaks are not on offer there.
+        if !sw.orphans.is_empty() && sw.text(cx).is_empty() && orphans_visible(&layout.scope) {
             list = list.child(self.render_orphan_panes(cx));
         }
 
@@ -2296,7 +2463,7 @@ impl Tty59App {
     /// here — its state dot rides on its workspace rows.
     fn render_banners(&self, layout: &Layout, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out: Vec<AnyElement> = Vec::new();
-        for group in &layout.groups {
+        for group in layout.groups.iter().filter(|g| layout.scope.admits(g)) {
             if group.target.is_none() {
                 continue;
             }
@@ -2510,6 +2677,60 @@ impl Tty59App {
             .into_any_element()
     }
 
+    /// The card a scoped machine gets while it is not connected: why the rows
+    /// below are only remembered ones, where the connect would dial, and the
+    /// button that starts it. Parked machines never get this card — their
+    /// route cannot be rebuilt (#485).
+    fn render_offline_card(&self, group: &Group, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let Some(choice) = connect_choice(group) else {
+            return div().into_any_element();
+        };
+        let endpoint = choice.detail.clone();
+        v_flex()
+            .gap(px(4.))
+            .mx(px(4.))
+            .mt(px(4.))
+            .mb(px(6.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(crate::ui::rounding::ROW_RADIUS)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_size(gpui::rems(12. / 16.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(fg)
+                    .child(t_fmt(
+                        L10nKey::SwitcherMachineNotConnected,
+                        &[("machine", &group.label)],
+                    )),
+            )
+            .child(
+                div()
+                    .truncate()
+                    .text_size(gpui::rems(11. / 16.))
+                    .text_color(muted)
+                    .child(endpoint),
+            )
+            .child(
+                h_flex().pt(px(2.)).child(
+                    Button::new(gpui::SharedString::from(format!(
+                        "switcher-connect-machine:{}",
+                        group.key
+                    )))
+                    .label(t(L10nKey::Connect))
+                    .xsmall()
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.connect_to_host(choice.clone(), cx);
+                    })),
+                ),
+            )
+            .into_any_element()
+    }
+
     /// The orphan block under the local group (#596): one line per pane no
     /// window holds — id, owner, where it runs — and the way to stop it.
     fn render_orphan_panes(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2706,6 +2927,7 @@ impl Tty59App {
         row: &Row,
         picked: bool,
         nav_at: Option<usize>,
+        show_machine: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(sw) = self.switcher.as_ref()
@@ -2782,7 +3004,10 @@ impl Tty59App {
             true => group.label.clone(),
             false => t(L10nKey::SwitcherLocalHost).to_string(),
         };
-        let mut meta = vec![host_label];
+        let mut meta: Vec<String> = Vec::new();
+        if show_machine {
+            meta.push(host_label);
+        }
         if !row.path.is_empty() {
             meta.push(row.path.clone());
         }
@@ -4299,6 +4524,239 @@ mod tests {
         assert_eq!(flatten(&groups, "", &MachineScope::local()).len(), 1);
     }
 
+    /// A workspace the list would open in this window.
+    fn closed(mut r: Row) -> Row {
+        r.open = false;
+        r
+    }
+
+    /// A machine workspace this client has not adopted: the row carries the
+    /// snapshot it came from, and no window holds it.
+    fn adoptable(mut r: Row) -> Row {
+        let snapshot = RemoteWorkspaceRow {
+            id: r.id,
+            name: r.name.clone(),
+            panes: 0,
+            last_active: r.last_active,
+        };
+        r.open = false;
+        r.remote_id = Some(r.id);
+        r.adopt = Some(Box::new(snapshot));
+        r
+    }
+
+    fn names_of<'a>(groups: &'a [Group], nav: &[Nav]) -> Vec<&'a str> {
+        nav.iter()
+            .map(|&(g, r)| groups[g].rows[r].name.as_str())
+            .collect()
+    }
+
+    /// The order this list used before a scope split it into two sections.
+    /// Kept here so the regression below can show the old comparator putting
+    /// the closed row first.
+    fn legacy_order(query: &str, a: &Row, b: &Row) -> std::cmp::Ordering {
+        a.name_match(query)
+            .cmp(&b.name_match(query))
+            .then_with(|| b.current.cmp(&a.current))
+            .then_with(|| b.last_active.cmp(&a.last_active))
+            .then_with(|| a.name.cmp(&b.name))
+    }
+
+    fn legacy_flatten(groups: &[Group], query: &str, scope: &MachineScope) -> Vec<Nav> {
+        let mut nav: Vec<Nav> = Vec::new();
+        for (g, group) in groups.iter().enumerate() {
+            if !scope.admits(group) {
+                continue;
+            }
+            let matched_host = group.label.to_lowercase().contains(query);
+            for (r, row) in group.rows.iter().enumerate() {
+                if query.is_empty() || matched_host || row.matches(query) {
+                    nav.push((g, r));
+                }
+            }
+        }
+        nav.sort_by(|&(ga, ra), &(gb, rb)| {
+            legacy_order(query, &groups[ga].rows[ra], &groups[gb].rows[rb])
+        });
+        nav
+    }
+
+    /// The regression the whole split exists for: narrowing to this computer
+    /// puts its open workspaces together, so a recently closed one no longer
+    /// sits above a live one.
+    #[test]
+    fn a_scoped_list_puts_open_rows_before_a_more_recent_closed_one() {
+        let groups = vec![group(vec![
+            aged(row("deploy", vec![]), 10),
+            closed(aged(row("notes", vec![]), 90)),
+        ])];
+        let scope = MachineScope::local();
+        assert_eq!(
+            names_of(&groups, &legacy_flatten(&groups, "", &scope)),
+            vec!["notes", "deploy"],
+            "the old comparator took the recency order, which is what the split changes"
+        );
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "", &scope)),
+            vec!["deploy", "notes"]
+        );
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "", &MachineScope::All)),
+            vec!["notes", "deploy"],
+            "All keeps the blended order it always had"
+        );
+    }
+
+    /// Adopt rows are not open here, so under a machine scope they belong
+    /// below the windows that are.
+    #[test]
+    fn a_scoped_machine_puts_open_workspaces_before_more_recent_adoptable_ones() {
+        let groups = vec![named_group(
+            "devbox",
+            vec![
+                adoptable(aged(row("web", vec![]), 90)),
+                aged(row("api", vec![]), 10),
+            ],
+        )];
+        let scope = MachineScope::Machine("devbox".into());
+        assert_eq!(
+            names_of(&groups, &legacy_flatten(&groups, "", &scope)),
+            vec!["web", "api"]
+        );
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "", &scope)),
+            vec!["api", "web"]
+        );
+    }
+
+    /// The split is one sort key, not a replacement for the search precedence:
+    /// inside a section the exact name still leads, and a machine-name hit
+    /// still brings all of its rows.
+    #[test]
+    fn the_scoped_split_keeps_the_queries_it_had() {
+        let mut here = aged(row("keen-crane", vec![tab("zsh", "/tmp/t7qa/fixture")]), 50);
+        here.current = true;
+        let groups = vec![group(vec![here, aged(row("qa", vec![]), 10)])];
+        let local = MachineScope::local();
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "qa", &local)),
+            vec!["qa", "keen-crane"],
+            "both rows are open, so the name match still decides inside the section"
+        );
+
+        let groups = vec![named_group(
+            "devbox",
+            vec![
+                aged(row("web", vec![]), 10),
+                closed(aged(row("api", vec![]), 90)),
+            ],
+        )];
+        let scope = MachineScope::Machine("devbox".into());
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "devbox", &scope)),
+            vec!["web", "api"],
+            "a host-name search still lists every row of the machine, open first"
+        );
+    }
+
+    #[test]
+    fn scoped_sections_break_at_the_boundaries_without_moving_nav() {
+        let groups = vec![group(vec![
+            aged(row("deploy", vec![]), 10),
+            closed(aged(row("notes", vec![]), 90)),
+        ])];
+        let scope = MachineScope::local();
+        let nav = flatten(&groups, "", &scope);
+        assert_eq!(nav, vec![(0, 0), (0, 1)], "the open row is first");
+        assert_eq!(
+            nav_sections(&nav, &groups, &scope, false),
+            vec![Some(Section::Open), Some(Section::Closed)],
+            "one heading per run, aligned with the nav slot it opens"
+        );
+        assert_eq!(
+            nav_sections(&nav, &groups, &scope, true),
+            vec![Some(Section::LastKnown); 2],
+            "an offline machine's remembered rows are not split by open state"
+        );
+        assert_eq!(
+            nav_sections(&nav, &groups, &MachineScope::All, true),
+            vec![None; 2],
+            "the unscoped list has no headings"
+        );
+    }
+
+    #[test]
+    fn only_a_reachable_down_machine_offers_the_connect_card() {
+        let scope = MachineScope::Machine("devbox".into());
+        let one = |link, parked| {
+            let mut group = named_group("devbox", vec![]);
+            group.link = link;
+            group.parked = parked;
+            vec![group]
+        };
+        for link in [Link::Offline, Link::Failed] {
+            assert!(offline_connect_group(&scope, &one(link, false)).is_some());
+            assert!(
+                offline_connect_group(&scope, &one(link, true)).is_none(),
+                "a parked route cannot be connected (#485)"
+            );
+        }
+        for link in [
+            Link::Connected,
+            Link::Connecting,
+            Link::Reconnecting { attempt: 2 },
+            Link::Local,
+        ] {
+            assert!(
+                offline_connect_group(&scope, &one(link, false)).is_none(),
+                "{link:?} must not take the offline-connect shortcut"
+            );
+        }
+        let local = vec![group(vec![])];
+        assert!(offline_connect_group(&MachineScope::local(), &local).is_none());
+        assert!(offline_connect_group(&MachineScope::All, &one(Link::Offline, false)).is_none());
+    }
+
+    #[test]
+    fn orphan_panes_stay_on_this_computers_screens() {
+        assert!(orphans_visible(&MachineScope::All));
+        assert!(orphans_visible(&MachineScope::local()));
+        assert!(
+            !orphans_visible(&MachineScope::Machine("devbox".into())),
+            "a remote scope is about another machine's workspaces"
+        );
+    }
+
+    #[test]
+    fn the_offline_card_dials_the_configured_endpoint_or_the_targets_own_name() {
+        let mut machine = named_group("devbox", vec![]);
+        assert_eq!(group_endpoint(&machine), "me@devbox");
+        machine.endpoint = "me@devbox.example:2222".into();
+        assert_eq!(group_endpoint(&machine), "me@devbox.example:2222");
+        let choice = connect_choice(&machine).expect("a machine has a target");
+        assert_eq!(choice.label, "devbox");
+        assert_eq!(choice.detail, "me@devbox.example:2222");
+        assert!(
+            connect_choice(&group(vec![])).is_none(),
+            "this computer connects to nothing"
+        );
+    }
+
+    #[test]
+    fn an_empty_scoped_list_names_the_machine() {
+        crate::ui::i18n::set_locale("en");
+        let groups = vec![named_group("devbox", vec![])];
+        assert_eq!(
+            empty_list_text(&MachineScope::Machine("devbox".into()), &groups),
+            "No workspaces on devbox"
+        );
+        assert_eq!(
+            empty_list_text(&MachineScope::All, &groups),
+            t(L10nKey::SwitcherNoMatch),
+            "unscoped keeps the wording it always had"
+        );
+    }
+
     #[test]
     fn the_tab_column_follows_the_flat_cursor() {
         let layout = Layout {
@@ -5160,6 +5618,198 @@ mod gpui_tests {
             assert!(
                 sw.hold.is_none(),
                 "a release over another window never reaches us"
+            );
+        });
+    }
+
+    /// A bare Enter, as the panel's own key handler sees it — not through the
+    /// input's bindings, which is why the event is built here rather than
+    /// typed. Typing would also pump the executor, and this test is about the
+    /// synchronous dispatch to `connect_to_host`.
+    fn enter_event(modifiers: Modifiers) -> gpui::KeyDownEvent {
+        gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers,
+                key: "enter".into(),
+                key_char: None,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    /// One disconnected machine, scoped, with nothing under the cursor. The
+    /// snapshot is enough to put the machine on the rail; a `Direct` target
+    /// routes without touching the network.
+    fn disconnected_machine(
+        cx: &mut TestAppContext,
+        column: crate::ui::switcher::Column,
+    ) -> (
+        gpui::Entity<crate::ui::app::Tty59App>,
+        gpui::VisualTestContext,
+        crate::core::session::RemoteTarget,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let target = RemoteTarget::direct("me", "build-box", 22);
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: Vec::new(),
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        app.update(cx, |app, cx| {
+            app.set_switcher_scope(super::MachineScope::Machine(target.to_string()), cx);
+            if let Some(sw) = app.switcher.as_mut() {
+                sw.column = column;
+            }
+        });
+        (app, vcx, target)
+    }
+
+    /// Enter with no row selected on a machine that is not connected is the
+    /// way to ask for the connection, not a no-op.
+    #[gpui::test]
+    fn bare_enter_on_a_disconnected_machine_asks_to_connect(cx: &mut TestAppContext) {
+        use crate::ui::remote_workspace::ConnectFlow;
+
+        let (app, mut vcx, target) = disconnected_machine(cx, super::Column::Left);
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(app.switcher_layout(cx).nav.is_empty(), "nothing to open");
+            app.on_switcher_key(&enter_event(Modifiers::none()), window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            let Some(ConnectFlow::Connecting { choice }) = &app.connect else {
+                panic!("bare Enter did not ask for the connection");
+            };
+            assert_eq!(
+                choice.target, target,
+                "the scoped machine is the one dialled"
+            );
+        });
+    }
+
+    /// The tab column can stay the active one after a query emptied the list,
+    /// so the empty-nav fallback must run before the column-specific dispatch.
+    #[gpui::test]
+    fn bare_enter_with_the_tab_column_active_still_connects_an_empty_scope(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::remote_workspace::ConnectFlow;
+
+        let (app, mut vcx, target) = disconnected_machine(cx, super::Column::Right);
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(app.switcher_layout(cx).nav.is_empty(), "nothing to open");
+            app.on_switcher_key(&enter_event(Modifiers::none()), window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            let Some(ConnectFlow::Connecting { choice }) = &app.connect else {
+                panic!("the tab column swallowed the empty-nav Enter");
+            };
+            assert_eq!(choice.target, target);
+        });
+    }
+
+    /// The new-window chord is a different gesture and keeps doing nothing
+    /// when the list is empty: there is no window to open and no pick to take.
+    #[gpui::test]
+    fn secondary_enter_does_not_take_the_bare_connect_fallback(cx: &mut TestAppContext) {
+        let (app, mut vcx, _target) = disconnected_machine(cx, super::Column::Left);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.on_switcher_key(&enter_event(Modifiers::secondary_key()), window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            assert!(
+                app.connect.is_none(),
+                "secondary Enter opened nothing and must not connect"
+            );
+        });
+    }
+
+    /// A layout the router can fail synchronously: the group looks connectable
+    /// but its profile is not in the config, so `control_route` refuses before
+    /// any link is attempted. This asserts the target `connect_to_host` was
+    /// handed, not a copy the test made up.
+    #[gpui::test]
+    fn the_connect_fallback_hands_connect_to_host_the_scoped_target(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+        use crate::ui::remote_workspace::ConnectFlow;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let target = RemoteTarget::Profile {
+            id: uuid::Uuid::new_v4(),
+        };
+        let key = target.to_string();
+        let mut group = super::tests::named_group("ghost-machine", vec![]);
+        group.key = key.clone();
+        group.target = Some(target.clone());
+        group.link = super::Link::Offline;
+        group.parked = false;
+        let layout = super::Layout {
+            groups: vec![group],
+            nav: Vec::new(),
+            rail: Vec::new(),
+            scope: super::MachineScope::Machine(key),
+        };
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_switcher(window, cx);
+            app.switcher_confirm(&layout, false, window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            let Some(ConnectFlow::Failed { choice, .. }) = &app.connect else {
+                panic!("the fallback never reached connect_to_host");
+            };
+            assert_eq!(
+                choice.target, target,
+                "connect_to_host got exactly the scoped machine"
+            );
+        });
+    }
+
+    /// The synthetic layout above must not stand in for the real route
+    /// classification: a profile that is gone is parked by `switcher_groups`,
+    /// and a parked machine offers no connect card at all.
+    #[gpui::test]
+    fn a_profile_that_no_longer_resolves_is_parked_and_gets_no_connect_card(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Profile {
+            id: uuid::Uuid::new_v4(),
+        };
+        app.update(cx, |app, cx| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: Vec::new(),
+                },
+            );
+            let groups = app.switcher_groups(cx);
+            let group = groups
+                .iter()
+                .find(|g| g.target.as_ref() == Some(&target))
+                .expect("the snapshot puts the machine on the rail");
+            assert!(group.parked, "a profile that no longer resolves is parked");
+            assert!(
+                super::offline_connect_group(
+                    &super::MachineScope::Machine(group.key.clone()),
+                    &groups
+                )
+                .is_none(),
+                "a parked machine must not offer a connect that can only fail"
             );
         });
     }
