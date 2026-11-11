@@ -5041,20 +5041,23 @@ mod tests {
         crate::ui::i18n::set_locale("en");
         let mut configured = named_group("devbox", vec![]);
         configured.endpoint = "dev@build:2222".to_string();
-        let bare = named_group("staging", vec![]);
-        let groups = vec![group(vec![]), configured.clone(), bare];
-        let layout = |scope| Layout {
-            groups: groups.clone(),
+        let configured_target = configured
+            .target
+            .clone()
+            .expect("a named group has a target");
+        let mut layout = Layout {
+            groups: vec![group(vec![]), configured, named_group("staging", vec![])],
             nav: Vec::new(),
             rail: Vec::new(),
-            scope,
+            scope: MachineScope::All,
         };
 
-        let (label, chosen) = create_preset_of(&layout(MachineScope::All));
+        let (label, chosen) = create_preset_of(&layout);
         assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
         assert!(chosen.is_none(), "All starts on this computer");
 
-        let (label, chosen) = create_preset_of(&layout(MachineScope::local()));
+        layout.scope = MachineScope::local();
+        let (label, chosen) = create_preset_of(&layout);
         assert_eq!(
             label,
             t_fmt(
@@ -5064,7 +5067,8 @@ mod tests {
         );
         assert!(chosen.is_none(), "this computer has no host to connect");
 
-        let (label, chosen) = create_preset_of(&layout(MachineScope::Machine("devbox".into())));
+        layout.scope = MachineScope::Machine("devbox".into());
+        let (label, chosen) = create_preset_of(&layout);
         assert_eq!(
             label,
             t_fmt(
@@ -5073,18 +5077,20 @@ mod tests {
             )
         );
         let chosen = chosen.expect("a configured machine supplies its host");
-        assert_eq!(chosen.target, configured.target.clone().unwrap());
+        assert_eq!(chosen.target, configured_target);
         assert_eq!(chosen.label, "devbox");
         assert_eq!(chosen.detail, "dev@build:2222");
 
         // No configured route: the detail falls back to the target's own
         // spelling, the same endpoint the offline card would print.
-        let (_, chosen) = create_preset_of(&layout(MachineScope::Machine("staging".into())));
+        layout.scope = MachineScope::Machine("staging".into());
+        let (_, chosen) = create_preset_of(&layout);
         let chosen = chosen.expect("a machine with no endpoint still connects by target");
         assert_eq!(chosen.detail, chosen.target.to_string());
 
         // A stored scope can outlive its group while the groups are rebuilt.
-        let (label, chosen) = create_preset_of(&layout(MachineScope::Machine("ghost".into())));
+        layout.scope = MachineScope::Machine("ghost".into());
+        let (label, chosen) = create_preset_of(&layout);
         assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
         assert!(chosen.is_none());
     }
