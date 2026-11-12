@@ -1530,6 +1530,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::RemoteStripPreempted => "此工作区已在 {by} 上打开",
         L10nKey::RemoteStripFailed => "未连接到 {machine}——{error}",
+        L10nKey::RemoteOpenWorkspacesOnMachine => "打开这台机器上的工作区",
         L10nKey::RemoteStripRouteLost => "{machine} 的连接配置已不存在，无法重连",
         L10nKey::RemoteRouteParkedHint => {
             "其连接配置已不存在，不会再自动重连。远端会话仍在——新建配置连上去就能在工作区列表里找回。"
@@ -1618,6 +1619,15 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "未找到运行中的编码 agent——请先在某个窗格中启动一个（claude、codex 等）。"
         }
         L10nKey::SwitcherThisComputer => "本机",
+        L10nKey::SwitcherMachineAll => "全部",
+        L10nKey::SwitcherAddMachine => "添加机器",
+        L10nKey::SwitcherMachineHint => "{modifier} ← → 切换机器",
+        L10nKey::SwitcherOpenInWindow => "在窗口中打开",
+        L10nKey::SwitcherOnThisMachine => "在这台机器上，此处未打开",
+        L10nKey::SwitcherMachineNotConnected => "未连接到 {machine}",
+        L10nKey::SwitcherLastKnownWorkspaces => "上次已知的工作区",
+        L10nKey::SwitcherNoWorkspacesOnMachine => "{machine} 上没有工作区",
+        L10nKey::SwitcherNewWorkspaceOnMachine => "在 {machine} 上新建工作区…",
         L10nKey::SwitcherStartingServer => "正在启动 tty59 server…",
         L10nKey::SwitcherDownloadingServerWithTotal => "正在下载 tty59 server… {done} / {total}",
         L10nKey::SwitcherDownloadingServerNoTotal => "正在下载 tty59 server… {done}",
@@ -1742,6 +1752,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdReopenClosedTab => "重新打开已关闭标签页",
         L10nKey::CmdNewWorkspace => "新建工作区…",
         L10nKey::CmdSwitchWorkspace => "切换工作区…",
+        L10nKey::CmdOpenWorkspaceOnMachine => "在机器上打开工作区…",
         L10nKey::CmdRenameWorkspace => "重命名工作区…",
         L10nKey::CmdStopWorkspace => "停止工作区…",
         L10nKey::CmdStopWorkspaceSubtitle => "结束其 shell，保留布局",

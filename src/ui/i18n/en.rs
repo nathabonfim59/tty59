@@ -1645,6 +1645,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::RemoteStripPreempted => "This workspace was opened on {by}",
         L10nKey::RemoteStripFailed => "Not connected to {machine} — {error}",
+        L10nKey::RemoteOpenWorkspacesOnMachine => "Open workspaces on this machine",
         L10nKey::RemoteStripRouteLost => {
             "The connection profile for {machine} no longer exists — it cannot reconnect"
         }
@@ -1747,6 +1748,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "No running coding agent found — start one (claude, codex, …) in a pane first."
         }
         L10nKey::SwitcherThisComputer => "This Computer",
+        L10nKey::SwitcherMachineAll => "All",
+        L10nKey::SwitcherAddMachine => "Add machine",
+        L10nKey::SwitcherMachineHint => "{modifier} ← → machine",
+        L10nKey::SwitcherOpenInWindow => "Open in a window",
+        L10nKey::SwitcherOnThisMachine => "On this machine, not open here",
+        L10nKey::SwitcherMachineNotConnected => "{machine} is not connected",
+        L10nKey::SwitcherLastKnownWorkspaces => "Last known workspaces",
+        L10nKey::SwitcherNoWorkspacesOnMachine => "No workspaces on {machine}",
+        L10nKey::SwitcherNewWorkspaceOnMachine => "New Workspace on {machine}…",
         L10nKey::SwitcherStartingServer => "Starting tty59's server…",
         L10nKey::SwitcherDownloadingServerWithTotal => {
             "Downloading tty59's server… {done} / {total}"
@@ -1881,6 +1891,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::CmdReopenClosedTab => "Reopen Closed Tab",
         L10nKey::CmdNewWorkspace => "New Workspace…",
         L10nKey::CmdSwitchWorkspace => "Switch Workspace…",
+        L10nKey::CmdOpenWorkspaceOnMachine => "Open Workspace on Machine…",
         L10nKey::CmdRenameWorkspace => "Rename Workspace…",
         L10nKey::CmdStopWorkspace => "Stop Workspace…",
         L10nKey::CmdStopWorkspaceSubtitle => "ends its shells, keeps the layout",

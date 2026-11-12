@@ -76,6 +76,22 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         SwitcherAcrossBack,
         Some("Switcher"),
     ));
+    // Alt+←/→ steps the machine rail, and it has to win over the input's own
+    // word movement for the picker's search box only. Actions are dispatched
+    // before key listeners, so the old key handler never saw a chord the input
+    // had bound; naming the search box's own context puts this binding at the
+    // same depth as the input's, where the later one wins. Ctrl+←/→ keeps
+    // moving by words, and rename/create inputs are not under this context.
+    bindings.push(KeyBinding::new(
+        "alt-left",
+        SwitcherMachinePrev,
+        Some("SwitcherSearch > Input"),
+    ));
+    bindings.push(KeyBinding::new(
+        "alt-right",
+        SwitcherMachineNext,
+        Some("SwitcherSearch > Input"),
+    ));
     // Tab walks the search's tabs. Bound on the search's own context for the
     // switcher's reason: Root's focus walker would otherwise take it out of
     // the modal, onto whichever chrome tile is behind it, ring and all.
@@ -3591,5 +3607,67 @@ mod gpui_tests {
                 "a terminal still opens the switcher"
             );
         });
+    }
+
+    /// macOS binds alt-left/right in the input to word movement; Linux spells
+    /// the same verbs on ctrl-left/right, so a Linux-only run cannot show
+    /// whether the rail's alt bindings win that collision. Lay the macOS
+    /// bindings into the base table the way gpui-component installs them,
+    /// rebuild the real keymap, and drive the public picker with real
+    /// keystrokes: the seeded `@` only leaves the box when the rail's action,
+    /// not the input's word movement, took the chord.
+    #[gpui::test]
+    fn the_rail_wins_alt_arrows_from_the_inputs_word_movement(cx: &mut gpui::TestAppContext) {
+        use gpui_component::input::{MoveToNextWord, MoveToPreviousWord};
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        cx.update(|cx| {
+            let base = cx.global_mut::<BaseBindings>();
+            base.0.push(KeyBinding::new(
+                "alt-left",
+                MoveToPreviousWord,
+                Some("Input"),
+            ));
+            base.0
+                .push(KeyBinding::new("alt-right", MoveToNextWord, Some("Input")));
+            rebuild_keymap(cx);
+        });
+
+        for (chord, direction) in [("alt-right", "right"), ("alt-left", "left")] {
+            app.update_in(&mut vcx, |app, window, cx| {
+                app.open_switcher_on_machine(window, cx)
+            });
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            app.update(cx, |app, cx| {
+                assert_eq!(
+                    app.switcher
+                        .as_ref()
+                        .expect("panel is open")
+                        .query
+                        .read(cx)
+                        .value(),
+                    "@",
+                    "the fixture opens with the machine token in the box"
+                );
+            });
+
+            vcx.simulate_keystrokes(chord);
+            app.update(cx, |app, cx| {
+                assert_eq!(
+                    app.switcher
+                        .as_ref()
+                        .expect("panel is open")
+                        .query
+                        .read(cx)
+                        .value(),
+                    "",
+                    "{direction}: the rail took the chord and dropped the token; \
+                     the input's word movement would have left it"
+                );
+            });
+            app.update_in(&mut vcx, |app, window, cx| app.close_switcher(window, cx));
+        }
     }
 }

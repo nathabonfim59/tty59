@@ -12,7 +12,9 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_f
 use tty59_core::core::machine::TabId;
 use tty59_core::core::session::{RemoteTarget, RouteSnapshot, WorkspaceId};
 
-use crate::core::actions::{SwitcherAcross, SwitcherAcrossBack};
+use crate::core::actions::{
+    SwitcherAcross, SwitcherAcrossBack, SwitcherMachineNext, SwitcherMachinePrev,
+};
 use crate::core::session::WorkspaceStore;
 use crate::daemon::install::InstallPhase;
 use crate::terminal::pane_liveness::Liveness;
@@ -20,6 +22,10 @@ use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
+
+mod machine_scope;
+pub(crate) use machine_scope::MachineScope;
+use machine_scope::RailEntry;
 
 const CARD_W: f32 = 760.0;
 
@@ -35,11 +41,20 @@ const LEFT_W: f32 = 340.0;
 pub(crate) const CARD_TOP: f32 = 112.0;
 
 /// Breathing room the card keeps from the window edge, and the height its own
-/// search row and footer take on top of the body.
+/// search row, machine rail and footer take on top of the body.
 const CARD_MARGIN: f32 = 24.0;
 const SEARCH_H: f32 = 48.0;
 const FOOTER_H: f32 = 40.0;
-const CARD_CHROME_H: f32 = SEARCH_H + FOOTER_H + 2.0;
+
+/// The machine rail's strip: tall enough for its chips to breathe, short
+/// enough that they stay within a glance of the search box. Every height the
+/// card spends on the rail hangs off this one constant.
+const RAIL_H: f32 = 40.0;
+const RAIL_CHIP_H: f32 = 26.0;
+
+/// The chrome's own borders: the search row, the rail and the footer each
+/// draw one.
+const CARD_CHROME_H: f32 = SEARCH_H + RAIL_H + FOOTER_H + 3.0;
 
 const BODY_H: f32 = 420.0;
 
@@ -63,6 +78,11 @@ const RUN_DOT: f32 = 5.0;
 
 /// The list rows' corner.
 const LIST_RADIUS: f32 = 8.0;
+
+/// How much of the left column the offline card's endpoint may take. The card
+/// lives in that column too, and an unbounded `user@host:port` beside the
+/// failure text squeezed the text to nothing.
+const ENDPOINT_MAX_W: f32 = 140.0;
 
 /// The create form's rows and the rename field keep the compact height.
 const ROW_H: f32 = 34.0;
@@ -94,6 +114,53 @@ enum Link {
 /// verb is for, so it has to stay enabled.
 fn link_is_engaged(link: Link) -> bool {
     matches!(link, Link::Connected | Link::Reconnecting { .. })
+}
+
+/// What a machine chip's dot says about its link state. Pure over `Link`, so
+/// an ordinary test pins every variant without a window; the inks are the
+/// renderer's business.
+///
+/// The rail is the machine list, so unlike the row avatars — where the quiet
+/// states say nothing and only the exceptions speak — every machine answers
+/// "is it reachable?" at a glance: reachable is a solid success dot, and a
+/// configured machine with no link is a hollow ring — the chip is there,
+/// nothing answers behind it yet. The states that want attention keep the
+/// rows' inks. The row's takeover case (`Connected` on a preempted machine)
+/// stays a row matter: `RailEntry` carries the link alone, and which
+/// workspace was taken over is not the machine's news.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailDotStyle {
+    /// Reachable: this computer, or a link that is up.
+    Solid,
+    /// On the rail, configured, and not connected.
+    Hollow,
+    /// A connect in flight, or a retry on its backoff.
+    Warn,
+    /// The last attempt failed.
+    Danger,
+}
+
+/// The dot style one link state puts on its machine chip.
+fn rail_dot_style(link: Link) -> RailDotStyle {
+    match link {
+        Link::Local | Link::Connected => RailDotStyle::Solid,
+        Link::Offline => RailDotStyle::Hollow,
+        Link::Connecting | Link::Reconnecting { .. } => RailDotStyle::Warn,
+        Link::Failed => RailDotStyle::Danger,
+    }
+}
+
+/// The dot itself: the style above dressed in the theme's inks. The hollow
+/// ring is a muted border and no fill, so it reads as an outline at the same
+/// size its solid neighbours fill.
+fn rail_dot(style: RailDotStyle, theme: &gpui_component::Theme) -> gpui::Div {
+    let dot = div().size(px(6.)).flex_shrink_0().rounded_full();
+    match style {
+        RailDotStyle::Solid => dot.bg(theme.success),
+        RailDotStyle::Hollow => dot.border(px(1.5)).border_color(theme.muted_foreground),
+        RailDotStyle::Warn => dot.bg(theme.warning),
+        RailDotStyle::Danger => dot.bg(theme.danger),
+    }
 }
 
 /// How one machine's row is drawn, from the two things that know.
@@ -342,6 +409,13 @@ pub(crate) struct Switcher {
     /// button.
     orphan_failures: HashMap<u64, String>,
     column: Column,
+    /// The machine the left column is narrowed to. Starts at All on every
+    /// open; a leading `@token` in the query previews another machine on top
+    /// of it (see `machine_scope::effective`).
+    scope: MachineScope,
+    /// Set while a committed `@token` rewrites the query, so the write is not
+    /// mistaken for fresh typing if the input ever emits for it.
+    committing_token: bool,
     left_sel: usize,
     right_sel: usize,
     /// Order the tab column most-recently-used first. Set when Ctrl+Tab opened
@@ -364,6 +438,17 @@ pub(crate) struct Switcher {
     /// the bottom of the column.
     left_anchor: gpui::ScrollAnchor,
     right_anchor: gpui::ScrollAnchor,
+    /// The machine rail's own scroll, horizontal. The chips are its direct
+    /// children, so `scroll_to_item` can find the effective scope's chip:
+    /// `render_rail` asks for it whenever that chip moves — a click,
+    /// Alt+←/→, or a `@token` being typed into the box — and gpui carries
+    /// the rail along by the minimal amount, which is why a hand browsing
+    /// the rail is never fought on a steady frame.
+    rail_scroll: gpui::ScrollHandle,
+    /// The index of the chip the rail last asked to show. Interior because
+    /// `render_rail` renders from `&self`, and it is what tells a move from
+    /// a steady frame.
+    rail_followed: std::cell::Cell<Option<usize>>,
     _subs: Vec<Subscription>,
 }
 
@@ -387,6 +472,11 @@ impl Switcher {
 struct Layout {
     groups: Vec<Group>,
     nav: Vec<Nav>,
+    /// The machine rail's chips, left to right.
+    rail: Vec<RailEntry>,
+    /// What the list is narrowed to this frame: the stored scope, or the
+    /// machine a half-typed `@token` previews.
+    scope: MachineScope,
 }
 
 impl Layout {
@@ -405,9 +495,14 @@ impl Layout {
 /// workspace, most recently used first with this window's own workspace on
 /// top. A query matching a machine's name keeps all of that machine's rows —
 /// searching "devbox" is how the old per-machine grouping is asked for now.
-fn flatten(groups: &[Group], query: &str) -> Vec<Nav> {
+/// Narrowed to one machine, open workspaces come first so the list can wear
+/// its two headings; All keeps the single blended order.
+fn flatten(groups: &[Group], query: &str, scope: &MachineScope) -> Vec<Nav> {
     let mut nav: Vec<Nav> = Vec::new();
     for (g, group) in groups.iter().enumerate() {
+        if !scope.admits(group) {
+            continue;
+        }
         let matched_host = group.label.to_lowercase().contains(query);
         for (r, row) in group.rows.iter().enumerate() {
             if query.is_empty() || matched_host || row.matches(query) {
@@ -415,18 +510,77 @@ fn flatten(groups: &[Group], query: &str) -> Vec<Nav> {
             }
         }
     }
+    // Narrowed to one machine the list has two headings, so its rows have to
+    // come out in two runs or a heading would have to repeat. All keeps the
+    // single blended order it has always had.
+    let scoped = !matches!(scope, MachineScope::All);
     nav.sort_by(|&(ga, ra), &(gb, rb)| {
-        let (a, b) = (&groups[ga].rows[ra], &groups[gb].rows[rb]);
-        // How a row matched comes before which one is current: "qa" is the
-        // workspace named qa, not this window's one whose tabs sit in
-        // `/tmp/t7qa`, and Enter takes the top row.
-        a.name_match(query)
-            .cmp(&b.name_match(query))
-            .then_with(|| b.current.cmp(&a.current))
-            .then_with(|| b.last_active.cmp(&a.last_active))
-            .then_with(|| a.name.cmp(&b.name))
+        row_order(query, scoped, &groups[ga].rows[ra], &groups[gb].rows[rb])
     });
     nav
+}
+
+/// One left-column row against another. Open rows lead when the list is
+/// narrowed to a machine — that is what separates "Open in a window" from the
+/// rest of the list. Everything after that is the order the flat list already
+/// had: how well the name matched, this window, recency, then name.
+fn row_order(query: &str, scoped: bool, a: &Row, b: &Row) -> std::cmp::Ordering {
+    let open = if scoped {
+        b.open.cmp(&a.open)
+    } else {
+        std::cmp::Ordering::Equal
+    };
+    // How a row matched comes before which one is current: "qa" is the
+    // workspace named qa, not this window's one whose tabs sit in
+    // `/tmp/t7qa`, and Enter takes the top row.
+    open.then_with(|| a.name_match(query).cmp(&b.name_match(query)))
+        .then_with(|| b.current.cmp(&a.current))
+        .then_with(|| b.last_active.cmp(&a.last_active))
+        .then_with(|| a.name.cmp(&b.name))
+}
+
+/// Which heading a row of a scoped list falls under. A change between
+/// neighbouring rows is where the heading is drawn; nothing is added to `nav`,
+/// so the arrow keys still walk exactly the rows on screen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Section {
+    Open,
+    Closed,
+    /// The rows of a machine that is not connected are remembered ones; a
+    /// single heading says so instead of splitting them by open state.
+    LastKnown,
+}
+
+impl Section {
+    fn key(self) -> L10nKey {
+        match self {
+            Section::Open => L10nKey::SwitcherOpenInWindow,
+            Section::Closed => L10nKey::SwitcherOnThisMachine,
+            Section::LastKnown => L10nKey::SwitcherLastKnownWorkspaces,
+        }
+    }
+}
+
+/// The heading under which each navigation slot falls, in nav order. `None`
+/// for the unscoped list, which has no headings.
+fn nav_sections(
+    nav: &[Nav],
+    groups: &[Group],
+    scope: &MachineScope,
+    last_known: bool,
+) -> Vec<Option<Section>> {
+    if matches!(scope, MachineScope::All) {
+        return vec![None; nav.len()];
+    }
+    nav.iter()
+        .map(|&(g, r)| {
+            Some(match (last_known, groups[g].rows[r].open) {
+                (true, _) => Section::LastKnown,
+                (false, true) => Section::Open,
+                (false, false) => Section::Closed,
+            })
+        })
+        .collect()
 }
 
 /// One line of the create form's host dropdown.
@@ -454,6 +608,112 @@ fn host_items(hosts: Vec<HostChoice>, query: &str, local_label: &str) -> Vec<Hos
     items
 }
 
+/// The scoped machine that is waiting on a connect, if any: remote, not
+/// parked, and neither connected nor in flight. A parked route can never be
+/// connected (#485), and an attempt already on the wire has its own banner.
+fn offline_connect_group<'a>(scope: &MachineScope, groups: &'a [Group]) -> Option<&'a Group> {
+    let group = scope.group(groups)?;
+    group.target.as_ref()?;
+    (!group.parked && matches!(group.link, Link::Offline | Link::Failed)).then_some(group)
+}
+
+/// The endpoint line the offline card prints: the configured route's detail,
+/// or the target's own spelling when the machine was never configured.
+fn group_endpoint(group: &Group) -> String {
+    match group.endpoint.trim() {
+        "" => group
+            .target
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default(),
+        endpoint => endpoint.to_string(),
+    }
+}
+
+/// The connect the offline card's button asks for. `None` only for a group
+/// with no target, which the card never shows.
+fn connect_choice(group: &Group) -> Option<HostChoice> {
+    Some(HostChoice {
+        target: group.target.clone()?,
+        label: group.label.clone(),
+        detail: group_endpoint(group),
+    })
+}
+
+/// The footer's New Workspace wording and the host the create form starts on,
+/// both from the frame's effective scope. A machine picked by a chip,
+/// Alt+←/→ or a half-typed `@token` names itself and supplies the same choice
+/// its offline card would connect with; All (or a scope whose group left the
+/// frame) means this computer's own form, with no host.
+fn create_preset_of(layout: &Layout) -> (String, Option<HostChoice>) {
+    let Some(group) = layout.scope.group(&layout.groups) else {
+        return (t(L10nKey::AppMenuNewWorkspace).to_string(), None);
+    };
+    (
+        t_fmt(
+            L10nKey::SwitcherNewWorkspaceOnMachine,
+            &[("machine", group.label.as_str())],
+        ),
+        connect_choice(group),
+    )
+}
+
+/// What the offline card's second line has to say: the failure that took the
+/// machine down (the row truncates it) and the endpoint it would dial. A group
+/// with no failure behind it only has the endpoint to show.
+fn offline_card_detail(group: &Group) -> (Option<String>, String) {
+    (group.error.clone(), group_endpoint(group))
+}
+
+/// Orphan panes are this computer's; under a remote scope they are not
+/// something the list is about.
+fn orphans_visible(scope: &MachineScope) -> bool {
+    matches!(scope, MachineScope::All) || scope == &MachineScope::local()
+}
+
+/// What the empty list says. Unscoped keeps the ordinary no-match wording; a
+/// machine names itself, since "no match" is not what an empty machine is.
+fn empty_list_text(scope: &MachineScope, groups: &[Group]) -> String {
+    match scope.group(groups) {
+        Some(group) => t_fmt(
+            L10nKey::SwitcherNoWorkspacesOnMachine,
+            &[("machine", &group.label)],
+        ),
+        None => t(L10nKey::SwitcherNoMatch).to_string(),
+    }
+}
+
+/// The sub-line under a workspace's name: its path, led by the machine only in
+/// the blended All list. A scoped row lives on the one machine the list is
+/// about, so repeating its name there is noise.
+fn row_meta(group: &Group, row: &Row, show_machine: bool) -> Vec<String> {
+    let mut meta: Vec<String> = Vec::new();
+    if show_machine {
+        meta.push(if group.target.is_some() {
+            group.label.clone()
+        } else {
+            t(L10nKey::SwitcherLocalHost).to_string()
+        });
+    }
+    if !row.path.is_empty() {
+        meta.push(row.path.clone());
+    }
+    meta
+}
+
+/// One of the scoped list's section headings.
+fn section_heading(section: Section, cx: &App) -> AnyElement {
+    div()
+        .px(px(ROW_PAD))
+        .pt(px(8.))
+        .pb(px(2.))
+        .text_size(gpui::rems(10.5 / 16.))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .text_color(cx.theme().muted_foreground)
+        .child(t(section.key()))
+        .into_any_element()
+}
+
 impl Tty59App {
     pub(crate) fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_some() {
@@ -465,6 +725,32 @@ impl Tty59App {
 
     pub(crate) fn open_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_switcher_in(Column::Left, false, None, window, cx);
+    }
+
+    /// The palette's Open Workspace on Machine: an ordinary picker with a bare
+    /// `@` already in the box, so the next keystrokes narrow the rail while
+    /// the list still previews. Nothing is scoped until a name matches.
+    pub(crate) fn open_switcher_on_machine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_switcher(window, cx);
+        let Some(query) = self.switcher.as_ref().map(|sw| sw.query.clone()) else {
+            return;
+        };
+        query.update(cx, |state, cx| state.set_value("@", window, cx));
+        cx.notify();
+    }
+
+    /// Opens a fresh picker already narrowed to `scope`, for the places that
+    /// know the machine before the picker exists. Opening first means the
+    /// ordinary All reset happens, then the scope is a real change.
+    #[allow(dead_code)] // the status-strip entry point is deferred
+    pub(crate) fn open_switcher_scoped(
+        &mut self,
+        scope: MachineScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_switcher(window, cx);
+        self.select_switcher_machine(scope, window, cx);
     }
 
     fn open_switcher_in(
@@ -494,8 +780,9 @@ impl Tty59App {
         let subs = vec![cx.subscribe_in(
             &query,
             window,
-            |this, _input, ev: &InputEvent, _window, cx| {
+            |this, input, ev: &InputEvent, window, cx| {
                 if matches!(ev, InputEvent::Change) {
+                    this.commit_query_machine_token(input, window, cx);
                     // A narrower list can strand the cursor past its end. Land
                     // it on the first hit so the tab column shows the hits
                     // straight away.
@@ -507,7 +794,11 @@ impl Tty59App {
                 }
             },
         )];
-        let (left_scroll, right_scroll) = (gpui::ScrollHandle::new(), gpui::ScrollHandle::new());
+        let (left_scroll, right_scroll, rail_scroll) = (
+            gpui::ScrollHandle::new(),
+            gpui::ScrollHandle::new(),
+            gpui::ScrollHandle::new(),
+        );
         self.switcher = Some(Switcher {
             query,
             page: Page::List,
@@ -515,6 +806,8 @@ impl Tty59App {
             orphans: Vec::new(),
             orphan_failures: HashMap::new(),
             column,
+            scope: MachineScope::All,
+            committing_token: false,
             left_sel: 0,
             right_sel: 0,
             mru,
@@ -525,6 +818,8 @@ impl Tty59App {
             right_scroll: right_scroll.clone(),
             left_anchor: gpui::ScrollAnchor::for_handle(left_scroll),
             right_anchor: gpui::ScrollAnchor::for_handle(right_scroll),
+            rail_scroll,
+            rail_followed: std::cell::Cell::new(None),
             _subs: subs,
         });
         // Park the left cursor on this window's own workspace so the tab column
@@ -820,6 +1115,29 @@ impl Tty59App {
             });
         }
 
+        // Every machine the user has configured is on the rail, connected or
+        // not, so a machine never visited can still be picked and connected
+        // from here. Empty until a connect lists its workspaces.
+        for host in &configured {
+            let key = host.target.to_string();
+            if index.contains_key(&key) {
+                continue;
+            }
+            index.insert(key.clone(), groups.len());
+            groups.push(Group {
+                key,
+                label: host.label.clone(),
+                endpoint: String::new(),
+                target: Some(host.target.clone()),
+                link: Link::Offline,
+                error: None,
+                installing: None,
+                preempted: false,
+                parked: false,
+                rows: Vec::new(),
+            });
+        }
+
         if !index.contains_key("") {
             groups.insert(
                 0,
@@ -1106,8 +1424,20 @@ impl Tty59App {
             .as_ref()
             .map(|sw| sw.text(cx))
             .unwrap_or_default();
-        let nav = flatten(&groups, &query);
-        Layout { groups, nav }
+        let rail = machine_scope::rail_entries(&groups, t(L10nKey::SwitcherMachineAll));
+        let stored = self
+            .switcher
+            .as_ref()
+            .map(|sw| sw.scope.clone())
+            .unwrap_or_default();
+        let (scope, rest) = machine_scope::effective(&stored, &query, &rail);
+        let nav = flatten(&groups, rest, &scope);
+        Layout {
+            groups,
+            nav,
+            rail,
+            scope,
+        }
     }
 
     fn pending_machines(&self) -> Vec<RemoteTarget> {
@@ -1222,13 +1552,16 @@ impl Tty59App {
     }
 
     /// `⌘⇧N` and the footer button. Raises the switcher if it is down and
-    /// flips the card to the create form, host defaulting to this computer —
-    /// so `⌘⇧N`, a name, then Enter is a fresh local workspace.
+    /// flips the card to the create form. A fresh panel is All, so the usual
+    /// `⌘⇧N`, a name, then Enter is a local workspace; a panel that is already
+    /// scoped hands the form that machine instead.
     pub(crate) fn open_workspace_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.switcher.is_none() {
             self.open_switcher(window, cx);
         }
-        self.switcher_to_form(None, window, cx);
+        let layout = self.switcher_layout(cx);
+        let (_, chosen) = create_preset_of(&layout);
+        self.switcher_to_form(chosen, window, cx);
     }
 
     fn switcher_to_form(
@@ -1428,9 +1761,10 @@ impl Tty59App {
         self.sync_window_title(window, cx);
     }
 
-    /// Arrow keys and Enter for the panel. These run ahead of the text input's
-    /// own `MoveUp`/`MoveDown` bindings, so anything handled here must stop
-    /// propagating or the cursor jumps inside the search box instead.
+    /// Arrow keys and Enter for the panel. Anything handled here stops
+    /// propagating, or the cursor would also move inside the search box.
+    /// Chords the box binds itself are routed as actions: the machine steps in
+    /// `ui::keymap`, and Backspace through the capture handler below.
     fn on_switcher_key(
         &mut self,
         ev: &gpui::KeyDownEvent,
@@ -1471,6 +1805,12 @@ impl Tty59App {
             // beats a panic in the render path if that ever stops being true.
             Key::Close => self.close_switcher(window, cx),
             Key::Pass => {}
+            // The rail binding wins the chord from the input (see
+            // `ui::keymap` and `SwitcherMachinePrev`), so this stays the path
+            // for a directly-delivered event; both step from the chip the
+            // list is effectively showing and drop the token that previewed
+            // it, so its preview cannot undo the step.
+            Key::Machine(delta) => self.switcher_step_machine(delta, window, cx),
             Key::Step(forward) => {
                 cx.stop_propagation();
                 match column {
@@ -1674,11 +2014,26 @@ impl Tty59App {
             return;
         };
         let (sel, column, right_sel) = (sw.left_sel, sw.column, sw.right_sel);
-        if column == Column::Right {
-            let query = sw.text(cx);
-            let Some(row) = layout.subject_row(sel) else {
+        let query = sw.text(cx);
+        // Nothing under the cursor — an empty list, or a filter that left no
+        // row to stand on. This sits ahead of the column split so the tab
+        // column cannot swallow it: it can stay the active column after a
+        // query narrowed the list away. On a machine that is not connected,
+        // Enter is the obvious way to ask for the connection; a selected row
+        // keeps its own open/reconnect path below.
+        let Some(&(g, r)) = layout.nav.get(sel) else {
+            if new_window {
                 return;
-            };
+            }
+            if let Some(group) = offline_connect_group(&layout.scope, &layout.groups)
+                && let Some(choice) = connect_choice(group)
+            {
+                self.connect_to_host(choice, cx);
+            }
+            return;
+        };
+        if column == Column::Right {
+            let row = &layout.groups[g].rows[r];
             let Some(tab) = visible_tabs(row, &query)
                 .get(right_sel)
                 .and_then(|i| row.tabs.get(*i))
@@ -1689,11 +2044,9 @@ impl Tty59App {
             self.switcher_open_tab(ws, id, new_window, window, cx);
             return;
         }
-        if let Some(&(g, r)) = layout.nav.get(sel) {
-            let group = &layout.groups[g];
-            let row = RowRef::of(group, &group.rows[r]);
-            self.switcher_open(row, new_window, window, cx);
-        }
+        let group = &layout.groups[g];
+        let row = RowRef::of(group, &group.rows[r]);
+        self.switcher_open(row, new_window, window, cx);
     }
 
     fn switcher_open_tab(
@@ -1764,6 +2117,23 @@ impl Tty59App {
                     let layout = this.switcher_layout(cx);
                     this.switcher_step_right(&layout, false, window, cx);
                 }))
+                // Actions resolve before key listeners, so the input's own
+                // Backspace would otherwise swallow the key. Capture runs
+                // ahead of that handler and only stops it when the pick
+                // actually steps out of a machine.
+                .capture_action(cx.listener(
+                    |this, _: &gpui_component::input::Backspace, _window, cx| {
+                        if this.switcher_backspace_to_all(cx) {
+                            cx.stop_propagation();
+                        }
+                    },
+                ))
+                .on_action(cx.listener(|this, _: &SwitcherMachinePrev, window, cx| {
+                    this.switcher_step_machine(-1, window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &SwitcherMachineNext, window, cx| {
+                    this.switcher_step_machine(1, window, cx);
+                }))
                 .on_key_down(cx.listener(Self::on_switcher_key))
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1804,10 +2174,36 @@ impl Tty59App {
         let border = theme.border;
 
         let mut list = v_flex().gap(px(1.));
-        for (at, &(g, r)) in layout.nav.iter().enumerate() {
+        // A machine that is not connected says so above its remembered rows,
+        // and the memory is not split by open state: none of it can be opened
+        // until the connect lands.
+        let offline = offline_connect_group(&layout.scope, &layout.groups);
+        let last_known = offline.is_some();
+        if let Some(group) = offline {
+            list = list.child(self.render_offline_card(group, cx));
+        }
+        let sections = nav_sections(&layout.nav, &layout.groups, &layout.scope, last_known);
+        let mut heading: Option<Section> = None;
+        for (at, (&(g, r), section)) in layout.nav.iter().zip(sections).enumerate() {
+            if let Some(section) = section
+                && heading != Some(section)
+            {
+                list = list.child(section_heading(section, cx));
+                heading = Some(section);
+            }
             let picked = sel == at && column == Column::Left;
             let group = &layout.groups[g];
-            list = list.child(self.render_row(group, &group.rows[r], picked, Some(at), cx));
+            // Scoped rows live on the one machine the list is about; repeating
+            // its name on every sub-line is noise.
+            let show_machine = matches!(layout.scope, MachineScope::All);
+            list = list.child(self.render_row(
+                group,
+                &group.rows[r],
+                picked,
+                Some(at),
+                show_machine,
+                cx,
+            ));
         }
         if layout.nav.is_empty() {
             list = list.child(
@@ -1816,15 +2212,16 @@ impl Tty59App {
                     .py(px(14.))
                     .text_size(gpui::rems(13. / 16.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(t(L10nKey::SwitcherNoMatch)),
+                    .child(empty_list_text(&layout.scope, &layout.groups)),
             );
         }
         // Orphan panes belong to the machine, not to a workspace, so they are
         // not rows and join no navigation — the bottom of the workspace list
         // is simply where a user looking for them finds them (#596). A search
         // narrows the panel to workspaces, and the box steps out of the way
-        // for one.
-        if !sw.orphans.is_empty() && sw.text(cx).is_empty() {
+        // for one. A remote scope is about another computer's workspaces, so
+        // this machine's leaks are not on offer there.
+        if !sw.orphans.is_empty() && sw.text(cx).is_empty() && orphans_visible(&layout.scope) {
             list = list.child(self.render_orphan_panes(cx));
         }
 
@@ -1896,10 +2293,267 @@ impl Tty59App {
             .rounded(px(CARD_RADIUS))
             .overflow_hidden()
             .child(self.render_search(cx))
+            .child(self.render_rail(&layout, cx))
             .child(body)
             .children(self.render_banners(&layout, cx))
-            .child(self.render_footer(cx))
+            .child(self.render_footer(&layout, cx))
             .into_any_element()
+    }
+
+    /// The machine rail between the search box and the columns: one chip per
+    /// `layout.rail` entry — All, this computer, then every configured host —
+    /// plus "Add machine" at the end. The chip the list is effectively scoped
+    /// to is marked, a half-typed `@token`'s preview included, and picking a
+    /// chip (click or Alt+←/→) goes through `select_switcher_machine` so the
+    /// stored scope wins over any token left in the box.
+    fn render_rail(&self, layout: &Layout, cx: &mut Context<Self>) -> AnyElement {
+        let sw = self.switcher.as_ref().expect("only rendered while up");
+        let theme = cx.theme();
+        let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
+        let sf = rungs(cx);
+        let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.selected));
+        let rail_scroll = sw.rail_scroll.clone();
+        // The rail follows the effective scope wherever the move came from —
+        // a click, Alt+←/→, or a `@token` typed into the box — but only when
+        // the chip it points at actually moved, and by the minimal amount: a
+        // rail that asked on every frame would fight a hand that is only
+        // browsing along it. What is followed is the chip's *index*, not the
+        // scope: a configured host regrouping from empty to populated keeps
+        // its scope but changes places on the rail, and the rail should
+        // carry to the new place. The chips are the scroller's direct
+        // children, which is the index `scroll_to_item` speaks.
+        let picked_ix = layout.rail.iter().position(|e| e.scope == layout.scope);
+        if sw.rail_followed.replace(picked_ix) != picked_ix
+            && let Some(ix) = picked_ix
+        {
+            rail_scroll.scroll_to_item(ix);
+        }
+
+        let mut chips: Vec<AnyElement> = Vec::with_capacity(layout.rail.len() + 1);
+        for (ix, entry) in layout.rail.iter().enumerate() {
+            let picked = entry.scope == layout.scope;
+            let scope = entry.scope.clone();
+            chips.push(
+                h_flex()
+                    .id(("switcher-rail-chip", ix))
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(RAIL_CHIP_H))
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .cursor_pointer()
+                    .text_size(gpui::rems(12.5 / 16.))
+                    .text_color(fg)
+                    .when(picked, |chip| chip.bg(picked_bg))
+                    .hover(move |chip| chip.bg(if picked { picked_bg } else { hover }))
+                    .children(
+                        entry
+                            .link
+                            .map(rail_dot_style)
+                            .map(|style| rail_dot(style, theme)),
+                    )
+                    .child(entry.label.clone())
+                    // Zero says nothing: an empty machine is exactly what its
+                    // chip is there to name, and the count would only add
+                    // noise to the machines that matter.
+                    .when(entry.count > 0, |chip| {
+                        chip.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_color(muted)
+                                .child(entry.count.to_string()),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        // The listener is an Fn that outlives the click, so
+                        // the captured scope travels by clone.
+                        this.select_switcher_machine(scope.clone(), window, cx);
+                    }))
+                    .into_any_element(),
+            );
+        }
+        // The way out when the machine wanted is not configured yet — the
+        // same exit the create form's host dropdown offers, reached one step
+        // earlier.
+        chips.push(
+            h_flex()
+                .id("switcher-rail-add")
+                .flex_shrink_0()
+                .items_center()
+                .gap(px(6.))
+                .h(px(RAIL_CHIP_H))
+                .px(px(10.))
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(gpui::rems(12.5 / 16.))
+                .text_color(muted)
+                .hover(move |chip| chip.bg(hover))
+                .child(Icon::new(IconName::Plus).size(px(10.)).text_color(muted))
+                .child(t(L10nKey::SwitcherAddMachine))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_switcher(window, cx);
+                    this.open_new_ssh_host(window, cx);
+                }))
+                .into_any_element(),
+        );
+
+        h_flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(RAIL_H))
+            .px(px(COLUMN_PAD))
+            .border_b_1()
+            .border_color(border)
+            .child(
+                // The chips scroll once the configured machines outrun the
+                // card; the hint stays pinned past them so it is always where
+                // the eye left it.
+                h_flex()
+                    .id("switcher-rail")
+                    .track_scroll(&rail_scroll)
+                    .min_w_0()
+                    .flex_1()
+                    .items_center()
+                    .gap(px(6.))
+                    .overflow_x_scroll()
+                    .children(chips),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(gpui::rems(12.5 / 16.))
+                    .text_color(muted)
+                    // The modifier names itself the way the footer's
+                    // shortcuts do — a glyph on macOS, a word elsewhere —
+                    // and the localized template places it.
+                    .child(t_fmt(
+                        L10nKey::SwitcherMachineHint,
+                        &[(
+                            "modifier",
+                            if cfg!(target_os = "macos") {
+                                "⌥"
+                            } else {
+                                "Alt"
+                            },
+                        )],
+                    )),
+            )
+            .into_any_element()
+    }
+
+    /// Narrows the left column to `scope` — the one way the rail, Alt+←/→ and
+    /// a committed `@token` change it. The cursor goes back to the top so the
+    /// tab column shows the new list's first workspace, even when the scope
+    /// is the one already stored: clicking the selected chip is how the
+    /// keyboard user gets back to the top.
+    pub(crate) fn set_switcher_scope(&mut self, scope: MachineScope, cx: &mut Context<Self>) {
+        let Some(sw) = self.switcher.as_mut() else {
+            return;
+        };
+        sw.scope = scope;
+        sw.left_sel = 0;
+        sw.right_sel = 0;
+        sw.column = Column::Left;
+        cx.notify();
+    }
+
+    /// Alt+←/→ from the search box: one chip either way. The input's word
+    /// movement would otherwise win the chord — actions resolve before key
+    /// listeners — so `ui::keymap` binds these on the search box's own
+    /// context to this pair of actions. Steps from the chip the list is
+    /// effectively showing (a half-typed `@token`'s preview included) and
+    /// lets the pick drop the token so its preview cannot undo the step.
+    fn switcher_step_machine(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sw) = self.switcher.as_ref() else {
+            return;
+        };
+        if matches!(sw.page, Page::Create(_)) || sw.renaming.is_some() {
+            return;
+        }
+        let layout = self.switcher_layout(cx);
+        let scope = machine_scope::step(&layout.rail, &layout.scope, delta);
+        cx.stop_propagation();
+        self.select_switcher_machine(scope, window, cx);
+    }
+
+    /// Backspace on an empty search box steps out of the machine. Runs from
+    /// the capture phase, ahead of the input's own Backspace, and says
+    /// whether it consumed the key. A box holding text — whitespace included
+    /// — keeps deleting; the create form's inputs and a rename box are their
+    /// own.
+    fn switcher_backspace_to_all(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(sw) = self.switcher.as_ref() else {
+            return false;
+        };
+        let leaves = !matches!(sw.page, Page::Create(_))
+            && sw.renaming.is_none()
+            && sw.scope != MachineScope::All
+            && sw.query.read(cx).value().is_empty();
+        if !leaves {
+            return false;
+        }
+        self.set_switcher_scope(MachineScope::All, cx);
+        true
+    }
+
+    /// Turns a committed `@machine` token into the stored scope, the way the
+    /// space after it is meant to: the token leaves the box and the rest of
+    /// the query keeps searching. A half-typed token still previews, and an
+    /// unresolved one is left for the search to find nothing with.
+    fn commit_query_machine_token(
+        &mut self,
+        input: &Entity<InputState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.switcher.as_ref().is_none_or(|sw| sw.committing_token) {
+            return;
+        }
+        let text = input.read(cx).value().to_string();
+        let Some(token) = machine_scope::parse_at_token(&text) else {
+            return;
+        };
+        if !token.committed {
+            return;
+        }
+        let (needle, rest) = (token.needle.to_string(), token.rest.to_string());
+        let entries =
+            machine_scope::rail_entries(&self.switcher_groups(cx), t(L10nKey::SwitcherMachineAll));
+        let Some(scope) = machine_scope::resolve_needle(&entries, &needle) else {
+            return;
+        };
+        self.set_switcher_scope(scope, cx);
+        if let Some(sw) = self.switcher.as_mut() {
+            sw.committing_token = true;
+        }
+        input.update(cx, |state, cx| state.set_value(rest, window, cx));
+        if let Some(sw) = self.switcher.as_mut() {
+            sw.committing_token = false;
+        }
+    }
+
+    /// Picks a machine from the rail — a chip click or an Alt+←/→ step — by
+    /// setting the stored scope and dropping a leading `@token` from the
+    /// query. The token previews its own machine every frame, so leaving it
+    /// in place would undo the pick; whatever was typed after it is the
+    /// search that stays.
+    pub(crate) fn select_switcher_machine(
+        &mut self,
+        scope: MachineScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sw) = self.switcher.as_ref() else {
+            return;
+        };
+        let query = sw.query.clone();
+        let text = query.read(cx).value().to_string();
+        let rest = machine_scope::parse_at_token(&text).map(|token| token.rest.to_string());
+        self.set_switcher_scope(scope, cx);
+        if let Some(rest) = rest {
+            query.update(cx, |state, cx| state.set_value(rest, window, cx));
+        }
     }
 
     fn render_search(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1915,16 +2569,23 @@ impl Tty59App {
             .border_color(border)
             .child(Icon::new(IconName::Search).size(px(12.)).text_color(muted))
             .child(
-                div().flex_1().min_w_0().children(
-                    self.switcher
-                        .as_ref()
-                        .map(|sw| Input::new(&sw.query).appearance(false).pl_0()),
-                ),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    // Alt+←/→ bindings in `ui::keymap` name this context, so
+                    // the machine step wins over the input's word movement
+                    // here and nowhere else.
+                    .key_context("SwitcherSearch")
+                    .children(
+                        self.switcher
+                            .as_ref()
+                            .map(|sw| Input::new(&sw.query).appearance(false).pl_0()),
+                    ),
             )
             .child(keycap("esc", cx))
     }
 
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_footer(&self, layout: &Layout, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
         let hover = hover_fill(cx);
@@ -1936,6 +2597,7 @@ impl Tty59App {
             .switcher
             .as_ref()
             .is_some_and(|sw| !sw.text(cx).trim().is_empty());
+        let (create_label, _) = create_preset_of(layout);
         let hint = |keys: Vec<AnyElement>, label: String| {
             h_flex()
                 .items_center()
@@ -1998,9 +2660,11 @@ impl Tty59App {
                     .text_size(gpui::rems(12.5 / 16.))
                     .text_color(fg)
                     .child(Icon::new(IconName::Plus).size(px(10.)).text_color(muted))
-                    .child(t(L10nKey::AppMenuNewWorkspace))
+                    .child(create_label)
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.switcher_to_form(None, window, cx);
+                        let layout = this.switcher_layout(cx);
+                        let (_, chosen) = create_preset_of(&layout);
+                        this.switcher_to_form(chosen, window, cx);
                     })),
             )
             .child(
@@ -2022,7 +2686,12 @@ impl Tty59App {
     /// here — its state dot rides on its workspace rows.
     fn render_banners(&self, layout: &Layout, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out: Vec<AnyElement> = Vec::new();
-        for group in &layout.groups {
+        // The connect card already says what went wrong and offers the way
+        // back; the error band under it would be the same sentence twice.
+        // Only the carded group's band steps aside — a parked or in-flight
+        // machine has no card and keeps its own banner.
+        let carded = offline_connect_group(&layout.scope, &layout.groups).map(|g| g.key.as_str());
+        for group in layout.groups.iter().filter(|g| layout.scope.admits(g)) {
             if group.target.is_none() {
                 continue;
             }
@@ -2038,7 +2707,9 @@ impl Tty59App {
                 if !self.parked_dismissed.contains(&group.key) {
                     out.push(self.render_parked_notice(group, cx).into_any_element());
                 }
-            } else if let Some(error) = group.error.clone() {
+            } else if let Some(error) = group.error.clone()
+                && carded != Some(group.key.as_str())
+            {
                 out.push(self.render_error_band(group, &error, cx));
             } else if matches!(group.link, Link::Connecting | Link::Reconnecting { .. }) {
                 let theme = cx.theme();
@@ -2232,6 +2903,81 @@ impl Tty59App {
                             },
                         )),
                     ),
+            )
+            .into_any_element()
+    }
+
+    /// The card a scoped machine gets while it is not connected: why the rows
+    /// below are only remembered ones, where the connect would dial, and the
+    /// button that starts it. Parked machines never get this card — their
+    /// route cannot be rebuilt (#485).
+    fn render_offline_card(&self, group: &Group, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let Some(choice) = connect_choice(group) else {
+            return div().into_any_element();
+        };
+        let muted_text = gpui::rems(11. / 16.);
+        // The failure truncates first and the endpoint is capped at
+        // ENDPOINT_MAX_W, truncating as well: the two share the column, so
+        // neither string can push the other out of the card.
+        let detail: AnyElement = match offline_card_detail(group) {
+            (Some(error), endpoint) => h_flex()
+                .items_center()
+                .gap(px(6.))
+                .min_w_0()
+                .text_size(muted_text)
+                .text_color(muted)
+                .child(div().flex_1().min_w_0().truncate().child(error))
+                .child(
+                    div()
+                        .flex_shrink_1()
+                        .min_w_0()
+                        .max_w(px(ENDPOINT_MAX_W))
+                        .truncate()
+                        .child(endpoint),
+                )
+                .into_any_element(),
+            (None, endpoint) => div()
+                .truncate()
+                .text_size(muted_text)
+                .text_color(muted)
+                .child(endpoint)
+                .into_any_element(),
+        };
+        v_flex()
+            .gap(px(4.))
+            .mx(px(4.))
+            .mt(px(4.))
+            .mb(px(6.))
+            .px(px(10.))
+            .py(px(8.))
+            .rounded(crate::ui::rounding::ROW_RADIUS)
+            .border_1()
+            .border_color(theme.border)
+            .child(
+                div()
+                    .text_size(gpui::rems(12. / 16.))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(fg)
+                    .child(t_fmt(
+                        L10nKey::SwitcherMachineNotConnected,
+                        &[("machine", &group.label)],
+                    )),
+            )
+            .child(detail)
+            .child(
+                h_flex().pt(px(2.)).child(
+                    Button::new(gpui::SharedString::from(format!(
+                        "switcher-connect-machine:{}",
+                        group.key
+                    )))
+                    .label(t(L10nKey::Connect))
+                    .xsmall()
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.connect_to_host(choice.clone(), cx);
+                    })),
+                ),
             )
             .into_any_element()
     }
@@ -2432,6 +3178,7 @@ impl Tty59App {
         row: &Row,
         picked: bool,
         nav_at: Option<usize>,
+        show_machine: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(sw) = self.switcher.as_ref()
@@ -2494,24 +3241,18 @@ impl Tty59App {
         // workspace name plus path plus badge plus timestamp on one row pushes
         // the trailing pieces straight out over the divider. The second line
         // leads with the machine the workspace lives on — the flat list's only
-        // grouping. A reachable workspace carries nothing extra; an offline
-        // one says so in the state column and dims its disc. Only the states
-        // that want attention — a connect in flight, a failure, a machine
-        // another client took over — keep a dot on the disc.
+        // grouping — except in scope, where every row is on that machine. A
+        // reachable workspace carries nothing extra; an offline one says so in
+        // the state column and dims its disc. Only the states that want
+        // attention — a connect in flight, a failure, a machine another client
+        // took over — keep a dot on the disc.
         let state_dot = match group.link {
             Link::Connected if group.preempted => Some(warn),
             Link::Connecting | Link::Reconnecting { .. } => Some(warn),
             Link::Failed => Some(theme.danger),
             Link::Local | Link::Connected | Link::Offline => None,
         };
-        let host_label = match group.target.is_some() {
-            true => group.label.clone(),
-            false => t(L10nKey::SwitcherLocalHost).to_string(),
-        };
-        let mut meta = vec![host_label];
-        if !row.path.is_empty() {
-            meta.push(row.path.clone());
-        }
+        let meta = row_meta(group, row, show_machine);
         let row_fill = if picked {
             picked_bg
         } else {
@@ -3424,7 +4165,7 @@ fn host_menu(
     let Some(target) = host.target.clone() else {
         return menu;
     };
-    let (a1, a2, a3, a4) = (app.clone(), app.clone(), app.clone(), app);
+    let (a1, a2, a3, a4, a5) = (app.clone(), app.clone(), app.clone(), app.clone(), app);
     let menu = menu
         .separator()
         .item(PopupMenuItem::label(host.label.clone()));
@@ -3440,6 +4181,18 @@ fn host_menu(
                 this.switcher_to_form(Some(create_choice.clone()), window, cx);
             });
         }),
+    );
+    // The picker is already up — this menu belongs to one of its rows — so
+    // the machine is one click away, its `@token` (if any) included.
+    let scope = MachineScope::Machine(target.to_string());
+    let menu = menu.item(
+        PopupMenuItem::new(t(L10nKey::RemoteOpenWorkspacesOnMachine)).on_click(
+            move |_, window, cx| {
+                let _ = a5.update(cx, |this, cx| {
+                    this.select_switcher_machine(scope.clone(), window, cx);
+                });
+            },
+        ),
     );
     // The host as it is configured, reachable from the one place it is on
     // screen. A machine dialled by address has no profile yet, so the same
@@ -3511,6 +4264,9 @@ fn hover_fill(cx: &App) -> gpui::Rgba {
 enum Key {
     Close,
     Step(bool),
+    /// Alt+←/→: step the machine rail by one chip. Signed, so `+1` is a
+    /// step to the right.
+    Machine(isize),
     ToColumn(Column),
     Tab(bool),
     Confirm(bool),
@@ -3520,6 +4276,19 @@ enum Key {
 fn key_intent(key: &str, mods: gpui::Modifiers) -> Key {
     if key == "escape" {
         return Key::Close;
+    }
+    // Alt+←/→ walks the machine rail, taken ahead of the Alt pass-through
+    // below — which is the price: those chords were the search box's word
+    // jumps. Alt alone, or not at all: Fn or any other modifier riding along
+    // is somebody else's gesture and keeps passing through untouched.
+    if mods.alt
+        && !mods.function
+        && !mods.control
+        && !mods.secondary()
+        && !mods.shift
+        && matches!(key, "left" | "right")
+    {
+        return Key::Machine(if key == "left" { -1 } else { 1 });
     }
     // Alt and Fn belong to whoever else wants them, whatever the key.
     if mods.alt || mods.function {
@@ -3809,7 +4578,7 @@ mod tests {
         }
     }
 
-    fn row(name: &str, tabs: Vec<TabRow>) -> Row {
+    pub(super) fn row(name: &str, tabs: Vec<TabRow>) -> Row {
         Row {
             id: WorkspaceId::new(),
             name: name.to_string(),
@@ -3832,7 +4601,7 @@ mod tests {
         r
     }
 
-    fn group(rows: Vec<Row>) -> Group {
+    pub(super) fn group(rows: Vec<Row>) -> Group {
         Group {
             key: String::new(),
             label: "This Computer".to_string(),
@@ -3847,7 +4616,7 @@ mod tests {
         }
     }
 
-    fn named_group(label: &str, rows: Vec<Row>) -> Group {
+    pub(super) fn named_group(label: &str, rows: Vec<Row>) -> Group {
         Group {
             key: label.to_lowercase(),
             label: label.to_string(),
@@ -3948,7 +4717,7 @@ mod tests {
             ]),
             named_group("devbox", vec![aged(row("remote", vec![]), 30)]),
         ];
-        let names: Vec<&str> = flatten(&groups, "")
+        let names: Vec<&str> = flatten(&groups, "", &MachineScope::All)
             .into_iter()
             .map(|(g, r)| groups[g].rows[r].name.as_str())
             .collect();
@@ -3960,7 +4729,7 @@ mod tests {
         let mut here = aged(row("here", vec![]), 1);
         here.current = true;
         let groups = vec![group(vec![aged(row("busy", vec![]), 99), here])];
-        let first = flatten(&groups, "")[0];
+        let first = flatten(&groups, "", &MachineScope::All)[0];
         assert_eq!(groups[first.0].rows[first.1].name, "here");
     }
 
@@ -3972,7 +4741,7 @@ mod tests {
         let mut here = aged(row("keen-crane", vec![tab("zsh", "/tmp/t7qa/fixture")]), 50);
         here.current = true;
         let groups = vec![group(vec![here, aged(row("qa", vec![]), 10)])];
-        let first = flatten(&groups, "qa")[0];
+        let first = flatten(&groups, "qa", &MachineScope::All)[0];
         assert_eq!(groups[first.0].rows[first.1].name, "qa");
     }
 
@@ -3985,9 +4754,345 @@ mod tests {
             group(vec![row("local-notes", vec![])]),
             named_group("devbox", vec![row("api", vec![]), row("web", vec![])]),
         ];
-        let hits = flatten(&groups, "devbox");
+        let hits = flatten(&groups, "devbox", &MachineScope::All);
         assert_eq!(hits.len(), 2);
         assert!(hits.iter().all(|&(g, _)| g == 1));
+    }
+
+    /// Every link state names the dot its machine chip wears — reachable
+    /// solid, configured-but-off hollow, the attention states in the rows'
+    /// inks. The mapping is the behavior; the inks are the theme's, and no
+    /// window is needed to pin one to the other.
+    #[test]
+    fn every_link_state_names_its_rail_dot() {
+        assert_eq!(rail_dot_style(Link::Local), RailDotStyle::Solid);
+        assert_eq!(rail_dot_style(Link::Connected), RailDotStyle::Solid);
+        assert_eq!(rail_dot_style(Link::Offline), RailDotStyle::Hollow);
+        assert_eq!(rail_dot_style(Link::Connecting), RailDotStyle::Warn);
+        assert_eq!(
+            rail_dot_style(Link::Reconnecting { attempt: 4 }),
+            RailDotStyle::Warn
+        );
+        assert_eq!(rail_dot_style(Link::Failed), RailDotStyle::Danger);
+    }
+
+    #[test]
+    fn a_machine_scope_lists_only_that_machines_rows_still_recent_first() {
+        let groups = vec![
+            group(vec![aged(row("local", vec![]), 50)]),
+            named_group(
+                "devbox",
+                vec![aged(row("api", vec![]), 10), aged(row("web", vec![]), 30)],
+            ),
+        ];
+        let scope = MachineScope::Machine("devbox".into());
+        let names: Vec<&str> = flatten(&groups, "", &scope)
+            .into_iter()
+            .map(|(g, r)| groups[g].rows[r].name.as_str())
+            .collect();
+        assert_eq!(names, vec!["web", "api"]);
+        assert!(flatten(&groups, "local", &scope).is_empty());
+        assert_eq!(flatten(&groups, "", &MachineScope::local()).len(), 1);
+    }
+
+    /// A workspace the list would open in this window.
+    fn closed(mut r: Row) -> Row {
+        r.open = false;
+        r
+    }
+
+    /// A machine workspace this client has not adopted: the row carries the
+    /// snapshot it came from, and no window holds it.
+    fn adoptable(mut r: Row) -> Row {
+        let snapshot = RemoteWorkspaceRow {
+            id: r.id,
+            name: r.name.clone(),
+            panes: 0,
+            last_active: r.last_active,
+        };
+        r.open = false;
+        r.remote_id = Some(r.id);
+        r.adopt = Some(Box::new(snapshot));
+        r
+    }
+
+    fn names_of<'a>(groups: &'a [Group], nav: &[Nav]) -> Vec<&'a str> {
+        nav.iter()
+            .map(|&(g, r)| groups[g].rows[r].name.as_str())
+            .collect()
+    }
+
+    /// The regression the whole split exists for: narrowing to this computer
+    /// puts its open workspaces together, so a recently closed one no longer
+    /// sits above a live one. All keeps the blended order.
+    #[test]
+    fn a_scoped_list_puts_open_rows_before_a_more_recent_closed_one() {
+        let groups = vec![group(vec![
+            aged(row("deploy", vec![]), 10),
+            closed(aged(row("notes", vec![]), 90)),
+        ])];
+        let scope = MachineScope::local();
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "", &scope)),
+            vec!["deploy", "notes"]
+        );
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "", &MachineScope::All)),
+            vec!["notes", "deploy"],
+            "All keeps the blended order it always had"
+        );
+    }
+
+    /// Adopt rows are not open here, so under a machine scope they belong
+    /// below the windows that are.
+    #[test]
+    fn a_scoped_machine_puts_open_workspaces_before_more_recent_adoptable_ones() {
+        let groups = vec![named_group(
+            "devbox",
+            vec![
+                adoptable(aged(row("web", vec![]), 90)),
+                aged(row("api", vec![]), 10),
+            ],
+        )];
+        let scope = MachineScope::Machine("devbox".into());
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "", &scope)),
+            vec!["api", "web"]
+        );
+    }
+
+    /// The split is one sort key, not a replacement for the search precedence:
+    /// inside a section the exact name still leads, and a machine-name hit
+    /// still brings all of its rows.
+    #[test]
+    fn the_scoped_split_keeps_the_queries_it_had() {
+        let mut here = aged(row("keen-crane", vec![tab("zsh", "/tmp/t7qa/fixture")]), 50);
+        here.current = true;
+        let groups = vec![group(vec![here, aged(row("qa", vec![]), 10)])];
+        let local = MachineScope::local();
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "qa", &local)),
+            vec!["qa", "keen-crane"],
+            "both rows are open, so the name match still decides inside the section"
+        );
+
+        let groups = vec![named_group(
+            "devbox",
+            vec![
+                aged(row("web", vec![]), 10),
+                closed(aged(row("api", vec![]), 90)),
+            ],
+        )];
+        let scope = MachineScope::Machine("devbox".into());
+        assert_eq!(
+            names_of(&groups, &flatten(&groups, "devbox", &scope)),
+            vec!["web", "api"],
+            "a host-name search still lists every row of the machine, open first"
+        );
+    }
+
+    #[test]
+    fn scoped_sections_break_at_the_boundaries_without_moving_nav() {
+        let groups = vec![group(vec![
+            aged(row("deploy", vec![]), 10),
+            closed(aged(row("notes", vec![]), 90)),
+        ])];
+        let scope = MachineScope::local();
+        let nav = flatten(&groups, "", &scope);
+        assert_eq!(nav, vec![(0, 0), (0, 1)], "the open row is first");
+        assert_eq!(
+            nav_sections(&nav, &groups, &scope, false),
+            vec![Some(Section::Open), Some(Section::Closed)],
+            "one heading per run, aligned with the nav slot it opens"
+        );
+        assert_eq!(
+            nav_sections(&nav, &groups, &scope, true),
+            vec![Some(Section::LastKnown); 2],
+            "an offline machine's remembered rows are not split by open state"
+        );
+        assert_eq!(
+            nav_sections(&nav, &groups, &MachineScope::All, true),
+            vec![None; 2],
+            "the unscoped list has no headings"
+        );
+    }
+
+    #[test]
+    fn only_a_reachable_down_machine_offers_the_connect_card() {
+        let scope = MachineScope::Machine("devbox".into());
+        let one = |link, parked| {
+            let mut group = named_group("devbox", vec![]);
+            group.link = link;
+            group.parked = parked;
+            vec![group]
+        };
+        for link in [Link::Offline, Link::Failed] {
+            assert!(offline_connect_group(&scope, &one(link, false)).is_some());
+            assert!(
+                offline_connect_group(&scope, &one(link, true)).is_none(),
+                "a parked route cannot be connected (#485)"
+            );
+        }
+        for link in [
+            Link::Connected,
+            Link::Connecting,
+            Link::Reconnecting { attempt: 2 },
+            Link::Local,
+        ] {
+            assert!(
+                offline_connect_group(&scope, &one(link, false)).is_none(),
+                "{link:?} must not take the offline-connect shortcut"
+            );
+        }
+        let local = vec![group(vec![])];
+        assert!(offline_connect_group(&MachineScope::local(), &local).is_none());
+        assert!(offline_connect_group(&MachineScope::All, &one(Link::Offline, false)).is_none());
+    }
+
+    #[test]
+    fn orphan_panes_stay_on_this_computers_screens() {
+        assert!(orphans_visible(&MachineScope::All));
+        assert!(orphans_visible(&MachineScope::local()));
+        assert!(
+            !orphans_visible(&MachineScope::Machine("devbox".into())),
+            "a remote scope is about another machine's workspaces"
+        );
+    }
+
+    #[test]
+    fn the_offline_card_dials_the_configured_endpoint_or_the_targets_own_name() {
+        let mut machine = named_group("devbox", vec![]);
+        assert_eq!(group_endpoint(&machine), "me@devbox");
+        machine.endpoint = "me@devbox.example:2222".into();
+        assert_eq!(group_endpoint(&machine), "me@devbox.example:2222");
+        let choice = connect_choice(&machine).expect("a machine has a target");
+        assert_eq!(choice.label, "devbox");
+        assert_eq!(choice.detail, "me@devbox.example:2222");
+        assert!(
+            connect_choice(&group(vec![])).is_none(),
+            "this computer connects to nothing"
+        );
+    }
+
+    #[test]
+    fn a_scoped_row_drops_the_machine_from_its_metadata_line() {
+        let api = row("api", vec![]);
+        let devbox = named_group("devbox", vec![]);
+        assert_eq!(
+            row_meta(&devbox, &api, true),
+            vec!["devbox".to_string(), "~/code".to_string()]
+        );
+        assert_eq!(
+            row_meta(&devbox, &api, false),
+            vec!["~/code".to_string()],
+            "the scope already says which machine these rows are on"
+        );
+        let local = group(vec![]);
+        assert_eq!(
+            row_meta(&local, &api, true),
+            vec![
+                t(L10nKey::SwitcherLocalHost).to_string(),
+                "~/code".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn the_offline_card_shows_the_failure_then_the_endpoint() {
+        let mut machine = named_group("devbox", vec![]);
+        machine.endpoint = "me@devbox.example:2222".into();
+        assert_eq!(
+            offline_card_detail(&machine),
+            (None, "me@devbox.example:2222".to_string()),
+            "a machine with no failure behind it has only the endpoint to print"
+        );
+        machine.error = Some("connection refused".into());
+        assert_eq!(
+            offline_card_detail(&machine),
+            (
+                Some("connection refused".to_string()),
+                "me@devbox.example:2222".to_string()
+            ),
+            "the failure rides on the line and the endpoint stays after it"
+        );
+    }
+
+    #[test]
+    fn an_empty_scoped_list_names_the_machine() {
+        crate::ui::i18n::set_locale("en");
+        let groups = vec![named_group("devbox", vec![])];
+        assert_eq!(
+            empty_list_text(&MachineScope::Machine("devbox".into()), &groups),
+            "No workspaces on devbox"
+        );
+        assert_eq!(
+            empty_list_text(&MachineScope::All, &groups),
+            t(L10nKey::SwitcherNoMatch),
+            "unscoped keeps the wording it always had"
+        );
+    }
+
+    /// The footer's wording and preset come from the frame's effective scope
+    /// and the group already in it. The endpoint is the same line the offline
+    /// card dials, so a machine with no configured route still names itself,
+    /// and a scope whose group left the frame falls back to this computer.
+    #[test]
+    fn the_create_preset_reads_the_layouts_scope_and_group() {
+        crate::ui::i18n::set_locale("en");
+        let mut configured = named_group("devbox", vec![]);
+        configured.endpoint = "dev@build:2222".to_string();
+        let configured_target = configured
+            .target
+            .clone()
+            .expect("a named group has a target");
+        let mut layout = Layout {
+            groups: vec![group(vec![]), configured, named_group("staging", vec![])],
+            nav: Vec::new(),
+            rail: Vec::new(),
+            scope: MachineScope::All,
+        };
+
+        let (label, chosen) = create_preset_of(&layout);
+        assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
+        assert!(chosen.is_none(), "All starts on this computer");
+
+        layout.scope = MachineScope::local();
+        let (label, chosen) = create_preset_of(&layout);
+        assert_eq!(
+            label,
+            t_fmt(
+                L10nKey::SwitcherNewWorkspaceOnMachine,
+                &[("machine", t(L10nKey::SwitcherThisComputer))],
+            )
+        );
+        assert!(chosen.is_none(), "this computer has no host to connect");
+
+        layout.scope = MachineScope::Machine("devbox".into());
+        let (label, chosen) = create_preset_of(&layout);
+        assert_eq!(
+            label,
+            t_fmt(
+                L10nKey::SwitcherNewWorkspaceOnMachine,
+                &[("machine", "devbox")],
+            )
+        );
+        let chosen = chosen.expect("a configured machine supplies its host");
+        assert_eq!(chosen.target, configured_target);
+        assert_eq!(chosen.label, "devbox");
+        assert_eq!(chosen.detail, "dev@build:2222");
+
+        // No configured route: the detail falls back to the target's own
+        // spelling, the same endpoint the offline card would print.
+        layout.scope = MachineScope::Machine("staging".into());
+        let (_, chosen) = create_preset_of(&layout);
+        let chosen = chosen.expect("a machine with no endpoint still connects by target");
+        assert_eq!(chosen.detail, chosen.target.to_string());
+
+        // A stored scope can outlive its group while the groups are rebuilt.
+        layout.scope = MachineScope::Machine("ghost".into());
+        let (label, chosen) = create_preset_of(&layout);
+        assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
+        assert!(chosen.is_none());
     }
 
     #[test]
@@ -3995,6 +5100,8 @@ mod tests {
         let layout = Layout {
             groups: vec![group(vec![row("a", vec![]), row("b", vec![])])],
             nav: vec![(0, 1), (0, 0)],
+            rail: Vec::new(),
+            scope: MachineScope::All,
         };
         assert_eq!(layout.subject(0), Some((0, 1)));
         assert_eq!(layout.subject(1), Some((0, 0)));
@@ -4116,9 +5223,11 @@ mod tests {
 
 #[cfg(test)]
 mod gpui_tests {
-    use gpui::{Modifiers, TestAppContext};
+    use gpui::{Context, Modifiers, TestAppContext, Window};
 
     use super::Column;
+    use super::MachineScope;
+    use crate::ui::app::Tty59App;
     use crate::ui::app::test_window::harness_with_tabs;
 
     /// Deleting a remote workspace has to take the listing snapshot's row with
@@ -4199,6 +5308,804 @@ mod gpui_tests {
                 "its machine's other workspaces are still on offer"
             );
         });
+    }
+
+    /// The rail's chip click and Alt+←/→ both enter through this helper: the
+    /// stored scope moves, and a leading `@token` — committed, half-typed or
+    /// unresolved — leaves the query so its per-frame preview cannot override
+    /// the pick. Everything typed after the token is still the search.
+    #[gpui::test]
+    fn selecting_a_machine_rewrites_the_query_and_sets_the_scope(cx: &mut TestAppContext) {
+        fn select(
+            app: &mut Tty59App,
+            window: &mut Window,
+            cx: &mut Context<Tty59App>,
+            typed: &str,
+            scope: MachineScope,
+        ) -> (String, MachineScope) {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value(typed, window, cx));
+            app.select_switcher_machine(scope, window, cx);
+            (
+                query.read(cx).value().to_string(),
+                app.switcher.as_ref().expect("still open").scope.clone(),
+            )
+        }
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let devbox = MachineScope::Machine("devbox".into());
+            {
+                let sw = app.switcher.as_mut().expect("panel is open");
+                sw.left_sel = 5;
+                sw.right_sel = 4;
+                sw.column = Column::Right;
+            }
+            assert_eq!(
+                select(app, window, cx, "api", devbox.clone()),
+                ("api".to_string(), devbox.clone()),
+                "a plain query is the search and stays untouched"
+            );
+            let sw = app.switcher.as_ref().expect("still open");
+            assert_eq!(
+                (sw.left_sel, sw.right_sel),
+                (0, 0),
+                "a pick sends both cursors back to the top"
+            );
+            assert_eq!(sw.column, Column::Left);
+            assert_eq!(
+                select(app, window, cx, "@dev api x", devbox.clone()),
+                ("api x".to_string(), devbox.clone()),
+                "a committed token goes and the rest stays"
+            );
+            assert_eq!(
+                select(app, window, cx, "@dev", devbox.clone()),
+                (String::new(), devbox.clone()),
+                "a half-typed token takes the box with it"
+            );
+            let local = MachineScope::local();
+            assert_eq!(
+                select(app, window, cx, "@nope api", local.clone()),
+                ("api".to_string(), local.clone()),
+                "a click wins over an unresolved token"
+            );
+            assert_eq!(
+                select(app, window, cx, "", MachineScope::All),
+                (String::new(), MachineScope::All),
+                "an empty box has no token to drop"
+            );
+        });
+    }
+
+    /// The stored scope and the preview can disagree: with All stored and
+    /// `@dev` typed, the list shows devbox. Picking All must drop the token
+    /// and reset the cursor even though the stored scope does not change — the
+    /// early return that skipped the assignments left the tab column where it
+    /// was.
+    #[gpui::test]
+    fn selecting_all_over_a_resolved_preview_clears_the_token_and_resets_the_cursor(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("@dev", window, cx));
+            assert_eq!(
+                app.switcher_layout(cx).scope,
+                MachineScope::Machine(key.clone()),
+                "the half-typed token previews devbox"
+            );
+            {
+                let sw = app.switcher.as_mut().expect("panel is open");
+                sw.left_sel = 4;
+                sw.right_sel = 3;
+                sw.column = Column::Right;
+            }
+            app.select_switcher_machine(MachineScope::All, window, cx);
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::All);
+            assert_eq!(sw.query.read(cx).value(), "", "the preview token is gone");
+            assert_eq!(
+                (sw.left_sel, sw.right_sel),
+                (0, 0),
+                "the unchanged stored scope still sends the cursors to the top"
+            );
+            assert_eq!(sw.column, Column::Left);
+        });
+    }
+
+    /// Clicking the chip whose scope is already stored is still a pick: it
+    /// puts the keyboard cursor back on the top row.
+    #[gpui::test]
+    fn picking_the_scope_already_stored_still_resets_the_cursor(cx: &mut TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let devbox = MachineScope::Machine("devbox".into());
+            app.select_switcher_machine(devbox.clone(), window, cx);
+            {
+                let sw = app.switcher.as_mut().expect("panel is open");
+                sw.left_sel = 2;
+                sw.right_sel = 1;
+                sw.column = Column::Right;
+            }
+            app.select_switcher_machine(devbox, window, cx);
+        });
+        app.update(cx, |app, _| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::Machine("devbox".into()));
+            assert_eq!((sw.left_sel, sw.right_sel), (0, 0));
+            assert_eq!(sw.column, Column::Left);
+        });
+    }
+
+    /// The machine keys have to survive the focused search box: actions
+    /// resolve before key listeners, so without a binding of its own the
+    /// picker's Alt+←/→ would be the input's word movement. Real keystrokes
+    /// from a drawn frame prove the dispatch path, not just the handler.
+    #[gpui::test]
+    fn alt_arrows_step_the_rail_from_the_focused_search(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        vcx.simulate_keystrokes("alt-right");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::local(),
+                "one step right of All is this computer"
+            );
+        });
+        vcx.simulate_keystrokes("alt-right");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::Machine(key.clone()),
+                "the next step lands on the only remote"
+            );
+        });
+        vcx.simulate_keystrokes("alt-left");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::local()
+            );
+        });
+
+        // Ctrl+← is still the search box's word movement; the rail stays put.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("api v2", window, cx));
+        });
+        vcx.simulate_keystrokes("ctrl-left");
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::local());
+            assert_eq!(sw.query.read(cx).value(), "api v2");
+        });
+    }
+
+    /// Typing `@machine` and a space commits the token: the stored scope moves
+    /// to that machine and only the rest of the query stays in the box. A
+    /// half-typed or unresolved token is left for the per-frame preview, and
+    /// once the token is gone further typing does not move the scope again.
+    #[gpui::test]
+    fn a_committed_machine_token_sets_the_scope_and_rewrites_the_query(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        let type_into_query =
+            |app: &mut Tty59App, window: &mut Window, cx: &mut Context<Tty59App>, text: &str| {
+                let query = app.switcher.as_ref().expect("panel is open").query.clone();
+                // `replace` replaces the selection, not the document, so clear
+                // first. `set_value` is silent in this dependency; `replace`
+                // takes the same path as typing, so the Change subscriber runs.
+                query.update(cx, |state, cx| {
+                    state.set_value("", window, cx);
+                    state.replace(text, window, cx);
+                });
+            };
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            type_into_query(app, window, cx, "@dev")
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::All, "a half-typed token previews");
+            assert_eq!(sw.query.read(cx).value(), "@dev", "and stays in the box");
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            type_into_query(app, window, cx, "@nope ")
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::All,
+                "an unresolved token commits nothing"
+            );
+            assert_eq!(sw.query.read(cx).value(), "@nope ");
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            type_into_query(app, window, cx, "@dev api")
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::Machine(key.clone()),
+                "the committed token moves the stored scope"
+            );
+            assert_eq!(
+                sw.query.read(cx).value(),
+                "api",
+                "the token leaves and the rest keeps searching"
+            );
+            assert!(
+                !sw.committing_token,
+                "the rewrite is over, so the next Change is read as typing"
+            );
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            type_into_query(app, window, cx, "api v2")
+        });
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::Machine(key.clone()),
+                "later typing without a token leaves the scope alone"
+            );
+            assert_eq!(sw.query.read(cx).value(), "api v2");
+        });
+    }
+
+    /// Backspace is the way back out of a machine when there is nothing left
+    /// to delete. A chorded Backspace still belongs to the input, and a
+    /// non-empty box still deletes a character.
+    #[gpui::test]
+    fn backspace_on_an_empty_scoped_search_returns_to_all(cx: &mut TestAppContext) {
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_switcher(window, cx);
+            app.set_switcher_scope(MachineScope::local(), cx);
+        });
+        // The key listener lives on the rendered card.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        vcx.simulate_keystrokes("alt-backspace");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::local(),
+                "a chorded Backspace is the input's"
+            );
+        });
+
+        // A non-empty box still deletes a character, and the machine stays.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("api", window, cx));
+        });
+        vcx.simulate_keystrokes("backspace");
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::local());
+            assert_eq!(
+                sw.query.read(cx).value(),
+                "ap",
+                "the input deleted the char"
+            );
+        });
+
+        // Shift keeps Backspace's meaning, so an empty scoped box steps out.
+        vcx.simulate_keystrokes("backspace");
+        vcx.simulate_keystrokes("shift-backspace");
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::local(),
+                "both presses had a character to delete"
+            );
+            assert_eq!(sw.query.read(cx).value(), "");
+        });
+
+        // Whitespace is text: Backspace deletes it before the scope goes.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value(" ", window, cx));
+        });
+        vcx.simulate_keystrokes("backspace");
+        app.update(cx, |app, cx| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(
+                sw.scope,
+                MachineScope::local(),
+                "the space was deleted first"
+            );
+            assert_eq!(sw.query.read(cx).value(), "");
+        });
+
+        vcx.simulate_keystrokes("backspace");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::All
+            );
+        });
+
+        // Not scoped: the bare key stays the input's own.
+        vcx.simulate_keystrokes("backspace");
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::All
+            );
+        });
+    }
+
+    /// The footer and the create form read the same effective scope as the
+    /// list, so All and this computer start a local form, a machine fills in
+    /// its own host, and a half-typed `@token` previews it before the space.
+    #[gpui::test]
+    fn the_create_preset_follows_the_effective_scope(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+        use crate::ui::i18n::{L10nKey, t, t_fmt};
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let layout = app.switcher_layout(cx);
+            let (label, chosen) = super::create_preset_of(&layout);
+            assert_eq!(label, t(L10nKey::AppMenuNewWorkspace));
+            assert!(chosen.is_none(), "All starts on this computer");
+
+            app.set_switcher_scope(MachineScope::local(), cx);
+            let layout = app.switcher_layout(cx);
+            let (label, chosen) = super::create_preset_of(&layout);
+            assert_eq!(
+                label,
+                t_fmt(
+                    L10nKey::SwitcherNewWorkspaceOnMachine,
+                    &[("machine", t(L10nKey::SwitcherThisComputer))],
+                )
+            );
+            assert!(chosen.is_none(), "this computer has no host to connect");
+
+            app.set_switcher_scope(MachineScope::Machine(key.clone()), cx);
+            let layout = app.switcher_layout(cx);
+            let (label, chosen) = super::create_preset_of(&layout);
+            assert_eq!(
+                label,
+                t_fmt(
+                    L10nKey::SwitcherNewWorkspaceOnMachine,
+                    &[("machine", "devbox")],
+                )
+            );
+            let chosen = chosen.expect("a remote scope supplies its host");
+            assert_eq!(chosen.target, target);
+            assert_eq!(chosen.label, "devbox");
+
+            // Half-typed token: stored All, but the preview is devbox.
+            app.set_switcher_scope(MachineScope::All, cx);
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("@dev", window, cx));
+            let layout = app.switcher_layout(cx);
+            let (label, chosen) = super::create_preset_of(&layout);
+            assert_eq!(
+                label,
+                t_fmt(
+                    L10nKey::SwitcherNewWorkspaceOnMachine,
+                    &[("machine", "devbox")],
+                )
+            );
+            assert_eq!(
+                chosen.expect("the preview supplies its host").target,
+                target
+            );
+        });
+    }
+
+    /// Opening the create form while scoped presets it, but a host the caller
+    /// names (the row menu's own New Workspace) is never replaced. A machine
+    /// with no link queues the existing PendingCreate path.
+    #[gpui::test]
+    fn the_scoped_preset_is_used_unless_a_host_is_named(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+
+        use super::{HostChoice, HostSnapshot, Page};
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let scoped = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let explicit = RemoteTarget::Alias {
+            alias: "ws-scope-testbox".into(),
+        };
+        app.update(cx, |app, _| {
+            for target in [scoped.clone(), explicit.clone()] {
+                app.host_snapshots.insert(
+                    target.host_id(),
+                    HostSnapshot {
+                        target: target.clone(),
+                        rows: vec![],
+                    },
+                );
+            }
+        });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_switcher(window, cx);
+            app.set_switcher_scope(MachineScope::Machine(scoped.to_string()), cx);
+            app.open_workspace_form(window, cx);
+            let sw = app.switcher.as_ref().expect("panel is open");
+            let Page::Create(form) = &sw.page else {
+                panic!("the form is up");
+            };
+            assert_eq!(
+                form.chosen.as_ref().map(|c| c.target.clone()),
+                Some(scoped.clone()),
+                "the scope presets the form"
+            );
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.switcher_back_to_list(window, cx);
+            app.set_switcher_scope(MachineScope::Machine(scoped.to_string()), cx);
+            app.switcher_to_form(
+                Some(HostChoice {
+                    target: explicit.clone(),
+                    label: "explicit".into(),
+                    detail: String::new(),
+                }),
+                window,
+                cx,
+            );
+            let sw = app.switcher.as_ref().expect("panel is open");
+            let Page::Create(form) = &sw.page else {
+                panic!("the form is up");
+            };
+            assert_eq!(
+                form.chosen.as_ref().map(|c| c.target.clone()),
+                Some(explicit.clone()),
+                "an explicit host choice wins over the scope"
+            );
+            let name = form.name.clone();
+            name.update(cx, |state, cx| state.set_value("demo", window, cx));
+            app.switcher_form_create(window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            let pending = app
+                .pending_create
+                .as_ref()
+                .expect("a machine with no link waits for its connect");
+            assert_eq!(pending.target, explicit);
+            assert_eq!(pending.name.as_deref(), Some("demo"));
+            assert!(
+                matches!(app.connect, Some(super::ConnectFlow::Failed { .. })),
+                "the test alias resolves to no ssh config entry, so the \
+                 existing connect path reports the failure"
+            );
+            assert!(matches!(
+                app.switcher.as_ref().expect("panel is open").page,
+                Page::List
+            ));
+        });
+    }
+
+    /// A scoped open lands on the machine with a reset cursor, and a plain
+    /// open after it goes back to All.
+    #[gpui::test]
+    fn a_scoped_open_resets_the_cursor_and_a_plain_open_resets_the_scope(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+
+        use super::HostSnapshot;
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Alias {
+            alias: "devbox".into(),
+        };
+        let key = target.to_string();
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                HostSnapshot {
+                    target: target.clone(),
+                    rows: vec![],
+                },
+            );
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_switcher(window, cx);
+            let sw = app.switcher.as_mut().expect("panel is open");
+            sw.left_sel = 3;
+            sw.right_sel = 2;
+            sw.column = Column::Right;
+            app.open_switcher_scoped(MachineScope::Machine(key.clone()), window, cx);
+        });
+        app.update(cx, |app, _| {
+            let sw = app.switcher.as_ref().expect("panel is open");
+            assert_eq!(sw.scope, MachineScope::Machine(key.clone()));
+            assert_eq!((sw.left_sel, sw.right_sel), (0, 0));
+            assert_eq!(sw.column, Column::Left);
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_switcher(window, cx);
+            app.open_switcher(window, cx);
+        });
+        app.update(cx, |app, _| {
+            assert_eq!(
+                app.switcher.as_ref().expect("panel is open").scope,
+                MachineScope::All,
+                "ordinary opens always restart from All"
+            );
+        });
+    }
+
+    /// The rail carries itself to whichever chip the list is effectively
+    /// scoped to — including the machine a half-typed `@token` previews,
+    /// which is the one move no click or key asks for by name. The request
+    /// is issued only when the chip's index moves, so a steady frame never
+    /// drags the rail back and a hand browsing along it is not fought.
+    ///
+    /// The assertions reach real rendering, not a plan for it: the
+    /// scroller's prepaint records its own bounds and its direct children's
+    /// bounds into the `ScrollHandle` and consumes any pending
+    /// `scroll_to_item` request in the same pass. Prepaint only runs when a
+    /// frame is actually drawn, so every state change below is followed by
+    /// an explicit draw before anything is claimed about `offset()`,
+    /// `bounds()` or `bounds_for_item`.
+    #[gpui::test]
+    fn the_rail_scrolls_a_distant_at_preview_into_view(cx: &mut TestAppContext) {
+        use gpui::{VisualTestContext, point, px, size};
+        use tty59_core::core::session::RemoteTarget;
+
+        fn settle(vcx: &mut VisualTestContext) {
+            // `run_until_parked` only drains the executor; `draw` is what
+            // paints a frame, and with it the scroll geometry under test.
+            vcx.run_until_parked();
+            let _ = vcx.update(|window, cx| window.draw(cx));
+        }
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        vcx.simulate_resize(size(px(1200.), px(800.)));
+        // Enough machines that the rail overflows the card several chips
+        // over, with the ones the token previews and the step lands on far
+        // past the right edge.
+        app.update(cx, |app, _| {
+            for name in [
+                "aa-mill",
+                "bb-press",
+                "cc-drill",
+                "dd-lathe",
+                "ee-forge",
+                "ff-motor",
+                "gg-piston",
+                "hh-rocket",
+                "ii-saucer",
+                "jj-tender",
+                "kk-ultra",
+                "ll-vapor",
+                "mm-wharf",
+                "nn-yard",
+            ] {
+                let target = RemoteTarget::Alias {
+                    alias: name.to_string(),
+                };
+                app.host_snapshots.insert(
+                    target.host_id(),
+                    super::HostSnapshot {
+                        target,
+                        rows: Vec::new(),
+                    },
+                );
+            }
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        settle(&mut vcx);
+        assert_eq!(
+            app.update_in(&mut vcx, |app, _, _| app
+                .switcher
+                .as_ref()
+                .expect("panel is open")
+                .rail_scroll
+                .offset()
+                .x),
+            px(0.),
+            "a rail that opens on All has nothing to scroll to"
+        );
+
+        // Half a token, never committed: the preview alone narrows the list,
+        // so it alone has to carry the rail along.
+        app.update_in(&mut vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().expect("panel is open").query.clone();
+            query.update(cx, |state, cx| state.set_value("@mm", window, cx));
+        });
+        settle(&mut vcx);
+
+        let (offset, chip, view) = app.update_in(&mut vcx, |app, _, cx| {
+            let sw = app.switcher.as_ref().expect("panel is up");
+            let ix = app
+                .switcher_layout(cx)
+                .rail
+                .iter()
+                .position(|e| e.scope == MachineScope::Machine("mm-wharf".into()))
+                .expect("the previewed machine has a chip");
+            (
+                sw.rail_scroll.offset().x,
+                sw.rail_scroll
+                    .bounds_for_item(ix)
+                    .expect("chips are drawn children"),
+                sw.rail_scroll.bounds(),
+            )
+        });
+        assert!(
+            offset < px(0.),
+            "the rail never followed the preview: still at {offset:?}"
+        );
+        assert!(
+            chip.left() + offset >= view.left() - px(1.)
+                && chip.right() + offset <= view.right() + px(1.),
+            "the previewed chip {chip:?} never came into view {view:?} at {offset:?}"
+        );
+
+        // A hand that scrolls the rail back while the scope stands still is
+        // not fought: a steady frame issues no new request.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.switcher
+                .as_ref()
+                .expect("panel is up")
+                .rail_scroll
+                .set_offset(point(px(0.), px(0.)));
+            cx.notify();
+        });
+        settle(&mut vcx);
+        assert_eq!(
+            app.update_in(&mut vcx, |app, _, _| app
+                .switcher
+                .as_ref()
+                .expect("panel is up")
+                .rail_scroll
+                .offset()
+                .x),
+            px(0.),
+            "the rail re-centered itself on a frame where nothing moved"
+        );
+
+        // Alt+→ from a preview, dispatched as a real keystroke through the
+        // focused search box rather than handed to the handler: the step
+        // must survive the route a user's key actually takes. It starts
+        // where the eye is — the previewed chip — picks the one after it as
+        // the stored scope, and the token that previewed goes with it.
+        vcx.simulate_keystrokes("alt-right");
+        settle(&mut vcx);
+
+        let (text, scope, rail) = app.update_in(&mut vcx, |app, _, cx| {
+            let sw = app.switcher.as_ref().expect("panel is up");
+            let ix = app
+                .switcher_layout(cx)
+                .rail
+                .iter()
+                .position(|e| e.scope == MachineScope::Machine("nn-yard".into()))
+                .expect("the stepped-to machine has a chip");
+            (
+                sw.query.read(cx).value().to_string(),
+                sw.scope.clone(),
+                (
+                    sw.rail_followed.get() == Some(ix),
+                    sw.rail_scroll.offset().x,
+                    sw.rail_scroll
+                        .bounds_for_item(ix)
+                        .expect("chips are drawn children"),
+                    sw.rail_scroll.bounds(),
+                ),
+            )
+        });
+        let (followed, offset, chip, view) = rail;
+        assert_eq!(text, "", "the step took the half-typed token with it");
+        assert_eq!(
+            scope,
+            MachineScope::Machine("nn-yard".into()),
+            "Alt+→ stepped from the previewed chip to the one after it"
+        );
+        assert!(
+            followed,
+            "the rail asked for the stepped-to chip, not the one before it"
+        );
+        assert!(
+            offset < px(0.),
+            "the rail never followed the step: still at {offset:?}"
+        );
+        assert!(
+            chip.left() + offset >= view.left() - px(1.)
+                && chip.right() + offset <= view.right() + px(1.),
+            "the stepped-to chip {chip:?} never came into view {view:?} at {offset:?}"
+        );
     }
 
     #[gpui::test]
@@ -4467,7 +6374,8 @@ mod gpui_tests {
     /// Where that part of the card lands on screen. The card is centred and
     /// its columns are laid out from `CARD_W` / `LEFT_W`, so the geometry is
     /// worth recomputing here rather than hard-coding pixels that move with
-    /// the window size.
+    /// the window size. Vertically the columns sit under the search row and
+    /// the machine rail, both of which the spots have to step over.
     fn card_point(vcx: &mut gpui::VisualTestContext, spot: Spot) -> gpui::Point<gpui::Pixels> {
         use gpui::{point, px};
 
@@ -4478,11 +6386,18 @@ mod gpui_tests {
         let left_w = super::LEFT_W.min(card_w * 0.5);
         let card_left = (viewport.width.as_f32() - card_w) / 2.;
         let (dx, dy) = match spot {
-            Spot::Workspaces => (20., super::SEARCH_H + super::COLUMN_PAD + 16.),
+            Spot::Workspaces => (
+                20.,
+                super::SEARCH_H + super::RAIL_H + super::COLUMN_PAD + 16.,
+            ),
             // Past the tab column's own header row, onto its first tab.
             Spot::Tabs => (
                 left_w + 40.,
-                super::SEARCH_H + super::COLUMN_PAD + super::HOST_H + super::TAB_ROW_H / 2.,
+                super::SEARCH_H
+                    + super::RAIL_H
+                    + super::COLUMN_PAD
+                    + super::HOST_H
+                    + super::TAB_ROW_H / 2.,
             ),
         };
         point(px(card_left + dx), px(super::CARD_TOP + dy))
@@ -4593,6 +6508,255 @@ mod gpui_tests {
             );
         });
     }
+
+    /// A bare Enter, as the panel's own key handler sees it — not through the
+    /// input's bindings, which is why the event is built here rather than
+    /// typed. Typing would also pump the executor, and this test is about the
+    /// synchronous dispatch to `connect_to_host`.
+    fn enter_event(modifiers: Modifiers) -> gpui::KeyDownEvent {
+        gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers,
+                key: "enter".into(),
+                key_char: None,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    /// One disconnected machine, scoped, with nothing under the cursor. The
+    /// snapshot is enough to put the machine on the rail; a `Direct` target
+    /// routes without touching the network.
+    fn disconnected_machine(
+        cx: &mut TestAppContext,
+        column: crate::ui::switcher::Column,
+    ) -> (
+        gpui::Entity<crate::ui::app::Tty59App>,
+        gpui::VisualTestContext,
+        crate::core::session::RemoteTarget,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let target = RemoteTarget::direct("me", "build-box", 22);
+        app.update(cx, |app, _| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: Vec::new(),
+                },
+            );
+        });
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        app.update(cx, |app, cx| {
+            app.set_switcher_scope(super::MachineScope::Machine(target.to_string()), cx);
+            if let Some(sw) = app.switcher.as_mut() {
+                sw.column = column;
+            }
+        });
+        (app, vcx, target)
+    }
+
+    /// Enter with no row selected on a machine that is not connected is the
+    /// way to ask for the connection, not a no-op.
+    #[gpui::test]
+    fn bare_enter_on_a_disconnected_machine_asks_to_connect(cx: &mut TestAppContext) {
+        use crate::ui::remote_workspace::ConnectFlow;
+
+        let (app, mut vcx, target) = disconnected_machine(cx, super::Column::Left);
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(app.switcher_layout(cx).nav.is_empty(), "nothing to open");
+            app.on_switcher_key(&enter_event(Modifiers::none()), window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            let Some(ConnectFlow::Connecting { choice }) = &app.connect else {
+                panic!("bare Enter did not ask for the connection");
+            };
+            assert_eq!(
+                choice.target, target,
+                "the scoped machine is the one dialled"
+            );
+        });
+    }
+
+    /// The tab column can stay the active one after a query emptied the list,
+    /// so the empty-nav fallback must run before the column-specific dispatch.
+    #[gpui::test]
+    fn bare_enter_with_the_tab_column_active_still_connects_an_empty_scope(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::remote_workspace::ConnectFlow;
+
+        let (app, mut vcx, target) = disconnected_machine(cx, super::Column::Right);
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert!(app.switcher_layout(cx).nav.is_empty(), "nothing to open");
+            app.on_switcher_key(&enter_event(Modifiers::none()), window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            let Some(ConnectFlow::Connecting { choice }) = &app.connect else {
+                panic!("the tab column swallowed the empty-nav Enter");
+            };
+            assert_eq!(choice.target, target);
+        });
+    }
+
+    /// The new-window chord is a different gesture and keeps doing nothing
+    /// when the list is empty: there is no window to open and no pick to take.
+    #[gpui::test]
+    fn secondary_enter_does_not_take_the_bare_connect_fallback(cx: &mut TestAppContext) {
+        let (app, mut vcx, _target) = disconnected_machine(cx, super::Column::Left);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.on_switcher_key(&enter_event(Modifiers::secondary_key()), window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            assert!(
+                app.connect.is_none(),
+                "secondary Enter opened nothing and must not connect"
+            );
+        });
+    }
+
+    /// A layout the router can fail synchronously: the group looks connectable
+    /// but its profile is not in the config, so `control_route` refuses before
+    /// any link is attempted. This asserts the target `connect_to_host` was
+    /// handed, not a copy the test made up.
+    #[gpui::test]
+    fn the_connect_fallback_hands_connect_to_host_the_scoped_target(cx: &mut TestAppContext) {
+        use crate::core::session::RemoteTarget;
+        use crate::ui::remote_workspace::ConnectFlow;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let target = RemoteTarget::Profile {
+            id: uuid::Uuid::new_v4(),
+        };
+        let key = target.to_string();
+        let mut group = super::tests::named_group("ghost-machine", vec![]);
+        group.key = key.clone();
+        group.target = Some(target.clone());
+        group.link = super::Link::Offline;
+        group.parked = false;
+        let layout = super::Layout {
+            groups: vec![group],
+            nav: Vec::new(),
+            rail: Vec::new(),
+            scope: super::MachineScope::Machine(key),
+        };
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_switcher(window, cx);
+            app.switcher_confirm(&layout, false, window, cx);
+        });
+
+        app.update(cx, |app, _| {
+            let Some(ConnectFlow::Failed { choice, .. }) = &app.connect else {
+                panic!("the fallback never reached connect_to_host");
+            };
+            assert_eq!(
+                choice.target, target,
+                "connect_to_host got exactly the scoped machine"
+            );
+        });
+    }
+
+    /// The synthetic layout above must not stand in for the real route
+    /// classification: a profile that is gone is parked by `switcher_groups`,
+    /// and a parked machine offers no connect card at all.
+    #[gpui::test]
+    fn a_profile_that_no_longer_resolves_is_parked_and_gets_no_connect_card(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::session::RemoteTarget;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let target = RemoteTarget::Profile {
+            id: uuid::Uuid::new_v4(),
+        };
+        app.update(cx, |app, cx| {
+            app.host_snapshots.insert(
+                target.host_id(),
+                super::HostSnapshot {
+                    target: target.clone(),
+                    rows: Vec::new(),
+                },
+            );
+            let groups = app.switcher_groups(cx);
+            let group = groups
+                .iter()
+                .find(|g| g.target.as_ref() == Some(&target))
+                .expect("the snapshot puts the machine on the rail");
+            assert!(group.parked, "a profile that no longer resolves is parked");
+            assert!(
+                super::offline_connect_group(
+                    &super::MachineScope::Machine(group.key.clone()),
+                    &groups
+                )
+                .is_none(),
+                "a parked machine must not offer a connect that can only fail"
+            );
+        });
+    }
+
+    /// The offline card carries the failure, so the scoped error band must not
+    /// repeat it. Every other state keeps the band it had: All still shows it,
+    /// and a parked or in-flight machine (which has no card) keeps its own.
+    #[gpui::test]
+    fn the_offline_card_replaces_the_scoped_error_band_only(cx: &mut TestAppContext) {
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let machine = |link, error: Option<&str>, parked| {
+            let mut group = super::tests::named_group("devbox", vec![]);
+            group.link = link;
+            group.error = error.map(str::to_string);
+            group.parked = parked;
+            group
+        };
+        let scoped = |group| super::Layout {
+            groups: vec![group],
+            nav: Vec::new(),
+            rail: Vec::new(),
+            scope: super::MachineScope::Machine("devbox".into()),
+        };
+
+        app.update(cx, |app, cx| {
+            let failed = || machine(super::Link::Failed, Some("connection refused"), false);
+            assert!(
+                app.render_banners(&scoped(failed()), cx).is_empty(),
+                "the offline card already names the failure"
+            );
+            let all = super::Layout {
+                scope: super::MachineScope::All,
+                ..scoped(failed())
+            };
+            assert_eq!(
+                app.render_banners(&all, cx).len(),
+                1,
+                "All keeps the error band it always had"
+            );
+            assert_eq!(
+                app.render_banners(
+                    &scoped(machine(
+                        super::Link::Failed,
+                        Some("connection refused"),
+                        true
+                    )),
+                    cx
+                )
+                .len(),
+                1,
+                "a parked machine has no card, so its banner stays"
+            );
+            assert_eq!(
+                app.render_banners(&scoped(machine(super::Link::Connecting, None, false)), cx)
+                    .len(),
+                1,
+                "a connect in flight has no card and keeps its own band"
+            );
+        });
+    }
 }
 
 #[cfg(test)]
@@ -4640,6 +6804,60 @@ mod key_tests {
             false => assert_eq!(key_intent("tab", ctrl), Key::Pass),
         }
         assert_eq!(key_intent("up", ctrl), Key::Pass);
+    }
+
+    #[test]
+    fn alt_arrows_step_the_machine_rail_in_both_directions() {
+        // Alt+←/→ is the rail's gesture, classified ahead of the Alt
+        // pass-through — the price is the search box's word jumps.
+        assert_eq!(key_intent("left", Modifiers::alt()), Key::Machine(-1));
+        assert_eq!(key_intent("right", Modifiers::alt()), Key::Machine(1));
+    }
+
+    #[test]
+    fn alt_arrows_with_company_are_somebody_elses_chord() {
+        // The rail wants Alt alone. Fn riding along is the macOS
+        // function-key family, Shift selects, Ctrl and the secondary belong
+        // elsewhere — every one of those still passes through untouched, so
+        // the search box only ever loses exactly two chords.
+        let alt = Modifiers::alt();
+        assert_eq!(
+            key_intent(
+                "left",
+                Modifiers {
+                    function: true,
+                    ..alt
+                }
+            ),
+            Key::Pass
+        );
+        assert_eq!(
+            key_intent("right", Modifiers { shift: true, ..alt }),
+            Key::Pass
+        );
+        assert_eq!(
+            key_intent(
+                "left",
+                Modifiers {
+                    control: true,
+                    ..alt
+                }
+            ),
+            Key::Pass
+        );
+        assert_eq!(
+            key_intent(
+                "right",
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::secondary_key()
+                }
+            ),
+            Key::Pass
+        );
+        // Fn on its own keeps its arrows too.
+        assert_eq!(key_intent("left", Modifiers::function()), Key::Pass);
+        assert_eq!(key_intent("right", Modifiers::function()), Key::Pass);
     }
 
     #[test]
