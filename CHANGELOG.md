@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.13.0] - 2026-11-12
+
+### Added
+
+- **Open Workspace can look at one machine at a time**: a row of machine
+  chips under the picker's search narrows the list to This Computer or one
+  remote host. Every configured host has a chip, even one with no
+  workspaces yet, and its dot says whether it is connected, offline or
+  failed. Step between machines with Alt+←/→ (⌥ on macOS), or type
+  `@name` and a space; Backspace on an empty search goes back to All.
+  Scoped, the list splits into what is open in a window and what is on
+  the machine but not open here. A machine that isn't connected shows a
+  card with its address and a Connect button (Enter connects too), with
+  its last known workspaces listed under it. New Workspace creates on the
+  machine you are looking at. The picker opens on All every time, so
+  Ctrl+Tab never hides another machine's workspaces.
+- **Open Workspace on Machine…** in the command palette opens the picker
+  ready to type a machine name, and a host's menu gains "Open workspaces
+  on this machine".
+
+### Fixed
+
+- **Hovering a line that starts with `>>`, `}` or `});` no longer freezes
+  the window**: the loopback-URL detector's trim loop could never finish
+  on a word made only of closing punctuation at the start of a line, and
+  spun on the UI thread on every hover.
+
 ## [26.12.0] - 2026-11-11
 
 ### Added
