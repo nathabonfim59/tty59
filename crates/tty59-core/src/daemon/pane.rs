@@ -4367,6 +4367,34 @@ fn apply_foreground_agent(
         notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
     }
     stamp_launch_argv(st, Some(detected.argv));
+    seed_resumed_session(st);
+}
+
+/// Take the session id off a command line that resumes one by name, for an
+/// agent that would otherwise not say which until its first turn
+/// (l0ng-ai/tty7#1260). Only fills a gap: an id the agent reported itself
+/// always stands.
+fn seed_resumed_session(st: &mut PaneState) {
+    let (Some(agent), Some(argv)) = (st.agent, st.agent_argv.as_ref()) else {
+        return;
+    };
+    if st
+        .agent_session
+        .as_ref()
+        .is_some_and(|s| s.session_id.is_some())
+    {
+        return;
+    }
+    let Some(id) = agent.resumed_session_id(argv) else {
+        return;
+    };
+    let argv = argv.clone();
+    let sess = st
+        .agent_session
+        .get_or_insert_with(AgentSessionState::default);
+    sess.session_id = Some(id);
+    sess.launch_argv.get_or_insert(argv);
+    notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
 
 fn begin_detection(st: &mut PaneState, kind: &str, now: Instant) {
@@ -7245,6 +7273,61 @@ mod tests {
             st.agent_session.as_ref().unwrap().session_id.is_none(),
             "switching the foreground agent drops the previous session"
         );
+    }
+
+    #[test]
+    fn a_resumed_codex_session_keeps_its_id_before_the_first_turn() {
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let session_id =
+            |st: &PaneState| st.agent_session.as_ref().and_then(|s| s.session_id.clone());
+
+        let mut st = test_state(true);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(argv("codex resume 0199a1b2-c3d4 --yolo")),
+            Some(20),
+        );
+        let sess = st
+            .agent_session
+            .clone()
+            .expect("a foreground agent has a session");
+        assert_eq!(sess.session_id.as_deref(), Some("0199a1b2-c3d4"));
+        assert_eq!(
+            sess.launch_argv.as_deref(),
+            Some(&argv("codex resume 0199a1b2-c3d4 --yolo")[..])
+        );
+
+        // The agent's own report still wins once it arrives.
+        let mut sniffer = OscSniffer::new();
+        let start = concat!(
+            "\x1b]777;notify;tty59://cli-agent;",
+            r#"{"v":1,"agent":"codex","event":"session-start","session_id":"0199-reported"}"#,
+            "\x07",
+        );
+        apply_signals(&mut st, sniffer.feed(start.as_bytes()));
+        assert_eq!(session_id(&st).as_deref(), Some("0199-reported"));
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(argv("codex resume 0199a1b2-c3d4 --yolo")),
+            Some(20),
+        );
+        assert_eq!(
+            session_id(&st).as_deref(),
+            Some("0199-reported"),
+            "a seeded id never overwrites a reported one"
+        );
+
+        let mut st = test_state(true);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(argv("codex resume --last")),
+            Some(20),
+        );
+        assert_eq!(session_id(&st), None, "--last names no session");
+
+        let mut st = test_state(true);
+        apply_foreground_agent(&mut st, detect_foreground_agent(argv("codex")), Some(20));
+        assert_eq!(session_id(&st), None, "a fresh launch has no id yet");
     }
 
     #[test]
