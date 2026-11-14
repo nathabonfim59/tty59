@@ -77,6 +77,7 @@ macro_rules! l10n_keys {
 
 l10n_keys! {
     VisionToggle,
+    VisionTogglePalette,
     VisionAgents,
     VisionWorkbench,
     VisionInbox,

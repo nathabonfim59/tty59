@@ -3,6 +3,7 @@ use super::L10nKey;
 pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
     Some(match key {
         L10nKey::VisionToggle => "Рабочий обзор агентов",
+        L10nKey::VisionTogglePalette => "Агенты: переключить Входящие / Доску",
         L10nKey::VisionAgents => "Агенты",
         L10nKey::VisionWorkbench => "Терминалы",
         L10nKey::VisionInbox => "Входящие",

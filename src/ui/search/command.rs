@@ -802,7 +802,7 @@ impl Item {
         let agents = [
             Item::localized(L10nKey::CmdNewAgentTab, NewAgentTab)
                 .with_subtitle(t(L10nKey::CmdNewAgentTabSubtitle)),
-            Item::localized(L10nKey::VisionToggle, ToggleAgentVision),
+            Item::localized(L10nKey::VisionTogglePalette, ToggleAgentVision),
             Item::localized(L10nKey::VisionKanban, ToggleAgentBoard),
             Item::localized(L10nKey::VisionHandled, MarkAgentHandled),
             Item::localized(

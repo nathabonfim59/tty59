@@ -115,24 +115,49 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.agent_mode_active();
-        let label = SharedString::from(if active {
-            t(L10nKey::VisionWorkbench).to_string()
+        // The count is data beside the word, only above zero, and only while the
+        // pill says Agents: Workbench is the mode, not a tally.
+        let shown = (!active && count > 0).then_some(count);
+        let word = SharedString::from(t(if active {
+            L10nKey::VisionWorkbench
         } else {
-            format!("{} ({count})", t(L10nKey::VisionAgents))
+            L10nKey::VisionAgents
+        }));
+        let accessible = match shown {
+            Some(count) => SharedString::from(format!("{word} {count}")),
+            None => word.clone(),
+        };
+        // The word and the count are our own children, not the button's, so
+        // their size, weight and figures are the ones `StripMetrics` measured
+        // rather than whatever the button gives its text.
+        let run = || {
+            div()
+                .flex_none()
+                .line_height(gpui::relative(1.))
+                .text_size(gpui::rems(crate::ui::tab_strip::PILL_TEXT))
+                .font_weight(FontWeight::NORMAL)
+                .not_italic()
+                .font_features(self.strip_metrics.features())
+        };
+        let word = run().child(word);
+        #[cfg(test)]
+        let word = word.debug_selector(|| "agent-mode-label".into());
+        let tally = shown.map(|count| {
+            let count = run()
+                .text_color(cx.theme().muted_foreground)
+                .child(count.to_string());
+            #[cfg(test)]
+            let count = count.debug_selector(|| "agent-mode-count".into());
+            count
         });
-        // The label is our own child, not the button's, so its size, weight and
-        // figures are the ones `StripMetrics` measured rather than whatever the
-        // button gives its text.
-        let text = div()
+        let text = h_flex()
             .flex_none()
-            .line_height(gpui::relative(1.))
-            .text_size(gpui::rems(crate::ui::tab_strip::PILL_TEXT))
-            .font_weight(FontWeight::NORMAL)
-            .not_italic()
-            .font_features(self.strip_metrics.features())
-            .child(label.clone());
+            .items_center()
+            .gap(px(crate::ui::tab_strip::PILL_COUNT_GAP))
+            .child(word)
+            .children(tally);
         let pill = Button::new("agent-mode-toggle")
-            .accessible_label(label)
+            .accessible_label(accessible)
             .child(text)
             .small()
             .custom(

@@ -2,7 +2,8 @@ use super::L10nKey;
 
 pub fn translate_en(key: L10nKey) -> &'static str {
     match key {
-        L10nKey::VisionToggle => "Alternative vision for agents",
+        L10nKey::VisionToggle => "Toggle Agents view",
+        L10nKey::VisionTogglePalette => "Agents: Toggle Inbox / Kanban",
         L10nKey::VisionAgents => "Agents",
         L10nKey::VisionWorkbench => "Workbench",
         L10nKey::VisionInbox => "Inbox",

@@ -3,6 +3,7 @@ use super::L10nKey;
 pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
     Some(match key {
         L10nKey::VisionToggle => "Agent 工作视图",
+        L10nKey::VisionTogglePalette => "Agent：切换收件箱 / 看板",
         L10nKey::VisionAgents => "Agent",
         L10nKey::VisionWorkbench => "工作台",
         L10nKey::VisionInbox => "收件箱",

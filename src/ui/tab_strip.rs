@@ -383,9 +383,11 @@ const COUNT_DIGIT_GLYPHS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", 
 /// [`StripMetrics`]' features, so what is measured is what is on screen.
 pub(crate) const PILL_TEXT: f32 = 0.875;
 pub(crate) const PILL_PAD_X: f32 = 10.;
+/// The gap between the pill's word and its count, drawn and budgeted as this.
+pub(crate) const PILL_COUNT_GAP: f32 = 6.;
 
 /// What the Agents pill's label measures at the current font, size and
-/// language: its fixed words, and the width of one digit. The strip budgets the
+/// language: its words, and the width of one digit. The strip budgets the
 /// pill from these without shaping any text while it is laid out; drawing only
 /// reads them, and they are measured again when the font, the size or the
 /// language they are for has changed.
@@ -398,8 +400,8 @@ pub(crate) struct StripMetrics {
     /// The tabular figures the label is drawn with, built once: the measured
     /// font, the pill and the count tile all take their features from here.
     features: gpui::FontFeatures,
-    /// "Agents ()" — the label less its digits.
-    agents_fixed: f32,
+    /// "Agents", the word alone: the count is drawn beside it, not in it.
+    agents_w: f32,
     /// One tabular digit, which is every digit's width.
     digit: f32,
     workbench_w: f32,
@@ -445,7 +447,7 @@ impl StripMetrics {
             agents,
             workbench,
             features,
-            agents_fixed: width(&format!("{agents} ()")),
+            agents_w: width(agents),
             digit: width("0"),
             workbench_w: width(workbench),
         }
@@ -462,13 +464,17 @@ impl StripMetrics {
         self.features.clone()
     }
 
-    /// The pill's width with `count` agents needing attention (`Agents (3)`),
-    /// or with the Workbench label while the agent view is up.
+    /// The pill's width with `count` agents needing attention (`Agents 3`, the
+    /// count only above zero), or with the Workbench label while the agent
+    /// view is up.
     pub(crate) fn pill_w(&self, workbench: bool, count: usize) -> f32 {
         2. * PILL_PAD_X
-            + match workbench {
-                true => self.workbench_w,
-                false => self.agents_fixed + count_digits(count) as f32 * self.digit,
+            + match (workbench, count) {
+                (true, _) => self.workbench_w,
+                (false, 0) => self.agents_w,
+                (false, _) => {
+                    self.agents_w + PILL_COUNT_GAP + count_digits(count) as f32 * self.digit
+                }
             }
     }
 }
@@ -4975,6 +4981,267 @@ mod overflow_gpui_tests {
                 "a pane that has not ended has no tail"
             );
         });
+    }
+
+    /// `text` shaped as the pill draws it (the theme's font, tabular figures,
+    /// the pill's share of the interface font size), by the real text system.
+    fn shaped_in_pill(vcx: &mut VisualTestContext, ui_font_size: f32, text: &'static str) -> f32 {
+        vcx.update(|window, cx| {
+            let font = gpui::Font {
+                family: cx.theme().font_family.clone(),
+                features: crate::ui::theme::tabular_figures(),
+                fallbacks: None,
+                weight: gpui::FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+            };
+            crate::ui::tab_strip::measure_text(
+                window.text_system(),
+                &font,
+                ui_font_size * crate::ui::tab_strip::PILL_TEXT,
+                text,
+            )
+        })
+    }
+
+    /// Puts a waiting agent on each of `streams`, through the daemon's own
+    /// message, and waits until the app's inbox counts all `expected` of them.
+    fn agents_wait(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        streams: &mut [crate::daemon::transport::Stream],
+        expected: usize,
+    ) {
+        use crate::core::cli_agent::{AgentDetectionSession, AgentSessionState, AgentStatus};
+        for (index, stream) in streams.iter_mut().take(expected).enumerate() {
+            crate::daemon::protocol::DaemonMsg::AgentStatus(Some(AgentSessionState {
+                status: AgentStatus::Waiting,
+                since_ms: Some(index as u64 + 1),
+                message: Some(format!("Approve task {index}")),
+                detection: Some(AgentDetectionSession {
+                    kind: "codex".into(),
+                    epoch: 1,
+                    exited: false,
+                    source: None,
+                    rule: None,
+                }),
+                ..Default::default()
+            }))
+            .encode(stream)
+            .unwrap();
+        }
+        let mut counted = 0;
+        for _ in 0..400 {
+            vcx.run_until_parked();
+            counted = app.update_in(vcx, |app, window, cx| {
+                app.refresh_agent_vision(window, cx);
+                app.agent_vision
+                    .state
+                    .attention_count(&app.agent_vision.panes, &app.agent_vision.reads)
+                    .total()
+            });
+            if counted == expected {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            counted, expected,
+            "the daemon's {expected} waiting agents did not all reach the inbox in 2s"
+        );
+        redraw(vcx);
+    }
+
+    /// What the pill says, read from where its parts were painted: the label,
+    /// and the count when there is one, each in its own box; both inside the
+    /// pill's padding, the budgeted width exactly spent on them, and the
+    /// strip's other controls clear of it.
+    ///
+    /// `workbench` is the mode the pill is drawn in, `agents` and
+    /// `workbench_label` what the language calls its two labels, and `count`
+    /// how many agents need attention.
+    fn assert_pill_says(
+        vcx: &mut VisualTestContext,
+        (ui_font_size, width): (f32, f32),
+        (workbench, count): (bool, usize),
+        (agents, workbench_label): (&'static str, &'static str),
+        what: &str,
+    ) {
+        let pill = vcx
+            .debug_bounds("agent-mode-pill")
+            .unwrap_or_else(|| panic!("{what}: the Agents pill is not drawn"));
+        let label = vcx
+            .debug_bounds("agent-mode-label")
+            .unwrap_or_else(|| panic!("{what}: the pill's label is not drawn in its own box"));
+        let count_box = vcx.debug_bounds("agent-mode-count");
+        let pad = crate::ui::tab_strip::PILL_PAD_X;
+        // A text element's intrinsic width is its shaped line width rounded up
+        // to a whole pixel (`ceil` in gpui's `TextLayout::layout`), which is
+        // also how the metric measures; so the painted box is exactly the
+        // shaped width's ceiling, give or take float noise, never the raw advance.
+        let same = |a: Pixels, shaped: f32| (f32::from(a) - shaped.ceil()).abs() <= 0.01;
+
+        let word = if workbench { workbench_label } else { agents };
+        let word_w = shaped_in_pill(vcx, ui_font_size, word);
+        assert!(
+            same(label.size.width, word_w),
+            "{what}: the label is {:?} wide, `{word}` shapes to {word_w}px: it carries more \
+             than its word",
+            label.size.width
+        );
+
+        let shows_count = !workbench && count > 0;
+        let digits = if shows_count {
+            count.to_string().len()
+        } else {
+            0
+        };
+        // The pill is budgeted from the word and ONE digit, each rounded up to a
+        // whole pixel, and a count of `digits` digits is painted as one run
+        // rounded up once. The word's box is the budgeted width exactly, so
+        // all that can be left over is what `digits` rounded-up digits exceed
+        // their one rounded-up run by: under a pixel for every digit, split
+        // between the two sides however the button aligns them. It can never be
+        // longer: nothing may stand inside the padding.
+        let rounding = digits as f32 + 0.01;
+        let inside_padding = |edge: Pixels| edge >= px(-0.01);
+        let left_pad = label.left() - pill.left() - px(pad);
+        assert!(
+            inside_padding(left_pad) && left_pad <= px(rounding),
+            "{what}: the label starts {:?} into the pill; its padding is {pad}px, at most \
+             {rounding}px more for rounding",
+            label.left() - pill.left()
+        );
+
+        let last = match (shows_count, count_box) {
+            (false, None) => label,
+            (false, Some(found)) => panic!(
+                "{what}: the pill shows a count box {found:?} for {count} agents in a mode \
+                 that carries none"
+            ),
+            (true, None) => panic!("{what}: {count} agents need attention and no count is drawn"),
+            (true, Some(count_box)) => {
+                let digit_run = ["0", "00", "000"][digits - 1];
+                let digits_w = shaped_in_pill(vcx, ui_font_size, digit_run);
+                assert!(
+                    same(count_box.size.width, digits_w),
+                    "{what}: the count for {count} is {:?} wide, its {digits} tabular digits \
+                     shape to {digits_w}px",
+                    count_box.size.width
+                );
+                assert!(
+                    count_box.left() - label.right() >= px(2.),
+                    "{what}: the count is {:?} from the label, no visible gap",
+                    count_box.left() - label.right()
+                );
+                count_box
+            }
+        };
+        let right_pad = pill.right() - last.right() - px(pad);
+        assert!(
+            inside_padding(right_pad) && right_pad <= px(rounding),
+            "{what}: {:?} is left between the pill's content and its edge; its padding is \
+             {pad}px, at most {rounding}px more for rounding: the budget and the drawing \
+             disagree",
+            pill.right() - last.right()
+        );
+
+        assert!(
+            pill.right() <= px(width),
+            "{what}: the pill {pill:?} leaves the {width}px window"
+        );
+        // Workbench takes the strip's New Tab button away; everywhere else it
+        // is drawn and the pill must stand clear of it.
+        let new_tab = vcx.debug_bounds("tab-strip-new");
+        match (workbench, new_tab) {
+            (true, Some(found)) => {
+                panic!("{what}: Workbench draws New Tab at {found:?}, it has none")
+            }
+            (true, None) => {}
+            (false, None) => panic!("{what}: the New Tab button is not drawn"),
+            (false, Some(new_tab)) => assert!(
+                new_tab.right() <= pill.left(),
+                "{what}: the pill {pill:?} overlaps New Tab {new_tab:?}"
+            ),
+        }
+    }
+
+    /// The reported bug: "Agents (0)" with no agents anywhere, and the count
+    /// baked into the label so it cannot be told apart from the word. Through
+    /// a real window: nothing but the word at zero, then one and two digits in
+    /// their own muted span as agents arrive through the daemon's messages,
+    /// and the Workbench label, with no count, once a real click on the pill
+    /// has switched the mode.
+    #[gpui::test]
+    fn the_agents_pill_keeps_its_count_apart_and_hides_zero(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = strip_window(cx, 12, 1440.);
+        let says = |vcx: &mut VisualTestContext, workbench: bool, count: usize, what: &str| {
+            assert_pill_says(
+                vcx,
+                (UI_FONT_SIZE_DEFAULT, 1440.),
+                (workbench, count),
+                ("Agents", "Workbench"),
+                what,
+            )
+        };
+
+        says(&mut vcx, false, 0, "no agents");
+
+        agents_wait(&app, &mut vcx, &mut streams[..1], 1);
+        says(&mut vcx, false, 1, "one agent");
+
+        agents_wait(&app, &mut vcx, &mut streams, 12);
+        says(&mut vcx, false, 12, "twelve agents");
+
+        let pill = vcx.debug_bounds("agent-mode-pill").expect("pill");
+        vcx.simulate_click(pill.center(), Modifiers::none());
+        redraw(&mut vcx);
+        assert!(
+            app.update(&mut vcx, |app, _| app.agent_mode_active()),
+            "clicking the pill enters the agent view"
+        );
+        says(&mut vcx, true, 12, "workbench, twelve waiting");
+
+        let pill = vcx.debug_bounds("agent-mode-pill").expect("pill");
+        vcx.simulate_click(pill.center(), Modifiers::none());
+        redraw(&mut vcx);
+        assert!(
+            !app.update(&mut vcx, |app, _| app.agent_mode_active()),
+            "clicking Workbench leaves the agent view"
+        );
+        says(&mut vcx, false, 12, "back out of the agent view");
+    }
+
+    /// The pill's budget is what the strip lays out around, so the label, the
+    /// count and their gap must be spent exactly in every language and at the
+    /// largest interface font, at the narrow window where the chips already
+    /// give way to it.
+    #[gpui::test]
+    fn the_agents_pill_is_budgeted_in_every_language_and_font(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = strip_window(cx, 12, 1000.);
+        for count in [0, 12] {
+            if count > 0 {
+                agents_wait(&app, &mut vcx, &mut streams, count);
+            }
+            for (locale, agents) in LOCALES {
+                use_locale(&app, &mut vcx, locale, agents);
+                let workbench = crate::ui::i18n::t(crate::ui::i18n::L10nKey::VisionWorkbench);
+                for ui_font_size in [UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX] {
+                    set_ui_font_size(&app, &mut vcx, ui_font_size);
+                    let what = format!("{locale} {ui_font_size}px, {count} agents");
+                    assert_pill_says(
+                        &mut vcx,
+                        (ui_font_size, 1000.),
+                        (false, count),
+                        (agents, workbench),
+                        &what,
+                    );
+                    let shown = drawn(&app, &mut vcx);
+                    assert_row_does_not_overlap(&app, &mut vcx, &shown, 1000., &what);
+                }
+            }
+        }
+        use_locale(&app, &mut vcx, "en", "Agents");
+        set_ui_font_size(&app, &mut vcx, UI_FONT_SIZE_DEFAULT);
     }
 }
 
