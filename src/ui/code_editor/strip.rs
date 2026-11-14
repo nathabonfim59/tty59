@@ -1102,6 +1102,48 @@ mod gpui_tests {
         header.top() >= px(crate::ui::app::TITLE_BAR_HEIGHT) - px(1.)
     }
 
+    fn set_zoom(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, zoom: f32) {
+        app.update_in(vcx, |app, _, cx| app.set_editor_zoom(zoom, cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.update(|_, cx| cx.global::<Config>().editor_zoom),
+            zoom,
+            "the zoom reached the config"
+        );
+    }
+
+    /// The column widths at which the hoisted header first falls into the
+    /// column when narrowing, and lifts again when widening, found from far
+    /// above so no earlier answer is held. Both headers are checked on the way.
+    fn hoist_boundary(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> (f32, f32) {
+        resize(vcx, 2400., 800.);
+        assert!(!header_is_inline(vcx), "a wide window lifts the header");
+        let mut width = 2400.;
+        while !header_is_inline(vcx) {
+            width -= 5.;
+            assert!(width > 900., "the header never moved into the column");
+            resize(vcx, width, 800.);
+        }
+        // Back to the last lifted coarse step, then one point at a time.
+        width += 5.;
+        resize(vcx, 2400., 800.);
+        resize(vcx, width, 800.);
+        assert!(!header_is_inline(vcx));
+        while !header_is_inline(vcx) {
+            width -= 1.;
+            resize(vcx, width, 800.);
+        }
+        assert_header(app, vcx, "first inline");
+        let first_inline = docked_px(app, vcx).expect("still docked");
+        while header_is_inline(vcx) {
+            width += 1.;
+            assert!(width < 2400., "the header never went back up");
+            resize(vcx, width, 800.);
+        }
+        assert_header(app, vcx, "lifted again");
+        (first_inline, docked_px(app, vcx).expect("docked"))
+    }
+
     fn open_names(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, names: &[&str]) {
         for name in names {
             open_rs(app, vcx, name);
@@ -1131,28 +1173,51 @@ mod gpui_tests {
             (900., 700., DocumentLayout::Fill, false, false),
             (1440., 900., DocumentLayout::Fill, true, false),
         ];
-        for (width, height, layout, panel, docked) in scenes {
-            app.update_in(&mut vcx, |app, _, cx| app.set_document_layout(layout, cx));
-            set_right_panel(&app, &mut vcx, panel);
-            resize(&mut vcx, width, height);
-            assert_eq!(
-                docked_px(&app, &mut vcx).is_some(),
-                docked,
-                "{width}x{height} {layout:?} panel {panel}: the column is {}docked",
-                if docked { "" } else { "not " }
-            );
-            // Fronted from the far end of the strip, then from the middle,
-            // then from a file recency has never seen.
-            for pos in [9, 0, 5, 3, 9] {
-                app.update_in(&mut vcx, |app, window, cx| {
-                    app.editor_activate(pos, window, cx);
-                });
-                vcx.run_until_parked();
-                let label = format!("{width}x{height} {layout:?} panel {panel} front {pos}");
-                let p = assert_header(&app, &mut vcx, &label);
-                assert!(
-                    p.more.is_some(),
-                    "{label}: ten files cannot all fit, +N expected"
+        // The editor's zoom scales the text below the header, never the
+        // header: what is drawn at 100 % is what is drawn at every zoom.
+        let mut at_full: Vec<(usize, Pixels, Pixels, Pixels)> = Vec::new();
+        for zoom in [1.0, 0.5, 3.0] {
+            set_zoom(&app, &mut vcx, zoom);
+            let mut seen = Vec::new();
+            for (width, height, layout, panel, docked) in scenes {
+                app.update_in(&mut vcx, |app, _, cx| app.set_document_layout(layout, cx));
+                set_right_panel(&app, &mut vcx, panel);
+                resize(&mut vcx, width, height);
+                assert_eq!(
+                    docked_px(&app, &mut vcx).is_some(),
+                    docked,
+                    "{width}x{height} {layout:?} panel {panel} zoom {zoom}: the column is {}docked",
+                    if docked { "" } else { "not " }
+                );
+                // Fronted from the far end of the strip, then from the middle,
+                // then from a file recency has never seen.
+                for pos in [9, 0, 5, 3, 9] {
+                    app.update_in(&mut vcx, |app, window, cx| {
+                        app.editor_activate(pos, window, cx);
+                    });
+                    vcx.run_until_parked();
+                    let label = format!(
+                        "{width}x{height} {layout:?} panel {panel} zoom {zoom} front {pos}"
+                    );
+                    let p = assert_header(&app, &mut vcx, &label);
+                    assert!(
+                        p.more.is_some(),
+                        "{label}: ten files cannot all fit, +N expected"
+                    );
+                    seen.push((
+                        p.tabs.len(),
+                        p.header.size.width,
+                        p.strip.size.width,
+                        p.more.map_or(px(0.), |m| m.size.width),
+                    ));
+                }
+            }
+            if zoom == 1.0 {
+                at_full = seen;
+            } else {
+                assert_eq!(
+                    seen, at_full,
+                    "zoom {zoom}: cell count and header, strip and +N widths differ from 100 %"
                 );
             }
         }
@@ -1391,6 +1456,24 @@ mod gpui_tests {
             }
             assert_header(&app, &mut vcx, "lifted");
             last_lifted = column;
+        }
+
+        // The zoom scales the text under the header, not the header, so the
+        // column width where it falls into the column, and where it is lifted
+        // again, are the same at every zoom.
+        set_zoom(&app, &mut vcx, 1.0);
+        let at_full = hoist_boundary(&app, &mut vcx);
+        assert!(
+            at_full.1 - at_full.0 > 8.,
+            "{at_full:?}: lifted again with no margin past the drop"
+        );
+        for zoom in [0.5, 3.0] {
+            set_zoom(&app, &mut vcx, zoom);
+            assert_eq!(
+                hoist_boundary(&app, &mut vcx),
+                at_full,
+                "zoom {zoom}: the hoisted header's fallback boundary moved"
+            );
         }
     }
 
