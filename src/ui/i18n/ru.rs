@@ -1848,6 +1848,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyTurnFinished => "Ответ завершён",
         L10nKey::TabTooltipMore => "Ещё",
         L10nKey::TabTooltipShowSidebar => "Показать боковую панель",
+        L10nKey::TabStripHiddenTabs => "Ещё вкладок: {count}",
         L10nKey::TabTooltipHideSidebar => "Скрыть боковую панель",
         L10nKey::TabTooltipHideDetailPanel => "Скрыть панель сведений",
         L10nKey::TabTooltipShowDetailPanel => "Показать панель сведений",
@@ -2886,6 +2887,11 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubShowAllReviewers, "few") => "Показать всех {count} рецензентов",
         (L10nKey::GitHubShowAllReviewers, "many") => "Показать всех {count} рецензентов",
         (L10nKey::GitHubShowAllReviewers, "other") => "Показать всех {count} рецензентов",
+        (L10nKey::TabStripHiddenTabs, "zero") => "Других вкладок нет",
+        (L10nKey::TabStripHiddenTabs, "one") => "Ещё {count} вкладка",
+        (L10nKey::TabStripHiddenTabs, "few") => "Ещё {count} вкладки",
+        (L10nKey::TabStripHiddenTabs, "many") => "Ещё {count} вкладок",
+        (L10nKey::TabStripHiddenTabs, "other") => "Ещё {count} вкладки",
         _ => return None,
     };
     Some(value)

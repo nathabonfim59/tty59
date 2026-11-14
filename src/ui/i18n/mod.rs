@@ -1380,6 +1380,7 @@ l10n_keys! {
     NotifyTurnFinished,
     TabTooltipMore,
     TabTooltipShowSidebar,
+    TabStripHiddenTabs,
     TabTooltipHideSidebar,
     TabTooltipHideDetailPanel,
     TabTooltipShowDetailPanel,
@@ -2340,6 +2341,7 @@ mod tests {
             L10nKey::GitHubSkippedCount,
             L10nKey::GitHubShowHiddenComments,
             L10nKey::GitHubShowAllReviewers,
+            L10nKey::TabStripHiddenTabs,
         ];
         for key in plural_keys {
             for branch in ["zero", "one", "few", "many", "other"] {
