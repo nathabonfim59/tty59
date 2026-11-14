@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.14.0] - 2026-11-14
+
+### Added
+
+- **The code editor zooms, separately from the terminal**: Ctrl+= / Ctrl+-
+  / Ctrl+0 (⌘ on macOS), the View menu items and the zoom-modifier wheel
+  now resize the editor while it has the focus or the pointer, instead of
+  the terminal's font. The source view and the rendered Markdown preview
+  share one level, so switching between them keeps the size: headings,
+  body text, tables, code blocks and Mermaid diagrams scale together in
+  the preview, and glyphs, line spacing, line numbers and change markers
+  in the source. The level steps from 50 % to 300 %, is remembered, has a
+  Zoom row on the Editor settings page, and shows in the status bar while
+  it is not 100 % (click it to reset). Zooming keeps your place in the
+  document.
+- **Mermaid diagrams open full screen**: hover a rendered diagram and click
+  the expand button to fill the preview with it, fitted. Ctrl+wheel zooms
+  about the pointer (even with no zoom modifier configured), Ctrl+= and
+  Ctrl+- zoom about the centre, dragging or scrolling pans, and Ctrl+0,
+  Fit or a double-click fits it again. The diagram is re-rendered sharp as
+  you zoom. Escape or the close button returns to the document where you
+  left it.
+
+### Fixed
+
+- **Ctrl+= while reading a Markdown preview no longer resizes the
+  terminal**: the preview had no focus of its own, so the font-size keys
+  fell through to the terminal's zoom.
+
 ## [26.13.0] - 2026-11-12
 
 ### Added
