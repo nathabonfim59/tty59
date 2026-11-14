@@ -499,7 +499,7 @@ impl Tty59App {
                         )
                     }),
             )
-            .children(self.row_status_dot(status, 0, gpui::rgb(sf.base).into()))
+            .children(self.row_status_dot(status, 0, gpui::rgb(sf.base).into(), cx))
             .when_some(badge, |d, pos| {
                 let badge = div().flex_shrink_0().text_xs().child(tab_badge_label(pos));
                 #[cfg(test)]
@@ -1031,7 +1031,7 @@ impl Tty59App {
                 // would be; the badge wins while the modifier is held.
                 let status_dot = match show_badge {
                     true => None,
-                    false => self.row_status_dot(agent_status, agent_unread, rail_fill),
+                    false => self.row_status_dot(agent_status, agent_unread, rail_fill, cx),
                 };
                 let status_extra = match status_dot.is_some() {
                     true => row_metrics::STATUS + row_metrics::GAP,

@@ -28,6 +28,8 @@ pub mod lsp;
 pub mod machine_mirror;
 pub(crate) mod markdown_mermaid;
 pub mod notice;
+#[cfg(test)]
+pub(crate) mod paint_probe;
 pub(crate) mod palette;
 pub mod pane;
 pub mod pane_drag;

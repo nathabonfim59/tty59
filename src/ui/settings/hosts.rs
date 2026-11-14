@@ -247,7 +247,7 @@ impl Tty59App {
                     .h(px(40.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(t_fmt(L10nKey::SettingsNoHostsMatch, &[("query", &query)]))
                     .into_any_element()
             })
@@ -257,7 +257,7 @@ impl Tty59App {
                     .h(px(40.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(t(L10nKey::SettingsNoHostsYet))
                     .into_any_element(),
             )
@@ -269,7 +269,7 @@ impl Tty59App {
                     .gap(px(8.))
                     .items_center()
                     .text_size(fs(12.))
-                    .text_color(tk.k45)
+                    .text_color(tk.sub)
                     .child(if show_all {
                         t_fmt(
                             L10nKey::SettingsHostsFromFiles,
@@ -363,7 +363,7 @@ impl Tty59App {
             .child(
                 div()
                     .font_weight(FontWeight::NORMAL)
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(count.to_string()),
             )
             .on_click(cx.listener(move |this, _, _w, cx| this.toggle_ssh_group(owned.clone(), cx)))
@@ -434,7 +434,7 @@ impl Tty59App {
         // and stays.
         let echo = !editing && address == title;
         let (meta, meta_color) = if dirty {
-            (t(L10nKey::SettingsUnsaved).to_string(), tk.warn_text)
+            (t(L10nKey::SettingsUnsaved).to_string(), tk.unsaved)
         } else if live {
             (t(L10nKey::SettingsLive).to_string(), tk.ok)
         } else {
@@ -451,7 +451,7 @@ impl Tty59App {
                 }
                 (None, _) => t(L10nKey::SettingsNever).to_string(),
             };
-            (text, tk.k4)
+            (text, tk.sub)
         };
 
         let head = div()
@@ -480,29 +480,33 @@ impl Tty59App {
                             .line_height(px(17.))
                             .truncate()
                             .when(open, |d| d.font_weight(FontWeight::MEDIUM))
-                            .text_color(if blank_title { tk.k4 } else { tk.fg })
+                            .text_color(if blank_title { tk.sub } else { tk.fg })
                             .child(title),
                     )
                     .when(!echo, |col| {
-                        col.child(
-                            div()
-                                .font_family(Tk::mono(cx))
-                                .text_size(fs(11.))
-                                .line_height(px(15.))
-                                .text_color(tk.k45)
-                                .truncate()
-                                .child(address),
-                        )
+                        let address = div()
+                            .font_family(Tk::mono(cx))
+                            .text_size(fs(11.))
+                            .line_height(px(15.))
+                            .text_color(tk.sub)
+                            .truncate()
+                            .child(address);
+                        #[cfg(test)]
+                        let address = kit::probe("settings.host-address", address);
+                        col.child(address)
                     }),
             )
-            .child(
-                div()
+            .child({
+                let meta = div()
                     .flex_shrink_0()
                     .whitespace_nowrap()
                     .text_size(fs(12.))
                     .text_color(meta_color)
-                    .child(meta),
-            )
+                    .child(meta);
+                #[cfg(test)]
+                let meta = kit::probe("settings.host-meta", meta);
+                meta
+            })
             .child(
                 div().size(px(10.)).flex_shrink_0().child(
                     Icon::empty()
@@ -512,7 +516,7 @@ impl Tty59App {
                             "icons/settings/chevron-right.svg"
                         })
                         .size(px(10.))
-                        .text_color(tk.k35),
+                        .text_color(tk.sub),
                 ),
             )
             .on_click(cx.listener(move |this, _, _w, cx| {
@@ -600,7 +604,7 @@ impl Tty59App {
                                 div()
                                     .w(px(96.))
                                     .flex_shrink_0()
-                                    .text_color(tk.k45)
+                                    .text_color(tk.sub)
                                     .child(k.to_string()),
                             )
                             .child(
@@ -719,7 +723,7 @@ impl Tty59App {
                         .w(px(SSH_LABEL_W))
                         .flex_shrink_0()
                         .text_size(fs(12.))
-                        .text_color(tk.k45)
+                        .text_color(tk.sub)
                         .child(label),
                 )
                 .child(
@@ -742,7 +746,7 @@ impl Tty59App {
                         .w(px(SSH_LABEL_W))
                         .flex_shrink_0()
                         .text_size(fs(12.))
-                        .text_color(tk.k45)
+                        .text_color(tk.sub)
                         .child(label),
                 )
                 .child(
@@ -817,7 +821,7 @@ impl Tty59App {
                         div()
                             .pl(px(4.))
                             .text_size(fs(11.5))
-                            .text_color(tk.k4)
+                            .text_color(tk.sub)
                             .child(t(L10nKey::SettingsStoredInTty59)),
                     )
                     .child(div().flex_1())

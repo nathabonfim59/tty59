@@ -137,7 +137,7 @@ impl Tty59App {
                 "icons/settings/machine-remote.svg"
             })
             .size(px(12.))
-            .text_color(tk.k5)
+            .text_color(tk.sub)
             .into_any_element();
         let machine = self.settings_dropdown(
             "agent-hooks-machine",
@@ -166,7 +166,7 @@ impl Tty59App {
                         div()
                             .text_size(fs(12.))
                             .line_height(px(17.))
-                            .text_color(tk.k5)
+                            .text_color(tk.sub)
                             .child(machine_desc),
                     ),
             )
@@ -196,7 +196,7 @@ impl Tty59App {
             )
             .child(div().flex_1())
             .when(matches!(view, AgentHooksView::Ready(_)), |r| {
-                r.child(div().text_size(fs(12.)).text_color(tk.k45).child(t_fmt(
+                r.child(div().text_size(fs(12.)).text_color(tk.sub).child(t_fmt(
                     L10nKey::SettingsAgentsInstalledSummary,
                     &[
                         ("count", &installed.to_string()),
@@ -213,18 +213,20 @@ impl Tty59App {
                     .h(px(44.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(t(L10nKey::SettingsReadingAgentConfig))
                     .into_any_element(),
             ),
-            AgentHooksView::Unavailable(reason) => body.push(
-                div()
+            AgentHooksView::Unavailable(reason) => {
+                let line = div()
                     .py(px(12.))
                     .text_size(fs(12.5))
                     .text_color(tk.warn_text)
-                    .child(reason.clone())
-                    .into_any_element(),
-            ),
+                    .child(reason.clone());
+                #[cfg(test)]
+                let line = kit::probe("settings.agents-unavailable", line);
+                body.push(line.into_any_element());
+            }
             AgentHooksView::Ready(rows) => {
                 let has = |r: &AgentHookRow| r.state != HooksState::NotInstalled;
                 let is_focused =
@@ -295,7 +297,7 @@ impl Tty59App {
                             .h(px(44.))
                             .flex()
                             .items_center()
-                            .text_color(tk.k35)
+                            .text_color(tk.sub)
                             .child(if query.is_empty() {
                                 t(L10nKey::SettingsNoAgentsInstalled).to_string()
                             } else {
@@ -312,7 +314,7 @@ impl Tty59App {
                             .gap(px(8.))
                             .items_center()
                             .text_size(fs(12.))
-                            .text_color(tk.k45)
+                            .text_color(tk.sub)
                             .when(!show_all, |r| {
                                 r.child(t_plural(L10nKey::SettingsMoreAgents, rest, &[]))
                             })
@@ -437,7 +439,7 @@ impl Tty59App {
                             Icon::empty()
                                 .path("icons/settings/more.svg")
                                 .size(px(12.))
-                                .text_color(tk.k5),
+                                .text_color(tk.sub),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.toggle_settings_menu(toggle.clone(), 0, false, window, cx)
@@ -491,14 +493,17 @@ impl Tty59App {
                             .min_w_0()
                             .gap(px(2.))
                             .child(agent.display_name())
-                            .child(
-                                div()
+                            .child({
+                                let target = div()
                                     .font_family(Tk::mono(cx))
                                     .text_size(fs(11.5))
-                                    .text_color(tk.k45)
+                                    .text_color(tk.sub)
                                     .truncate()
-                                    .child(row.target.clone()),
-                            ),
+                                    .child(row.target.clone());
+                                #[cfg(test)]
+                                let target = kit::probe("settings.agent-target", target);
+                                target
+                            }),
                     )
                     .child(
                         h_flex()
@@ -506,16 +511,17 @@ impl Tty59App {
                             .gap(px(10.))
                             .items_center()
                             .when_some(status, |r, text| {
-                                r.child(
-                                    h_flex()
-                                        .gap(px(6.))
-                                        .items_center()
-                                        .text_size(fs(12.))
-                                        .text_color(tk.k5)
-                                        .whitespace_nowrap()
-                                        .child(div().size(px(6.)).rounded_full().bg(dot))
-                                        .child(text),
-                                )
+                                let status = h_flex()
+                                    .gap(px(6.))
+                                    .items_center()
+                                    .text_size(fs(12.))
+                                    .text_color(tk.sub)
+                                    .whitespace_nowrap()
+                                    .child(div().size(px(6.)).rounded_full().bg(dot))
+                                    .child(text);
+                                #[cfg(test)]
+                                let status = kit::probe("settings.agent-status", status);
+                                r.child(status)
                             })
                             .when_some(action, |r, label| {
                                 r.child(
@@ -542,7 +548,7 @@ impl Tty59App {
                         .mt(px(-4.))
                         .text_size(fs(12.))
                         .line_height(px(17.))
-                        .text_color(tk.k45)
+                        .text_color(tk.sub)
                         .child(text),
                 )
             })

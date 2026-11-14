@@ -214,8 +214,8 @@ pub(crate) fn well(cx: &App) -> Div {
 /// A key named in a hint: a small faint cap, never a button outline. The same
 /// cap the switcher's header and footer draw.
 pub(crate) fn keycap(label: impl Into<SharedString>, cx: &App) -> gpui::AnyElement {
-    let theme = cx.theme();
-    div()
+    let ink = crate::ui::theme::chrome_ink(cx);
+    let cap = div()
         .flex_shrink_0()
         .min_w(px(KEYCAP))
         .h(px(KEYCAP))
@@ -224,11 +224,15 @@ pub(crate) fn keycap(label: impl Into<SharedString>, cx: &App) -> gpui::AnyEleme
         .items_center()
         .justify_center()
         .rounded(px(4.))
-        .bg(well_fill(cx))
+        .bg(gpui::rgb(ink.keycap_fill))
         .text_size(rems(11. / 16.))
-        .text_color(theme.muted_foreground)
-        .child(label.into())
-        .into_any_element()
+        .text_color(gpui::rgb(ink.keycap_ink))
+        .child(label.into());
+    #[cfg(test)]
+    let mut cap = cap;
+    #[cfg(test)]
+    crate::ui::paint_probe::note("dialog.keycap", &mut cap);
+    cap.into_any_element()
 }
 
 /// A key combination as one cap per key — `⌘` `T`, never `⌘T` in one. The
@@ -318,4 +322,73 @@ pub(crate) fn button(
         .when_some(hover, |b, hover| b.hover(move |s| s.bg(hover)))
         .when(enabled, |b| b.cursor_pointer().on_click(on_click))
         .child(text.into())
+}
+
+/// What the real-render contrast tests of the switcher, Search Everywhere, the
+/// pane grip, the port chips and the forward rows share: the themes they run
+/// under, how a test window switches to one, and the floors the external
+/// contract states (text 4.5:1, marks 3:1 — not read off any private constant).
+#[cfg(test)]
+pub(crate) mod test_themes {
+    use gpui::VisualTestContext;
+
+    use crate::ui::presets::{self, Theme};
+
+    pub(crate) const TEXT_FLOOR: f32 = 4.5;
+    pub(crate) const MARK_FLOOR: f32 = 3.0;
+
+    /// The built-ins, a spread of the generated user-style palettes and the
+    /// crossover ones whose chrome fills invert.
+    pub(crate) fn themes() -> Vec<Theme> {
+        let mut themes = presets::builtins();
+        let grid = presets::generated_theme_grid();
+        themes.extend(grid.iter().cloned().step_by(37));
+        themes.extend(
+            grid.into_iter()
+                .filter(|t| t.background_color() == 0x777777)
+                .step_by(11),
+        );
+        themes
+    }
+
+    /// Switches the window to `theme` the way a theme change does: by
+    /// `apply_theme`, which is where every cached ink is derived.
+    pub(crate) fn apply(vcx: &mut VisualTestContext, theme: &Theme) {
+        vcx.update(|window, cx| {
+            let mut registry = presets::all(cx);
+            registry.retain(|t| t.id != theme.id);
+            registry.push(theme.clone());
+            cx.set_global(presets::Themes(registry));
+            let mut config = cx.global::<crate::core::config::Config>().clone();
+            config.theme_follow_system = false;
+            config.theme_preset = theme.id.clone();
+            cx.set_global(config);
+            crate::ui::theme::apply_theme(Some(window), cx);
+        });
+    }
+
+    /// Collects every ink that misses its floor, so one run names all the
+    /// counterexamples rather than the first.
+    #[derive(Default)]
+    pub(crate) struct Misses(Vec<String>);
+
+    impl Misses {
+        pub(crate) fn floor(&mut self, theme: &str, what: &str, ink: u32, fill: u32, floor: f32) {
+            let got = presets::contrast(ink, fill);
+            if got < floor {
+                self.0.push(format!(
+                    "{theme}: {what} is {got:.2}:1 ({ink:06x} on {fill:06x}), floor {floor}"
+                ));
+            }
+        }
+
+        pub(crate) fn assert_none(self, what: &str) {
+            assert!(
+                self.0.is_empty(),
+                "{what}: {} misses\n{}",
+                self.0.len(),
+                self.0.join("\n")
+            );
+        }
+    }
 }

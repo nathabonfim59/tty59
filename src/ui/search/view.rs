@@ -125,17 +125,22 @@ impl SearchDelegate {
             )]),
             None => gpui::StyledText::new(title),
         };
-        left = left.child(
-            div()
-                .flex_shrink(1.)
-                .min_w(px(40.))
-                .truncate()
-                .text_color(match self.query.trim().is_empty() {
-                    true => fg,
-                    false => fg.opacity(0.78),
-                })
-                .child(title),
-        );
+        let title_el = div()
+            .flex_shrink(1.)
+            .min_w(px(40.))
+            .truncate()
+            .text_color(match self.query.trim().is_empty() {
+                true => fg,
+                // The cached ink is the 92% title seed already floored on
+                // every row fill, which a bare fade of fg is not.
+                false => gpui::rgb(crate::ui::theme::chrome_ink(cx).search_title).into(),
+            })
+            .child(title);
+        #[cfg(test)]
+        let mut title_el = title_el;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("search.title", &mut title_el);
+        left = left.child(title_el);
         if let Some(subtitle) = item.subtitle.clone() {
             left = left.child(
                 div().flex_1().min_w(px(24.)).flex().justify_end().child(
@@ -1610,5 +1615,93 @@ mod tests {
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
         assert!(app.read_with(&vcx, |app, _| app.search.is_none()));
+    }
+}
+
+/// Switcher F11 through the real app render: the search is opened, frames are
+/// drawn, and the title and keycap paints the row builders assigned are read
+/// back from the scoped probe.
+#[cfg(test)]
+mod contrast_tests {
+    use gpui::TestAppContext;
+
+    use super::SearchTab;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, Misses, TEXT_FLOOR};
+    use crate::ui::paint_probe as probe;
+
+    #[gpui::test]
+    fn typed_search_titles_hold_the_cached_ink_on_every_row_rung(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_search(SearchTab::Actions, "split", window, cx)
+        });
+        vcx.run_until_parked();
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            for _ in 0..2 {
+                probe::clear();
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+            }
+            let (ink, popover) = vcx.update(|_, cx| {
+                (
+                    crate::ui::theme::chrome_ink(cx),
+                    cx.global::<crate::ui::presets::Surfaces>().popover,
+                )
+            });
+            let id = theme.id.as_str();
+
+            let titles = probe::all("search.title");
+            assert!(!titles.is_empty(), "{id}: the real render drew result rows");
+            for (n, title) in titles.iter().enumerate() {
+                assert_eq!(
+                    title.text,
+                    Some(ink.search_title),
+                    "{id}: title {n} reads the cached role"
+                );
+                assert_eq!(
+                    title.text_alpha,
+                    Some(1.0),
+                    "{id}: title {n} is solid ink, not a fade of the foreground"
+                );
+                assert_eq!(title.opacity, None, "{id}: title {n} has no fade");
+                for (rung, fill) in [
+                    ("resting", popover.base),
+                    ("hovered", popover.hover),
+                    ("selected", popover.selected),
+                ] {
+                    misses.floor(
+                        id,
+                        &format!("title {n} on the {rung} rung"),
+                        ink.search_title,
+                        fill,
+                        TEXT_FLOOR,
+                    );
+                }
+            }
+
+            let caps = probe::all("dialog.keycap");
+            assert!(!caps.is_empty(), "{id}: result rows draw their chords");
+            for (n, cap) in caps.iter().enumerate() {
+                assert_eq!(cap.fill, Some(ink.keycap_fill), "{id}: keycap {n} fill");
+                assert_eq!(cap.fill_alpha, Some(1.0), "{id}: keycap {n} fill alpha");
+                assert_eq!(cap.text, Some(ink.keycap_ink), "{id}: keycap {n} ink");
+                assert_eq!(cap.text_alpha, Some(1.0), "{id}: keycap {n} ink alpha");
+                misses.floor(
+                    id,
+                    &format!("keycap {n} label"),
+                    ink.keycap_ink,
+                    ink.keycap_fill,
+                    TEXT_FLOOR,
+                );
+            }
+        }
+        misses.assert_none("search titles and keycaps");
     }
 }
