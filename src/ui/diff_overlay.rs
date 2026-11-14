@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{
     AnyElement, Background, FocusHandle, FontWeight, Hsla, KeyDownEvent, MouseButton,
@@ -678,6 +678,9 @@ impl Tty59App {
             // only gives back the half point the title bar spends, so this
             // header's tiles land on the traffic lights' line rather than below.
             .title_strip_row(HAIRLINE_W, hairline(cx))
+            // The header's sha and paths are identifiers, not prose: the same
+            // literal characters the patch rows below draw.
+            .font_features(literal())
             .pl(px(lead))
             // The close tile is a notch smaller than the title bar's own, and
             // is pulled in by half the difference so its glyph stays on the
@@ -1391,6 +1394,26 @@ pub(crate) fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
+/// The patch's own characters rather than the face's ligatures: `=>` and `->`
+/// must draw as the two glyphs the file holds, not the arrow the shaper would
+/// rather show. All three features are named off for the same reason the
+/// terminal's `ligatures_off` names them — `calt: 0` alone leaves `liga` and
+/// `clig` at the shaper's default-on — while `tnum` stays on so the gutter's
+/// line numbers keep their digit grid. One shared table behind a clone: a row
+/// is drawn every frame, so building the `Arc` there would re-allocate per
+/// line of patch.
+fn literal() -> gpui::FontFeatures {
+    static FEATURES: LazyLock<gpui::FontFeatures> = LazyLock::new(|| {
+        gpui::FontFeatures(Arc::new(vec![
+            ("calt".to_string(), 0),
+            ("liga".to_string(), 0),
+            ("clig".to_string(), 0),
+            ("tnum".to_string(), 1),
+        ]))
+    });
+    FEATURES.clone()
+}
+
 /// The height of one line of a patch, in either view.
 ///
 /// Also what the list counts a row it has not laid out yet at. A list knows
@@ -1436,6 +1459,7 @@ fn diff_row_element(
                 })
                 .text_size(rems(META_MONO))
                 .font_family(font.clone())
+                .font_features(literal())
                 .text_color(cx.theme().muted_foreground)
                 .truncate()
                 .child(text.clone())
@@ -1630,6 +1654,7 @@ fn diff_file_header(
         .h(FILE_ROW_H)
         .px(ROW_INSET)
         .rounded(ROW_RADIUS)
+        .font_features(literal())
         .when(head.expandable, |h| {
             let path = head.path.clone();
             let want = !head.expanded;
@@ -1731,6 +1756,7 @@ fn diff_untracked_row(
         .h(FILE_ROW_H)
         .px(ROW_INSET)
         .rounded(ROW_RADIUS)
+        .font_features(literal())
         .cursor_pointer()
         .hover(|s| s.bg(hover))
         .on_click(move |_, window, cx| {
@@ -1780,6 +1806,7 @@ fn diff_split_row(
         .items_stretch()
         .text_xs()
         .font_family(font.clone())
+        .font_features(literal())
         .child(diff_split_cell(
             row.left.as_ref(),
             Side::Old,
@@ -1900,6 +1927,7 @@ fn diff_unified_row(
         .items_center()
         .text_xs()
         .font_family(font.clone())
+        .font_features(literal())
         .when_some(fill, |line, bg| line.bg(bg))
         .child(gutter(row.old))
         .child(gutter(row.new))
@@ -3057,6 +3085,66 @@ mod overlay_gpui_tests {
             overlay.load = DiffLoad::Ready(Arc::new(one_file_snapshot(source)));
             // The card is what carries the rows, so open it.
             overlay.expanded.insert("a.rs".to_string(), true);
+        });
+    }
+
+    /// `=>` and `->` are the file's own characters; a diff whose face fuses
+    /// them into arrows is quoting something that is not in the file. The
+    /// feature set is named on each row itself so the line-number gutters and
+    /// the code share it — `tnum` rides along for the number column, the way
+    /// the terminal's `ligatures_off` names all three ligature features
+    /// because `calt: 0` alone leaves `liga`/`clig` at the shaper's default
+    /// (on).
+    #[gpui::test]
+    fn diff_rows_name_every_ligature_feature_off(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |_app, _window, cx| {
+            let font = SharedString::from("Test Mono");
+            let drag = Drag {
+                sel: None,
+                selecting: false,
+            };
+            let weak = cx.entity().downgrade();
+            let at = RowAt {
+                path: SharedString::from("a.rs"),
+                id: crate::ui::diff_rows::RowId { hunk: 0, row: 0 },
+            };
+            let want = Some(gpui::FontFeatures(Arc::new(vec![
+                ("calt".to_string(), 0),
+                ("liga".to_string(), 0),
+                ("clig".to_string(), 0),
+                ("tnum".to_string(), 1),
+            ])));
+
+            let unified = UnifiedRow {
+                old: Some(1),
+                new: None,
+                kind: LineKind::Removed,
+                text: "let f = () => browser -> api;".to_string(),
+                line: 0,
+            };
+            let mut row = diff_unified_row(&unified, &at, &drag, &font, &weak, cx);
+            assert_eq!(
+                row.style().text.font_features,
+                want,
+                "the unified row carries the literal set for code and gutter alike"
+            );
+
+            let split = SplitRow {
+                left: Some(SplitCell {
+                    no: Some(1),
+                    text: "let f = () => browser -> api;".to_string(),
+                    changed: true,
+                    line: 0,
+                }),
+                right: None,
+            };
+            let mut row = diff_split_row(&split, &at, &drag, &font, &weak, cx);
+            assert_eq!(
+                row.style().text.font_features,
+                want,
+                "the split row carries it for both cells and the number gutter"
+            );
         });
     }
 

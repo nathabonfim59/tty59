@@ -1562,6 +1562,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmNothingToCommit => "コミットするものがありません",
         L10nKey::ScmNetworkBusy => "このリポジトリでは別のネットワーク操作が実行中です",
         L10nKey::ScmCommitNeedsMessage => "先にコミットメッセージを入力してください",
+        L10nKey::ScmCommitHasConflicts => "先に {count} 件の競合を解決してください",
         L10nKey::ScmDetailFilesFailed => "ファイル一覧を読み込めませんでした",
         L10nKey::ScmTimeNow => "今",
         L10nKey::ScmTimeMinutes => "{n}分",
@@ -2313,6 +2314,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::ScmFilesChanged => "{count} 個のファイルが変更されました",
         L10nKey::ScmStagedFileCount => "{count} 個のファイルがステージされました",
+        L10nKey::ScmConflictCount => "未解決の競合 {count} 件",
         L10nKey::AppMenuAbout => "tty59 について",
         L10nKey::AppMenuCheckForUpdates => "アップデートを確認…",
         L10nKey::AppMenuSettings => "設定…",
@@ -2613,6 +2615,12 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::ScmStagedFileCount, "zero") => "ステージされた変更はありません",
         (L10nKey::ScmStagedFileCount, "one") => "1 個のファイルがステージされました",
         (L10nKey::ScmStagedFileCount, "other") => "{count} 個のファイルがステージされました",
+        (L10nKey::ScmCommitHasConflicts, "zero") => "未解決の競合はありません",
+        (L10nKey::ScmCommitHasConflicts, "one") => "先に 1 件の競合を解決してください",
+        (L10nKey::ScmCommitHasConflicts, "other") => "先に {count} 件の競合を解決してください",
+        (L10nKey::ScmConflictCount, "zero") => "解決が必要な競合はありません",
+        (L10nKey::ScmConflictCount, "one") => "未解決の競合 1 件",
+        (L10nKey::ScmConflictCount, "other") => "未解決の競合 {count} 件",
         (L10nKey::PanelMoreChangedFiles, "zero") => {
             "… さらに変更されたファイル 0 個 — 表示するには `git diff` を実行してください"
         }

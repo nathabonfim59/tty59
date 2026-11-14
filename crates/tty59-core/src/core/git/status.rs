@@ -385,6 +385,9 @@ pub struct StatusIndex {
     dirs: HashMap<String, DirRollup>,
     /// Set when `files` was dropped for exceeding [`MAX_DECORATED_FILES`].
     pub files_dropped: bool,
+    /// The `U` paths in this status, counted while the maps above were —
+    /// the commit button reads this rather than rescanning every frame.
+    pub conflict_count: usize,
 }
 
 impl StatusIndex {
@@ -400,6 +403,9 @@ impl StatusIndex {
         };
         for entry in &status.entries {
             let deco = entry.deco();
+            if entry.is_conflicted() {
+                index.conflict_count += 1;
+            }
             index.insert(entry.path.as_str(), deco);
             // A rename's old path goes into the directory rollup only — the
             // directory it left did lose a file. Not into `files`: the path

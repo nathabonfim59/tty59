@@ -1492,6 +1492,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ScmNothingToCommit => "Nothing to commit",
         L10nKey::ScmNetworkBusy => "Another network operation is still running for this repository",
         L10nKey::ScmCommitNeedsMessage => "Write a commit message first",
+        L10nKey::ScmCommitHasConflicts => "Resolve {count} conflicts first",
         L10nKey::ScmDetailFilesFailed => "The file list could not be read",
         L10nKey::ScmTimeNow => "now",
         L10nKey::ScmTimeMinutes => "{n}m",
@@ -2244,6 +2245,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::ScmFilesChanged => "{count} files changed",
         L10nKey::ScmStagedFileCount => "{count} files staged",
+        L10nKey::ScmConflictCount => "{count} conflicts to resolve",
         L10nKey::AppMenuAbout => "About tty59",
         L10nKey::AppMenuCheckForUpdates => "Check for Updates…",
         L10nKey::AppMenuSettings => "Settings…",
@@ -2543,6 +2545,12 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::ScmStagedFileCount, "zero") => "No staged changes",
         (L10nKey::ScmStagedFileCount, "one") => "1 file staged",
         (L10nKey::ScmStagedFileCount, "other") => "{count} files staged",
+        (L10nKey::ScmCommitHasConflicts, "zero") => "No unresolved conflicts",
+        (L10nKey::ScmCommitHasConflicts, "one") => "Resolve 1 conflict first",
+        (L10nKey::ScmCommitHasConflicts, "other") => "Resolve {count} conflicts first",
+        (L10nKey::ScmConflictCount, "zero") => "No conflicts to resolve",
+        (L10nKey::ScmConflictCount, "one") => "1 conflict to resolve",
+        (L10nKey::ScmConflictCount, "other") => "{count} conflicts to resolve",
         (L10nKey::PanelMoreChangedFiles, "zero") => {
             "… and 0 more changed files — run git diff to see them."
         }
