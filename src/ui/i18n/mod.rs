@@ -1515,6 +1515,7 @@ l10n_keys! {
     PanelSearchInContents,
     PanelFilesNameMatches,
     SwitcherHintNewWindow,
+    SwitcherHintMachine,
     SwitcherLocalHost,
     SwitcherConnectingTo,
     SwitcherFormName,
@@ -1976,6 +1977,21 @@ pub fn t(key: L10nKey) -> &'static str {
 
 pub fn t_fmt(key: L10nKey, args: &[(&str, &str)]) -> String {
     apply_template(t(key), args, None)
+}
+
+/// `key` as the current locale words it, then as every other shipped locale
+/// does, in catalog order. For a surface that has to recognise text some
+/// other language's rendering of `key` produced, and must not allocate to do
+/// it: every item is the catalog's own `&'static str`.
+pub fn texts_current_first(key: L10nKey) -> impl Iterator<Item = &'static str> {
+    let current = current_locale_index();
+    std::iter::once(translate(current, key)).chain(
+        SUPPORTED_LANGUAGES
+            .iter()
+            .enumerate()
+            .filter(move |(idx, _)| *idx != current)
+            .filter_map(move |(_, lang)| (lang.translate_fn)(key)),
+    )
 }
 
 /// The same key as every *other* locale words it.

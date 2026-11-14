@@ -15,6 +15,7 @@ use crate::ui::app::{
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
+use crate::ui::text_elision::{ElidedLabel, Mode as ElideMode};
 
 /// The tab a stored choice shows. Search was a tab of its own until the
 /// Files tab took over searching file contents; a config that still says
@@ -178,6 +179,27 @@ pub(crate) fn forwards_port(m: &ManagedForward, port: u16) -> bool {
         && crate::daemon::protocol::PortEntry::reaches_loopback(&m.target_host)
 }
 
+/// The space between two tiles of an [`action_strip`].
+const ACTION_STRIP_GAP: f32 = 1.;
+
+/// Air a row keeps between its text and the strip drawn over its end. A
+/// choice about the text, not painted padding: 5 is what leaves a clear gap
+/// at the default size, and gives the 23 and 42px that one and two tiles
+/// reserve.
+const ACTION_STRIP_CLEARANCE: f32 = 5.;
+
+/// How wide an [`action_strip`] of `tiles` [`TILE_SIZE_XS`] tiles paints: the
+/// tiles and the gaps between them, from the constants the painter uses.
+fn action_strip_width(tiles: usize) -> f32 {
+    tiles as f32 * TILE_SIZE_XS + tiles.saturating_sub(1) as f32 * ACTION_STRIP_GAP
+}
+
+/// The width a row holds back from its text so that it ends before an
+/// [`action_strip`] of `tiles` tiles instead of under it.
+pub(crate) fn action_strip_reserve(tiles: usize) -> f32 {
+    action_strip_width(tiles) + ACTION_STRIP_CLEARANCE
+}
+
 /// The strip the row and group action buttons live in, revealed by hovering
 /// `row`.
 ///
@@ -202,17 +224,23 @@ pub(crate) fn forwards_port(m: &ManagedForward, port: u16) -> bool {
 /// without lying to the hit test: children register their handlers after this
 /// one and gpui bubbles back to front, so a button still gets its click first.
 pub(crate) fn action_strip(row: &gpui::SharedString, backing: u32) -> gpui::Div {
-    h_flex()
+    let strip = h_flex()
         .absolute()
         .right(px(ROW_INSET))
         .top_0()
         .bottom_0()
         .items_center()
-        .gap(px(1.))
+        .gap(px(ACTION_STRIP_GAP))
         .bg(gpui::rgb(backing))
         .invisible()
         .group_hover(row.clone(), |s| s.visible())
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+    #[cfg(test)]
+    let strip = strip.debug_selector({
+        let row = row.clone();
+        move || format!("{row}-strip")
+    });
+    strip
 }
 
 /// Height of a bare inline input row — Source Control's new-branch and
@@ -334,6 +362,9 @@ pub(crate) struct PaneForwardCtx {
 enum InfoValue {
     /// Mono text, truncated from the tail.
     Text(String),
+    /// A branch name, shrunk from the middle: the end is what tells two
+    /// `feature/…` branches apart, and the start says which kind it is.
+    Branch(String),
     /// A filesystem path, shrunk from the head so the leaf survives.
     Path(String),
     /// `+N −M` in the sidebar's two colours, and a click into the diff
@@ -395,9 +426,18 @@ impl InfoRow {
         }
     }
 
+    fn branch(label: &'static str, value: String) -> Self {
+        Self {
+            label,
+            value: InfoValue::Branch(value),
+            copy: None,
+            reveal: None,
+        }
+    }
+
     fn copyable(mut self) -> Self {
         self.copy = match &self.value {
-            InfoValue::Text(v) | InfoValue::Path(v) => Some(v.clone()),
+            InfoValue::Text(v) | InfoValue::Branch(v) | InfoValue::Path(v) => Some(v.clone()),
             _ => None,
         };
         self
@@ -980,7 +1020,7 @@ impl Tty59App {
             // a diff, disagreeing means a click that opens a repository other
             // than the one whose numbers were clicked.
             if let Some(git) = git {
-                rows.push(InfoRow::text(t(L10nKey::PanelBranch), git.branch.clone()).copyable());
+                rows.push(InfoRow::branch(t(L10nKey::PanelBranch), git.branch.clone()).copyable());
                 rows.push(InfoRow {
                     label: t(L10nKey::PanelChangesRow),
                     value: InfoValue::Diff {
@@ -1065,11 +1105,26 @@ impl Tty59App {
             "{}, {}",
             row.label,
             match &row.value {
-                InfoValue::Text(v) | InfoValue::Path(v) => v.clone(),
+                InfoValue::Text(v) | InfoValue::Branch(v) | InfoValue::Path(v) => v.clone(),
                 InfoValue::Diff { added, removed, .. } => format!("+{added} −{removed}"),
             }
         );
+        #[cfg(test)]
+        let is_branch = matches!(row.value, InfoValue::Branch(_));
         let value = match row.value {
+            // The label measures the width layout gives the value slot, so the
+            // strip's reserved padding and a narrow panel are both already in
+            // the budget. The whole name is what the copy tile puts on the
+            // clipboard and what assistive tech reads.
+            InfoValue::Branch(v) => div()
+                .flex_1()
+                .min_w_0()
+                .text_size(rems(TEXT))
+                .text_color(cx.theme().foreground)
+                // The id only has to be unique among the row's own children:
+                // the row's `id` is already on the element-id stack above it.
+                .child(ElidedLabel::new("branch", v, ElideMode::Middle))
+                .into_any_element(),
             // A path identifies a pane by its last segment, and plain
             // truncation eats exactly that: a deep checkout read
             // "/private/tmp/claude-501…" and told you nothing. Let the head
@@ -1173,7 +1228,7 @@ impl Tty59App {
             .min_w_0()
             .items_baseline()
             .when(tiles_wide > 0, |this| {
-                this.pr(px(tiles_wide as f32 * (TILE_SIZE_XS + 1.) + 4.))
+                this.pr(px(action_strip_reserve(tiles_wide)))
             })
             .child(value);
 
@@ -1206,8 +1261,16 @@ impl Tty59App {
         // empty one carrying a hover subscription for a set of buttons that
         // does not exist.
         let actions = has_tiles.then_some(tiles);
+        // Test-only handles on the branch row, to hover it and click its one
+        // tile; the strip's own selector is the row id, which a test cannot
+        // spell as a literal.
+        #[cfg(test)]
+        let actions = actions.map(|strip| match is_branch {
+            true => strip.debug_selector(|| "panel-info-branch-strip".into()),
+            false => strip,
+        });
 
-        h_flex()
+        let element = h_flex()
             .id(id.clone())
             .role(gpui::Role::Label)
             .aria_label(a11y_name)
@@ -1234,8 +1297,13 @@ impl Tty59App {
                     .child(row.label),
             )
             .child(value)
-            .children(actions)
-            .into_any_element()
+            .children(actions);
+        #[cfg(test)]
+        let element = match is_branch {
+            true => element.debug_selector(|| "panel-info-branch-row".into()),
+            false => element,
+        };
+        element.into_any_element()
     }
 
     /// The tile an Info row's hover strip is made of — the [`TILE_SIZE_XS`]
@@ -1524,7 +1592,7 @@ impl Tty59App {
                             // Room held back for the strip, so the process name
                             // ends where the buttons begin instead of under
                             // them. Same reservation the Info rows make.
-                            .pr(px(tiles_wide as f32 * (TILE_SIZE_XS + 1.) + 4.))
+                            .pr(px(action_strip_reserve(tiles_wide)))
                             .text_size(rems(TEXT_MONO))
                             .font_family(mono.clone())
                             .text_color(cx.theme().muted_foreground)
@@ -2121,6 +2189,13 @@ fn port_chip(
 }
 
 fn pill(text: &str, bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -> gpui::Div {
+    pill_shell(bg, fg, mono).child(text.to_string())
+}
+
+/// The pill of [`info_chip`] without its content, for a chip whose text has to
+/// give way to a width cap and so brings its own element. It is `flex_none`
+/// like the chip; a caller that needs it to shrink says so after.
+pub(crate) fn pill_shell(bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -> gpui::Div {
     div()
         .flex_none()
         .px(px(5.))
@@ -2130,7 +2205,6 @@ fn pill(text: &str, bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -
         .text_size(rems(META_MONO))
         .font_family(mono.clone())
         .text_color(fg)
-        .child(text.to_string())
 }
 
 pub fn reveal_label() -> &'static str {
@@ -2421,6 +2495,19 @@ mod tests {
             app.remote_files_pane(window, cx)
         });
         assert_eq!(files, Some((1, "me@build-box".to_string())));
+    }
+
+    #[test]
+    fn a_branch_row_copies_the_whole_name_it_may_elide() {
+        let name = "feature/checkout-flow-saved-payment-methods";
+        assert_eq!(
+            InfoRow::branch("branch", name.into())
+                .copyable()
+                .copy
+                .as_deref(),
+            Some(name),
+            "the row draws a cut of the name; the clipboard gets all of it"
+        );
     }
 }
 

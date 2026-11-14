@@ -2,7 +2,7 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, Axis, Bounds, Context, Div, ExternalPaths,
     FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString,
     Stateful, Window, canvas, deferred, div, ease_out_quint, linear_color_stop, linear_gradient,
-    prelude::*, px,
+    prelude::*, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent};
@@ -27,10 +27,8 @@ use crate::ui::hints::{badge_positions_from_order, tab_badge_label};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
-use crate::ui::tab_strip::{
-    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_end_clusters, elide_label,
-    elide_path_keep_tail, measure_text,
-};
+use crate::ui::tab_strip::{DragTab, REORDER_SLIDE_MS, abbreviate_home};
+use crate::ui::text_elision::{ElidedLabel, Mode};
 
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
 
@@ -171,55 +169,26 @@ const RAIL_INSET: f32 = 12.;
 const HEAD_CONTROL_HEIGHT: f32 = 28.;
 const HEAD_CONTROL_RADIUS: f32 = 7.;
 
-/// What sits between a group's branch and its diff counts.
-const META_SEP_TRIMMED: &str = "·";
+/// What sits between a group's branch and its diff counts: the branch's tail,
+/// led by the space that would otherwise be a flex gap.
+const META_SEP_TRIMMED: &str = "  ·";
+
+/// The fewest characters of a header's branch worth drawing. Below this the
+/// branch names nothing (`fea…`), so it is dropped and only the counts stay.
+const MIN_HEADER_BRANCH: usize = 6;
 
 /// Tabular numerals, so a column of diff counts lines up digit for digit.
 fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
-/// The row chrome the text budget has to be measured around. These are the
-/// numbers the layout below is built from, not a second guess at it — a row
-/// that elides against a budget wider than it really has falls back to CSS
-/// truncation, which drops the tail this whole module exists to keep.
+/// The sizes the row's fixed-width children are drawn with, shared by the
+/// painters that need them.
 mod row_metrics {
-    /// `border_r_1` on the sidebar itself.
-    pub(super) const BORDER: f32 = 1.;
-    /// `px_3` on the scrolling list that holds the rows.
-    pub(super) const LIST_PAD: f32 = 12.;
-    /// `pl_2` + `pr_2` on the row.
-    pub(super) const ROW_PAD: f32 = 8.;
     /// The avatar handed to `tab_avatar_plain`.
     pub(super) const AVATAR: f32 = 16.;
     /// `gap_2p5` between the row's children.
     pub(super) const GAP: f32 = 10.;
-    /// The trailing status mark, when the row has one.
-    pub(super) const STATUS: f32 = crate::ui::tab_strip::ROW_STATUS_SLOT;
-    /// The ⌘N badge, when one is shown.
-    pub(super) const BADGE: f32 = 20.;
-    /// The zoom mark, when the tab has a pane zoomed over the others.
-    pub(super) const ZOOM: f32 = 16.;
-    /// `gap_1p5`, between a branch and the counts after it.
-    pub(super) const META_GAP: f32 = 6.;
-    /// `px_2` on a group header.
-    pub(super) const HEADER_PAD: f32 = 8. + 8.;
-    /// The chevron a header opens with, and the pin that marks a folder
-    /// group: both `xsmall` icons, which resolve to 12px.
-    pub(super) const HEADER_ICON: f32 = 12.;
-
-    /// What a row can spend on text, before the badge is taken out.
-    pub(super) const fn text_budget(width: f32) -> f32 {
-        width - BORDER - 2. * LIST_PAD - 2. * ROW_PAD - AVATAR - GAP
-    }
-
-    /// What a group header can spend on its name and the branch beside it.
-    /// The chevron, the pin and the folded row count come off at the call
-    /// site, which knows whether they are drawn — an open group draws no
-    /// chevron, and reserving one anyway elided its branch with 18px to spare.
-    pub(super) const fn header_budget(width: f32) -> f32 {
-        width - BORDER - 2. * LIST_PAD - HEADER_PAD
-    }
 }
 
 /// The narrowest a group's heading is allowed to get: three or four capitals
@@ -232,47 +201,6 @@ const HEADER_NAME_FLOOR: f32 = 40.;
 const ROW_TITLE_FLOOR: f32 = 48.;
 const ROW_CWD_FLOOR: f32 = 24.;
 
-/// How a group header divides its line between the heading and the branch its
-/// rows share. The branch takes what it wants up to half the line, and the
-/// heading keeps the rest — so a long branch can no longer crush the name
-/// (flex used to hand the overflow to them in proportion to what each asked
-/// for, which gave the longer string the smaller cut), and a long group name
-/// cannot crush the branch in return. `git_want` is `None` for a header with
-/// no shared branch on it, which then owns the whole line.
-fn header_name_avail(avail: f32, git_want: Option<f32>) -> f32 {
-    match git_want {
-        Some(want) => (avail - want.min(avail * 0.5)).max(HEADER_NAME_FLOOR),
-        None => avail,
-    }
-}
-
-/// What a diff's counts occupy on a line, measured against real glyphs: the
-/// two numbers, the gap between them when both are drawn, and the gap that
-/// separates them from the branch. They never wrap and never shrink, so this
-/// is the width a branch has to be elided around — on a row and on the group
-/// header that lifts the branch off its rows alike.
-fn counts_width(
-    ts: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    status: &crate::terminal::git_status::GitStatus,
-) -> f32 {
-    let mut w = 0.;
-    if status.added > 0 {
-        w += measure_text(ts, font, size, &format!("+{}", status.added));
-    }
-    if status.removed > 0 {
-        w += measure_text(ts, font, size, &format!("−{}", status.removed));
-    }
-    if status.added > 0 && status.removed > 0 {
-        w += row_metrics::META_GAP;
-    }
-    if w > 0. {
-        w += row_metrics::META_GAP;
-    }
-    w
-}
-
 /// The branch a whole group shares, lifted off its rows and onto its header.
 struct SharedGit {
     status: crate::terminal::git_status::GitStatus,
@@ -281,19 +209,6 @@ struct SharedGit {
     click: Option<(crate::ui::host_ops::HostId, PathBuf)>,
     /// Every row the group counts, drawn or folded away.
     rows: Vec<usize>,
-}
-
-/// What a sidebar row rendered, next to what it had to leave out, so the
-/// hover card can be built by comparison instead of deriving the same strings
-/// a second time — the two derivations have to agree, and the shortest way to
-/// guarantee that is to only ever have one.
-struct SidebarRowShown {
-    /// The elided title, and the full string it came from. `None` when the
-    /// row is showing a placeholder (`Shell 3`) rather than a real title,
-    /// which nothing can expand.
-    title: Option<(SharedString, SharedString)>,
-    branch: Option<(SharedString, SharedString, u32, u32)>,
-    cwd: Option<(SharedString, SharedString)>,
 }
 
 #[derive(Clone)]
@@ -305,16 +220,19 @@ impl Render for DragGroup {
     }
 }
 
-/// Every detail a sidebar row could not fit, collected so the hover card can
-/// be rendered from cloneable data (an `AnyElement` cannot be cloned, but the
-/// tooltip closure has to rebuild its content on every hover).
+/// The whole values behind a sidebar row's labels, collected so the hover card
+/// can be rendered from cloneable data (an `AnyElement` cannot be cloned, but
+/// the tooltip closure has to rebuild its content on every hover). The labels
+/// elide against whatever width layout gives them, so the card cannot compare
+/// "shown" with "full" and is offered for every row.
 #[derive(Clone)]
 struct SidebarInfo {
-    /// Full path, when the row's title was elided.
+    /// The full title. `None` for a placeholder (`Shell 3`), which nothing
+    /// can expand.
     title: Option<SharedString>,
-    /// Full branch plus diff counts, when the row's branch was elided.
+    /// The full branch plus diff counts.
     branch: Option<(SharedString, u32, u32)>,
-    /// Full working directory, when the row's second line was elided.
+    /// The full working directory.
     cwd: Option<SharedString>,
     /// Remote host, when the avatar only shows a dot for it.
     host: Option<SharedString>,
@@ -725,39 +643,8 @@ impl Tty59App {
             .collect();
 
         let pointer = window.mouse_position();
-        // The row text is measured against real glyphs before it is elided:
-        // `text_sm` is 0.875rem and `text_xs` 0.75rem, resolved here so the
-        // measurement and the render use the same sizes and family.
-        let font = gpui::Font {
-            family: cx.theme().font_family.clone(),
-            features: Default::default(),
-            fallbacks: None,
-            weight: Default::default(),
-            style: Default::default(),
-        };
-        // The active row renders its title at `FontWeight::MEDIUM`, which is
-        // wider than the regular weight in any proportional face. Measuring
-        // it as regular would let the one row the user is looking at overflow
-        // into the truncation this is here to avoid.
-        let title_font_active = gpui::Font {
-            weight: FontWeight::MEDIUM,
-            ..font.clone()
-        };
         let rem = window.rem_size().as_f32();
-        // Measure with the same interface scale used to paint the header.
         let header_size = rem * META_REM;
-        // The git lines and the group header paint with `tabular()` figures,
-        // which set a `1` as wide as an `8`; measuring them proportionally
-        // came out a few pixels short on counts like `+1565 −124`, and the
-        // front-elided branch then lost its tail to CSS truncation as well.
-        let meta_font = gpui::Font {
-            features: tabular(),
-            ..font.clone()
-        };
-        let header_font = gpui::Font {
-            weight: FontWeight::MEDIUM,
-            ..meta_font.clone()
-        };
         // On the rail the diff counts are metadata like the branch beside
         // them, so they take its caption ink; the hover card, which is where
         // someone goes to read them, keeps the resting green and red.
@@ -1036,82 +923,55 @@ impl Tty59App {
                 let agent_status = tab.agent_status(cx);
                 let agent_unread = tab.agent_unread_count(cx);
                 let git_cwd = git_click(tab, window, cx);
-                let badge_extra = if show_badge {
-                    row_metrics::BADGE + row_metrics::GAP
-                } else {
-                    0.
-                };
                 let zoomed = self.tab_is_zoomed(i);
-                let zoom_extra = if zoomed {
-                    row_metrics::ZOOM + row_metrics::GAP
-                } else {
-                    0.
-                };
-                // The sleep mark takes the zoom mark's size; a sleeping tab
-                // has no panes on screen to zoom, so the two never share a row.
-                let zoom_extra = if asleep {
-                    zoom_extra + row_metrics::ZOOM + row_metrics::GAP
-                } else {
-                    zoom_extra
-                };
                 // Status rides at the row's trailing end, where the badge
                 // would be; the badge wins while the modifier is held.
                 let status_dot = match show_badge {
                     true => None,
                     false => self.row_status_dot(agent_status, agent_unread, rail_fill, cx),
                 };
-                let status_extra = match status_dot.is_some() {
-                    true => row_metrics::STATUS + row_metrics::GAP,
-                    false => 0.,
-                };
-                // Elision is measured against this budget so the label and
-                // branch never wrap or overflow into CSS truncation.
-                let label_avail =
-                    (row_metrics::text_budget(width) - badge_extra - zoom_extra - status_extra)
-                        .max(48.);
-                let title_size = 0.875 * rem;
                 let meta_size = META_REM * rem;
-                let title_font = if is_active { &title_font_active } else { &font };
-                // Title: the *full* label, elided further down once the
-                // working directory beside it has said how much of the line
-                // it wants. A wide sidebar shows the whole thing and a narrow
-                // one keeps whichever end identifies it — the tail for a
-                // path, both edges for anything else. A fixed segment cap
-                // (`short_title`) would elide even when the row has room, so
-                // only the width may decide here.
+                // Title: the *full* label. The label elides it against the
+                // width layout actually gives it, so a wide sidebar shows the
+                // whole thing and a narrow one keeps whichever end identifies
+                // it — the tail for a path, both edges for anything else. A
+                // fixed segment cap (`short_title`) would elide even when the
+                // row has room, so only the width may decide here.
                 //
-                // `full_title` is the unelided string the card can expand
-                // back to; `None` means the row is showing a placeholder that
-                // no card can improve on.
+                // `full_title` is the unelided string the card can spell out;
+                // `None` means the row is showing a placeholder that no card
+                // can improve on.
                 //
                 // The ladder the strip and the switcher climb, read here for
-                // the name and not for the shortening: this column measures in
-                // pixels and lets a card expand the row back to the whole
-                // string, so it wants what `label_of` would have cut down
-                // rather than the cut. A renamed tab is elided like anything
-                // else — and so the card has to be able to spell it back out.
-                let (title_text, full_title) = match self.full_tab_label(tab, Some(window), cx) {
-                    Some(raw) => {
-                        let full = SharedString::from(raw);
-                        (full.clone(), Some(full))
-                    }
-                    // Nothing to expand: the row is naming an unnamed shell,
-                    // not hiding a title behind an ellipsis.
-                    None => {
-                        let placeholder = SharedString::from(t_fmt(
-                            L10nKey::TabUnnamedShell,
-                            &[("n", &((i + 1).to_string()))],
-                        ));
-                        (placeholder, None)
-                    }
-                };
-                let mut branch_shown: Option<(SharedString, SharedString, u32, u32)> = None;
-                let mut cwd_shown: Option<(SharedString, SharedString)> = None;
-                let git_line = match shared_git.is_some() {
+                // the name and not for the shortening. A renamed tab is elided
+                // like anything else, and the card spells it back out.
+                //
+                // An ended pane's own title keeps the words its exit wrote
+                // whole and elides only the name in front of them.
+                let (title_text, title_tail, full_title) =
+                    match self.full_tab_label(tab, Some(window), cx) {
+                        Some(label) => {
+                            let tail = label.ended_tail;
+                            (label.text.clone(), tail, Some(label.text))
+                        }
+                        // Nothing to expand: the row is naming an unnamed shell,
+                        // not hiding a title behind an ellipsis.
+                        None => {
+                            let placeholder = SharedString::from(t_fmt(
+                                L10nKey::TabUnnamedShell,
+                                &[("n", &((i + 1).to_string()))],
+                            ));
+                            (placeholder, None, None)
+                        }
+                    };
+                let git = match shared_git.is_some() {
                     true => None,
                     false => tab.git_status(Some(window), cx),
-                }
-                .map(|g| {
+                };
+                let branch_full = git
+                    .as_ref()
+                    .map(|g| (SharedString::from(g.branch.clone()), g.added, g.removed));
+                let git_line = git.map(|g| {
                     let mut line = h_flex()
                         .id(("sidebar-git", i))
                         .w_full()
@@ -1120,23 +980,14 @@ impl Tty59App {
                         .text_size(px(meta_size))
                         .text_color(cx.theme().muted_foreground)
                         .font_features(tabular());
-                    let counts_w = counts_width(&window.text_system(), &meta_font, meta_size, &g);
-                    // Branch: cut from the end, the way any other label is.
-                    let branch_avail = (label_avail - counts_w).max(0.);
-                    let shown = elide_end_clusters(
-                        &window.text_system(),
-                        &meta_font,
-                        meta_size,
-                        &g.branch,
-                        branch_avail,
-                    );
-                    branch_shown = Some((
-                        shown.clone(),
-                        SharedString::from(g.branch.clone()),
-                        g.added,
-                        g.removed,
-                    ));
-                    line = line.child(div().flex_1().min_w_0().truncate().child(shown));
+                    // Branch: cut from the end, the way any other label is. The
+                    // counts are intrinsic siblings that never shrink, so the
+                    // branch is cut to whatever they leave.
+                    line = line.child(div().flex_1().min_w_0().child(ElidedLabel::new(
+                        ("sidebar-row-branch", i),
+                        g.branch.clone(),
+                        Mode::End,
+                    )));
                     if g.added > 0 || g.removed > 0 {
                         let mut counts = h_flex()
                             .id(("sidebar-diff", i))
@@ -1205,62 +1056,23 @@ impl Tty59App {
                         // copy adds noise, not information.
                         .filter(|full| full.as_ref() != title_text.as_ref()),
                 };
-                // The path takes what it needs up to half the line and the
-                // title keeps the rest — the same split a group header makes
-                // with the branch beside its heading. Flex would hand the
-                // overflow to the two of them in proportion to what each
-                // asked for, which cuts the longer string hardest.
-                let cwd_want = cwd_full.as_ref().map(|full| {
-                    row_metrics::META_GAP
-                        + measure_text(&window.text_system(), &font, meta_size, full)
-                });
-                let title_avail = match cwd_want {
-                    Some(want) => (label_avail - want.min(label_avail * 0.5)).max(ROW_TITLE_FLOOR),
-                    None => label_avail,
-                };
-                let shown_title = elide_label(
-                    &window.text_system(),
-                    title_font,
-                    title_size,
-                    &title_text,
-                    title_avail,
-                );
-                if let Some(full) = cwd_full {
-                    // Measured against what the title actually took, not what
-                    // it was allowed to: a short title hands the slack back
-                    // instead of leaving the path elided around a gap.
-                    let avail = (label_avail
-                        - measure_text(
-                            &window.text_system(),
-                            title_font,
-                            title_size,
-                            &shown_title,
-                        )
-                        - row_metrics::META_GAP)
-                        .max(0.);
-                    if avail >= ROW_CWD_FLOOR {
-                        let shown = elide_path_keep_tail(
-                            &window.text_system(),
-                            &font,
-                            meta_size,
-                            &full,
-                            avail,
-                        );
-                        cwd_shown = Some((shown, full));
-                    }
-                }
                 let rename_input = self
                     .renaming
                     .as_ref()
                     .filter(|r| r.tab == tab.tree_id.get())
                     .map(|r| r.input.clone());
 
-                let shown = SidebarRowShown {
-                    title: full_title.map(|full| (shown_title.clone(), full)),
-                    branch: branch_shown.clone(),
-                    cwd: cwd_shown.clone(),
-                };
-                let info = self.sidebar_info(tab, window, cx, &shown);
+                let info = self.sidebar_info(
+                    tab,
+                    window,
+                    cx,
+                    SidebarInfo {
+                        title: full_title,
+                        branch: branch_full,
+                        cwd: cwd_full.clone(),
+                        host: None,
+                    },
+                );
                 // Colors are captured by value so the tooltip builder (which
                 // borrows no app state) can style the card on its own.
                 let muted = cx.theme().muted_foreground;
@@ -1274,6 +1086,24 @@ impl Tty59App {
                     true => ROW_HEIGHT_TWO_LINE,
                     false => ROW_HEIGHT,
                 };
+                let title_slot = div()
+                    .flex_1()
+                    .min_w(px(ROW_TITLE_FLOOR))
+                    .text_sm()
+                    .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                    .child({
+                        let elided = ElidedLabel::new(
+                            ("sidebar-row-title", i),
+                            title_text.clone(),
+                            Mode::Label,
+                        );
+                        match title_tail {
+                            Some(tail) => elided.tail_included(tail),
+                            None => elided,
+                        }
+                    });
+                #[cfg(test)]
+                let title_slot = title_slot.debug_selector(|| format!("sidebar-row-title-{i}"));
                 let label_region = match rename_input {
                     Some(input) => div()
                         .id(("sidebar-rename", i))
@@ -1387,27 +1217,29 @@ impl Tty59App {
                                 .w_full()
                                 .items_center()
                                 .gap_1p5()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                                        .child(shown_title),
-                                )
-                                // The path is elided to the room the title
-                                // left, so it may not shrink again here — a
-                                // second cut would come out of its tail, the
-                                // half that says which directory this is.
-                                .when_some(cwd_shown.map(|(cwd, _)| cwd), |line, cwd| {
-                                    line.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(cwd),
-                                    )
+                                .child(title_slot)
+                                // The path takes what it needs up to half the
+                                // line and the title keeps the rest, the same
+                                // split a group header makes with its branch.
+                                // Flex would otherwise hand the overflow to
+                                // the two in proportion to what each asked
+                                // for, which cuts the longer string hardest.
+                                .when_some(cwd_full, |line, cwd| {
+                                    let cwd_slot = div()
+                                        .flex_shrink(1.)
+                                        .min_w(px(ROW_CWD_FLOOR))
+                                        .max_w(relative(0.5))
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(ElidedLabel::new(
+                                            ("sidebar-row-cwd", i),
+                                            cwd,
+                                            Mode::Path,
+                                        ));
+                                    #[cfg(test)]
+                                    let cwd_slot =
+                                        cwd_slot.debug_selector(|| format!("sidebar-row-cwd-{i}"));
+                                    line.child(cwd_slot)
                                 }),
                         )
                         .children(git_line)
@@ -1679,46 +1511,10 @@ impl Tty59App {
                 // overflow between the two in proportion to how much room each
                 // asked for, which is backwards here — the name is what the
                 // group *is*, the branch only what it happens to be sitting
-                // on. So both are measured against the header's real chrome:
-                // the branch gets what it needs up to half the line, the name
-                // keeps the rest, and each is elided into its share the way a
-                // row already elides its own.
-                let ts = window.text_system();
-                let mut avail = row_metrics::header_budget(width);
-                if folded {
-                    avail -= row_metrics::HEADER_ICON + row_metrics::META_GAP;
-                }
-                if pinned {
-                    avail -= PIN_MARK_SIZE + row_metrics::META_GAP;
-                }
+                // on. So the branch group may take up to half the line and
+                // the name keeps the rest down to a floor; each is a label
+                // that elides to the width layout hands it.
                 let count_label = row_count.to_string();
-                if folded {
-                    avail -= measure_text(&ts, &meta_font, header_size, &count_label)
-                        + row_metrics::META_GAP;
-                }
-                if header_badge_pos.is_some() {
-                    avail -= row_metrics::BADGE + row_metrics::META_GAP;
-                }
-                let avail = avail.max(HEADER_NAME_FLOOR);
-                // What the shared branch would take if nothing were in its
-                // way: the branch itself, the `·` before its counts, the
-                // counts, and the gaps the spacer between the name and the
-                // branch sits in.
-                // Drawn as a bare `·` with a gap on either side; the gap before
-                // it is the one `counts_width` already reserves.
-                let sep_w = measure_text(&ts, &meta_font, header_size, META_SEP_TRIMMED)
-                    + row_metrics::META_GAP;
-                let git_want = shared_git.as_ref().map(|shared| {
-                    let counts = counts_width(&ts, &meta_font, header_size, &shared.status);
-                    let sep = if counts > 0. { sep_w } else { 0. };
-                    2. * row_metrics::META_GAP
-                        + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
-                        + sep
-                        + counts
-                });
-                let name_avail = header_name_avail(avail, git_want);
-                let label = elide_label(&ts, &header_font, header_size, &name, name_avail);
-                let name_w = measure_text(&ts, &header_font, header_size, &label);
                 let hover_group = SharedString::from(format!("sidebar-group-{group_ix}"));
                 let has_shared_git = shared_git.is_some();
                 let is_renaming = renaming_group.is_some();
@@ -1830,29 +1626,39 @@ impl Tty59App {
                             // sideways the moment rename began.
                             .child(Input::new(&input).appearance(false).px_0())
                             .into_any_element(),
-                        // Elided above, so the truncation here is only the
-                        // backstop for a face that measures wider than it
-                        // paints; the name no longer gives room to the branch.
-                        None => div()
-                            .id(("sidebar-group-name", group_ix))
-                            .flex_shrink_0()
-                            .min_w_0()
-                            .truncate()
-                            // A caption, not a title: the rows under it are
-                            // what the column is for, so the heading keeps
-                            // the metadata's grey and only a medium weight
-                            // to stand apart from the branch beside it.
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(label)
-                            // A folder group may have been renamed to anything;
-                            // the folder it keeps is what the name stands for.
-                            .when_some(pinned_folder.clone(), |name, folder| {
-                                name.tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(folder.clone())
-                                        .build(window, cx)
-                                })
-                            })
-                            .into_any_element(),
+                        None => {
+                            // One shared string for the label and the tooltip.
+                            let name_text = SharedString::from(name);
+                            let name_slot = div()
+                                .id(("sidebar-group-name", group_ix))
+                                .flex_shrink(1.)
+                                .min_w(px(HEADER_NAME_FLOOR))
+                                // A caption, not a title: the rows under it are
+                                // what the column is for, so the heading keeps
+                                // the metadata's grey and only a medium weight
+                                // to stand apart from the branch beside it.
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(ElidedLabel::new(
+                                    ("sidebar-group-name-label", group_ix),
+                                    name_text.clone(),
+                                    Mode::Label,
+                                ))
+                                // A folder group may have been renamed to
+                                // anything; the folder it keeps is what the name
+                                // stands for. Any other heading spells itself
+                                // out whole.
+                                .tooltip({
+                                    let full = pinned_folder.clone().unwrap_or(name_text);
+                                    move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(full.clone())
+                                            .build(window, cx)
+                                    }
+                                });
+                            #[cfg(test)]
+                            let name_slot = name_slot
+                                .debug_selector(|| format!("sidebar-group-name-{group_ix}"));
+                            name_slot.into_any_element()
+                        }
                     })
                     .when_some(shared_git, |bar, shared| {
                         let SharedGit {
@@ -1860,33 +1666,35 @@ impl Tty59App {
                             click,
                             rows,
                         } = shared;
-                        let counts_w = counts_width(&ts, &meta_font, header_size, &status);
-                        let sep = if counts_w > 0. { sep_w } else { 0. };
-                        let branch_avail =
-                            (avail - name_w - 2. * row_metrics::META_GAP - sep - counts_w).max(0.);
-                        // Cut from the end, like a row's.
-                        let branch = elide_end_clusters(
-                            &ts,
-                            &meta_font,
-                            header_size,
-                            &status.branch,
-                            branch_avail,
-                        );
-                        let mut line = h_flex()
+                        let has_counts = status.added > 0 || status.removed > 0;
+                        // Cut from the end, like a row's. The separator rides
+                        // with the branch as its tail, so the two appear and
+                        // disappear together: a branch that cannot keep
+                        // `MIN_HEADER_BRANCH` readable characters is dropped,
+                        // and no dot is left pointing at nothing. It stays the
+                        // only shrinkable item in this right-pinned group, so
+                        // the counts keep their place either way.
+                        let mut branch = ElidedLabel::new(
+                            ("sidebar-group-branch", group_ix),
+                            status.branch.clone(),
+                            Mode::End,
+                        )
+                        .min_visible(MIN_HEADER_BRANCH);
+                        if has_counts {
+                            branch = branch.tail(META_SEP_TRIMMED);
+                        }
+                        let line = h_flex()
                             .id(("sidebar-group-git", group_ix))
-                            .flex_shrink(1.)
-                            .min_w_0()
+                            .flex_shrink_0()
+                            .max_w(relative(0.5))
                             .items_center()
                             .gap_1p5()
-                            .child(div().min_w_0().truncate().child(branch));
-                        if status.added > 0 || status.removed > 0 {
-                            line = line.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .whitespace_nowrap()
-                                    .child(META_SEP_TRIMMED),
-                            );
-                            let mut counts = h_flex()
+                            .child(div().flex_shrink(1.).min_w_0().child(branch));
+                        #[cfg(test)]
+                        let line = line.debug_selector(|| format!("sidebar-group-git-{group_ix}"));
+                        let mut line = line;
+                        if has_counts {
+                            let counts = h_flex()
                                 .id(("sidebar-group-diff", group_ix))
                                 .flex_shrink_0()
                                 .items_center()
@@ -1920,6 +1728,10 @@ impl Tty59App {
                                             ),
                                         )
                                 });
+                            #[cfg(test)]
+                            let counts =
+                                counts.debug_selector(|| format!("sidebar-group-diff-{group_ix}"));
+                            let mut counts = counts;
                             if status.added > 0 {
                                 counts = counts.child(
                                     div()
@@ -1975,6 +1787,8 @@ impl Tty59App {
                             cx,
                         ))
                     });
+                #[cfg(test)]
+                let bar = bar.debug_selector(|| format!("sidebar-group-{group_ix}"));
                 // Renaming is offered on a menu rather than a double click:
                 // the first click of a double would fold the group, so the
                 // name would be edited on a box that just shut. An auto group
@@ -2568,42 +2382,18 @@ impl Tty59App {
         )
     }
 
-    /// What the sidebar row hid: the full title, the full branch and diff
-    /// counts, the working directory, and the remote host the avatar only
-    /// dots. `None` when the row showed everything — a card would add noise,
-    /// not information. The host is included even for an untruncated row,
-    /// because the title strips the `user@host:` prefix the avatar cannot
-    /// spell out.
-    ///
-    /// Every line is decided by comparing what the row rendered against the
-    /// string it was elided from. Both come from the row itself: deriving
-    /// them here a second time is how a renamed tab ended up with a name the
-    /// row shortened and the card refused to expand.
+    /// What the sidebar row's card spells out: the full title, the full branch
+    /// and diff counts, the working directory, and the remote host the avatar
+    /// only dots. `None` for a row with nothing to say. The host is included
+    /// even for a row that cut nothing, because the title strips the
+    /// `user@host:` prefix the avatar cannot spell out.
     fn sidebar_info(
         &self,
         tab: &crate::ui::app::Tab,
         window: &mut Window,
         cx: &gpui::App,
-        shown: &SidebarRowShown,
+        mut info: SidebarInfo,
     ) -> Option<SidebarInfo> {
-        let elided = |pair: &Option<(SharedString, SharedString)>| {
-            pair.as_ref()
-                .filter(|(shown, full)| shown != full)
-                .map(|(_, full)| full.clone())
-        };
-        let mut info = SidebarInfo {
-            title: elided(&shown.title),
-            branch: shown
-                .branch
-                .as_ref()
-                .filter(|(shown, full, _, _)| shown != full)
-                .map(|(_, full, added, removed)| (full.clone(), *added, *removed)),
-            // The cwd only earns a card line when it was rendered *and*
-            // elided: a repo row already shows the full path as its title, so
-            // repeating the cwd under it would be noise, not information.
-            cwd: elided(&shown.cwd),
-            host: None,
-        };
         // The host is read off the same leaf the title and cwd came from; a
         // split tab whose panes sit on different machines would otherwise
         // name whichever one happens to be first.
@@ -3838,7 +3628,7 @@ fn git_click(
 mod fold_tests {
     use super::*;
     use crate::ui::app::test_window::harness_with_tabs;
-    use gpui::TestAppContext;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
 
     /// Bounds a row registered for itself while it was on screen. A folded
     /// row leaves the default rectangle behind, and that is what stops a pane
@@ -3854,6 +3644,18 @@ mod fold_tests {
     /// missing makes it return "no decision", which would leave every group
     /// below untouched and every assertion about moving vacuous.
     fn plant(app: &Tty59App, i: usize, cwd: &str, root: &str, home: &str, cx: &mut gpui::App) {
+        plant_on(app, i, cwd, (root, home), ("main", (0, 0)), cx);
+    }
+
+    /// [`plant`] with the branch the cache answers and its diff counts.
+    fn plant_on(
+        app: &Tty59App,
+        i: usize,
+        cwd: &str,
+        (root, home): (&str, &str),
+        (branch, counts): (&str, (u32, u32)),
+        cx: &mut gpui::App,
+    ) {
         use crate::terminal::git_status::{GitStatusCache, RepoSnapshot};
         use crate::ui::host_ops::HostId;
 
@@ -3871,8 +3673,8 @@ mod fold_tests {
                 Some(RepoSnapshot {
                     root: PathBuf::from(root),
                     home: PathBuf::from(home),
-                    branch: "main".into(),
-                    counts: Some((0, 0)),
+                    branch: branch.into(),
+                    counts: Some(counts),
                 }),
             );
         });
@@ -5040,6 +4842,313 @@ mod fold_tests {
             );
         });
     }
+
+    /// What `harness_with_tabs` draws at `width`, drawn twice so the first
+    /// frame's measurements have settled.
+    fn draw_at(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, width: f32) {
+        app.update(vcx, |app, cx| {
+            app.sidebar_width.set(width);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        for _ in 0..2 {
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    /// Two tabs pinned to one group whose long name and very long branch
+    /// (with `counts`) both want the whole header line.
+    fn long_branch_header(
+        cx: &mut TestAppContext,
+        counts: (u32, u32),
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, 2);
+        app.update(&mut vcx, |app, cx| {
+            let work = label(app, "a-rather-long-group-name-for-the-rail", cx);
+            for i in 0..2 {
+                app.set_tab_group(i, Some(work), cx);
+                plant_on(
+                    app,
+                    i,
+                    "/w/probed/sub",
+                    ("/w/probed", "/w/probed"),
+                    (
+                        "feature/checkout-flow-redesign-with-a-very-long-name",
+                        counts,
+                    ),
+                    cx,
+                );
+            }
+        });
+        (app, vcx, streams)
+    }
+
+    /// A header with a long branch used to leave the heading as `DEL…` while
+    /// the branch kept thirty characters. The branch group may take half the
+    /// header's line and no more, the heading keeps the rest down to its
+    /// floor, and the diff counts are never squeezed: they sit flush right at
+    /// the narrowest rail and at the default one, at the same size.
+    #[gpui::test]
+    fn a_long_branch_takes_at_most_half_the_header_and_the_counts_stay_whole(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = long_branch_header(cx, (12, 3));
+        let mut counts_widths = Vec::new();
+        for width in [MIN_SIDEBAR_WIDTH, 260.] {
+            draw_at(&app, &mut vcx, width);
+            let painted = |vcx: &mut VisualTestContext, selector: &'static str| {
+                vcx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} was not painted at {width}"))
+            };
+            let bar = painted(&mut vcx, "sidebar-group-0");
+            let name = painted(&mut vcx, "sidebar-group-name-0");
+            let git = painted(&mut vcx, "sidebar-group-git-0");
+            let counts = painted(&mut vcx, "sidebar-group-diff-0");
+            // `px_2` on the bar: the half is of what is inside it.
+            let inner = bar.size.width - px(16.);
+            assert!(
+                git.size.width <= inner * 0.5 + px(0.5),
+                "at {width}: the branch group is {:?} of a {inner:?} line",
+                git.size.width
+            );
+            assert!(
+                name.size.width >= px(HEADER_NAME_FLOOR) - px(0.5),
+                "at {width}: the heading kept {:?}",
+                name.size.width
+            );
+            assert!(
+                name.right() <= git.left() + px(0.5),
+                "at {width}: the heading and the branch overlap"
+            );
+            assert!(
+                (counts.right() - git.right()).abs() < px(0.5)
+                    && (bar.right() - px(8.) - counts.right()).abs() < px(0.5),
+                "at {width}: the counts are not flush right"
+            );
+            counts_widths.push(counts.size.width);
+        }
+        assert_eq!(
+            counts_widths[0], counts_widths[1],
+            "the counts are intrinsic and do not give way at the narrow rail"
+        );
+    }
+
+    /// A plain (no repo) tab whose title is short and whose working directory
+    /// is far longer than any row: the path rides on the title's own line.
+    fn short_title_long_cwd(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, 1);
+        app.update(&mut vcx, |app, cx| {
+            app.tabs[0].name = Some("zsh".into());
+            plant_plain(
+                app,
+                0,
+                "/w/scratch/experiments/long-nested-directory-name-for-truncation/and-one-more",
+                cx,
+            );
+            cx.notify();
+        });
+        (app, vcx, streams)
+    }
+
+    /// The working directory beside a short title takes what it asks for up to
+    /// half of the title line and no more: the title keeps the rest. The cap is
+    /// what limits it here (its path is far longer), so it lands on the half.
+    #[gpui::test]
+    fn a_long_working_directory_takes_half_of_the_title_line_and_no_more(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = short_title_long_cwd(cx);
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let title = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted");
+        let cwd = vcx
+            .debug_bounds("sidebar-row-cwd-0")
+            .expect("the working directory was painted beside the title");
+        let line = cwd.right() - title.left();
+        assert!(
+            cwd.size.width <= line * 0.5 + px(0.5),
+            "the path is {:?} of a {line:?} line",
+            cwd.size.width
+        );
+        assert!(
+            cwd.size.width >= line * 0.5 - px(1.),
+            "the path asked for far more than half and got only {:?} of {line:?}",
+            cwd.size.width
+        );
+    }
+
+    /// A row with less room (the Alt badge column is on) still keeps the
+    /// title's floor: the working directory gives way, not the title.
+    #[gpui::test]
+    fn a_row_title_keeps_its_floor_when_the_row_has_less_room(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = short_title_long_cwd(cx);
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let roomy = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted")
+            .size
+            .width;
+        app.update(&mut vcx, |app, cx| {
+            app.mod_hint_badges = true;
+            app.mod_hint_group = false;
+            cx.notify();
+        });
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let tight = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted with the badge column")
+            .size
+            .width;
+        assert!(
+            tight < roomy,
+            "the badge column took room from the line: {roomy:?} -> {tight:?}"
+        );
+        assert!(
+            tight >= px(ROW_TITLE_FLOOR) - px(0.5),
+            "the title was squeezed to {tight:?}"
+        );
+    }
+
+    /// A title takes the room a wider rail gives it.
+    #[gpui::test]
+    fn a_row_title_grows_with_the_rail(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update(&mut vcx, |app, cx| {
+            app.tabs[0].name = Some("a-fairly-long-custom-tab-name-for-this-row".into());
+            cx.notify();
+        });
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let narrow = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted at the narrowest rail")
+            .size
+            .width;
+        draw_at(&app, &mut vcx, 260.);
+        let wide = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted at the default rail")
+            .size
+            .width;
+        assert!(
+            wide > narrow,
+            "the title takes the room a wider rail gives it: {narrow:?} -> {wide:?}"
+        );
+    }
+
+    /// The six-character rule at the real consumer. At the narrowest rail and
+    /// at 240 the branch has no room for six readable characters, so its label
+    /// is drawn hidden (prepared with nothing, nothing painted) while the diff
+    /// counts stay painted flush right; at a wide rail the same label paints.
+    /// 240 is a measured width, not a guess: without the rule the label there
+    /// shows `feat…  ·` (four of its characters), so a missing rule paints a
+    /// fragment where this test requires nothing. The observer answers `None`
+    /// for a label that was not drawn at all, which must not pass for hidden,
+    /// so every state is asserted as present.
+    #[gpui::test]
+    fn the_header_hides_a_branch_without_six_characters_and_keeps_the_counts(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::text_elision::observe;
+
+        let (app, mut vcx, _streams) = long_branch_header(cx, (1, 1));
+        let branch = gpui::ElementId::from(("sidebar-group-branch", 0usize));
+        let mut counts_widths = Vec::new();
+        for (width, shown) in [(MIN_SIDEBAR_WIDTH, false), (240., false), (400., true)] {
+            // Settle at the new width first, then forget what that drew, so
+            // the frame inspected is the only source of the observation.
+            draw_at(&app, &mut vcx, width);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let label = observe::label(&branch)
+                .unwrap_or_else(|| panic!("at {width}: the branch label was not drawn at all"));
+            match shown {
+                false => assert!(
+                    label.text.is_empty() && !label.painted,
+                    "at {width}: expected a present, hidden label, got {label:?}"
+                ),
+                true => assert!(
+                    !label.text.is_empty() && label.painted,
+                    "at {width}: expected a painted branch, got {label:?}"
+                ),
+            }
+            let bar = vcx.debug_bounds("sidebar-group-0").expect("the header");
+            let counts = vcx
+                .debug_bounds("sidebar-group-diff-0")
+                .unwrap_or_else(|| panic!("at {width}: the counts were not painted"));
+            assert!(
+                (bar.right() - px(8.) - counts.right()).abs() < px(0.5),
+                "at {width}: the counts are not flush right"
+            );
+            counts_widths.push(counts.size.width);
+        }
+        assert_eq!(
+            counts_widths[0], counts_widths[1],
+            "the counts keep their size whether or not the branch is drawn"
+        );
+    }
+
+    /// An ended pane's row keeps the words its exit wrote, whole, in every
+    /// shipped language, and elides only the name in front of them: the
+    /// observer reads what the title label prepared and painted at the widest
+    /// rail, where the head still has room beside the tail.
+    #[gpui::test]
+    fn an_ended_row_keeps_its_localized_tail_whole(cx: &mut TestAppContext) {
+        use crate::ui::text_elision::observe;
+
+        const NAME: &str = "a-pane-with-a-very-long-name-that-no-row-can-hold-whole-and-then-some-more-words-after-it-to-be-sure";
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let title = gpui::ElementId::from(("sidebar-row-title", 0usize));
+        // The rail width per language is MEASURED, not computed: at each one the title slot
+        // is too narrow for an ordinary label (the whole text, no included tail) to keep
+        // the status whole, yet wide enough for the included tail plus a cut name.
+        for (language, width, tail) in [
+            ("en", 240., " — process exited"),
+            ("ru-RU", 240., ": процесс завершён"),
+            ("ja-JP", 220., " — プロセスが終了しました"),
+            ("zh-CN", MIN_SIDEBAR_WIDTH, " — 进程已退出"),
+        ] {
+            crate::ui::i18n::set_locale(language);
+            app.update(&mut vcx, |app, cx| {
+                let leaf = app.tabs[0].pane.first_leaf().expect("a tab has a pane");
+                leaf.terminal()
+                    .expect("a terminal pane")
+                    .update(cx, |view, cx| view.end_for_test(NAME, cx));
+                cx.notify();
+            });
+            draw_at(&app, &mut vcx, width);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let label = observe::label(&title)
+                .unwrap_or_else(|| panic!("{language}: the row title was not drawn"));
+            assert!(label.painted, "{language}: {label:?}");
+            assert!(
+                label.text.ends_with(tail),
+                "{language}: the tail was cut: {:?}",
+                label.text
+            );
+            assert!(
+                label.text.contains('…') && label.text.len() < NAME.len() + tail.len(),
+                "{language}: the name did not elide: {:?}",
+                label.text
+            );
+        }
+        crate::ui::i18n::set_locale("en");
+    }
 }
 
 #[cfg(test)]
@@ -5358,30 +5467,6 @@ mod tests {
         // A search hides the second; it keeps its place.
         let shown = [ids[0], ids[2], ids[3]];
         assert_eq!(reordered_pinned(&ids, &shown, 2, 0), Some(vec![3, 0, 1, 2]));
-    }
-
-    /// A header with a long branch on it used to leave the heading as `DEL…`
-    /// while the branch kept thirty characters. The name is the group; the
-    /// branch is what it happens to be sitting on, and it may take at most
-    /// half the line before the heading starts paying for it.
-    #[test]
-    fn a_long_branch_takes_half_the_header_and_no_more() {
-        let avail = 200.;
-        assert_eq!(header_name_avail(avail, Some(400.)), 100.);
-        assert_eq!(header_name_avail(avail, Some(100.)), 100.);
-    }
-
-    #[test]
-    fn a_short_branch_leaves_the_heading_the_rest_of_the_header() {
-        assert_eq!(header_name_avail(200., Some(40.)), 160.);
-        assert_eq!(header_name_avail(200., None), 200.);
-    }
-
-    /// Even a header narrow enough that the branch's half swallows the line
-    /// keeps a readable stub of the name, rather than eliding it away.
-    #[test]
-    fn the_heading_keeps_a_floor_on_a_narrow_sidebar() {
-        assert_eq!(header_name_avail(60., Some(400.)), HEADER_NAME_FLOOR);
     }
 }
 

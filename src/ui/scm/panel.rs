@@ -32,7 +32,7 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    META, META_MONO, ROW_INSET, SEARCH_H, action_strip, git_badge, info_chip,
+    META, META_MONO, ROW_INSET, SEARCH_H, action_strip, action_strip_reserve, git_badge, info_chip,
 };
 use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
@@ -40,6 +40,7 @@ use crate::ui::scm::path::split_display_path;
 use crate::ui::scm::state::{RepoKey, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
 use crate::ui::scm::tree::{TreeRow, normalize_query, path_matches, tree_rows};
+use crate::ui::text_elision::{ElidedLabel, Mode as ElideMode};
 
 /// Shared compact pitch for working-tree and commit-detail file rows.
 ///
@@ -417,19 +418,23 @@ impl Tty59App {
                         .dropdown_caret(true)
                         // A child rather than `.label`, because a label is
                         // laid out `flex_none` and cannot be told to
-                        // truncate. This is the cut that knows the real
-                        // width, and it is the only cut here — an
-                        // `elide_middle` character budget on top of it put
-                        // two ellipses in a row (`fix/new-tab-……`) and threw
-                        // away the tail it was there to keep.
+                        // shrink. The label measures the width layout gives
+                        // it and keeps both ends of the name, so it is the
+                        // only cut here — an `elide_middle` character budget
+                        // on top of it put two ellipses in a row
+                        // (`fix/new-tab-……`). The menu this opens lists the
+                        // whole name for a pointer that wants it.
                         .child(
                             div()
                                 .flex_1()
                                 .min_w(px(0.))
                                 .line_height(relative(1.))
-                                .truncate()
                                 .font_weight(gpui::FontWeight::MEDIUM)
-                                .child(head_label(&status.head)),
+                                .child(ElidedLabel::new(
+                                    "scm-branch-label",
+                                    head_label(&status.head),
+                                    ElideMode::Middle,
+                                )),
                         )
                         .w_full()
                         .h(rems(24. / 16.))
@@ -1739,6 +1744,10 @@ impl Tty59App {
         );
 
         let selector = id.clone();
+        let hover_group = id.clone();
+        #[cfg(test)]
+        let dir_selector = id.clone();
+        let strip_reserve = action_strip_reserve(row_verbs(group).len());
         h_flex()
             .id(id.clone())
             // The whole path and which list it is on: the letter drawn beside
@@ -1820,18 +1829,27 @@ impl Tty59App {
             // The row tooltip has the whole path either way. A tree row has
             // its directory above it, so it carries none.
             .when(depth.is_none(), |this| {
-                this.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis_start()
-                        .text_right()
-                        .text_size(rems(META))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(dir.to_string()),
-                )
+                // Stateful, so the cell's hover state exists when layout asks
+                // for the margin below: a bare `div` only refines paint style.
+                // The id need only be unique under the row's own.
+                let cell = div()
+                    .id("dir")
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis_start()
+                    .text_right()
+                    .text_size(rems(META))
+                    .text_color(cx.theme().muted_foreground)
+                    // The strip is drawn over the row's end, so on hover the
+                    // cell gives up the strip's width and the ellipsis lands
+                    // before it, not under it. A margin rather than padding:
+                    // the cell's own box is what narrows.
+                    .group_hover(hover_group, move |s| s.mr(px(strip_reserve)));
+                #[cfg(test)]
+                let cell = cell.debug_selector(move || format!("{dir_selector}-dir"));
+                this.child(cell.child(dir.to_string()))
             })
             .child(actions)
             .into_any_element()
@@ -3761,6 +3779,295 @@ mod render_idle_gpui_tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The real Changes row in the real panel: hovering it paints the strip
+    /// over the row's end, and the directory text must end before it. Drawn
+    /// through `scm_file_row`, so what is under test is the row's own wiring.
+    #[gpui::test]
+    fn hovering_a_changed_file_moves_its_directory_out_from_under_the_strip(
+        cx: &mut TestAppContext,
+    ) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = scratch("strip");
+        git(&root, &["init", "--quiet"]);
+        std::fs::create_dir_all(root.join("src/ui")).unwrap();
+        std::fs::write(root.join("src/ui/a.rs"), "a\n").unwrap();
+        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
+                    .is_some_and(|s| s.untracked().count() == 1)
+            })
+        });
+        // `debug_bounds` keys are `&'static str`, so the three selectors are
+        // spelled as literals built from one row id.
+        macro_rules! row_id {
+            () => {
+                "scm-row-Untracked-src/ui/a.rs"
+            };
+        }
+        const ROW: &str = row_id!();
+        const DIR: &str = concat!(row_id!(), "-dir");
+        const STRIP: &str = concat!(row_id!(), "-strip");
+        let draw = |vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+        };
+        draw(&mut vcx);
+        let row = vcx.debug_bounds(ROW).expect("the row is drawn");
+        let resting = vcx
+            .debug_bounds(DIR)
+            .expect("the flat list draws the directory");
+
+        vcx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                    position: gpui::point(row.left() + gpui::px(12.), row.center().y),
+                    pressed_button: None,
+                    modifiers: gpui::Modifiers::none(),
+                }),
+                cx,
+            );
+            window.refresh();
+        });
+        draw(&mut vcx);
+        let strip = vcx
+            .debug_bounds(STRIP)
+            .expect("hovering the row paints its strip");
+        let hovered = vcx.debug_bounds(DIR).expect("the directory is still drawn");
+
+        assert!(
+            hovered.right() <= strip.left(),
+            "the directory ends at {:?}, under the strip that starts at {:?}",
+            hovered.right(),
+            strip.left()
+        );
+        assert_eq!(
+            hovered.left(),
+            resting.left(),
+            "only the end of the cell gives way"
+        );
+        assert!(
+            hovered.right() < resting.right(),
+            "hovering gave no width up: {:?}",
+            hovered.right()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    const LONG_BRANCH: &str = "feature/checkout-flow-with-saved-payment-methods";
+
+    /// A repository on [`LONG_BRANCH`] with one commit and one untracked file.
+    fn repo_on_long_branch(name: &str) -> PathBuf {
+        let root = scratch(name);
+        git(&root, &["init", "--quiet", "--initial-branch", LONG_BRANCH]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        git(&root, &["add", "-A"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=tty59 test",
+                "-c",
+                "user.email=test@tty59.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "feat: first",
+            ],
+        );
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        root
+    }
+
+    /// What `shown` kept of `full` when it was cut in the middle: a source
+    /// prefix and a source suffix around exactly one inserted ellipsis. The
+    /// fixture names contain none, so any `…` is the label's. Returns how many
+    /// characters survived, so a wider box can be shown to keep more.
+    fn kept_around_one_ellipsis(full: &str, shown: &str) -> usize {
+        assert_eq!(
+            shown.matches('…').count(),
+            1,
+            "{shown:?} should carry exactly one inserted ellipsis"
+        );
+        let (head, tail) = shown.split_once('…').unwrap();
+        assert!(!head.is_empty(), "{shown:?} lost the start of {full:?}");
+        assert!(!tail.is_empty(), "{shown:?} lost the end of {full:?}");
+        assert!(
+            full.starts_with(head),
+            "{shown:?} head is not from {full:?}"
+        );
+        assert!(full.ends_with(tail), "{shown:?} tail is not from {full:?}");
+        assert!(
+            head.len() + tail.len() < full.len(),
+            "{shown:?} cut nothing from {full:?}"
+        );
+        head.chars().count() + tail.chars().count()
+    }
+
+    /// Draws a frame and answers what the label with this id prepared in it.
+    /// `None` only when it was not drawn at all.
+    fn observed(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        id: &'static str,
+    ) -> Option<crate::ui::text_elision::observe::Label> {
+        crate::ui::text_elision::observe::clear();
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+        crate::ui::text_elision::observe::label(&gpui::ElementId::from(id))
+    }
+
+    /// Frames until the label with this id is drawn, or panics with `root`.
+    fn wait_observed(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        id: &'static str,
+        root: &Path,
+    ) -> crate::ui::text_elision::observe::Label {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(label) = observed(app, vcx, id) {
+                return label;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "label {id:?} was never drawn for {}",
+                root.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn set_panel_width(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, width: f32) -> f32 {
+        app.update_in(vcx, |app, window, cx| {
+            app.right_panel_width.set(width);
+            cx.notify();
+            app.right_panel_px(window, cx)
+        })
+    }
+
+    /// The Changes header, end to end over a real repository: a long branch
+    /// is cut in the middle at the width the panel actually has, a wider panel
+    /// shows more of it.
+    #[gpui::test]
+    fn the_changes_header_keeps_both_ends_of_a_long_branch(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = repo_on_long_branch("header-branch");
+        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
+                    .is_some_and(|s| s.untracked().count() == 1)
+            })
+        });
+        vcx.simulate_resize(gpui::size(px(1800.), px(1000.)));
+
+        let narrow = set_panel_width(&app, &mut vcx, 280.);
+        let at_narrow = wait_observed(&app, &mut vcx, "scm-branch-label", &root);
+        assert!(
+            at_narrow.painted,
+            "the label was prepared but never painted"
+        );
+        let kept_narrow = kept_around_one_ellipsis(LONG_BRANCH, &at_narrow.text);
+
+        let wide = set_panel_width(&app, &mut vcx, 420.);
+        assert!(wide > narrow, "the panel did not widen: {narrow} -> {wide}");
+        let at_wide = observed(&app, &mut vcx, "scm-branch-label")
+            .expect("the header is still drawn when the panel widens");
+        let kept_wide = if at_wide.text.as_ref() == LONG_BRANCH {
+            LONG_BRANCH.chars().count()
+        } else {
+            kept_around_one_ellipsis(LONG_BRANCH, &at_wide.text)
+        };
+        assert!(
+            kept_wide > kept_narrow,
+            "a wider panel kept {kept_wide} characters against {kept_narrow}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The Info tab's Branch row: cut in the middle at the live panel width,
+    /// and the copy tile still puts the whole name on the clipboard.
+    #[gpui::test]
+    fn the_info_branch_row_keeps_both_ends_and_copies_the_whole_name(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = repo_on_long_branch("info-branch");
+        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
+                    .is_some_and(|s| s.untracked().count() == 1)
+            })
+        });
+        vcx.simulate_resize(gpui::size(px(1800.), px(1000.)));
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_tab = RightPanelTab::Info;
+            cx.notify();
+        });
+        set_panel_width(&app, &mut vcx, 240.);
+        let shown = wait_observed(&app, &mut vcx, "branch", &root);
+        assert!(shown.painted, "the label was prepared but never painted");
+        kept_around_one_ellipsis(LONG_BRANCH, &shown.text);
+
+        // Hover the real row, then click the one tile its strip holds.
+        let row = vcx
+            .debug_bounds("panel-info-branch-row")
+            .expect("the branch row is drawn");
+        let pointer = |vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>, press: bool| {
+            vcx.update(|window, cx| {
+                let event = match press {
+                    false => gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                        position: at,
+                        pressed_button: None,
+                        modifiers: gpui::Modifiers::none(),
+                    }),
+                    true => gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                        button: gpui::MouseButton::Left,
+                        position: at,
+                        modifiers: gpui::Modifiers::none(),
+                        click_count: 1,
+                        first_mouse: false,
+                    }),
+                };
+                window.dispatch_event(event, cx);
+                if press {
+                    window.dispatch_event(
+                        gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                            button: gpui::MouseButton::Left,
+                            position: at,
+                            modifiers: gpui::Modifiers::none(),
+                            click_count: 1,
+                        }),
+                        cx,
+                    );
+                }
+                window.refresh();
+            });
+            vcx.run_until_parked();
+        };
+        pointer(
+            &mut vcx,
+            row.origin + gpui::point(px(4.), row.size.height / 2.),
+            false,
+        );
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+        let strip = vcx
+            .debug_bounds("panel-info-branch-strip")
+            .expect("hovering the row reveals its copy tile");
+        pointer(&mut vcx, strip.center(), true);
+        let copied = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        assert_eq!(
+            copied.as_deref(),
+            Some(LONG_BRANCH),
+            "the copy tile must give the whole name, not the cut one"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

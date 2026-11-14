@@ -9,6 +9,10 @@ use crate::terminal::view::TerminalView;
 use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, TEXT_MONO};
+use crate::ui::text_elision::{ElidedLabel, Mode};
+
+/// The widest the disconnected strip's reason grows before it wraps.
+const REASON_MAX_W: f32 = 420.;
 
 /// The managed-forward form's five text fields, read out of their inputs.
 ///
@@ -113,6 +117,14 @@ impl ForwardFields {
     }
 }
 
+/// The whole target as the rule holds it, for the tooltip the elided row hands
+/// back. The host keeps the spelling it was saved with, so an IPv6 literal is
+/// `fe80::1:8080` here as everywhere else the app writes a forward — the port
+/// is a field of its own, never recovered by splitting this string.
+fn target_address(host: &str, port: u16) -> String {
+    format!("{host}:{port}")
+}
+
 /// The entry a forward request just appended: the one the panel did not have
 /// before it asked.
 ///
@@ -201,8 +213,22 @@ impl Tty59App {
             .and_then(|id| uuid::Uuid::parse_str(&id).ok());
 
         let theme = cx.theme();
-        let (danger, foreground) = (theme.danger, theme.foreground);
+        let (danger, foreground, muted) = (theme.danger, theme.foreground, theme.muted_foreground);
         let theme_popover = theme.popover;
+
+        // The chord was spelled "⌘⇧R" here. That is one platform's
+        // rendering of one default: off macOS it names a modifier the
+        // keyboard does not have, and either way it kept saying ⌘⇧R after
+        // the user had rebound Reconnect to something else. Ask the keymap
+        // for the first stroke, and say nothing at all when the action carries
+        // no binding.
+        let chord = crate::ui::keymap::effective_key("RestartSshSession", cx)
+            .and_then(|spec| crate::ui::keymap::key_chords(&spec).into_iter().next())
+            .map(|keys| crate::ui::dialog::chord(keys, cx));
+        // A chord that is built is not a chord that is drawn: this is what lets a
+        // test ask the real window whether it was laid out.
+        #[cfg(test)]
+        let chord = chord.map(|chord| chord.debug_selector(|| "ssh-strip-chord".into()));
 
         let bar = crate::ui::notice::pill(danger, cx)
             .child(
@@ -216,30 +242,32 @@ impl Tty59App {
                     }),
             )
             .children(reason.map(|reason| {
-                // The reason is whatever ssh said, and it runs past 360px more
-                // often than not — a truncated "…" was the only account of a
-                // rejected key the pane had left, its own output having
-                // scrolled away. Hovering gives the whole sentence back.
+                // The reason is whatever ssh said, and it runs long more often
+                // than not — a rejected key's account used to be one truncated
+                // line with "…" for the rest, its pane's own output having
+                // scrolled away. It wraps to two lines instead, in the muted
+                // ink: the dot is the strip's one red. The tooltip still gives
+                // back the whole sentence past the second line.
                 let full = reason.clone();
-                div()
+                let line = div()
                     .id("ssh-strip-reason")
-                    .max_w(px(360.))
-                    .truncate()
-                    .text_color(danger)
+                    .min_w_0()
+                    .max_w(px(REASON_MAX_W))
+                    .line_clamp(2)
+                    .text_color(muted)
                     .tooltip(move |window, cx| {
                         gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
                     })
-                    .child(reason)
+                    .child(reason);
+                #[cfg(test)]
+                let mut line = line;
+                #[cfg(test)]
+                crate::ui::paint_probe::note("ssh.reason", &mut line);
+                #[cfg(test)]
+                let line = line.debug_selector(|| "ssh-strip-reason".into());
+                line
             }))
-            // The chord was spelled "⌘⇧R" here. That is one platform's
-            // rendering of one default: off macOS it names a modifier the
-            // keyboard does not have, and either way it kept saying ⌘⇧R after
-            // the user had rebound Reconnect to something else. Ask the keymap,
-            // and say nothing at all when the action carries no binding.
-            .children(
-                crate::ui::home::key_hint("RestartSshSession", cx)
-                    .map(|keys| div().child(format!("· {keys}"))),
-            )
+            .children(chord)
             .child(
                 // The strip's one action, as v4's primary: inverted neutral on
                 // the popover fill the pill floats on. The red is the edge
@@ -253,13 +281,21 @@ impl Tty59App {
                     ),
             )
             .children(profile.map(|id| {
-                Button::new("ssh-edit-profile")
+                // Quiet until pointed at, so Reconnect is the one thing that
+                // leads; the hover is the ghost button's own.
+                let edit = Button::new("ssh-edit-profile")
                     .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::SshEditProfile))
                     .ghost()
                     .small()
+                    .text_color(muted)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_ssh_profile_in_settings(id, window, cx)
-                    }))
+                    }));
+                #[cfg(test)]
+                let mut edit = edit;
+                #[cfg(test)]
+                crate::ui::paint_probe::note("ssh.edit-host", &mut edit);
+                edit
             }));
         // The bar only. `body_area` anchors it, together with whatever else is
         // floating down there — this used to place itself at `bottom_4` and so
@@ -285,30 +321,128 @@ impl Tty59App {
         // nothing; it is drawn quiet, not red.
         let off = !forward.enabled;
         let errored = !off && matches!(forward.status, ForwardStatus::Error(_));
-        let bind = if matches!(forward.bind_host.as_str(), "127.0.0.1" | "localhost" | "") {
-            forward.bind_port.to_string()
-        } else {
-            format!("{}:{}", forward.bind_host, forward.bind_port)
-        };
-        let mapping = match forward.kind {
-            SshForwardKind::Dynamic => "SOCKS".to_string(),
-            _ => format!("→ {}:{}", forward.target_host, forward.target_port),
-        };
-        let tail = match &forward.status {
-            _ if off => mapping,
-            ForwardStatus::Error(msg) => msg.clone(),
-            ForwardStatus::Listening => mapping,
-        };
+        // Loopback is the unmarked case and the chip is the bare port; any other
+        // bind says which interface it listens on.
+        let bind_host = (!matches!(forward.bind_host.as_str(), "127.0.0.1" | "localhost" | ""))
+            .then(|| gpui::SharedString::from(forward.bind_host.as_str()));
         let pane_id = forward.pane_id;
         let forward_id = forward.id;
         let forward_for_edit = forward.clone();
         let group = gpui::SharedString::from(format!("panel-forward-{forward_id}"));
         // A switched-off rule reads dimmer through its muted ink and the
-        // absence of the accent chip, never through a container fade: half
-        // opacity dropped muted text under 4.5:1 on soft palettes.
+        // absence of the chip's wash, never through a container fade: half
+        // opacity dropped muted text under 4.5:1 on soft palettes. A live one
+        // wears the same neutral wash and floored ink as a port's chip; the
+        // accent is not spent on a number that is not an error.
         let (chip_fill, chip_ink) = match off {
             true => (gpui::transparent_black(), muted),
-            false => (theme.accent, theme.foreground),
+            false => (
+                gpui::Hsla::from(gpui::rgb(crate::ui::theme::fill_pole(cx)))
+                    .opacity(crate::ui::presets::PORT_CHIP_WASH),
+                gpui::rgb(crate::ui::theme::chrome_ink(cx).port_chip_ink).into(),
+            ),
+        };
+        // A bind that names an interface makes a chip too wide to share the
+        // line with a target on a narrow panel, and what each would lose to
+        // fit is a choice with no right answer. The line wraps instead: the
+        // target takes its own full-width line below the chip when the two
+        // cannot sit side by side, and nothing gives way to the other. The
+        // target then sizes from its content (`flex_auto`) rather than from
+        // zero (`flex_1`), which would never be wider than the room left on
+        // the chip's line and so would never wrap.
+        let wraps = bind_host.is_some();
+        let grows = |line: Div| {
+            if wraps {
+                line.flex_auto()
+            } else {
+                line.flex_1()
+            }
+        };
+        let mono_text = |line: Div| {
+            line.min_w_0()
+                .text_size(rems(TEXT_MONO))
+                .font_family(mono.clone())
+                .text_color(if errored { theme.danger } else { muted })
+        };
+        // What the row says after the chip. A listening or switched-off rule
+        // is a mapping: the target host gives way to the room it is handed and
+        // its `:port` is a sibling that never does, so what the rule opens is
+        // always readable. An error or a SOCKS proxy has no target to split.
+        let target = match (&forward.status, forward.kind) {
+            (ForwardStatus::Error(msg), _) if !off => mono_text(grows(div()).truncate())
+                .child(msg.clone())
+                .into_any_element(),
+            (_, SshForwardKind::Dynamic) => mono_text(grows(div()).truncate())
+                .child("SOCKS")
+                .into_any_element(),
+            _ => {
+                // The host as the rule holds it: an IPv6 literal keeps the
+                // spelling it was saved with, and the port is a field of its
+                // own, so no `:` is ever taken for a separator. The tooltip
+                // builds the whole address only when it is asked for.
+                let host = gpui::SharedString::from(forward.target_host.as_str());
+                let port = forward.target_port;
+                let full_host = host.clone();
+                let port_text = div().flex_none().child(format!(":{port}"));
+                #[cfg(test)]
+                let port_text = port_text.debug_selector(|| format!("forward-port-{forward_id}"));
+                let line = mono_text(grows(h_flex()).overflow_hidden())
+                    .id(("panel-forward-target-row", forward_id as usize))
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(target_address(&full_host, port))
+                            .build(window, cx)
+                    })
+                    .child(div().flex_none().mr(px(5.)).child("→"))
+                    .child(ElidedLabel::new(
+                        ("panel-forward-target", forward_id as usize),
+                        host,
+                        Mode::Middle,
+                    ))
+                    .child(port_text);
+                #[cfg(test)]
+                let line = line.debug_selector(|| format!("forward-target-{forward_id}"));
+                line.into_any_element()
+            }
+        };
+        let bind_port = forward.bind_port;
+        let chip = match bind_host {
+            None => {
+                crate::ui::right_panel::info_chip(&bind_port.to_string(), chip_fill, chip_ink, mono)
+            }
+            // The same pill, its host elided against the room it is handed and
+            // its port a sibling that never gives way. The tooltip builds the
+            // whole address when asked.
+            Some(host) => {
+                let full_host = host.clone();
+                let bind_port_text = div().flex_none().child(format!(":{bind_port}"));
+                #[cfg(test)]
+                let bind_port_text =
+                    bind_port_text.debug_selector(|| format!("forward-bind-port-{forward_id}"));
+                let shell = crate::ui::right_panel::pill_shell(chip_fill, chip_ink, mono)
+                    .id(("panel-forward-bind", forward_id as usize))
+                    .flex()
+                    .items_center()
+                    // Past the line itself the host inside is elided, the
+                    // port after it kept; short of that it is whole.
+                    .max_w_full()
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(target_address(&full_host, bind_port))
+                            .build(window, cx)
+                    })
+                    .child(ElidedLabel::new(
+                        ("panel-forward-bind-host", forward_id as usize),
+                        host,
+                        Mode::Middle,
+                    ))
+                    .child(bind_port_text);
+                #[cfg(test)]
+                let mut shell = shell;
+                #[cfg(test)]
+                crate::ui::paint_probe::note("forwards.bind-chip", &mut shell);
+                #[cfg(test)]
+                let shell = shell.debug_selector(|| format!("forward-chip-{forward_id}"));
+                shell.into_any_element()
+            }
         };
         let column = v_flex()
             .flex_1()
@@ -318,19 +452,9 @@ impl Tty59App {
                 h_flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(crate::ui::right_panel::info_chip(
-                        &bind, chip_fill, chip_ink, mono,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(rems(TEXT_MONO))
-                            .font_family(mono.clone())
-                            .text_color(if errored { theme.danger } else { muted })
-                            .child(tail),
-                    ),
+                    .when(wraps, |line| line.flex_wrap())
+                    .child(chip)
+                    .child(target),
             )
             .when_some(forward.description.clone(), |this, desc| {
                 this.child(
@@ -346,7 +470,7 @@ impl Tty59App {
         #[cfg(test)]
         crate::ui::paint_probe::note("forwards.column", &mut column);
 
-        h_flex()
+        let row = h_flex()
             .id(("panel-forward", forward_id as usize))
             .group(group.clone())
             .items_center()
@@ -425,7 +549,10 @@ impl Tty59App {
                             },
                         )),
                     ),
-            )
+            );
+        #[cfg(test)]
+        let row = row.debug_selector(|| format!("forward-row-{forward_id}"));
+        row
     }
 
     /// The form that adds a forward.
@@ -494,39 +621,40 @@ impl Tty59App {
                 }),
             )
             .when(!advanced, |form| {
-                form.child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(rems(META))
-                                .text_color(muted)
-                                .child(t(L10nKey::ForwardPortLabel)),
-                        )
-                        .child(
-                            div()
-                                .w(px(64.))
-                                .child(Input::new(&self.loopback_panel.mf_target_port).xsmall()),
-                        )
-                        // Where the port will come out, said before the click
-                        // rather than after it. The number is the same one on
-                        // both ends unless it is taken here, which is the case
-                        // the row itself reports once the forward exists.
-                        .children(rule.as_ref().map(|r| {
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(rems(META))
-                                .text_color(muted)
-                                .child(t_fmt(
-                                    L10nKey::ForwardPortHere,
-                                    &[("port", &r.bind_port.to_string())],
-                                ))
-                        })),
-                )
+                let port_input = div()
+                    .w(px(64.))
+                    .child(Input::new(&self.loopback_panel.mf_target_port).xsmall());
+                #[cfg(test)]
+                let port_input = port_input.debug_selector(|| "forward-port-input".into());
+                let port_row = h_flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(rems(META))
+                            .text_color(muted)
+                            .child(t(L10nKey::ForwardPortLabel)),
+                    )
+                    .child(port_input);
+                #[cfg(test)]
+                let port_row = port_row.debug_selector(|| "forward-port-row".into());
+                form.child(port_row)
+                    // Where the port will come out, said before the click
+                    // rather than after it, and on a line of its own: beside
+                    // the field it was the sentence a 260px panel cut off. The
+                    // number is the same one on both ends unless it is taken
+                    // here, which is the case the row itself reports once the
+                    // forward exists.
+                    .children(rule.as_ref().map(|r| {
+                        let hint = div().text_size(rems(META)).text_color(muted).child(t_fmt(
+                            L10nKey::ForwardPortHere,
+                            &[("port", &r.bind_port.to_string())],
+                        ));
+                        #[cfg(test)]
+                        let hint = hint.debug_selector(|| "forward-port-hint".into());
+                        hint
+                    }))
             })
             .when(advanced, |form| {
                 form.child(self.segmented(
@@ -849,9 +977,9 @@ mod tests {
     }
 }
 
-/// Remote F21 through the real app render: the Info tab is drawn with forward
-/// rows and the advanced form, and the paints the builders assigned are read
-/// back from the scoped probe.
+/// Remote F21 and F10 through the real app render: the Info tab is drawn with
+/// forward rows and the advanced form, and the paints the builders assigned are
+/// read back from the scoped probe.
 #[cfg(test)]
 mod contrast_tests {
     use gpui::TestAppContext;
@@ -861,6 +989,7 @@ mod contrast_tests {
     use crate::ui::app::test_window::harness_with_tabs;
     use crate::ui::dialog::test_themes as themes;
     use crate::ui::paint_probe as probe;
+    use crate::ui::presets::PORT_CHIP_WASH;
     use crate::ui::right_panel::test_panel::{open_info, port};
 
     fn forward(id: u64, bind_port: u16, enabled: bool) -> ManagedForward {
@@ -882,7 +1011,7 @@ mod contrast_tests {
     }
 
     #[gpui::test]
-    fn an_off_forward_is_quiet_without_a_fade_or_an_accent_chip(cx: &mut TestAppContext) {
+    fn an_off_forward_is_quiet_and_a_live_one_wears_the_neutral_chip(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
         open_info(
             &app,
@@ -894,10 +1023,11 @@ mod contrast_tests {
 
         for theme in &themes::themes() {
             themes::apply(&mut vcx, theme);
-            let (muted, foreground, accent) = vcx.update(|_, cx| {
+            let (muted, ink, pole, accent) = vcx.update(|_, cx| {
                 (
                     probe::hsla24(cx.theme().muted_foreground),
-                    probe::hsla24(cx.theme().foreground),
+                    crate::ui::theme::chrome_ink(cx),
+                    crate::ui::theme::fill_pole(cx),
                     probe::hsla24(cx.theme().accent),
                 )
             });
@@ -940,19 +1070,26 @@ mod contrast_tests {
             );
             assert_eq!(
                 live.fill,
-                Some(accent),
-                "{id}: the live chip keeps its accent fill"
+                Some(pole),
+                "{id}: the live chip washes with the shared fill pole"
             );
-            assert_eq!(
-                live.fill_alpha,
-                Some(1.0),
-                "{id}: the live chip fill is solid"
+            assert_ne!(
+                live.fill,
+                Some(accent),
+                "{id}: an ordinary mapping does not spend the accent"
+            );
+            assert!(
+                live.fill_alpha
+                    .is_some_and(|a| (a - PORT_CHIP_WASH).abs() < 0.005),
+                "{id}: the live chip keeps the shared wash alpha, got {:?}",
+                live.fill_alpha
             );
             assert_eq!(
                 live.text,
-                Some(foreground),
-                "{id}: the live chip keeps its ink"
+                Some(ink.port_chip_ink),
+                "{id}: the live chip wears the floored port ink"
             );
+            assert_eq!(live.text_alpha, Some(1.0), "{id}: the ink is solid");
             assert!(
                 probe::all("port.chip.hover").len() == 1,
                 "{id}: only the port row's chip answers the row's hover; forward chips do not"
@@ -995,5 +1132,653 @@ mod contrast_tests {
                 "{kind:?}: no pair stands in faded"
             );
         }
+    }
+}
+
+/// Remote F10, F12 and F19 through the real render: what each label painted,
+/// and where layout put it.
+///
+/// `TestAppContext` shapes through gpui's `NoopTextSystem`, where every `char`
+/// advances the same fraction of the font size, so widths are compared with one
+/// another and with the labels' own prepared text, never with constants. What
+/// a real font does to them is for the native captures, and a tooltip's
+/// appearance under a real pointer is too: nothing here hovers.
+#[cfg(test)]
+mod layout_tests {
+    use gpui::{ElementId, TestAppContext, VisualTestContext, px};
+
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::paint_probe as probe;
+    use crate::ui::right_panel::test_panel::{open_info, port};
+    use crate::ui::text_elision::observe;
+
+    const LONG_HOST: &str = "reporting-replica-eu-west-1b.internal.platform.example.com";
+
+    fn mapping(id: u64, bind_host: &str, host: &str, port: u16) -> ManagedForward {
+        ManagedForward {
+            id,
+            pane_id: 1,
+            kind: SshForwardKind::Local,
+            bind_host: bind_host.into(),
+            bind_port: 5432,
+            target_host: host.into(),
+            target_port: port,
+            description: None,
+            status: ForwardStatus::Listening,
+            enabled: true,
+        }
+    }
+
+    /// Lets the app settle, forgets what earlier frames observed, and draws.
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        observe::clear();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn label(id: u64) -> Option<observe::Label> {
+        observe::label(&ElementId::from(("panel-forward-target", id as usize)))
+    }
+
+    /// The width the forward panel is drawn at in these tests: the 260px a
+    /// narrow window gives it, above the panel's 240px floor.
+    const PANEL_W: f32 = 260.;
+
+    /// A panel wide enough for a short bind chip and a short target to share
+    /// one line, which 260px is not once the switch, the remove tile and the
+    /// fixed ports are counted.
+    const WIDE_PANEL_W: f32 = 420.;
+
+    fn set_panel_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        set_width(app, vcx, PANEL_W);
+    }
+
+    fn set_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext, width: f32) {
+        app.update_in(vcx, |app, _, cx| {
+            app.right_panel_width.set(width);
+            cx.notify();
+        });
+    }
+
+    /// The panel is really `PANEL_W` wide: the width layout used, read back
+    /// after the clamp that keeps it between its floor and its ceiling.
+    fn assert_panel_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        assert_width(app, vcx, PANEL_W);
+    }
+
+    fn assert_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext, width: f32) {
+        let used = app.update_in(vcx, |app, window, cx| app.right_panel_px(window, cx));
+        assert_eq!(used, width, "the panel was clamped away from {width}");
+    }
+
+    fn show(
+        app: &gpui::Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        forwards: Vec<ManagedForward>,
+    ) {
+        app.update_in(vcx, |app, _, cx| {
+            app.loopback_panel.managed = forwards;
+            cx.notify();
+        });
+        set_panel_width(app, vcx);
+        draw(vcx);
+        assert_panel_width(app, vcx);
+    }
+
+    /// What `…` kept of `source` on each side. Both are derived from the text
+    /// that was cut, so the assertion is "this is a real head and a real tail
+    /// of it", not a guess at how many characters a width buys.
+    fn ends(shown: &str, source: &str) -> (String, String) {
+        let (head, tail) = shown
+            .split_once('…')
+            .unwrap_or_else(|| panic!("{shown:?} was not elided"));
+        assert!(!head.is_empty(), "{shown:?} kept no head of {source:?}");
+        assert!(!tail.is_empty(), "{shown:?} kept no tail of {source:?}");
+        assert!(
+            source.starts_with(head),
+            "{head:?} is not a head of {source:?}"
+        );
+        assert!(
+            source.ends_with(tail),
+            "{tail:?} is not a tail of {source:?}"
+        );
+        assert!(head.len() + tail.len() < source.len(), "nothing was cut");
+        (head.to_string(), tail.to_string())
+    }
+
+    /// The host gives way and the port does not: beside a host that fits, the
+    /// port of a host that was cut is exactly as wide, and sits inside the row.
+    #[gpui::test]
+    fn a_long_host_is_elided_while_its_port_stays_whole(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(&app, &mut vcx, vec![port(3000, 42, "node")], Vec::new());
+        show(
+            &app,
+            &mut vcx,
+            vec![
+                mapping(9, "127.0.0.1", LONG_HOST, 5432),
+                mapping(10, "127.0.0.1", "db", 5432),
+            ],
+        );
+
+        let cut = label(9).expect("the long host's label was drawn");
+        assert!(cut.painted, "{cut:?}");
+        ends(&cut.text, LONG_HOST);
+        let whole = label(10).expect("the short host's label was drawn");
+        assert_eq!(&*whole.text, "db");
+        assert!(whole.painted);
+
+        let long_port = vcx
+            .debug_bounds("forward-port-9")
+            .expect("long port laid out");
+        let short_port = vcx
+            .debug_bounds("forward-port-10")
+            .expect("short port laid out");
+        let row = vcx
+            .debug_bounds("forward-target-9")
+            .expect("target row laid out");
+        assert_eq!(
+            long_port.size.width, short_port.size.width,
+            "the port is as wide beside a cut host as beside a whole one"
+        );
+        assert!(long_port.size.width > px(0.));
+        assert!(
+            long_port.right() <= row.right(),
+            "{long_port:?} inside {row:?}"
+        );
+    }
+
+    /// An IPv6 literal is the field as saved: nothing is bracketed, split or
+    /// reparsed, so a host that fits is painted verbatim and a long one is cut
+    /// by the same elision, its kept ends being real ends of the literal.
+    #[gpui::test]
+    fn an_ipv6_literal_keeps_its_spelling_and_its_port(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(&app, &mut vcx, vec![port(3000, 42, "node")], Vec::new());
+        let scoped = "fe80::a00:27ff:fe4e:66a1%enp0s31f6-with-a-very-long-scope-name";
+        show(
+            &app,
+            &mut vcx,
+            vec![
+                mapping(9, "127.0.0.1", "::1", 8080),
+                mapping(10, "127.0.0.1", scoped, 8080),
+            ],
+        );
+
+        let short = label(9).expect("drawn");
+        assert_eq!(
+            &*short.text, "::1",
+            "a literal that fits is painted as saved"
+        );
+        let cut = label(10).expect("drawn");
+        ends(&cut.text, scoped);
+        assert!(
+            !cut.text.contains('[') && !short.text.contains('['),
+            "no bracket is invented"
+        );
+        let a = vcx.debug_bounds("forward-port-9").expect("laid out");
+        let b = vcx.debug_bounds("forward-port-10").expect("laid out");
+        assert_eq!(a.size.width, b.size.width, "the port is whole on both");
+        // The whole address the tooltip hands back, spelled the way the rule
+        // holds it. Only the string is checked: hovering is for the native run.
+        assert_eq!(target_address("fe80::1", 8080), "fe80::1:8080");
+        assert_eq!(target_address(scoped, 8080), format!("{scoped}:8080"));
+    }
+
+    fn bind_label(id: u64) -> Option<observe::Label> {
+        observe::label(&ElementId::from(("panel-forward-bind-host", id as usize)))
+    }
+
+    /// A bind host as long as a person can type: the chip is as wide as its
+    /// line and no wider, its host elided inside it with the `:port` kept, and
+    /// the target wrapped onto a line of its own below it instead of being
+    /// squeezed out beside it. A guarantee about the 260px panel; the wrap is
+    /// what spares the target, so it never goes without a host character.
+    #[gpui::test]
+    fn a_long_bind_host_is_elided_in_its_chip_and_the_target_wraps_below(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(&app, &mut vcx, vec![port(3000, 42, "node")], Vec::new());
+        show(&app, &mut vcx, vec![mapping(9, "0.0.0.0", LONG_HOST, 5432)]);
+        let target_port_width = vcx
+            .debug_bounds("forward-port-9")
+            .expect("laid out")
+            .size
+            .width;
+        let bind_port_width = vcx
+            .debug_bounds("forward-bind-port-9")
+            .expect("laid out")
+            .size
+            .width;
+
+        let mut wrapped_text = None;
+        let mut chip_widths = Vec::new();
+        let mut bind_kept_all = Vec::new();
+        let mut bind_was_cut = false;
+        for extra in 0..60 {
+            let bind = format!("lan-{}-gateway", "x".repeat(extra));
+            show(
+                &app,
+                &mut vcx,
+                vec![
+                    mapping(9, &bind, LONG_HOST, 5432),
+                    mapping(10, "127.0.0.1", "db", 5432),
+                ],
+            );
+
+            let target = label(9).expect("the target label is drawn at every width");
+            assert!(
+                target.text.chars().any(|c| c != '…'),
+                "{extra}: no target host is left"
+            );
+            let host = bind_label(9).expect("the bind host label is drawn at every width");
+            let bind_kept = host.text.chars().filter(|c| *c != '…').count();
+            assert!(bind_kept >= 1, "{extra}: no bind host is left");
+            bind_kept_all.push(bind_kept);
+            if host.text.contains('…') {
+                bind_was_cut = true;
+                ends(&host.text, &bind);
+            }
+
+            let row = vcx.debug_bounds("forward-row-9").expect("row laid out");
+            let chip = vcx.debug_bounds("forward-chip-9").expect("chip laid out");
+            let target_row = vcx.debug_bounds("forward-target-9").expect("laid out");
+            let target_port = vcx.debug_bounds("forward-port-9").expect("laid out");
+            let bind_port = vcx.debug_bounds("forward-bind-port-9").expect("laid out");
+            assert_eq!(target_port.size.width, target_port_width, "{extra}");
+            assert_eq!(bind_port.size.width, bind_port_width, "{extra}");
+            assert!(
+                target_port.right() <= target_row.right()
+                    && target_port.left() >= target_row.left(),
+                "{extra}: {target_port:?} is outside {target_row:?}"
+            );
+            assert!(
+                bind_port.right() <= chip.right() && bind_port.left() >= chip.left(),
+                "{extra}: {bind_port:?} is outside {chip:?}"
+            );
+            assert!(
+                chip.right() <= row.right() && target_row.right() <= row.right(),
+                "{extra}: the line outgrew its row: {chip:?} {target_row:?} in {row:?}"
+            );
+            chip_widths.push(chip.size.width);
+
+            // Wrapped: the target is below the chip, not beside it, and the
+            // same text is shown at every width that wraps, because it then
+            // has the whole line whatever the chip is doing.
+            if chip.bottom() <= target_row.top() {
+                assert!(
+                    chip.size.width <= target_row.size.width,
+                    "{extra}: the chip is wider than the line it sits on"
+                );
+                match &wrapped_text {
+                    None => wrapped_text = Some(target.text.clone()),
+                    Some(first) => assert_eq!(
+                        &target.text, first,
+                        "{extra}: the wrapped target changed with the chip"
+                    ),
+                }
+            }
+        }
+        assert!(bind_was_cut, "the sweep never made the bind host give way");
+        assert!(wrapped_text.is_some(), "the target never wrapped below");
+        assert!(
+            bind_kept_all
+                .iter()
+                .rev()
+                .take(10)
+                .all(|k| *k == bind_kept_all[59]),
+            "once the chip is as wide as its line the host gets the same room: {bind_kept_all:?}"
+        );
+        let cap = chip_widths[chip_widths.len() - 1];
+        assert!(
+            chip_widths.iter().rev().take(10).all(|w| *w == cap),
+            "the chip kept growing past its line: {chip_widths:?}"
+        );
+    }
+
+    /// A short bind host is whole however long the target is: the target
+    /// wraps below it and is the one that gives way. The row grows by the
+    /// second line, and the next row starts under it rather than over it.
+    #[gpui::test]
+    fn a_short_bind_host_stays_whole_and_the_target_wraps_below_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(&app, &mut vcx, vec![port(3000, 42, "node")], Vec::new());
+        show(
+            &app,
+            &mut vcx,
+            vec![
+                mapping(9, "0.0.0.0", LONG_HOST, 5432),
+                mapping(10, "127.0.0.1", "db", 5432),
+            ],
+        );
+        let bind = bind_label(9).expect("drawn");
+        assert_eq!(&*bind.text, "0.0.0.0");
+        assert!(bind.painted);
+        ends(&label(9).expect("drawn").text, LONG_HOST);
+
+        let chip = vcx.debug_bounds("forward-chip-9").expect("laid out");
+        let target = vcx.debug_bounds("forward-target-9").expect("laid out");
+        let row = vcx.debug_bounds("forward-row-9").expect("laid out");
+        let next = vcx.debug_bounds("forward-row-10").expect("laid out");
+        assert!(
+            chip.bottom() <= target.top(),
+            "the target wrapped below the chip: {chip:?} {target:?}"
+        );
+        assert!(
+            row.size.height >= chip.size.height + target.size.height,
+            "the row grew by the second line: {row:?}"
+        );
+        assert!(
+            next.top() >= row.bottom(),
+            "the next row starts under the wrapped one: {next:?} {row:?}"
+        );
+        assert!(
+            row.size.height > next.size.height,
+            "the wrapped row is taller than the one-line row"
+        );
+    }
+
+    /// Wrapping is for the line that needs it: where a short bind chip and a
+    /// short target fit together they stay one line. At 260px they do not (the
+    /// chip, the target's arrow and ports and the row's switch and tile are
+    /// more than the column), so this is drawn at a wider panel, read back.
+    #[gpui::test]
+    fn a_short_bind_chip_and_a_short_target_share_one_line(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(&app, &mut vcx, vec![port(3000, 42, "node")], Vec::new());
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.loopback_panel.managed = vec![mapping(9, "0.0.0.0", "db", 80)];
+            cx.notify();
+        });
+        set_width(&app, &mut vcx, WIDE_PANEL_W);
+        draw(&mut vcx);
+        assert_width(&app, &mut vcx, WIDE_PANEL_W);
+        let chip = vcx.debug_bounds("forward-chip-9").expect("laid out");
+        let target = vcx.debug_bounds("forward-target-9").expect("laid out");
+        assert!(
+            target.top() < chip.bottom(),
+            "they share a line: {chip:?} {target:?}"
+        );
+        assert_eq!(&*bind_label(9).expect("drawn").text, "0.0.0.0");
+        assert_eq!(&*label(9).expect("drawn").text, "db");
+    }
+
+    /// F19: the hint is a line of its own under the 64px field, in the form's
+    /// own column, rather than a flex sibling the row cuts off.
+    #[gpui::test]
+    fn the_simple_form_hint_has_its_own_line_under_the_port_field(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(&app, &mut vcx, vec![port(3000, 42, "node")], Vec::new());
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.loopback_panel.form_pane_id = Some(1);
+            app.loopback_panel.mf_advanced = false;
+            app.loopback_panel
+                .mf_target_port
+                .update(cx, |input, cx| input.set_value("8080", window, cx));
+            cx.notify();
+        });
+        set_panel_width(&app, &mut vcx);
+        draw(&mut vcx);
+        assert_panel_width(&app, &mut vcx);
+
+        let row = vcx
+            .debug_bounds("forward-port-row")
+            .expect("port row laid out");
+        let input = vcx
+            .debug_bounds("forward-port-input")
+            .expect("input laid out");
+        let hint = vcx
+            .debug_bounds("forward-port-hint")
+            .expect("hint laid out");
+        assert_eq!(input.size.width, px(64.), "the field keeps its width");
+        assert!(
+            hint.top() >= row.bottom(),
+            "the hint sits under the row: {hint:?} vs {row:?}"
+        );
+        assert_eq!(hint.left(), row.left(), "in the form's own column");
+        assert!(
+            hint.size.width >= row.size.width / 2.,
+            "it is a line of the column, not a flex sibling squeezed beside the field"
+        );
+    }
+
+    /// A live ssh pane from a saved host (or a one-off address), in the app's
+    /// own window the way the tab tests build one.
+    fn live_ssh_app(
+        cx: &mut TestAppContext,
+        profile: Option<uuid::Uuid>,
+    ) -> (
+        gpui::Entity<Tty59App>,
+        VisualTestContext,
+        gpui::Entity<crate::terminal::view::TerminalView>,
+        crate::daemon::transport::Stream,
+    ) {
+        use crate::terminal::view::quiet_test_ssh_pane_of;
+        use crate::ui::app::{Tab, test_window::harness};
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx) = harness(cx);
+        let (pane, daemon) = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, end) = quiet_test_ssh_pane_of(1, profile, window, cx);
+            app.tabs
+                .push(Tab::new(Pane::leaf(PaneSlot::Ready(view.clone()))));
+            app.active = 0;
+            cx.notify();
+            (view, end)
+        });
+        vcx.background_executor.run_until_parked();
+        (app, vcx, pane, daemon)
+    }
+
+    /// The connect fails with `reason` and the link goes away, which is how a
+    /// real pane learns it is over without a child having exited: the reader
+    /// tears down and sends its exit event. Returns once the pane says so.
+    fn fail_ssh_pane(
+        vcx: &mut VisualTestContext,
+        pane: &gpui::Entity<crate::terminal::view::TerminalView>,
+        mut daemon: crate::daemon::transport::Stream,
+        reason: &str,
+    ) {
+        use crate::daemon::protocol::{DaemonMsg, SshPhase};
+
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Failed {
+                reason: reason.into(),
+            },
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        drop(daemon);
+        let ended = (0..200).any(|_| {
+            vcx.run_until_parked();
+            let ended = pane.update(vcx, |view, _| {
+                view.ssh_phase().is_some() && view.ssh_disconnected()
+            });
+            if !ended {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            ended
+        });
+        assert!(ended, "the pane never reported failed and disconnected");
+    }
+
+    /// The whole fixture in one: an ssh pane that failed and ended, in a
+    /// window that has not yet drawn the strip.
+    fn failed_ssh_app(
+        cx: &mut TestAppContext,
+        profile: Option<uuid::Uuid>,
+        reason: &str,
+    ) -> (gpui::Entity<Tty59App>, VisualTestContext) {
+        let (app, mut vcx, pane, daemon) = live_ssh_app(cx, profile);
+        fail_ssh_pane(&mut vcx, &pane, daemon, reason);
+        (app, vcx)
+    }
+
+    /// The whole path: an ssh pane from a saved host, the daemon's `Failed`
+    /// status, the link dropping so the pane ends through its own event path,
+    /// and the strip the app's render draws for it — reason and Edit host
+    /// included.
+    #[gpui::test]
+    fn a_failed_ssh_pane_draws_the_strip_through_the_apps_render(cx: &mut TestAppContext) {
+        let _probe = probe::scope();
+        let (_app, mut vcx, pane, daemon) = live_ssh_app(cx, Some(uuid::Uuid::nil()));
+        let muted = vcx.update(|_, cx| probe::hsla24(cx.theme().muted_foreground));
+
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("ssh-strip-reason").is_none(),
+            "a live pane has no strip"
+        );
+
+        let reason = "connect to 127.0.0.1:2299 failed: Connection refused (os error 111)";
+        fail_ssh_pane(&mut vcx, &pane, daemon, reason);
+        probe::clear();
+        draw(&mut vcx);
+        let drawn = vcx
+            .debug_bounds("ssh-strip-reason")
+            .expect("the strip's reason was drawn by the app's render");
+        assert!(drawn.size.width <= px(REASON_MAX_W));
+        let paint = probe::all("ssh.reason");
+        assert_eq!(paint.len(), 1);
+        assert_eq!(paint[0].text, Some(muted), "the reason is muted ink");
+        assert_eq!(probe::all("ssh.edit-host").len(), 1, "a saved connection");
+        assert!(
+            !probe::all("dialog.keycap").is_empty(),
+            "the chord is keycaps"
+        );
+        assert!(
+            vcx.debug_bounds("ssh-strip-chord").is_some(),
+            "the chord is drawn by the app's render, not only built"
+        );
+    }
+
+    #[gpui::test]
+    fn a_long_reason_wraps_to_two_muted_lines_within_its_width(cx: &mut TestAppContext) {
+        let _probe = probe::scope();
+        let short = "refused";
+        let medium =
+            "connect to 127.0.0.1:2299 failed: Connection refused (os error 111) ".repeat(3);
+        let endless =
+            "connect to 127.0.0.1:2299 failed: Connection refused (os error 111) ".repeat(20);
+
+        let mut heights = Vec::new();
+        for reason in [short.to_string(), medium, endless] {
+            let (_app, mut vcx) = failed_ssh_app(cx, None, &reason);
+            let muted = vcx.update(|_, cx| probe::hsla24(cx.theme().muted_foreground));
+            let danger = vcx.update(|_, cx| probe::hsla24(cx.theme().danger));
+            probe::clear();
+            draw(&mut vcx);
+            let bounds = vcx
+                .debug_bounds("ssh-strip-reason")
+                .expect("reason laid out");
+            assert!(
+                bounds.size.width <= px(REASON_MAX_W),
+                "{:?} is past the strip's maximum",
+                bounds.size.width
+            );
+            heights.push(bounds.size.height);
+            let paint = probe::all("ssh.reason");
+            assert_eq!(paint.len(), 1);
+            assert_eq!(paint[0].text, Some(muted), "the reason is muted ink");
+            assert_ne!(
+                paint[0].text,
+                Some(danger),
+                "the dot is the strip's one red"
+            );
+        }
+        assert!(heights[1] > heights[0], "a long reason wraps: {heights:?}");
+        assert_eq!(
+            heights[2], heights[1],
+            "and stops at two lines however long it is: {heights:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn the_reconnect_chord_is_the_effective_binding_as_keycaps(cx: &mut TestAppContext) {
+        use crate::core::config::{Config, KeybindingOverride};
+
+        let _probe = probe::scope();
+        let (app, mut vcx) = failed_ssh_app(cx, None, "refused");
+        // Every keycap the window draws, the strip's chord included: the
+        // chord's own is what the binding adds to the count with it unbound.
+        let caps = |app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            probe::clear();
+            draw(vcx);
+            probe::all("dialog.keycap").len()
+        };
+        let bind = |vcx: &mut VisualTestContext, keys: Vec<String>| {
+            vcx.update(|_, cx| {
+                let mut cfg = cx.global::<Config>().clone();
+                cfg.keybindings
+                    .insert("RestartSshSession".into(), KeybindingOverride::Exact(keys));
+                cx.set_global(cfg);
+            });
+        };
+
+        // The shipped chord, read from the keymap before anything overrides it.
+        let shipped = vcx.update(|_, cx| {
+            crate::ui::keymap::effective_key("RestartSshSession", cx)
+                .and_then(|spec| crate::ui::keymap::key_chords(&spec).into_iter().next())
+                .map_or(0, |keys| keys.len())
+        });
+        assert!(shipped >= 2, "a combination is one cap per key");
+        let with_default = caps(&app, &mut vcx);
+        // The paint probe notes a keycap when it is BUILT, so counts alone would
+        // also be satisfied by a chord that is built and then never drawn. The
+        // window's own layout answers whether it was drawn.
+        let default_chord = vcx
+            .debug_bounds("ssh-strip-chord")
+            .expect("the default chord is drawn");
+        assert!(default_chord.size.width > px(0.), "{default_chord:?}");
+
+        bind(&mut vcx, Vec::new());
+        let without = caps(&app, &mut vcx);
+        assert_eq!(with_default, without + shipped, "one cap per key");
+        assert!(
+            vcx.debug_bounds("ssh-strip-chord").is_none(),
+            "an unbound action draws no chord"
+        );
+
+        bind(&mut vcx, vec!["alt-x".to_string()]);
+        assert_eq!(caps(&app, &mut vcx), without + 2, "a rebind moves the caps");
+        let rebound = vcx
+            .debug_bounds("ssh-strip-chord")
+            .expect("the rebound chord is drawn");
+        assert!(
+            px(0.) < rebound.size.width && rebound.size.width < default_chord.size.width,
+            "two caps are narrower than the shipped combination: {rebound:?} vs {default_chord:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn edit_host_is_quiet_and_only_offered_for_a_saved_connection(cx: &mut TestAppContext) {
+        let _probe = probe::scope();
+
+        let (_one_off, mut vcx) = failed_ssh_app(cx, None, "refused");
+        probe::clear();
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("ssh-strip-reason").is_some(),
+            "the strip is drawn, so its missing button means something"
+        );
+        assert!(
+            probe::all("ssh.edit-host").is_empty(),
+            "a one-off address has no host to edit"
+        );
+
+        let (_saved, mut vcx) = failed_ssh_app(cx, Some(uuid::Uuid::nil()), "refused");
+        let muted = vcx.update(|_, cx| probe::hsla24(cx.theme().muted_foreground));
+        probe::clear();
+        draw(&mut vcx);
+        let edit = probe::all("ssh.edit-host");
+        assert_eq!(edit.len(), 1);
+        assert_eq!(
+            edit[0].text,
+            Some(muted),
+            "muted until the button's own hover"
+        );
     }
 }

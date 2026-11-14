@@ -391,10 +391,7 @@ impl Tty59App {
                     String::new()
                 } else {
                     let local = f.host.id() == local_host;
-                    let mut segs =
-                        super::nav::path_segments(&f.path, if local { roots } else { &[] });
-                    segs.pop();
-                    segs.join("/")
+                    super::nav::path_crumbs(&f.path, if local { roots } else { &[] }).0
                 };
                 Some(PickerRow {
                     id,

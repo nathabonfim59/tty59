@@ -739,7 +739,11 @@ impl Tab {
 
     /// The leaf a tab names itself after — its title and, with it, the home
     /// that title's path is measured against.
-    fn title_leaf(&self, window: Option<&Window>, cx: &App) -> Option<Entity<TerminalView>> {
+    pub(crate) fn title_leaf(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> Option<Entity<TerminalView>> {
         let leaf = match window {
             Some(window) => self
                 .pane
@@ -1780,10 +1784,7 @@ impl Tty59App {
             sftp_panel,
             right_panel: Default::default(),
             scm: crate::ui::scm::ScmPanelState {
-                graph: crate::ui::scm::GraphState {
-                    expanded: scm_graph_expanded,
-                    ..Default::default()
-                },
+                graph: crate::ui::scm::GraphState::new(scm_graph_expanded),
                 ..Default::default()
             },
             github: Default::default(),
