@@ -449,7 +449,9 @@ impl Tty59App {
                 (Some(then), _) => {
                     crate::ui::home::relative_time(crate::core::config::unix_now(), then)
                 }
-                (None, _) => t(L10nKey::SettingsNever).to_string(),
+                // A host that never connected says nothing — "Never" on every
+                // row was noise beside the rows that had a real time.
+                (None, _) => String::new(),
             };
             (text, tk.k4)
         };
@@ -495,14 +497,17 @@ impl Tty59App {
                         )
                     }),
             )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .text_size(fs(12.))
-                    .text_color(meta_color)
-                    .child(meta),
-            )
+            .when(!meta.is_empty(), |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || format!("ssh-host-meta-{}", id.as_u128()))
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .text_size(fs(12.))
+                        .text_color(meta_color)
+                        .child(meta),
+                )
+            })
             .child(
                 div().size(px(10.)).flex_shrink_0().child(
                     Icon::empty()

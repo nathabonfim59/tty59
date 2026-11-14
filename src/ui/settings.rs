@@ -1472,6 +1472,13 @@ fn profiles_sharing_endpoint(cfg: &Config, id: Uuid) -> usize {
 
 pub(crate) struct SshProfileForm {
     editing: Uuid,
+    /// What the form produced the moment it was loaded — the normalized
+    /// profile and the complaints validation had about it — so "unsaved"
+    /// means "differs from what was opened", not "differs from disk". A
+    /// just-added host's untouched form compares equal to itself and is
+    /// clean, while text that only fails validation still counts as an edit.
+    /// A successful save moves this to what was written.
+    seeded: Option<(SshProfile, SshFormErrors)>,
     carry_group: Option<String>,
     carry_credential_ref: Option<CredentialRef>,
 
@@ -2431,6 +2438,7 @@ impl Tty59App {
 
         let form = SshProfileForm {
             editing: profile.id,
+            seeded: None,
             carry_group: profile.group.clone(),
             carry_credential_ref: profile.credential_ref.clone(),
             name,
@@ -2480,6 +2488,14 @@ impl Tty59App {
             // A saved host edits in its own row; a new one gets a row of its
             // own at the top, so nothing else is shown opened.
             s.ssh_open = known.then_some(editing);
+        }
+        // What "edited" means is decided against what the form opened as, so
+        // the baseline is the collect result of the seeded fields — a form
+        // nobody has typed into, including a brand-new host with no saved
+        // profile to point at, compares equal to itself.
+        let seeded = self.ssh_form_collect(cx);
+        if let Some(form) = self.ssh_form_mut() {
+            form.seeded = seeded;
         }
         cx.notify();
     }
@@ -2592,6 +2608,15 @@ impl Tty59App {
             return None;
         }
         self.save_ssh_form_secrets(&profile, window, cx);
+        // The caller decides when the form closes, and until then what it
+        // holds is exactly what is on disk: move the baseline it compares
+        // against so the freshly saved edits do not read as unsaved. This
+        // only runs after the write actually persisted — a failed save keeps
+        // the old baseline and the edits stay flagged.
+        let seeded = self.ssh_form_collect(cx);
+        if let Some(form) = self.ssh_form_mut() {
+            form.seeded = seeded;
+        }
         Some(id)
     }
 
@@ -2744,20 +2769,16 @@ impl Tty59App {
 
     /// Whether the SSH profile form on screen holds edits that were never
     /// saved. Save is enabled off exactly this, so closing on it is the same
-    /// question the button already answers — and it compares what the form
-    /// would save even when the form cannot be saved yet, so a half-typed new
-    /// host is still something Escape has to ask about.
+    /// question the button already answers. The yardstick is what the form
+    /// was loaded as — profile and validation complaints both — so a form
+    /// nobody has touched is clean even for a host that is not on disk yet,
+    /// while text that only fails validation still counts, and a half-typed
+    /// new host is still something Escape has to ask about.
     pub(crate) fn ssh_form_dirty(&self, cx: &App) -> bool {
         let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
             return false;
         };
-        let saved = cx
-            .global::<Config>()
-            .ssh_profiles
-            .iter()
-            .find(|p| p.id == form.editing)
-            .cloned();
-        self.ssh_form_collect(cx).map(|(profile, _)| profile) != saved || form.secrets_changed(cx)
+        self.ssh_form_collect(cx).as_ref() != form.seeded.as_ref() || form.secrets_changed(cx)
     }
 
     /// Closing from Escape or the X is the user leaving; every other caller
@@ -4258,6 +4279,289 @@ mod gpui_tests {
                 "saved.example.com"
             );
         });
+    }
+
+    /// The host form used to ask "is this host on disk?", which is always no
+    /// for one that was just added — so an untouched New host read "Unsaved"
+    /// and every nav click opened the save prompt over nothing. It now asks
+    /// whether the form differs from what it was loaded with.
+    #[gpui::test]
+    fn an_untouched_new_host_is_clean_and_leaves_without_asking(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.add_new_profile(window, cx);
+        });
+        vcx.run_until_parked();
+
+        assert!(
+            !vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx)),
+            "a form nobody has typed in has nothing to save"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.navigate_settings(SettingsSection::General, None, window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(
+            !vcx.has_pending_prompt(),
+            "leaving a clean new host must not ask to save it"
+        );
+        app.update_in(&mut vcx, |app, _, _cx| {
+            assert!(app.active_settings().unwrap().section == SettingsSection::General);
+        });
+    }
+
+    /// Every kind of edit flags a form that started clean, and undoing it is
+    /// clean again: a text field, a toggle, text validation cannot turn into
+    /// a profile, and a secret the profile itself never sees.
+    #[gpui::test]
+    fn a_new_host_flags_each_kind_of_edit_and_clears_on_revert(cx: &mut TestAppContext) {
+        use gpui_component::input::InputState;
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.add_new_profile(window, cx);
+        });
+        vcx.run_until_parked();
+        let dirty =
+            |vcx: &mut VisualTestContext| vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx));
+        let set = |vcx: &mut VisualTestContext, input: &Entity<InputState>, value: &str| {
+            app.update_in(vcx, |_app, window, cx| {
+                input.update(cx, |i, cx| i.set_value(value, window, cx));
+            });
+            vcx.run_until_parked();
+        };
+        let (host, port, password) = vcx.update(|_, cx| {
+            let form = app
+                .read(cx)
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .expect("the host editor is open");
+            (form.host.clone(), form.port.clone(), form.password.clone())
+        });
+
+        assert!(!dirty(&mut vcx), "the seeded form starts clean");
+
+        set(&mut vcx, &host, "new.example");
+        assert!(dirty(&mut vcx), "a typed host is an unsaved change");
+        set(&mut vcx, &host, "");
+        assert!(!dirty(&mut vcx), "clearing it back is clean again");
+
+        // Text validation cannot turn into a profile is still typing worth
+        // asking about: Save cannot have it and Escape must not lose it.
+        set(&mut vcx, &port, "abc");
+        assert!(dirty(&mut vcx), "an invalid port is still an edit");
+        set(&mut vcx, &port, "22");
+        assert!(!dirty(&mut vcx));
+
+        app.update_in(&mut vcx, |app, _, _cx| {
+            app.ssh_form_mut().unwrap().x11 = true;
+        });
+        assert!(dirty(&mut vcx), "a toggled checkbox is an edit");
+        app.update_in(&mut vcx, |app, _, _cx| {
+            app.ssh_form_mut().unwrap().x11 = false;
+        });
+        assert!(!dirty(&mut vcx));
+
+        // The secret goes to the keychain, not the profile, so the profile
+        // comparison alone would never see it.
+        set(&mut vcx, &password, "hunter2");
+        assert!(dirty(&mut vcx), "a typed password is an unsaved change");
+        set(&mut vcx, &password, "");
+        assert!(!dirty(&mut vcx));
+    }
+
+    /// A saved host compares against the form it was loaded as: a forward-row
+    /// edit flags it, text validation cannot turn into a profile flags it
+    /// while a failed save leaves it flagged, and a revert is clean.
+    #[gpui::test]
+    fn a_saved_host_flags_forward_and_invalid_edits(cx: &mut TestAppContext) {
+        use crate::core::ssh_profile::{ForwardKind, ForwardRule, HostPort, SshProfile};
+        use gpui_component::input::InputState;
+        let (app, mut vcx) = harness(cx);
+        let mut profile = SshProfile::new("prod");
+        profile.host = "prod.example".into();
+        profile.user = "deploy".into();
+        profile.forwards = vec![ForwardRule {
+            kind: ForwardKind::Local,
+            bind: HostPort::new("127.0.0.1", 8080),
+            target: HostPort::new("app.internal", 80),
+            description: "app".into(),
+            enabled: true,
+        }];
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.update_config(cx, |cfg| cfg.ssh_profiles.push(profile.clone()));
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.ssh_form_load(&profile, window, cx);
+        });
+        vcx.run_until_parked();
+        let dirty =
+            |vcx: &mut VisualTestContext| vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx));
+        let set = |vcx: &mut VisualTestContext, input: &Entity<InputState>, value: &str| {
+            app.update_in(vcx, |_app, window, cx| {
+                input.update(cx, |i, cx| i.set_value(value, window, cx));
+            });
+            vcx.run_until_parked();
+        };
+        let (bind_port, port) = vcx.update(|_, cx| {
+            let form = app
+                .read(cx)
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .expect("the host editor is open");
+            (form.forwards[0].bind_port.clone(), form.port.clone())
+        });
+
+        assert!(!dirty(&mut vcx), "an untouched saved host is clean");
+
+        set(&mut vcx, &bind_port, "9090");
+        assert!(dirty(&mut vcx), "a changed forward is an unsaved change");
+        set(&mut vcx, &bind_port, "8080");
+        assert!(!dirty(&mut vcx));
+
+        // Invalid text cannot be saved, but it is still something the user
+        // typed — losing it on Escape without asking is still losing work.
+        set(&mut vcx, &port, "abc");
+        assert!(dirty(&mut vcx), "invalid text is still an unsaved change");
+        let saved = app.update_in(&mut vcx, |app, window, cx| {
+            app.save_editing_profile(window, cx)
+        });
+        assert!(saved.is_none(), "an invalid form cannot save");
+        assert!(
+            dirty(&mut vcx),
+            "a save that refused leaves the edits flagged"
+        );
+
+        set(&mut vcx, &port, "22");
+        assert!(!dirty(&mut vcx));
+    }
+
+    /// Saving writes the form out and leaves it open — the caller decides
+    /// when it closes — so "what it was loaded with" has to move to what was
+    /// just saved, or the freshly saved edits read as unsaved themselves.
+    #[gpui::test]
+    fn saving_the_open_form_rebases_the_dirty_baseline(cx: &mut TestAppContext) {
+        use crate::core::ssh_profile::SshProfile;
+        let (app, mut vcx) = harness(cx);
+        let mut profile = SshProfile::new("prod");
+        profile.host = "prod.example".into();
+        let profile_id = profile.id;
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.update_config(cx, |cfg| cfg.ssh_profiles.push(profile.clone()));
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.ssh_form_load(&profile, window, cx);
+        });
+        vcx.run_until_parked();
+        let dirty =
+            |vcx: &mut VisualTestContext| vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx));
+        let host = vcx.update(|_, cx| {
+            app.read(cx)
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .expect("the host editor is open")
+                .host
+                .clone()
+        });
+        app.update_in(&mut vcx, |_app, window, cx| {
+            host.update(cx, |i, cx| i.set_value("renamed.example", window, cx));
+        });
+        vcx.run_until_parked();
+        assert!(dirty(&mut vcx));
+
+        let saved = app.update_in(&mut vcx, |app, window, cx| {
+            app.save_editing_profile(window, cx)
+        });
+        assert_eq!(saved, Some(profile_id));
+        assert!(
+            !dirty(&mut vcx),
+            "the form still on screen now holds exactly what is on disk"
+        );
+
+        app.update_in(&mut vcx, |_app, window, cx| {
+            host.update(cx, |i, cx| i.set_value("renamed-again.example", window, cx));
+        });
+        vcx.run_until_parked();
+        assert!(
+            dirty(&mut vcx),
+            "the next edit counts against the new baseline"
+        );
+
+        // A write that cannot complete must not move the baseline either:
+        // the edits on screen are still unsaved.
+        app.update_in(&mut vcx, |_app, _window, cx| {
+            cx.global_mut::<Config>().quarantined = true;
+        });
+        let saved = app.update_in(&mut vcx, |app, window, cx| {
+            app.save_editing_profile(window, cx)
+        });
+        assert!(saved.is_none(), "a write that fails is not a save");
+        assert!(dirty(&mut vcx), "a failed save leaves the edits flagged");
+
+        app.update_in(&mut vcx, |_app, _window, cx| {
+            cx.global_mut::<Config>().quarantined = false;
+        });
+        let saved = app.update_in(&mut vcx, |app, window, cx| {
+            app.save_editing_profile(window, cx)
+        });
+        assert_eq!(saved, Some(profile_id));
+        assert!(!dirty(&mut vcx), "a completed save rebases the form");
+    }
+
+    /// The trailing text on a host row says something only when there is
+    /// something to say: a connected host shows its age, a host that never
+    /// connected stays quiet instead of reading "Never", and a clean New
+    /// host stays quiet instead of reading "Unsaved".
+    #[gpui::test]
+    fn host_rows_show_last_use_or_stay_quiet(cx: &mut TestAppContext) {
+        use crate::core::config::ProfileUsage;
+        use crate::core::ssh_profile::SshProfile;
+        use uuid::Uuid;
+        let (app, mut vcx) = harness(cx);
+        let mut never = SshProfile::new("never");
+        never.host = "never.example".into();
+        let mut used = SshProfile::new("used");
+        used.host = "used.example".into();
+        let (never_id, used_id) = (never.id, used.id);
+        let new_id = app.update_in(&mut vcx, |app, window, cx| {
+            let cfg = cx.global_mut::<Config>();
+            cfg.ssh_profiles = vec![never, used];
+            cfg.ssh_profile_frecency.insert(
+                used_id,
+                ProfileUsage {
+                    count: 2,
+                    last_used: crate::core::config::unix_now().saturating_sub(3600),
+                },
+            );
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.add_new_profile(window, cx);
+            app.active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .map(|f| f.editing)
+                .expect("the new host form opened")
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        // Two cycles: the first lays the page out, the second paints the
+        // settled tree, which is when debug bounds are recorded.
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let meta = |id: Uuid| -> &'static str { format!("ssh-host-meta-{}", id.as_u128()).leak() };
+        assert!(
+            vcx.debug_bounds(meta(used_id)).is_some(),
+            "a recently connected host shows its age"
+        );
+        assert!(
+            vcx.debug_bounds(meta(never_id)).is_none(),
+            "a host that never connected says nothing"
+        );
+        assert!(
+            vcx.debug_bounds(meta(new_id)).is_none(),
+            "an untouched new host is not labelled Unsaved"
+        );
     }
 
     /// The credential rows follow the auth method the same way connecting
