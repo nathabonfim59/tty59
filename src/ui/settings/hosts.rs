@@ -501,7 +501,9 @@ impl Tty59App {
             .when(!meta.is_empty(), |row| {
                 row.child({
                     let meta = div()
-                        .debug_selector(move || format!("ssh-host-meta-{}", id.as_u128()))
+                        .when(cfg!(test), |d| {
+                            d.debug_selector(move || format!("ssh-host-meta-{}", id.as_u128()))
+                        })
                         .flex_shrink_0()
                         .whitespace_nowrap()
                         .text_size(fs(12.))
