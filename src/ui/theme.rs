@@ -1856,6 +1856,31 @@ pub(crate) fn markdown_style(cx: &gpui::App) -> gpui_component::text::TextViewSt
         .inline_code_background(cx.theme().foreground.opacity(0.08))
 }
 
+/// [`markdown_style`] at the editor's zoom `zoom` (1.0 = 100 %).
+///
+/// The text view takes its sizes from three sources, and the rem one — body
+/// text, lists, the paragraph gap — is handled outside the style, by laying
+/// the view out against a scoped rem ([`crate::ui::rem_scope::RemScope`]).
+/// What the style carries are the other two: headings grow with
+/// `heading_base_font_size` (absolute `px(14)` by default, every level a
+/// multiple of the base), and code blocks grow through their refinement,
+/// which lands after the text view's own absolute `mono_font_size` and so
+/// overrides it. At `zoom == 1.0` the style is byte-for-byte
+/// [`markdown_style`], so 100 % renders exactly as the unzoomed preview
+/// always did.
+pub(crate) fn markdown_style_at(cx: &gpui::App, zoom: f32) -> gpui_component::text::TextViewStyle {
+    if zoom == 1.0 {
+        return markdown_style(cx);
+    }
+    let mut style = markdown_style(cx);
+    style.heading_base_font_size = gpui::px(
+        f32::from(gpui_component::text::TextViewStyle::default().heading_base_font_size) * zoom,
+    );
+    let mut code_block = gpui::StyleRefinement::default();
+    code_block.text.font_size = Some(gpui::px(f32::from(cx.theme().mono_font_size) * zoom).into());
+    style.code_block(code_block)
+}
+
 /// The palette handed to the mermaid renderer for the active theme.
 ///
 /// Diagrams draw on the preview's own background and use the theme's body ink,

@@ -97,19 +97,14 @@ impl CacheKey {
     pub(super) fn scale(&self) -> f32 {
         f32::from_bits(self.scale_bits)
     }
-
-    /// The key's scale bits, for last-good matching.
-    pub(super) fn scale_bits(&self) -> u32 {
-        self.scale_bits
-    }
 }
 
 /// A diagram's logical size in points — device pixels divided by the scale
 /// the raster actually came back at, which is what layout must use.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct LogicalSize {
-    pub(super) width: f32,
-    pub(super) height: f32,
+pub(crate) struct LogicalSize {
+    pub(crate) width: f32,
+    pub(crate) height: f32,
 }
 
 /// What `render_block` should draw for a key, as decided by the cache.
@@ -170,7 +165,6 @@ enum EntryState {
 /// source keep showing a diagram instead of flickering to a placeholder.
 struct LastGood {
     theme: MermaidTheme,
-    scale_bits: u32,
     image: Arc<RenderImage>,
     logical: LogicalSize,
     last_used: u64,
@@ -345,8 +339,12 @@ impl MermaidCache {
     }
 
     /// This block's last-good image, when it was rendered for the same
-    /// theme and scale as the pending render. A theme or scale change
-    /// returns `None` — the stale palette must not stay on screen.
+    /// theme. The scale is deliberately not matched: the editor's zoom
+    /// changes the scale every diagram renders at, and flashing the
+    /// placeholder on all of them for a zoom the eye is following would be
+    /// worse than a briefly soft image — the caller draws the last-good at
+    /// the new size until the new raster lands. A theme change still returns
+    /// `None`: the stale palette must not stay on screen.
     /// Read-only: like [`MermaidCache::peek`], building an offscreen
     /// element must not refresh recency; a displayed last-good is touched
     /// separately ([`MermaidCache::touch_last_good`]).
@@ -354,10 +352,9 @@ impl MermaidCache {
         &self,
         block_id: u64,
         theme: &MermaidTheme,
-        scale_bits: u32,
     ) -> Option<(Arc<RenderImage>, LogicalSize)> {
         let good = self.last_good.get(&block_id)?;
-        if &good.theme != theme || good.scale_bits != scale_bits {
+        if &good.theme != theme {
             return None;
         }
         Some((good.image.clone(), good.logical))
@@ -391,7 +388,6 @@ impl MermaidCache {
         &mut self,
         block_id: u64,
         theme: MermaidTheme,
-        scale_bits: u32,
         image: Arc<RenderImage>,
         logical: LogicalSize,
     ) -> Option<Release> {
@@ -400,7 +396,6 @@ impl MermaidCache {
             block_id,
             LastGood {
                 theme,
-                scale_bits,
                 image,
                 logical,
                 last_used: self.clock,
@@ -740,13 +735,7 @@ mod tests {
                 };
                 assert!(
                     cache
-                        .store_last_good(
-                            i as u64,
-                            key.theme().clone(),
-                            key.scale_bits(),
-                            image.clone(),
-                            logical
-                        )
+                        .store_last_good(i as u64, key.theme().clone(), image.clone(), logical)
                         .is_none(),
                     "nothing is replaced the first time"
                 );
@@ -808,13 +797,7 @@ mod tests {
                 let Decision::Ready(image, logical) = cache.request(&key).0 else {
                     panic!("filler {i} should be ready");
                 };
-                cache.store_last_good(
-                    100 + i as u64,
-                    key.theme().clone(),
-                    key.scale_bits(),
-                    image,
-                    logical,
-                );
+                cache.store_last_good(100 + i as u64, key.theme().clone(), image, logical);
             }
             assert_eq!(cache.last_good_count(), CAP_LAST_GOOD * 2);
             let releases = cache.collect_releases(&[fake_handle(9)]);
@@ -859,26 +842,14 @@ mod tests {
             // Block 7 shows `first`…
             assert!(
                 cache
-                    .store_last_good(
-                        7,
-                        first.theme().clone(),
-                        first.scale_bits(),
-                        first_image.clone(),
-                        first_logical
-                    )
+                    .store_last_good(7, first.theme().clone(), first_image.clone(), first_logical)
                     .is_none()
             );
             // …and re-storing it while its entry still holds the image
             // releases nothing.
             assert!(
                 cache
-                    .store_last_good(
-                        7,
-                        first.theme().clone(),
-                        first.scale_bits(),
-                        first_image.clone(),
-                        first_logical
-                    )
+                    .store_last_good(7, first.theme().clone(), first_image.clone(), first_logical)
                     .is_none(),
                 "the entry still retains the replaced image"
             );
@@ -917,13 +888,7 @@ mod tests {
                 panic!("second should be ready");
             };
             let release = cache
-                .store_last_good(
-                    7,
-                    second.theme().clone(),
-                    second.scale_bits(),
-                    second_image,
-                    second_logical,
-                )
+                .store_last_good(7, second.theme().clone(), second_image, second_logical)
                 .expect("the aged-out image is no longer retained anywhere");
             assert!(Arc::ptr_eq(&release.image, &first_image));
             assert_eq!(release.windows, vec![fake_handle(1)]);
@@ -964,32 +929,19 @@ mod tests {
             let Decision::Ready(image, logical) = cache.request(&key).0 else {
                 panic!("should be ready");
             };
-            cache.store_last_good(7, key.theme().clone(), key.scale_bits(), image, logical);
+            cache.store_last_good(7, key.theme().clone(), image, logical);
 
-            // Same block, same theme+scale, new source: eligible.
+            // Same block, same theme, new source: eligible.
+            assert!(cache.last_good_for_block(7, key.theme()).is_some());
+            // Same block, different theme: refused — the stale palette must
+            // not stay on screen.
             assert!(
                 cache
-                    .last_good_for_block(7, key.theme(), key.scale_bits())
-                    .is_some()
-            );
-            // Same block, different theme: refused.
-            assert!(
-                cache
-                    .last_good_for_block(7, &MermaidTheme::dark(), key.scale_bits())
-                    .is_none()
-            );
-            // Different scale: refused.
-            assert!(
-                cache
-                    .last_good_for_block(7, key.theme(), 2.0f32.to_bits())
+                    .last_good_for_block(7, &MermaidTheme::dark())
                     .is_none()
             );
             // Different block: never borrowed.
-            assert!(
-                cache
-                    .last_good_for_block(8, key.theme(), key.scale_bits())
-                    .is_none()
-            );
+            assert!(cache.last_good_for_block(8, key.theme()).is_none());
         });
     }
 }

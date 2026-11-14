@@ -1486,6 +1486,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsEditorMermaidColorsDesc => {
             "Раскрашивать фигуры диаграмм Mermaid в предпросмотре Markdown. Выключено — рисуются нейтральным цветом темы."
         }
+        L10nKey::SettingsEditorZoom => "Масштаб",
+        L10nKey::SettingsEditorZoomDesc => {
+            "Размер текста редактора кода и предпросмотра Markdown, в процентах от обычного размера."
+        }
         L10nKey::SettingsSearchEditorGitGutterKeywords => {
             "поля различия изменения метки индекс изменено добавлено удалено git gutter diff changes markers staged index scm vcs modified added deleted"
         }
@@ -1500,6 +1504,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchEditorMermaidColorsKeywords => {
             "mermaid диаграмма график цвета акценты фигуры markdown предпросмотр"
+        }
+        L10nKey::SettingsSearchEditorZoomKeywords => {
+            "масштаб размер текста шрифт крупнее мельче редактор markdown предпросмотр zoom font size"
         }
         L10nKey::EditorGoToLinePlaceholder => "Строка или строка:столбец (1-{total})",
         L10nKey::EditorGoToSymbolAction => "Перейти к символу в редакторе…",
@@ -2527,6 +2534,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::MermaidRendering => "Отрисовка диаграммы…",
         L10nKey::MermaidRenderError => "Ошибка диаграммы",
+        L10nKey::MermaidViewerFullScreen => "Во весь экран",
+        L10nKey::MermaidViewerFit => "Вместить",
+        L10nKey::MermaidViewerExit => "Выйти из полноэкранного режима (Esc)",
     })
 }
 

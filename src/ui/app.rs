@@ -2805,6 +2805,24 @@ impl Tty59App {
         self.set_font_size(Config::default().font_size, cx);
     }
 
+    /// The code editor's zoom, shared by the source view and every Markdown
+    /// preview, as a scale on their normal sizes. Like `set_ui_font_size`
+    /// this reaches every window — a preview can sit in any of them — so it
+    /// refreshes rather than notify.
+    pub(crate) fn set_editor_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        use crate::core::config::EDITOR_ZOOM_MAX;
+        use crate::core::config::EDITOR_ZOOM_MIN;
+        let zoom = zoom.clamp(EDITOR_ZOOM_MIN, EDITOR_ZOOM_MAX);
+        let cfg = cx.global_mut::<Config>();
+        if cfg.editor_zoom == zoom {
+            return;
+        }
+        cfg.editor_zoom = zoom;
+        self.persist_settings_config(cx);
+        cx.refresh_windows();
+        cx.notify();
+    }
+
     fn set_ui_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
         use crate::core::config::{UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN};
         let size = size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
@@ -7136,7 +7154,7 @@ impl Tty59App {
             DocumentWidthTwoThirds => {
                 self.set_document_ratio(crate::core::config::DOCUMENT_RATIO_TWO_THIRDS, cx)
             }
-            ToggleDocumentPreview => self.toggle_document_preview(cx),
+            ToggleDocumentPreview => self.toggle_document_preview(window, cx),
             ToggleDocumentWrap => self.toggle_document_wrap(window, cx),
             EditorTransformUppercase => {
                 self.editor_dispatch(&gpui_component::input::TransformToUppercase, window, cx);
@@ -7377,6 +7395,7 @@ impl Tty59App {
             L10nKey::SettingsEditorMermaidColors => {
                 self.set_editor_mermaid_colors(defaults.editor_mermaid_colors, cx)
             }
+            L10nKey::SettingsEditorZoom => self.set_editor_zoom(defaults.editor_zoom, cx),
             L10nKey::SettingsNotifyOnCommandFinish => {
                 self.set_notify_mode(defaults.notify_on_command_finish, cx)
             }
@@ -10310,8 +10329,8 @@ impl Render for Tty59App {
                         this.set_document_ratio(crate::core::config::DOCUMENT_RATIO_TWO_THIRDS, cx)
                     }),
                 )
-                .on_action(cx.listener(|this, _: &ToggleDocumentPreview, _window, cx| {
-                    this.toggle_document_preview(cx)
+                .on_action(cx.listener(|this, _: &ToggleDocumentPreview, window, cx| {
+                    this.toggle_document_preview(window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ToggleDocumentWrap, window, cx| {
                     this.toggle_document_wrap(window, cx)

@@ -1375,6 +1375,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsEditorMermaidColorsDesc => {
             "Color the shapes in Mermaid diagrams in the Markdown preview. Off draws them in the theme's neutral fill."
         }
+        L10nKey::SettingsEditorZoom => "Zoom",
+        L10nKey::SettingsEditorZoomDesc => {
+            "Text size of the code editor and the Markdown preview, as a percentage of their normal size."
+        }
         L10nKey::SettingsSearchEditorGitGutterKeywords => {
             "git gutter diff changes markers staged index scm vcs modified added deleted"
         }
@@ -1387,6 +1391,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchEditorMermaidColorsKeywords => {
             "mermaid diagram chart colors accents shapes markdown preview"
+        }
+        L10nKey::SettingsSearchEditorZoomKeywords => {
+            "zoom text size font size scale editor markdown preview bigger smaller"
         }
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
         L10nKey::EditorGoToSymbolAction => "Go to Symbol in Editor…",
@@ -2434,6 +2441,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::MermaidRendering => "Rendering diagram…",
         L10nKey::MermaidRenderError => "Diagram error",
+        L10nKey::MermaidViewerFullScreen => "Full screen",
+        L10nKey::MermaidViewerFit => "Fit",
+        L10nKey::MermaidViewerExit => "Exit full screen (Esc)",
     }
 }
 

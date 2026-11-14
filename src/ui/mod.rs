@@ -40,6 +40,7 @@ pub mod prefill;
 pub mod presets;
 pub mod proc_usage;
 pub mod prompt;
+pub(crate) mod rem_scope;
 pub mod remote_connect;
 pub mod remote_workspace;
 pub mod reorder;
@@ -62,6 +63,7 @@ pub mod tray;
 pub mod tree_sync;
 pub mod windows;
 pub mod worktree_prompt;
+pub(crate) mod zoom;
 
 /// The two answers a confirmation dialog gets, arranged the way macOS arranges
 /// them: the action on the right, where Return lands and where every other app

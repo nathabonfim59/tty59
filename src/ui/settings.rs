@@ -14,9 +14,9 @@ use std::cell::{Cell, RefCell};
 use uuid::Uuid;
 
 use crate::core::config::{
-    BellMode, Config, ConfirmClose, CursorStyle, LinkFileOpen, MouseZoomModifier, NewTabPosition,
-    NotifyMode, PromptCursorStyle, TabBarPosition, TabGroupActivation, UI_FONT_SIZE_DEFAULT,
-    UpdateChannel, WindowBackdrop,
+    BellMode, Config, ConfirmClose, CursorStyle, EDITOR_ZOOM_STEPS, LinkFileOpen,
+    MouseZoomModifier, NewTabPosition, NotifyMode, PromptCursorStyle, TabBarPosition,
+    TabGroupActivation, UI_FONT_SIZE_DEFAULT, UpdateChannel, WindowBackdrop,
 };
 use crate::core::keychain::{
     CredentialRef, CredentialStore as _, OsCredentialStore, key_account_from_contents,
@@ -782,6 +782,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsEditorZoom,
+            keywords: SettingsSearchEditorZoomKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsNotifyOnCommandFinish,
             keywords: SettingsSearchNotifyOnCommandFinishKeywords,
         },
@@ -886,6 +891,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorSoftWrap => "editor_soft_wrap",
             L10nKey::SettingsEditorMarkdownPreview => "editor_markdown_preview",
             L10nKey::SettingsEditorMermaidColors => "editor_mermaid_colors",
+            L10nKey::SettingsEditorZoom => "editor_zoom",
             L10nKey::SettingsNotifyOnCommandFinish => "notify_on_command_finish",
             L10nKey::SettingsNotifyThreshold => "notify_threshold_secs",
             L10nKey::SettingsTerminalBell => "bell",
@@ -1012,6 +1018,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorSoftWrap => t(L10nKey::SettingsEditorSoftWrapDesc),
             L10nKey::SettingsEditorMarkdownPreview => t(L10nKey::SettingsEditorMarkdownPreviewDesc),
             L10nKey::SettingsEditorMermaidColors => t(L10nKey::SettingsEditorMermaidColorsDesc),
+            L10nKey::SettingsEditorZoom => t(L10nKey::SettingsEditorZoomDesc),
             L10nKey::SettingsNotifyOnCommandFinish => t(L10nKey::SettingsNotifyOnCommandFinishDesc),
             L10nKey::SettingsNotifyThreshold => t(L10nKey::SettingsNotifyThresholdDesc),
             L10nKey::SettingsAppHttpProxy => t(L10nKey::SettingsAppHttpProxyDesc),
@@ -1079,6 +1086,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorMermaidColors => {
                 cfg.editor_mermaid_colors != defaults.editor_mermaid_colors
             }
+            L10nKey::SettingsEditorZoom => cfg.editor_zoom != defaults.editor_zoom,
             L10nKey::SettingsNotifyOnCommandFinish => {
                 cfg.notify_on_command_finish != defaults.notify_on_command_finish
             }
