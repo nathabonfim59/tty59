@@ -2823,10 +2823,6 @@ impl Tty59App {
         cx.notify();
     }
 
-    pub(crate) fn reset_editor_zoom(&mut self, cx: &mut Context<Self>) {
-        self.set_editor_zoom(Config::default().editor_zoom, cx);
-    }
-
     fn set_ui_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
         use crate::core::config::{UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN};
         let size = size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);

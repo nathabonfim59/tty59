@@ -40,23 +40,45 @@ use gpui_component::text::{
 };
 
 mod render;
+pub(crate) mod viewer;
+mod viewport;
 
 /// Stable node name registered with the text view.
 const MERMAID_NODE: &str = "mermaid";
 
 /// Identifies one rendered preview: a buffer in one editor group.
 ///
-/// Built from the buffer entity id and the group slot at wiring time. The mix
-/// is a fixed splitmix sequence, so the same buffer in the same group keeps
-/// the same identity for the life of the process. `EntityId`s are assigned per
-/// launch, so neither is stable across restarts.
+/// Built from the buffer entity id and the group slot at wiring time. The
+/// mix is a fixed splitmix sequence, so the same buffer in the same group
+/// keeps the same identity for the life of the process. `EntityId`s are
+/// assigned per launch, so neither is stable across restarts. The parts
+/// ride along unlocked: the full-screen viewer is keyed by the identity but
+/// needs the buffer when the buffer itself closes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PreviewIdentity(u64);
+pub(crate) struct PreviewIdentity {
+    key: u64,
+    buffer: EntityId,
+    slot: usize,
+}
 
 impl PreviewIdentity {
     /// Derive the identity for `buffer` in editor group `slot`.
     pub(crate) fn from_buffer(buffer: EntityId, slot: usize) -> Self {
-        Self(combine(buffer.as_u64(), slot as u64))
+        Self {
+            key: combine(buffer.as_u64(), slot as u64),
+            buffer,
+            slot,
+        }
+    }
+
+    /// The buffer this identity was built from.
+    pub(crate) fn buffer(self) -> EntityId {
+        self.buffer
+    }
+
+    /// The editor group this identity was built from.
+    pub(crate) fn slot(self) -> usize {
+        self.slot
     }
 }
 
@@ -120,7 +142,7 @@ impl MarkdownPlugin for MermaidPlugin {
         cx: &mut gpui::App,
     ) -> impl IntoElement {
         match node.data::<MermaidBlock>() {
-            Some(block) => render::render_block(block, window, cx),
+            Some(block) => render::render_block(block, self.identity, window, cx),
             // Only our parser produces this name; an empty element beats a
             // panic if a stale node ever reaches the renderer.
             None => gpui::div().into_any_element(),
@@ -242,7 +264,7 @@ fn mermaid_block(
     Some(MermaidBlock {
         source: code.value.clone(),
         original_fence: original_fence.to_string(),
-        block_id: combine(identity.0, document_offset as u64),
+        block_id: combine(identity.key, document_offset as u64),
     })
 }
 

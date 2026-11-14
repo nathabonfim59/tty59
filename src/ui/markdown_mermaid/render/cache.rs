@@ -102,9 +102,9 @@ impl CacheKey {
 /// A diagram's logical size in points — device pixels divided by the scale
 /// the raster actually came back at, which is what layout must use.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct LogicalSize {
-    pub(super) width: f32,
-    pub(super) height: f32,
+pub(crate) struct LogicalSize {
+    pub(crate) width: f32,
+    pub(crate) height: f32,
 }
 
 /// What `render_block` should draw for a key, as decided by the cache.

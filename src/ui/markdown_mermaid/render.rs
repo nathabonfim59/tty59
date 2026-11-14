@@ -53,7 +53,7 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, ImageSource, Pixels, RenderImage, Window, div, img, px};
 use gpui_component::text::TextView;
-use gpui_component::{ActiveTheme as _, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, v_flex};
 use image::{Frame, RgbaImage};
 use smallvec::SmallVec;
 use tty59_mermaid::MermaidTheme;
@@ -77,7 +77,17 @@ const PENDING_HEIGHT: f32 = 96.;
 /// last-goods, and above all scheduling renders for misses — happens in
 /// [`VisibleBlock`]'s prepaint, once the block's bounds are known to
 /// intersect the visible clip.
-pub(super) fn render_block(block: &MermaidBlock, window: &mut Window, cx: &mut App) -> AnyElement {
+pub(super) fn render_block(
+    block: &MermaidBlock,
+    identity: super::PreviewIdentity,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    // An open full-screen viewer learns the block is still here (and picks
+    // up source edits) from this very call — the overlay takes the
+    // witnesses once per frame and closes the viewer when this block stops
+    // appearing among them.
+    super::viewer::witness(identity, block.block_id, &block.source, cx);
     let theme = crate::ui::theme::mermaid_theme(cx);
     // Diagrams follow the text zoom, so the document keeps its proportions:
     // the raster is requested at the window's scale times the zoom, and laid
@@ -136,9 +146,31 @@ pub(super) fn render_block(block: &MermaidBlock, window: &mut Window, cx: &mut A
     };
 
     let inner = match (&decision, &pending) {
-        (Decision::Ready(image, logical), _) => diagram_element(image, *logical, zoom),
+        (Decision::Ready(image, logical), _) => diagram_element(
+            Diagram {
+                identity,
+                block,
+                image,
+                logical: *logical,
+                zoom,
+                scale: key.scale(),
+                theme: theme.clone(),
+            },
+            cx,
+        ),
         (Decision::Failed(message), _) => failure_element(block, message, zoom, cx),
-        (_, Some(PendingDisplay::Image(image, logical))) => diagram_element(image, *logical, zoom),
+        (_, Some(PendingDisplay::Image(image, logical))) => diagram_element(
+            Diagram {
+                identity,
+                block,
+                image,
+                logical: *logical,
+                zoom,
+                scale: key.scale(),
+                theme: theme.clone(),
+            },
+            cx,
+        ),
         (_, Some(PendingDisplay::Placeholder(height))) => pending_element(Some(*height), cx),
         (Decision::Pending | Decision::Idle, None) => {
             unreachable!("pending states always carry a display")
@@ -418,21 +450,94 @@ fn release_on_windows(release: Release, window: &mut Window, cx: &mut App) -> us
     dropped
 }
 
+/// What one drawn diagram carries into its element: the box geometry and
+/// everything the full-screen affordance needs to open a viewer seeded with
+/// the image on screen.
+struct Diagram<'a> {
+    identity: super::PreviewIdentity,
+    block: &'a MermaidBlock,
+    image: &'a Arc<RenderImage>,
+    logical: LogicalSize,
+    zoom: f32,
+    /// The device scale the raster was keyed at — the seed's bucket.
+    scale: f32,
+    theme: MermaidTheme,
+}
+
 /// A ready diagram: its logical size times the editor zoom (never grown past
 /// that), shrunk to the available width, aspect kept by the wrapper's
 /// `aspect_ratio`. `logical` is device px over the scale the raster *reports*,
 /// so a raster capped by `MAX_PIXELS` still lays out at the right size, only
-/// softer.
-fn diagram_element(image: &Arc<RenderImage>, logical: LogicalSize, zoom: f32) -> AnyElement {
+/// softer. A drawable diagram also carries the full-screen affordance: a
+/// small expand button at its top-right, revealed on hover, opening the
+/// viewer with this very image as its first frame.
+fn diagram_element(diagram: Diagram<'_>, cx: &App) -> AnyElement {
+    let Diagram {
+        identity,
+        block,
+        image,
+        logical,
+        zoom,
+        scale,
+        theme,
+    } = diagram;
     // Degenerate sizes are clamped so the ratio stays positive even if a
     // renderer returns something extreme.
     let width = (logical.width.max(1.0) * zoom).max(1.0);
     let height = (logical.height.max(1.0) * zoom).max(1.0);
+    let block_id = block.block_id;
+    let source = block.source.clone();
+    let seed = (image.clone(), (logical.width, logical.height), scale, theme);
+    let button = {
+        let theme = cx.theme();
+        let el = div()
+            .id(("mermaid-expand", block_id))
+            .absolute()
+            .top_1()
+            .right_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(22.))
+            .rounded(px(5.))
+            .bg(theme.secondary)
+            .text_color(theme.foreground)
+            .opacity(0.)
+            .group_hover("mermaid-diagram", |s| s.opacity(1.))
+            .cursor_pointer();
+        // While the viewer is open this button sits under the overlay, and
+        // its tooltip would outlive its hover — gpui clears an active
+        // tooltip only when its element paints without a tooltip builder.
+        // Dropping the builder (not the button) does exactly that.
+        let el = if super::viewer::is_open(identity, cx) {
+            el
+        } else {
+            el.tooltip(move |window, cx| {
+                gpui_component::tooltip::Tooltip::new(t(L10nKey::MermaidViewerFullScreen))
+                    .build(window, cx)
+            })
+        };
+        el.on_click(move |_, window, cx| {
+            super::viewer::open(
+                identity,
+                identity.buffer(),
+                block_id,
+                &source,
+                Some(seed.clone()),
+                window,
+                cx,
+            );
+        })
+        .child(Icon::new(IconName::Maximize).xsmall())
+    };
     div()
+        .id(("mermaid-diagram", block_id))
         .w(px(width))
         .max_w_full()
         .aspect_ratio(width / height)
+        .group("mermaid-diagram")
         .child(img(ImageSource::Render(image.clone())).size_full())
+        .child(button)
         .into_any_element()
 }
 
@@ -507,7 +612,9 @@ fn error_line(message: &str, cx: &App) -> AnyElement {
 ///
 /// The raster is owned here so its pixel buffer can be handed to the image
 /// (see `raster_conversion_moves_the_buffer_without_cloning`).
-fn raster_to_image(raster: tty59_mermaid::Raster) -> Option<(Arc<RenderImage>, LogicalSize)> {
+pub(super) fn raster_to_image(
+    raster: tty59_mermaid::Raster,
+) -> Option<(Arc<RenderImage>, LogicalSize)> {
     let width = raster.width;
     let height = raster.height;
     if width == 0 || height == 0 {
@@ -593,6 +700,12 @@ mod tests {
         }
     }
 
+    /// The identity the plain `render_block` test calls speak for: any one
+    /// buffer in group 0. The viewer path is exercised through `BlockHost`.
+    fn test_identity() -> super::super::PreviewIdentity {
+        super::super::PreviewIdentity::from_buffer(gpui::EntityId::from(1234u64), 0)
+    }
+
     fn block(id: u64, source: &str) -> MermaidBlock {
         let original_fence = format!("```mermaid\n{source}\n```");
         MermaidBlock {
@@ -626,6 +739,7 @@ mod tests {
     /// block the way the actual preview would.
     struct BlockHost {
         block: MermaidBlock,
+        identity: super::super::PreviewIdentity,
         recorded: Arc<Mutex<Option<Bounds<Pixels>>>>,
     }
 
@@ -635,7 +749,7 @@ mod tests {
             window: &mut Window,
             cx: &mut gpui::Context<Self>,
         ) -> impl IntoElement {
-            let inner = render_block(&self.block, window, cx);
+            let inner = render_block(&self.block, self.identity, window, cx);
             Measured {
                 inner,
                 recorded: self.recorded.clone(),
@@ -712,13 +826,36 @@ mod tests {
         }
     }
 
+    /// A one-draw host view: the expand button's hover machinery needs a
+    /// rendered entity on the element stack (`window.current_view()`), which
+    /// a raw `VisualTestContext::draw` does not provide — so the block is
+    /// drawn the way the actual preview draws it, inside a view.
+    struct MeasuredHost {
+        build: Option<Box<dyn FnOnce(&mut Window, &mut App) -> AnyElement + 'static>>,
+        recorded: Arc<Mutex<Option<Bounds<Pixels>>>>,
+    }
+
+    impl gpui::Render for MeasuredHost {
+        fn render(
+            &mut self,
+            window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let inner = (self.build.take().expect("rendered once"))(window, cx);
+            Measured {
+                inner,
+                recorded: self.recorded.clone(),
+            }
+        }
+    }
+
     /// Draw `build` as the root of the test window with a definite
     /// available size, and return the bounds layout gave the wrapped
     /// element.
     fn draw_measured(
         cx: &mut VisualTestContext,
         available: gpui::Size<Pixels>,
-        build: impl FnOnce(&mut Window, &mut App) -> AnyElement,
+        build: impl FnOnce(&mut Window, &mut App) -> AnyElement + 'static,
     ) -> Bounds<Pixels> {
         let recorded: Arc<Mutex<Option<Bounds<Pixels>>>> = Arc::new(Mutex::new(None));
         let sink = recorded.clone();
@@ -728,9 +865,12 @@ mod tests {
                 AvailableSpace::Definite(available.width),
                 AvailableSpace::Definite(available.height),
             ),
-            move |window, cx| Measured {
-                inner: build(window, cx),
-                recorded: sink,
+            move |_window, cx| {
+                let host = cx.new(|_| MeasuredHost {
+                    build: Some(Box::new(build)),
+                    recorded: sink,
+                });
+                div().w_full().child(host)
             },
         );
         recorded
@@ -767,9 +907,12 @@ mod tests {
 
         // First draw is pending; park to let the render land, then draw the
         // hit.
-        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         vcx.run_until_parked();
         vcx.update(|_, cx| {
             assert_eq!(
@@ -781,9 +924,12 @@ mod tests {
 
         // Wide preview: intrinsic logical size — neither the 400px device
         // size nor the 200px a requested-scale division would give.
-        let wide = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let wide = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(f32::from(wide.size.width), 100.0, "intrinsic width");
         assert_close(
             f32::from(wide.size.height),
@@ -793,9 +939,12 @@ mod tests {
 
         // Narrower than the diagram: shrink to the available width with the
         // aspect kept.
-        let narrow = draw_measured(vcx, size(px(75.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let narrow = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(75.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(f32::from(narrow.size.width), 75.0, "clamped width");
         assert_close(
             f32::from(narrow.size.height),
@@ -804,9 +953,12 @@ mod tests {
         );
 
         // Much wider than the diagram: never upscaled.
-        let huge = draw_measured(vcx, size(px(2000.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let huge = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(2000.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(f32::from(huge.size.width), 100.0, "no upscaling");
         assert_close(f32::from(huge.size.height), 50.0, "no upscaling (height)");
 
@@ -820,9 +972,12 @@ mod tests {
             cx.set_global(cfg);
         });
         // First zoomed draw is pending (the zoomed key is new); let it land.
-        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         vcx.run_until_parked();
         vcx.update(|_, cx| {
             let theme = crate::ui::theme::mermaid_theme(cx);
@@ -833,9 +988,12 @@ mod tests {
                 "the zoomed raster rendered"
             );
         });
-        let zoomed = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let zoomed = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(zoomed.size.width),
             200.0,
@@ -846,9 +1004,12 @@ mod tests {
             100.0,
             "zoom doubles the height",
         );
-        let zoomed_narrow = draw_measured(vcx, size(px(75.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let zoomed_narrow = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(75.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(zoomed_narrow.size.width),
             75.0,
@@ -870,9 +1031,12 @@ mod tests {
 
         // First render of block 7: placeholder at the default height.
         let first = block(7, "graph TD\nA-->B");
-        let pending = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&first, window, cx)
-        });
+        let pending = {
+            let first = first.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&first, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(pending.size.height),
             PENDING_HEIGHT,
@@ -880,16 +1044,22 @@ mod tests {
         );
         vcx.run_until_parked();
         // Draw the hit once more so the block actually stores its last-good.
-        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&first, window, cx)
-        });
+        {
+            let first = first.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&first, test_identity(), window, cx)
+            })
+        };
 
         // Now an edit (pending again) shows that image, not a placeholder:
         // 100×50 logical (the raster's own scale).
         let edited = block(7, "graph TD\nA-->B2");
-        let stable = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&edited, window, cx)
-        });
+        let stable = {
+            let edited = edited.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&edited, test_identity(), window, cx)
+            })
+        };
         assert_close(f32::from(stable.size.width), 100.0, "last-good width");
         assert_close(f32::from(stable.size.height), 50.0, "last-good height");
         vcx.run_until_parked();
@@ -900,9 +1070,12 @@ mod tests {
         // the 100×50 old-palette image.
         vcx.update(|_, cx| Theme::change(ThemeMode::Dark, None, cx));
         let dark = block(7, "graph TD\nA-->B3");
-        let themed = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&dark, window, cx)
-        });
+        let themed = {
+            let dark = dark.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&dark, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(themed.size.width),
             400.0,
@@ -933,13 +1106,19 @@ mod tests {
 
         // Render block 9 once so it has a last-good: 100×50 logical.
         let drawn = block(9, "graph TD\nA-->B");
-        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         vcx.run_until_parked();
-        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
 
         // 2× zoom: the key moves to TEST_SCALE × 2, the entry is idle, and
         // the pending display is the last-good image drawn at 200×100 — not
@@ -949,9 +1128,12 @@ mod tests {
             cfg.editor_zoom = 2.0;
             cx.set_global(cfg);
         });
-        let zoomed = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let zoomed = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(zoomed.size.width),
             200.0,
@@ -974,9 +1156,12 @@ mod tests {
                 "the zoomed key rendered"
             );
         });
-        let landed = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let landed = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(f32::from(landed.size.width), 200.0, "no size jump");
         assert_close(f32::from(landed.size.height), 100.0, "no size jump");
     }
@@ -1016,18 +1201,24 @@ mod tests {
 
         // No Config global: colors default on. First render lands, is shown
         // once more so the block stores its colored last-good.
-        let pending = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let pending = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(pending.size.height),
             PENDING_HEIGHT,
             "first draw is the placeholder",
         );
         vcx.run_until_parked();
-        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_eq!(
             *requests.lock().unwrap(),
             vec![6],
@@ -1044,9 +1235,12 @@ mod tests {
                 },
             ));
         });
-        let neutral_pending = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let neutral_pending = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(neutral_pending.size.width),
             400.0,
@@ -1083,9 +1277,12 @@ mod tests {
             vec![6, 0],
             "the neutral render ran with an empty palette"
         );
-        let neutral = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let neutral = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(neutral.size.width),
             120.0,
@@ -1099,9 +1296,12 @@ mod tests {
             cx.global_mut::<crate::core::config::Config>()
                 .editor_mermaid_colors = true;
         });
-        let colored_again = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&drawn, window, cx)
-        });
+        let colored_again = {
+            let drawn = drawn.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&drawn, test_identity(), window, cx)
+            })
+        };
         assert_close(
             f32::from(colored_again.size.width),
             100.0,
@@ -1128,6 +1328,7 @@ mod tests {
         let recorded: Arc<Mutex<Option<Bounds<Pixels>>>> = Arc::new(Mutex::new(None));
         let (_, vcx) = cx.add_window_view(|_, _| BlockHost {
             block: block(3, source),
+            identity: test_identity(),
             recorded: recorded.clone(),
         });
 
@@ -1158,9 +1359,12 @@ mod tests {
         // can be drawn raw.
         let message =
             failure_message(&MermaidError::Syntax("invalid diagram source".into()).to_string());
-        let line_only = draw_measured(vcx, size(px(400.), px(2000.)), |_, cx| {
-            error_line(&message, cx)
-        });
+        let line_only = {
+            let message = message.clone();
+            draw_measured(vcx, size(px(400.), px(2000.)), move |_, cx| {
+                error_line(&message, cx)
+            })
+        };
         assert!(
             full.size.height > line_only.size.height + px(20.),
             "the fallback code block renders below the error line: full {:?} vs line {:?}",
@@ -1188,15 +1392,15 @@ mod tests {
         let left = block(1, "graph TD\nA-->B");
         let right = block(2, "graph TD\nA-->B");
 
-        for blk in [&left, &right] {
-            draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-                render_block(blk, window, cx)
+        for blk in [left.clone(), right.clone()] {
+            draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&blk, test_identity(), window, cx)
             });
         }
         vcx.run_until_parked();
-        for blk in [&left, &right] {
-            let bounds = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
-                render_block(blk, window, cx)
+        for blk in [left.clone(), right.clone()] {
+            let bounds = draw_measured(vcx, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&blk, test_identity(), window, cx)
             });
             assert_close(
                 f32::from(bounds.size.width),
@@ -1708,16 +1912,25 @@ mod tests {
         // count observed by `release_on_windows` proves the other-window
         // branch (the handle update) really ran.
         let probe = block(2, "graph release probe");
-        draw_measured(v1, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&probe, window, cx)
-        });
+        {
+            let probe = probe.clone();
+            draw_measured(v1, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&probe, test_identity(), window, cx)
+            });
+        }
         cx.run_until_parked();
-        draw_measured(v1, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&probe, window, cx)
-        });
-        draw_measured(v2, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&probe, window, cx)
-        });
+        {
+            let probe = probe.clone();
+            draw_measured(v1, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&probe, test_identity(), window, cx)
+            });
+        }
+        {
+            let probe = probe.clone();
+            draw_measured(v2, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&probe, test_identity(), window, cx)
+            });
+        }
         let probe_image = cx.update(|cx| {
             let cache = cx.global::<MermaidCache>();
             let image = cache
@@ -1764,16 +1977,28 @@ mod tests {
         // Phase 2 — a diagram recorded by both windows; closing the second
         // prunes its handle on the next draw.
         let shown = block(1, "graph TD\nA-->B");
-        draw_measured(v1, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&shown, window, cx)
-        });
+        {
+            let shown = shown.clone();
+            let shown = shown.clone();
+            draw_measured(v1, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&shown, test_identity(), window, cx)
+            });
+        }
         cx.run_until_parked();
-        draw_measured(v1, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&shown, window, cx)
-        });
-        draw_measured(v2, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&shown, window, cx)
-        });
+        {
+            let shown = shown.clone();
+            let shown = shown.clone();
+            draw_measured(v1, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&shown, test_identity(), window, cx)
+            });
+        }
+        {
+            let shown = shown.clone();
+            let shown = shown.clone();
+            draw_measured(v2, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&shown, test_identity(), window, cx)
+            });
+        }
         let shown_image = cx.update(|cx| {
             let cache = cx.global::<MermaidCache>();
             let image = cache
@@ -1788,9 +2013,13 @@ mod tests {
         // platform close request, which a bare test root never answers.)
         v2.update(|window, _| window.remove_window());
         cx.run_until_parked();
-        draw_measured(v1, size(px(400.), px(2000.)), |window, cx| {
-            render_block(&shown, window, cx)
-        });
+        {
+            let shown = shown.clone();
+            let shown = shown.clone();
+            draw_measured(v1, size(px(400.), px(2000.)), move |window, cx| {
+                render_block(&shown, test_identity(), window, cx)
+            });
+        }
         cx.update(|cx| {
             let windows = cx.global::<MermaidCache>().recorded_windows(&shown_image);
             assert_eq!(windows.len(), 1, "the closed window's handle is pruned");
@@ -1802,13 +2031,21 @@ mod tests {
         // pending entry is ever evicted before it completes.
         for i in 0..CAP_ENTRIES + 2 {
             let filler = block(10_000 + i as u64, &format!("graph fill {i}"));
-            draw_measured(v1, size(px(400.), px(2000.)), |window, cx| {
-                render_block(&filler, window, cx)
-            });
+            {
+                let filler = filler.clone();
+                let filler = filler.clone();
+                draw_measured(v1, size(px(400.), px(2000.)), move |window, cx| {
+                    render_block(&filler, test_identity(), window, cx)
+                });
+            }
             cx.run_until_parked();
-            draw_measured(v1, size(px(400.), px(2000.)), |window, cx| {
-                render_block(&filler, window, cx)
-            });
+            {
+                let filler = filler.clone();
+                let filler = filler.clone();
+                draw_measured(v1, size(px(400.), px(2000.)), move |window, cx| {
+                    render_block(&filler, test_identity(), window, cx)
+                });
+            }
         }
         cx.update(|cx| {
             let cache = cx.global::<MermaidCache>();
@@ -1950,16 +2187,22 @@ mod tests {
             // First draw is pending: visible prepaint performs the block's
             // single request per miss, and parking waits for the background
             // render to complete.
-            draw_measured(vcx, size(px(600.), px(4000.)), |window, cx| {
-                render_block(&blk, window, cx)
-            });
+            {
+                let blk = blk.clone();
+                draw_measured(vcx, size(px(600.), px(4000.)), move |window, cx| {
+                    render_block(&blk, test_identity(), window, cx)
+                })
+            };
             vcx.run_until_parked();
 
             // Second draw is the ready-image path the preview actually
             // paints; it also records the drawing window for atlas release.
-            draw_measured(vcx, size(px(600.), px(4000.)), |window, cx| {
-                render_block(&blk, window, cx)
-            });
+            {
+                let blk = blk.clone();
+                draw_measured(vcx, size(px(600.), px(4000.)), move |window, cx| {
+                    render_block(&blk, test_identity(), window, cx)
+                })
+            };
 
             vcx.update(|_, cx| {
                 let key = key_for(cx, source);

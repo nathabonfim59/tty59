@@ -2278,6 +2278,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::MermaidRendering => "正在渲染图表…",
         L10nKey::MermaidRenderError => "图表错误",
+        L10nKey::MermaidViewerFullScreen => "全屏",
+        L10nKey::MermaidViewerFit => "适应",
+        L10nKey::MermaidViewerExit => "退出全屏 (Esc)",
     })
 }
 

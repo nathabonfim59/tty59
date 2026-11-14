@@ -2534,6 +2534,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::MermaidRendering => "Отрисовка диаграммы…",
         L10nKey::MermaidRenderError => "Ошибка диаграммы",
+        L10nKey::MermaidViewerFullScreen => "Во весь экран",
+        L10nKey::MermaidViewerFit => "Вместить",
+        L10nKey::MermaidViewerExit => "Выйти из полноэкранного режима (Esc)",
     })
 }
 

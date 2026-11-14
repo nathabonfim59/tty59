@@ -2514,6 +2514,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::MermaidRendering => "図をレンダリング中…",
         L10nKey::MermaidRenderError => "図のエラー",
+        L10nKey::MermaidViewerFullScreen => "全画面",
+        L10nKey::MermaidViewerFit => "フィット",
+        L10nKey::MermaidViewerExit => "全画面を終了 (Esc)",
     })
 }
 

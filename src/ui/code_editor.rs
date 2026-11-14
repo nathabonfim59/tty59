@@ -1640,6 +1640,11 @@ impl Tty59App {
         }
         f.preview = !f.preview;
         let preview = f.preview;
+        if !preview {
+            // The full-screen diagram viewer lives over the rendered
+            // preview; turning the preview off turns it off too.
+            crate::ui::markdown_mermaid::viewer::close_for_buffer(id, window, cx);
+        }
         self.update_config(cx, |cfg| cfg.editor_markdown_preview = preview);
         // The view that just came up takes the focus: the preview's handle
         // when rendering, the input when editing. Leaving the focus on the
@@ -2638,6 +2643,14 @@ impl Tty59App {
         for code in self.tabs.iter_mut().filter_map(|t| t.code.as_deref_mut()) {
             code.forget_everywhere(id);
         }
+        // A full-screen diagram of this buffer's preview cannot outlive the
+        // buffer. Close takes a window for the image releases; every window
+        // is asked, and the one holding the viewer does the work.
+        for handle in cx.windows() {
+            let _ = handle.update(cx, |_, window, cx| {
+                crate::ui::markdown_mermaid::viewer::close_for_buffer(id, window, cx);
+            });
+        }
         self.editor.buffers.retain(|b| b.id() != id);
         self.editor.nav.forget_buffer(id);
         if matches!(
@@ -3261,6 +3274,27 @@ impl Tty59App {
             code.note_front();
         }
         let breadcrumbs = self.render_editor_breadcrumbs(window, cx);
+        // What each editor group is showing right now, for the full-screen
+        // diagram viewers: any viewer whose group no longer shows its
+        // diagram — a file closed in one group, a group emptied or merged
+        // away, a tab switched — closes here, releasing its rasters.
+        {
+            let code = self.tab_code();
+            let shown = match code {
+                None => [None, None],
+                Some(c) if !c.is_split() => [c.active_id(), None],
+                Some(c) => {
+                    let focused = c.active_id();
+                    let other = c.other_active_id();
+                    if c.focused_slot() == 0 {
+                        [focused, other]
+                    } else {
+                        [other, focused]
+                    }
+                }
+            };
+            crate::ui::markdown_mermaid::viewer::sweep(shown, window, cx);
+        }
         let body = self.render_editor_body(
             self.tab_code().and_then(TabCode::active_id),
             self.tab_code().map_or(0, TabCode::focused_slot),
@@ -3461,9 +3495,20 @@ impl Tty59App {
         // phase before its own scroll listeners, so modifier+wheel over the
         // editor zooms it wherever the focus happens to be.
         match body {
-            Some((id, element)) => self
-                .editor_wheel_zoom(slot, id, element, cx)
-                .into_any_element(),
+            Some((id, element)) => {
+                let wrapped = self.editor_wheel_zoom(slot, id, element, cx);
+                let mut col = v_flex().relative().size_full().child(wrapped);
+                // A full-screen diagram viewer for this group's preview
+                // layers over the text; the preview stays mounted beneath
+                // it, scroll position and all.
+                if let Some(viewer) = crate::ui::markdown_mermaid::viewer::render(
+                    crate::ui::markdown_mermaid::PreviewIdentity::from_buffer(id, slot),
+                    cx,
+                ) {
+                    col = col.child(viewer);
+                }
+                col.into_any_element()
+            }
             None => self.render_editor_empty(cx).into_any_element(),
         }
     }
@@ -3620,8 +3665,9 @@ impl Tty59App {
                     {
                         return;
                     }
-                    let zoomed =
-                        app.update(cx, |this, cx| this.editor_zoom_wheel(id, ev, window, cx));
+                    let zoomed = app.update(cx, |this, cx| {
+                        this.editor_zoom_wheel(slot, id, ev, window, cx)
+                    });
                     if zoomed {
                         cx.stop_propagation();
                     }
@@ -3636,16 +3682,26 @@ impl Tty59App {
             .child(zoom_canvas.absolute().inset_0())
     }
 
-    /// One wheel event over buffer `id`'s editor body: the terminal's
-    /// zoom-wheel decision on the editor's own latch. Returns whether the
-    /// event was a zoom (the caller then stops it reaching the scroll).
+    /// One wheel event over buffer `id`'s editor body in group `slot`: the
+    /// terminal's zoom-wheel decision on the editor's own latch. Returns
+    /// whether the event was a zoom (the caller then stops it reaching the
+    /// scroll).
     fn editor_zoom_wheel(
         &mut self,
+        slot: usize,
         id: BufferId,
         ev: &gpui::ScrollWheelEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        // A full-screen diagram viewer over this preview owns the wheel
+        // there; the text zoom beneath it stands down.
+        if crate::ui::markdown_mermaid::viewer::is_open(
+            crate::ui::markdown_mermaid::PreviewIdentity::from_buffer(id, slot),
+            cx,
+        ) {
+            return false;
+        }
         // The latch work ends before the stepping starts: both borrow self.
         let steps = {
             let Some(f) = self.buffer_mut(id) else {
@@ -4696,5 +4752,117 @@ mod zoom_gpui_tests {
         vcx.dispatch_action(ResetFontSize);
         settle(&mut vcx);
         assert_eq!(sizes(&app, &mut vcx), (1.0, 16.0), "reset: zoom only");
+    }
+
+    /// The full-screen diagram viewer in the real editor tree, where hit
+    /// testing, the wheel-zoom wrapper and the scrolling preview all sit
+    /// around it: Ctrl+wheel zooms the *diagram* (and not the text, whatever
+    /// `mouse_zoom_modifier` says), a drag and a plain wheel pan it, and
+    /// every change is in the frame the event asked for — nothing here
+    /// draws by hand.
+    #[gpui::test]
+    fn the_diagram_viewer_takes_wheel_and_drag_in_the_real_editor(cx: &mut TestAppContext) {
+        use crate::ui::markdown_mermaid::{PreviewIdentity, viewer};
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.editor_markdown_preview = true;
+            cfg.mouse_zoom_modifier = crate::core::config::MouseZoomModifier::None;
+            cx.set_global(cfg);
+        });
+        open_rs(&app, &mut vcx, "/zoom/doc.md");
+        settle(&mut vcx);
+        let identity = app.update_in(&mut vcx, |app, _, _| {
+            PreviewIdentity::from_buffer(app.active_buffer().expect("a buffer").id(), 0)
+        });
+        vcx.update(|window, cx| {
+            viewer::open(
+                identity,
+                identity.buffer(),
+                42,
+                "graph TD\nA-->B",
+                Some(viewer::test_seed(cx)),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+        let painted = |vcx: &mut VisualTestContext| {
+            vcx.debug_bounds("diagram-viewer-img")
+                .expect("the viewer paints its diagram over the preview")
+        };
+        let near = |got: f32, want: f32, what: &str| {
+            assert!((got - want).abs() < 0.6, "{what}: got {got}, want {want}");
+        };
+
+        // Ctrl+wheel over the diagram: the diagram grows about the pointer.
+        let fitted = painted(&mut vcx);
+        let at = fitted.center();
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: at,
+            delta: gpui::ScrollDelta::Lines(gpui::point(0., 3.)),
+            modifiers: gpui::Modifiers::control(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        vcx.run_until_parked();
+        let zoomed = painted(&mut vcx);
+        assert!(
+            zoomed.size.width.as_f32() > fitted.size.width.as_f32() * 1.03,
+            "ctrl+wheel zooms the diagram: {} -> {}",
+            fitted.size.width.as_f32(),
+            zoomed.size.width.as_f32()
+        );
+        let ratio = zoomed.size.width.as_f32() / fitted.size.width.as_f32();
+        near(
+            zoomed.origin.x.as_f32(),
+            at.x.as_f32() - (at.x.as_f32() - fitted.origin.x.as_f32()) * ratio,
+            "anchored at the pointer",
+        );
+        assert_eq!(
+            sizes(&app, &mut vcx),
+            (1.0, 15.0),
+            "the text zoom and the terminal stay where they were"
+        );
+
+        // A left drag pans it.
+        let from = zoomed.center();
+        let to = gpui::point(from.x - px(30.), from.y - px(10.));
+        vcx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
+        vcx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.run_until_parked();
+        let dragged = painted(&mut vcx);
+        near(
+            dragged.origin.x.as_f32(),
+            zoomed.origin.x.as_f32() - 30.,
+            "drag x",
+        );
+        near(
+            dragged.origin.y.as_f32(),
+            zoomed.origin.y.as_f32() - 10.,
+            "drag y",
+        );
+
+        // A plain wheel pans too, and leaves the scale alone.
+        vcx.simulate_event(gpui::ScrollWheelEvent {
+            position: to,
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.), px(-12.))),
+            modifiers: gpui::Modifiers::none(),
+            touch_phase: gpui::TouchPhase::Moved,
+        });
+        vcx.run_until_parked();
+        let scrolled = painted(&mut vcx);
+        near(
+            scrolled.origin.y.as_f32(),
+            dragged.origin.y.as_f32() - 12.,
+            "wheel y",
+        );
+        near(
+            scrolled.size.width.as_f32(),
+            dragged.size.width.as_f32(),
+            "wheel keeps the scale",
+        );
     }
 }

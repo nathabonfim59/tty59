@@ -1927,6 +1927,9 @@ l10n_keys! {
     SettingsCopyJoinWrappedDesc,
     SettingsSearchCopyJoinWrappedKeywords,
     MermaidRendering,
+    MermaidViewerFullScreen,
+    MermaidViewerFit,
+    MermaidViewerExit,
     MermaidRenderError,
 }
 

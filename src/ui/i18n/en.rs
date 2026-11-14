@@ -2441,6 +2441,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::MermaidRendering => "Rendering diagram…",
         L10nKey::MermaidRenderError => "Diagram error",
+        L10nKey::MermaidViewerFullScreen => "Full screen",
+        L10nKey::MermaidViewerFit => "Fit",
+        L10nKey::MermaidViewerExit => "Exit full screen (Esc)",
     }
 }
 
