@@ -22,7 +22,7 @@ struct AgentRowPaints {
     caption: gpui::Hsla,
 }
 
-fn agent_row_paints(card: bool, cx: &gpui::App) -> AgentRowPaints {
+fn agent_row_paints(card: bool, selected: bool, cx: &gpui::App) -> AgentRowPaints {
     let sf = cx.global::<crate::ui::presets::Surfaces>();
     // A card carries the rail's tinted fill, so it steps on the rail's
     // rungs; a list row sits on the window fill, where `sidebar`'s ladder
@@ -31,13 +31,22 @@ fn agent_row_paints(card: bool, cx: &gpui::App) -> AgentRowPaints {
         true => sf.rail,
         false => sf.sidebar,
     };
+    let chrome = crate::ui::theme::chrome_ink(cx);
     AgentRowPaints {
         rungs,
         // The panel title ink: authored foreground floored once per theme
         // across both panel ladders' base/hover/selected fills, so the title
         // stays the top rung on every row state of both panels.
-        title: gpui::rgb(crate::ui::theme::chrome_ink(cx).panel_title).into(),
-        caption: cx.theme().muted_foreground,
+        title: gpui::rgb(chrome.panel_title).into(),
+        // Twelve pixels of regular caption lose enough edge contrast to
+        // antialiasing that the muted ink, floored for the panel's resting
+        // fills, falls under 4.5 on the stronger selected fill — selected
+        // rows draw the caption ink cached against that fill instead.
+        caption: if selected {
+            gpui::rgb(chrome.selected_caption).into()
+        } else {
+            cx.theme().muted_foreground
+        },
     }
 }
 
@@ -264,7 +273,7 @@ impl Tty59App {
     fn agent_row(&self, pane: &PaneSummary, card: bool, cx: &mut Context<Self>) -> AnyElement {
         let key = pane.location.key;
         let selected = self.agent_vision.state.selected() == Some(key);
-        let paints = agent_row_paints(card, cx);
+        let paints = agent_row_paints(card, selected, cx);
         let project = self
             .agent_vision
             .projects
@@ -392,6 +401,14 @@ impl Tty59App {
                         let reason_el = {
                             let mut reason_el = reason_el;
                             crate::ui::paint_probe::note("agent-row-reason", &mut reason_el);
+                            crate::ui::paint_probe::note(
+                                if selected {
+                                    "agent-row-reason-sel"
+                                } else {
+                                    "agent-row-reason-plain"
+                                },
+                                &mut reason_el,
+                            );
                             reason_el.debug_selector(move || {
                                 format!("agent-row-reason-{}-{}", key.host.0, key.pane)
                             })
@@ -784,6 +801,9 @@ mod tests {
     fn agent_rows_paint_theme_inks_and_panel_rungs(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = agents_window(cx);
         let _probe = paint_probe::scope();
+        // The selected-caption assert only bites where the lifted ink differs
+        // from muted; the fixture must reach at least one such theme.
+        let mut distinguished = false;
         for id in ["light", "dark"] {
             vcx.update(|_, cx| {
                 cx.set_global(Config(crate::core::config::CoreConfig {
@@ -793,15 +813,18 @@ mod tests {
                 }));
                 crate::ui::theme::apply_theme(None, cx);
             });
-            let (sf, muted, muted_alpha, semantics, panel_title) = vcx.update(|_, cx| {
-                (
-                    cx.global::<crate::ui::presets::Surfaces>().clone(),
-                    hsla24(cx.theme().muted_foreground),
-                    cx.theme().muted_foreground.a,
-                    crate::ui::theme::semantics(cx),
-                    crate::ui::theme::chrome_ink(cx).panel_title,
-                )
-            });
+            let (sf, muted, muted_alpha, semantics, panel_title, sel_caption) =
+                vcx.update(|_, cx| {
+                    (
+                        cx.global::<crate::ui::presets::Surfaces>().clone(),
+                        hsla24(cx.theme().muted_foreground),
+                        cx.theme().muted_foreground.a,
+                        crate::ui::theme::semantics(cx),
+                        crate::ui::theme::chrome_ink(cx).panel_title,
+                        crate::ui::theme::chrome_ink(cx).selected_caption,
+                    )
+                });
+            distinguished |= sel_caption != muted;
             for (mode, rungs, cards) in [
                 (ViewMode::Inbox, sf.sidebar, false),
                 (ViewMode::Kanban, sf.rail, true),
@@ -842,7 +865,29 @@ mod tests {
                         "{id}/{kind}: the title div must not carry opacity"
                     );
                 }
-                for reason in &reasons {
+                let sel_reasons = paint_probe::all("agent-row-reason-sel");
+                assert_eq!(
+                    sel_reasons.len(),
+                    1,
+                    "{id}/{kind}: the fixture marks exactly one selected row"
+                );
+                assert_eq!(
+                    sel_reasons[0].text,
+                    Some(sel_caption),
+                    "{id}/{kind}: a selected caption is not the lifted ink"
+                );
+                assert_eq!(
+                    sel_reasons[0].text_alpha,
+                    Some(1.0),
+                    "{id}/{kind}: the lifted caption lost its alpha"
+                );
+                let plain_reasons = paint_probe::all("agent-row-reason-plain");
+                assert_eq!(
+                    plain_reasons.len(),
+                    1,
+                    "{id}/{kind}: the fixture leaves one row unselected"
+                );
+                for reason in &plain_reasons {
                     assert_eq!(
                         reason.text,
                         Some(muted),
@@ -926,6 +971,10 @@ mod tests {
                 }
             }
         }
+        assert!(
+            distinguished,
+            "no fixture theme distinguishes the selected caption from muted, so its wiring cannot be proven"
+        );
     }
 
     /// The panel ladders themselves — every builtin plus a weak custom
@@ -967,18 +1016,19 @@ mod tests {
                 }));
                 crate::ui::theme::apply_theme(None, cx);
             });
-            let (sf, muted, title) = cx.update(|cx| {
+            let (sf, muted, sel_caption, title) = cx.update(|cx| {
                 (
                     cx.global::<crate::ui::presets::Surfaces>().clone(),
                     theme.neutrals().muted_foreground,
+                    crate::ui::theme::chrome_ink(cx).selected_caption,
                     crate::ui::theme::chrome_ink(cx).panel_title,
                 )
             });
             for (kind, rungs) in [("row", sf.sidebar), ("card", sf.rail)] {
-                for (name, surface) in [
-                    ("base", rungs.base),
-                    ("hover", rungs.hover),
-                    ("selected", rungs.selected),
+                for (name, surface, caption) in [
+                    ("base", rungs.base, muted),
+                    ("hover", rungs.hover, muted),
+                    ("selected", rungs.selected, sel_caption),
                 ] {
                     assert!(
                         crate::ui::presets::contrast(title, surface) >= FLOOR,
@@ -986,8 +1036,8 @@ mod tests {
                         theme.id
                     );
                     assert!(
-                        crate::ui::presets::contrast(muted, surface) >= FLOOR,
-                        "{}/{kind}: caption {muted:#08x} unreadable on {name} {surface:#08x}",
+                        crate::ui::presets::contrast(caption, surface) >= FLOOR,
+                        "{}/{kind}: caption {caption:#08x} unreadable on {name} {surface:#08x}",
                         theme.id
                     );
                 }
