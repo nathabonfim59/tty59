@@ -2325,6 +2325,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::NotifyTurnFinished => "Turn finished",
         L10nKey::TabTooltipMore => "More",
         L10nKey::TabTooltipShowSidebar => "Show Sidebar",
+        L10nKey::TabStripHiddenTabs => "{count} more tabs",
         L10nKey::TabTooltipHideSidebar => "Hide Sidebar",
         L10nKey::TabTooltipHideDetailPanel => "Hide Detail Panel",
         L10nKey::TabTooltipShowDetailPanel => "Show Detail Panel",
@@ -2644,6 +2645,9 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubShowAllReviewers, "zero") => "No reviewers",
         (L10nKey::GitHubShowAllReviewers, "one") => "Show 1 reviewer",
         (L10nKey::GitHubShowAllReviewers, "other") => "Show all {count} reviewers",
+        (L10nKey::TabStripHiddenTabs, "zero") => "No more tabs",
+        (L10nKey::TabStripHiddenTabs, "one") => "1 more tab",
+        (L10nKey::TabStripHiddenTabs, "other") => "{count} more tabs",
         _ => return None,
     };
     Some(res)

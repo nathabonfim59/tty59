@@ -67,20 +67,34 @@ impl State {
 }
 
 impl Tty59App {
-    pub(in crate::ui) fn agent_mode_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The Agents pill. `count` is what the strip already counted this frame,
+    /// so the number it says and the width the strip budgeted for it are one
+    /// scan of the panes.
+    pub(in crate::ui) fn agent_mode_button(
+        &self,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let active = self.agent_mode_active();
-        let count = self
-            .agent_vision
-            .state
-            .attention_count(&self.agent_vision.panes, &self.agent_vision.reads)
-            .total();
-        let label = if active {
+        let label = SharedString::from(if active {
             t(L10nKey::VisionWorkbench).to_string()
         } else {
             format!("{} ({count})", t(L10nKey::VisionAgents))
-        };
-        Button::new("agent-mode-toggle")
-            .label(label)
+        });
+        // The label is our own child, not the button's, so its size, weight and
+        // figures are the ones `StripMetrics` measured rather than whatever the
+        // button gives its text.
+        let text = div()
+            .flex_none()
+            .line_height(gpui::relative(1.))
+            .text_size(gpui::rems(crate::ui::tab_strip::PILL_TEXT))
+            .font_weight(FontWeight::NORMAL)
+            .not_italic()
+            .font_features(self.strip_metrics.features())
+            .child(label.clone());
+        let pill = Button::new("agent-mode-toggle")
+            .accessible_label(label)
+            .child(text)
             .small()
             .custom(
                 gpui_component::button::ButtonCustomVariant::new(cx)
@@ -90,18 +104,20 @@ impl Tty59App {
                     .active(rgb(cx.global::<crate::ui::presets::Surfaces>().rail.pressed).into()),
             )
             .h(px(crate::ui::tab_strip::TITLEBAR_SEARCH_H))
-            .px(px(10.))
+            .px(px(crate::ui::tab_strip::PILL_PAD_X))
+            .w(px(self.strip_metrics.pill_w(active, count)))
             .rounded(px(crate::ui::tab_strip::TITLEBAR_SEARCH_RADIUS))
             .bg(crate::ui::tab_strip::titlebar_search_fill(cx))
-            .text_size(gpui::rems(0.8125))
             .tooltip_element(crate::ui::tab_strip::chord_tooltip(
                 t(L10nKey::VisionToggle),
                 "ToggleAgentVision",
                 cx,
             ))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|app, _, window, cx| app.toggle_agent_vision(window, cx)))
-            .into_any_element()
+            .on_click(cx.listener(|app, _, window, cx| app.toggle_agent_vision(window, cx)));
+        #[cfg(test)]
+        let pill = pill.debug_selector(|| "agent-mode-pill".into());
+        pill.into_any_element()
     }
 
     pub(in crate::ui) fn agent_view_switch(&self, cx: &mut Context<Self>) -> AnyElement {

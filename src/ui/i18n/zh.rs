@@ -2166,6 +2166,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyTurnFinished => "本轮已完成",
         L10nKey::TabTooltipMore => "更多",
         L10nKey::TabTooltipShowSidebar => "显示侧栏",
+        L10nKey::TabStripHiddenTabs => "还有 {count} 个标签页",
         L10nKey::TabTooltipHideSidebar => "隐藏侧栏",
         L10nKey::TabTooltipHideDetailPanel => "隐藏详情面板",
         L10nKey::TabTooltipShowDetailPanel => "显示详情面板",
@@ -2450,6 +2451,9 @@ pub fn translate_variant_zh(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubShowAllReviewers, "zero") => "没有审查人",
         (L10nKey::GitHubShowAllReviewers, "one") => "显示 1 位审查人",
         (L10nKey::GitHubShowAllReviewers, "other") => "显示全部 {count} 位审查人",
+        (L10nKey::TabStripHiddenTabs, "zero") => "没有更多标签页",
+        (L10nKey::TabStripHiddenTabs, "one") => "还有 1 个标签页",
+        (L10nKey::TabStripHiddenTabs, "other") => "还有 {count} 个标签页",
         _ => return None,
     };
     Some(res)

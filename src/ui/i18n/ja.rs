@@ -2394,6 +2394,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyTurnFinished => "ターンが完了しました",
         L10nKey::TabTooltipMore => "その他",
         L10nKey::TabTooltipShowSidebar => "サイドバーを表示",
+        L10nKey::TabStripHiddenTabs => "他 {count} 個のタブ",
         L10nKey::TabTooltipHideSidebar => "サイドバーを非表示",
         L10nKey::TabTooltipHideDetailPanel => "詳細パネルを非表示",
         L10nKey::TabTooltipShowDetailPanel => "詳細パネルを表示",
@@ -2710,6 +2711,9 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubShowAllReviewers, "zero") => "レビュアーなし",
         (L10nKey::GitHubShowAllReviewers, "one") => "1 人のレビュアーを表示",
         (L10nKey::GitHubShowAllReviewers, "other") => "{count} 人のレビュアーをすべて表示",
+        (L10nKey::TabStripHiddenTabs, "zero") => "他のタブはありません",
+        (L10nKey::TabStripHiddenTabs, "one") => "他 1 個のタブ",
+        (L10nKey::TabStripHiddenTabs, "other") => "他 {count} 個のタブ",
         _ => return None,
     };
     Some(res)

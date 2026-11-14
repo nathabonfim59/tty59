@@ -1128,6 +1128,9 @@ pub struct Tty59App {
     /// rectangle was not drawn — scrolled out of a full strip, filtered out of
     /// the sidebar — and takes no part in the reading.
     pub(crate) strip_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    /// What the strip's Agents pill measures at the current font and language.
+    /// Drawing only reads it; it is measured again when one of those changes.
+    pub(crate) strip_metrics: crate::ui::tab_strip::StripMetrics,
     pub(crate) sidebar_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     /// Where each pinned group's block was drawn last frame, so a tab held
     /// over one can be told which group it is over. Only pinned groups are
@@ -1602,6 +1605,7 @@ impl Tty59App {
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
+        let strip_metrics = crate::ui::tab_strip::StripMetrics::new(window, cx);
         let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
@@ -1812,6 +1816,7 @@ impl Tty59App {
             tab_merge: Cell::new(None),
             pane_detach: Cell::new(None),
             strip_slots: Rc::new(RefCell::new(Vec::new())),
+            strip_metrics,
             sidebar_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_group_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_divider: Rc::new(Cell::new(None)),
