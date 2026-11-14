@@ -25,7 +25,10 @@ use std::rc::Rc;
 use crate::core::config::{
     Config, DOCUMENT_RATIO_MAX, DOCUMENT_RATIO_MIN, DOCUMENT_RATIO_STOPS, DocumentLayout,
 };
-use crate::ui::app::{DOCUMENT_MIN_W, OverlayTop, TERMINAL_MIN_W, Tty59App, document_column_px};
+use crate::ui::app::{
+    DOCUMENT_MIN_W, OverlayTop, TERMINAL_MIN_W, Tty59App, document_column_px,
+    document_column_px_min,
+};
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 
@@ -130,13 +133,7 @@ const TERMINAL_DIVIDER_MX: f32 = 6.;
 /// they take. The name is as wide as the terminal's title, so a header
 /// budgeting for it has to assume the longest.
 pub(crate) fn terminal_button_max_w(window: &Window) -> f32 {
-    TERMINAL_PILL_PAD_L
-        + TERMINAL_PILL_BADGE
-        + TERMINAL_PILL_GAP
-        + HEADER_CELL_MAX_W
-        + TERMINAL_PILL_PAD_R
-        + 2. * TERMINAL_DIVIDER_MX
-        + crate::ui::theme::hairline(window).as_f32()
+    terminal_button_fixed_w(crate::ui::theme::hairline(window).as_f32()) + HEADER_CELL_MAX_W
 }
 
 /// Which cell a document's layout switch raises: the box the surface is
@@ -314,6 +311,18 @@ where
         .into_any_element()
 }
 
+/// What the terminal button spends on everything but its name: its padding,
+/// its badge, the gap before the name, and the divider after it with the room
+/// either side of it. `divider` is the divider's own width, a hairline.
+pub(crate) const fn terminal_button_fixed_w(divider: f32) -> f32 {
+    TERMINAL_PILL_PAD_L
+        + TERMINAL_PILL_BADGE
+        + TERMINAL_PILL_GAP
+        + TERMINAL_PILL_PAD_R
+        + divider
+        + 2. * TERMINAL_DIVIDER_MX
+}
+
 impl Tty59App {
     /// A filled document's lead: the terminal it covers, by name, and a way
     /// back that keeps the file or diff open beside it. Both surfaces use this
@@ -322,6 +331,20 @@ impl Tty59App {
     pub(crate) fn render_document_terminal_button(
         &self,
         chrome: DocumentChrome,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        self.render_document_terminal_button_capped(chrome, None, window, cx)
+    }
+
+    /// [`Self::render_document_terminal_button`] with the name held to a cap, in
+    /// pixels, by a header that has worked out what room the name has. The
+    /// button's tooltip then carries the whole name, since the name may be cut.
+    /// `None` is the button as it always was.
+    pub(crate) fn render_document_terminal_button_capped(
+        &self,
+        chrome: DocumentChrome,
+        name_cap: Option<f32>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -335,6 +358,20 @@ impl Tty59App {
             .map(|tab| self.tab_label(tab, self.active, Some(window), cx))
             .unwrap_or_default();
         let badge_bg = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.selected);
+        let name_max = name_cap.unwrap_or(HEADER_CELL_MAX_W);
+        // The tooltip of a name that may be cut spells out the whole title, not
+        // the shortened one the label ladder gives a chip.
+        let whole_name: Option<gpui::SharedString> = if name_cap.is_some() {
+            let whole = self
+                .tabs
+                .get(self.active)
+                .and_then(|tab| self.full_tab_label(tab, Some(window), cx))
+                .map(|label| label.text)
+                .unwrap_or_else(|| name.clone().into());
+            Some(format!("{}: {whole}", t(L10nKey::DocumentDock)).into())
+        } else {
+            None
+        };
         Some(
             h_flex()
                 .flex_none()
@@ -373,15 +410,20 @@ impl Tty59App {
                         )
                         .child(
                             div()
-                                .max_w(px(HEADER_CELL_MAX_W))
+                                .max_w(px(name_max))
                                 .whitespace_nowrap()
                                 .text_ellipsis()
                                 .overflow_hidden()
+                                .when(cfg!(test), |d| {
+                                    d.debug_selector(|| "document-terminal-name".into())
+                                })
                                 .child(name),
                         )
-                        .tooltip(|window, cx| {
-                            gpui_component::tooltip::Tooltip::new(t(L10nKey::DocumentDock))
-                                .build(window, cx)
+                        .tooltip(move |window, cx| match &whole_name {
+                            Some(whole) => gpui_component::tooltip::Tooltip::new(whole.clone())
+                                .build(window, cx),
+                            None => gpui_component::tooltip::Tooltip::new(t(L10nKey::DocumentDock))
+                                .build(window, cx),
                         })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_document_layout(DocumentLayout::Dock, cx);
@@ -419,8 +461,13 @@ impl Tty59App {
     /// share of that strip cannot hold its controls and the front file keeps
     /// its header in the column instead, for as long as that is so. Nothing
     /// is saved: the layout asked for stays the one asked for.
-    pub(crate) fn docked_document_chrome(&self, window: &Window, cx: &gpui::App) -> DocumentChrome {
-        match cfg!(target_os = "macos") || self.editor_header_inline(window, cx) {
+    pub(crate) fn docked_document_chrome(
+        &self,
+        trail: f32,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> DocumentChrome {
+        match cfg!(target_os = "macos") || self.editor_header_inline(trail, window, cx) {
             true => DocumentChrome::Dock,
             false => DocumentChrome::DockHoisted,
         }
@@ -483,7 +530,18 @@ impl Tty59App {
         if self.document_layout(cx) != DocumentLayout::Dock || self.document_front().is_none() {
             return None;
         }
-        document_column_px(self.document_body_px(window, cx), self.document_ratio.get())
+        // A diff's column is as narrow as its header's controls allow, and gives
+        // way to the filled layout below that, held through the same margin the
+        // header's own fallback is: see `diff_fills`. A code editor's is the
+        // plain rule.
+        if self.diff_fills(window, cx) {
+            return None;
+        }
+        let (body, ratio) = (self.document_body_px(window, cx), self.document_ratio.get());
+        match self.document_front() {
+            Some(OverlayTop::Diff) => document_column_px_min(body, ratio, self.document_min_px(cx)),
+            _ => document_column_px(body, ratio),
+        }
     }
 
     /// Fill ↔ dock, for the active tab. One of the two writers of the layout;
@@ -582,6 +640,7 @@ impl Tty59App {
     pub(crate) fn render_document_header(
         &mut self,
         chrome: DocumentChrome,
+        trail: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -589,7 +648,7 @@ impl Tty59App {
             return None;
         }
         match self.document_front()? {
-            OverlayTop::Code => Some(self.render_editor_header_only(chrome, window, cx)),
+            OverlayTop::Code => Some(self.render_editor_header_only(chrome, trail, window, cx)),
             OverlayTop::Diff => self.render_diff_header_only(chrome, window, cx),
         }
     }
@@ -610,6 +669,9 @@ impl Tty59App {
         Some(
             v_flex()
                 .id("document-column")
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "document-column".into())
+                })
                 .relative()
                 .flex_none()
                 .w(px(width))

@@ -44,6 +44,10 @@ const CHIP_GAP: f32 = 6.;
 /// interface font. The row is drawn with it and budgeted with it.
 const STRIP_GAP_REM: f32 = 0.375;
 
+/// Air between two groups of title-bar chrome: the document header and the
+/// Agents pill, the search box and the tiles beside it.
+pub(crate) const CHROME_GROUP_GAP: f32 = 8.;
+
 pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
 const KEEP_SEGMENTS: usize = 3;
@@ -359,7 +363,7 @@ const COUNT_TEXT: f32 = 12. / 16.;
 const COUNT_SLOT_EM: f32 = 0.75;
 const COUNT_INSET: f32 = 2.;
 
-fn count_digits(n: usize) -> usize {
+pub(crate) fn count_digits(n: usize) -> usize {
     n.checked_ilog10().map_or(1, |d| d as usize + 1)
 }
 
@@ -495,9 +499,27 @@ impl StripMetrics {
                 }
             }
     }
+
+    /// What the Agents pill holds at the end of the strip row, from its left
+    /// edge to the row's next control: the pill with `count` agents needing
+    /// attention (the Agents form, the only one a docked document has beside
+    /// it) and the gap the row puts after it.
+    pub(crate) fn pill_span(&self, count: usize) -> f32 {
+        self.pill_w(false, count) + STRIP_GAP_REM * self.rem
+    }
 }
 
 impl Tty59App {
+    /// How many agents need attention: the number the Agents pill says. The
+    /// one scan a frame takes; whoever budgets the pill is handed this number
+    /// rather than counting again.
+    pub(crate) fn attention_total(&self) -> usize {
+        self.agent_vision
+            .state
+            .attention_count(&self.agent_vision.panes, &self.agent_vision.reads)
+            .total()
+    }
+
     fn strip_metrics_refresh(&mut self, window: &Window, cx: &App) {
         if !self.strip_metrics.is_for(cx) {
             self.strip_metrics = StripMetrics::measure(window, cx);
@@ -815,7 +837,7 @@ fn status_paints(sem: crate::ui::presets::Semantic, base: gpui::Hsla, faded: boo
 
 /// Air between the search box and the nearest chrome tile when the bar is too
 /// narrow for the box to sit at its full width.
-const TITLEBAR_SEARCH_CLEAR_GAP: f32 = 8.;
+const TITLEBAR_SEARCH_CLEAR_GAP: f32 = CHROME_GROUP_GAP;
 
 /// Where the title-bar search box is centred, as offsets from the tab strip it
 /// is drawn inside.
@@ -871,6 +893,26 @@ pub(crate) fn search_band(
         right,
         clear: leading.max(trailing),
     }
+}
+
+/// The share of the band the search box may take, so a document docked beside
+/// the terminal leaves the label and chord room to read in.
+const TITLEBAR_SEARCH_SHARE: f32 = 0.6;
+
+/// The narrowest the search box carries its chord at. Narrower, the label has
+/// the room: the shortcut is one keypress the rail's tooltip and the palette
+/// already teach.
+pub(crate) const TITLEBAR_SEARCH_CHORD_MIN_W: f32 = 240.;
+
+/// How wide the search box is drawn in a band `band_w` wide whose springs keep
+/// `clear` free at each end: its width, a share of the band, and what the two
+/// clears leave. Drawn at exactly this width, and the chord is judged against
+/// it, so what is decided is what is on screen.
+pub(crate) fn search_box_w(band_w: f32, clear: f32) -> f32 {
+    TITLEBAR_SEARCH_W
+        .min(TITLEBAR_SEARCH_SHARE * band_w)
+        .min(band_w - 2. * clear)
+        .max(0.)
 }
 
 /// How far the title bar's lead reaches before the tab strip starts: the room
@@ -2390,6 +2432,7 @@ impl Tty59App {
     pub(crate) fn tab_strip(
         &self,
         show_chips: bool,
+        attention: usize,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -2459,13 +2502,8 @@ impl Tty59App {
         } else {
             document_w
         };
-        // One scan of the panes a frame: the pill's width, which the strip
-        // budgets, and the number the pill says come from the same count.
-        let attention = self
-            .agent_vision
-            .state
-            .attention_count(&self.agent_vision.panes, &self.agent_vision.reads)
-            .total();
+        // The pill's width, which the strip budgets, and the number the pill
+        // says come from the one count the caller scanned for the frame.
         let pill_w = self.strip_metrics.pill_w(agent_mode, attention);
         let rem = window.rem_size().as_f32();
         // The row's gaps: chips to New Tab, New Tab to the spacer, the spacer
@@ -2936,10 +2974,6 @@ impl Tty59App {
             (strip_chrome && docked_right <= 0.).then(trailing_chrome_tiles_w),
         );
         let centre_search = (!show_chips).then(|| {
-            // The chord as text, not caps: a cap's fill is this box's own
-            // grey, so on it a cap is only a gap between two letters.
-            let chord = crate::ui::keymap::effective_key("TogglePalette", cx)
-                .map(|spec| crate::ui::keymap::key_tokens(&spec).join(""));
             // Two equal springs either side keep the box centred; each stops
             // at the band's `clear`, and past that it is the box that gives.
             // Reserve the agent-mode controls on both sides while keeping the
@@ -2947,6 +2981,34 @@ impl Tty59App {
             let clear = band
                 .clear
                 .max(if self.agent_mode_active() { 140. } else { 110. });
+            // The band is the bar's column less what stands beside it: the
+            // rail at the width it is drawn, the window buttons the strip
+            // stops short of, and what `band.right` already gives to a docked
+            // document and panel. On macOS the bar is the terminal column, so
+            // those two come off it instead.
+            let rail_w = match (self.agent_mode_active(), self.sidebar_open(cx)) {
+                (true, _) => self.sidebar_width.get(),
+                (false, true) => self.sidebar_px(window, cx),
+                (false, false) => 0.,
+            };
+            let beside_bar = match cfg!(target_os = "macos") {
+                true => panel_w + document_w,
+                false => controls_w,
+            };
+            let band_w = (window.viewport_size().width.as_f32()
+                - pad.left.as_f32()
+                - pad.right.as_f32()
+                - rail_w
+                - beside_bar
+                - band.right)
+                .max(0.);
+            let box_w = search_box_w(band_w, clear);
+            // Caps, one per key, only where the box is wide enough to carry
+            // them; they come from the binding the user has.
+            let chord = (box_w >= TITLEBAR_SEARCH_CHORD_MIN_W)
+                .then(|| crate::ui::keymap::effective_key("TogglePalette", cx))
+                .flatten()
+                .map(|spec| crate::ui::dialog::chord(crate::ui::keymap::key_tokens(&spec), cx));
             let spring = || div().flex_1().min_w(px(clear));
             div()
                 .absolute()
@@ -2960,14 +3022,12 @@ impl Tty59App {
                 .child(
                     h_flex()
                         .id("titlebar-search")
+                        .when(cfg!(test), |d| {
+                            d.debug_selector(|| "titlebar-search".into())
+                        })
                         .occlude()
-                        .w(px(TITLEBAR_SEARCH_W))
+                        .w(px(box_w))
                         .min_w_0()
-                        // Enough of the bar that the label and its chord still
-                        // fit with a document docked beside the terminal; at a
-                        // half it read `Search Everywhe…` in exactly the
-                        // layout people search from most.
-                        .max_w(gpui::relative(0.6))
                         .h(px(TITLEBAR_SEARCH_H))
                         .items_center()
                         .gap(px(7.))
@@ -2990,9 +3050,7 @@ impl Tty59App {
                                 .truncate()
                                 .child(t(L10nKey::AppMenuSearchEverywhere)),
                         )
-                        .when_some(chord, |row, chord| {
-                            row.child(div().flex_shrink_0().child(chord))
-                        })
+                        .when_some(chord, |row, chord| row.child(chord))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(
                             cx.listener(|this, _, window, cx| match this.search.is_some() {
@@ -4400,7 +4458,7 @@ mod tests {
 /// top, resized, drawn, and read back from what was painted (`strip_slots` is
 /// written from paint, so a chip that is not drawn leaves nothing in it).
 #[cfg(test)]
-mod overflow_gpui_tests {
+pub(crate) mod overflow_gpui_tests {
     use crate::core::config::{Config, TabBarPosition, UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX};
     use crate::ui::app::{Tty59App, test_window::harness_with_tabs};
     use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext, px, size};
@@ -4519,11 +4577,16 @@ mod overflow_gpui_tests {
     /// The two languages the strip is drawn in here, by registry code, with
     /// what each calls the Agents pill: its label, and so its width, is the one
     /// thing in the row that changes with them.
-    const LOCALES: [(&str, &str); 2] = [("en", "Agents"), ("ru-RU", "Агенты")];
+    pub(crate) const LOCALES: [(&str, &str); 2] = [("en", "Agents"), ("ru-RU", "Агенты")];
 
     /// `set_locale` falls back to English for a code it does not know, so the
     /// language is checked by what it says, not by what was asked for.
-    fn use_locale(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, locale: &str, agents: &str) {
+    pub(crate) fn use_locale(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        locale: &str,
+        agents: &str,
+    ) {
         assert!(
             crate::ui::i18n::find_language(locale).is_some(),
             "{locale} is not a supported language code"
@@ -4550,7 +4613,11 @@ mod overflow_gpui_tests {
         redraw(vcx);
     }
 
-    fn set_ui_font_size(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, ui_font_size: f32) {
+    pub(crate) fn set_ui_font_size(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        ui_font_size: f32,
+    ) {
         vcx.update(|_, cx| {
             let mut cfg = cx.global::<Config>().clone();
             cfg.ui_font_size = ui_font_size;
@@ -5023,7 +5090,7 @@ mod overflow_gpui_tests {
 
     /// Puts a waiting agent on each of `streams`, through the daemon's own
     /// message, and waits until the app's inbox counts all `expected` of them.
-    fn agents_wait(
+    pub(crate) fn agents_wait(
         app: &Entity<Tty59App>,
         vcx: &mut VisualTestContext,
         streams: &mut [crate::daemon::transport::Stream],

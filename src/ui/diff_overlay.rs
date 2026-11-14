@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, LazyLock};
@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_component::button::Button;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 
 use crate::core::config::{Config, DiffViewMode};
 use crate::core::git::status::DecoStatus;
@@ -36,8 +36,76 @@ use crate::ui::scm::status::{status_color, status_glyph};
 
 pub(crate) enum DiffLoad {
     Loading,
-    Ready(Arc<DiffSnapshot>),
+    Ready(Loaded),
     NotARepo,
+}
+
+/// A snapshot as the overlay holds it, with the facts the header is drawn and
+/// budgeted from, taken once where the snapshot is installed.
+///
+/// One value, built by the only way to make one — `From<Arc<DiffSnapshot>>` —
+/// so the facts cannot describe a different snapshot than the one beside
+/// them, and a new snapshot brings its own. The header and its budget read the
+/// same facts every frame instead of walking the files again.
+#[derive(Clone)]
+pub(crate) struct Loaded {
+    snapshot: Arc<DiffSnapshot>,
+    facts: Arc<LoadFacts>,
+}
+
+struct LoadFacts {
+    stats: DiffStats,
+    /// Every path the snapshot names: the files it holds a patch for and the
+    /// untracked ones it only lists. What a focus can point at.
+    paths: HashSet<String>,
+}
+
+impl From<Arc<DiffSnapshot>> for Loaded {
+    fn from(snapshot: Arc<DiffSnapshot>) -> Self {
+        let facts = LoadFacts {
+            stats: snapshot.stats(),
+            paths: snapshot
+                .files
+                .iter()
+                .map(|f| f.path.clone())
+                .chain(snapshot.untracked.iter().cloned())
+                .collect(),
+        };
+        Self {
+            snapshot,
+            facts: Arc::new(facts),
+        }
+    }
+}
+
+impl std::ops::Deref for Loaded {
+    type Target = DiffSnapshot;
+
+    fn deref(&self) -> &DiffSnapshot {
+        &self.snapshot
+    }
+}
+
+impl Loaded {
+    /// The snapshot itself, for whoever keeps or compares it by identity.
+    fn snapshot(&self) -> &Arc<DiffSnapshot> {
+        &self.snapshot
+    }
+
+    /// [`DiffSnapshot::stats`], taken once when the snapshot was installed.
+    fn stats(&self) -> DiffStats {
+        self.facts.stats
+    }
+
+    /// [`DiffSnapshot::totals`], from the same facts.
+    fn totals(&self) -> (u32, u32) {
+        self.facts.stats.totals
+    }
+
+    /// Whether `path` is a file the snapshot holds or lists untracked.
+    fn has_path(&self, path: &str) -> bool {
+        self.facts.paths.contains(path)
+    }
 }
 
 pub(crate) struct DiffOverlayState {
@@ -220,8 +288,71 @@ impl Tty59App {
             .filter(|o| o.cwd == cwd && o.host_id == host && o.source == source)
             && !matches!(overlay.load, DiffLoad::Ready(_))
         {
-            overlay.load = DiffLoad::Ready(snapshot);
+            overlay.load = DiffLoad::Ready(snapshot.into());
             cx.notify();
+        }
+    }
+
+    /// Opens `snapshot` as an overlay that has already loaded, whatever its
+    /// source, for tests outside this file: [`Self::open_supplied_diff`] takes
+    /// only patches, and the overlay's state is private to this module.
+    ///
+    /// Builds the overlay itself instead of going through
+    /// [`Self::open_diff_overlay`], which would start a probe of the
+    /// directory for any source git can answer — and a probe of a directory
+    /// that is not there lands later as "not a repository" over the snapshot
+    /// this installs.
+    #[cfg(test)]
+    pub(crate) fn open_loaded_diff_for_test(
+        &mut self,
+        snapshot: Arc<DiffSnapshot>,
+        loading: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (cwd, source) = (snapshot.root.clone(), snapshot.source.clone());
+        let active = self.active;
+        let Some(tab) = self.tabs.get_mut(active) else {
+            return;
+        };
+        tab.overlay_top = crate::ui::app::OverlayTop::Diff;
+        let focus_handle = cx.focus_handle();
+        tab.diff_overlay = Some(DiffOverlayState {
+            host_id: crate::ui::host_ops::HostId::LOCAL,
+            cwd,
+            source,
+            focus_handle: focus_handle.clone(),
+            load: DiffLoad::Ready(snapshot.into()),
+            loading,
+            expanded: HashMap::new(),
+            focus: None,
+            preview: None,
+            preview_loading: None,
+            selection: None,
+            selecting: false,
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(256.))
+                .with_size_hint(DIFF_LINE_H),
+            rows: Rc::new(Vec::new()),
+            rows_key: None,
+            epoch: None,
+        });
+        window.focus(&focus_handle, cx);
+        cx.notify();
+    }
+
+    /// Whether the active overlay is ready and holds exactly `expected`, by
+    /// identity, so a test measures the fixture it installed and not whatever
+    /// replaced it.
+    #[cfg(test)]
+    pub(crate) fn diff_overlay_holds_for_test(&self, expected: &Arc<DiffSnapshot>) -> bool {
+        match self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.diff_overlay.as_ref())
+            .map(|o| &o.load)
+        {
+            Some(DiffLoad::Ready(loaded)) => std::ptr::eq(&**loaded, expected.as_ref()),
+            _ => false,
         }
     }
 
@@ -477,6 +608,9 @@ impl Tty59App {
         // Only wanted by an overlay whose first probe could not know the root,
         // and so could not read its own epoch before dispatching.
         let landing_epoch = snap.as_ref().map(|s| scm_epoch(cx, host, &s.root));
+        // The facts the header is drawn from, taken once for the snapshot and
+        // shared by every overlay it lands in.
+        let loaded = snap.as_ref().map(|s| Loaded::from(Arc::clone(s)));
         for tab in self.tabs.iter_mut() {
             let Some(overlay) = tab
                 .diff_overlay
@@ -487,8 +621,8 @@ impl Tty59App {
             };
             overlay.loading = false;
             overlay.epoch = overlay.epoch.or(landing_epoch);
-            overlay.load = match &snap {
-                Some(snap) => DiffLoad::Ready(Arc::clone(snap)),
+            overlay.load = match &loaded {
+                Some(loaded) => DiffLoad::Ready(loaded.clone()),
                 None => DiffLoad::NotARepo,
             };
             // A new snapshot restarts any untracked preview: the file may
@@ -654,30 +788,190 @@ impl Tty59App {
             }
             _ => (String::new(), 0, 0, 0, 0),
         };
-        // See `render_editor_header`: the traffic-light inset belongs to a
-        // header that starts at the window's left edge, which a column's does
-        // not.
-        let lead = if self.left_panel_open(cx) || chrome.is_dock() {
-            crate::ui::app::CONTENT_INSET
-        } else {
-            crate::ui::app::TITLE_BAR_LEAD
-        };
+        let lead = self.diff_header_lead(chrome, cx);
         let mono = SharedString::from(self.font_family.clone());
         let subject = source_subject(&overlay.source, branch);
-        let subject_takes_the_slack =
-            chrome.is_dock() && !subject.is_rev && subject.label.is_none();
+        let shape = source_shape(&overlay.source);
+        // A filled header decides its lines from what is measured and the room
+        // it is drawn in, never from what it has painted: the one-line budget
+        // against the body, held the editor's margin by the last answer the
+        // app's events recorded. The names then take what their line leaves.
+        let need =
+            (chrome == DocumentChrome::Fill).then(|| self.diff_fill_need(overlay, window, cx));
+        let body = self.document_body_px(window, cx);
+        let two_line = need.is_some_and(|n| n.wraps(body, self.editor.diff_two_line));
+        let parts = HeaderParts::of(overlay, shape, chrome, (added, removed));
+        let caps = need.map(|n| n.caps(body, two_line));
+        let rem = window.rem_size();
         let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
-        let row = h_flex().id("diff-overlay-header");
+
+        // The metadata, in the order it is read: the focused file's way back,
+        // the file count, the two totals and the Refreshing word. On one line
+        // it follows the subject; on two it is the second line.
+        let mut metadata: Vec<AnyElement> = Vec::new();
+        // The focused file's path is the only other thing on the strip that
+        // grows without bound, and it used to refuse to yield any of it: a
+        // header with a commit label already spends its slack on the subject,
+        // so the path pushed the view switch and the close tile off the end of
+        // a docked column and they were clipped away mid-word. It shrinks now,
+        // ahead of the subject (`999.` against the subject's `1.`) because a
+        // path has a second home one line down in the file list and the
+        // subject has none — and it shrinks head-first, so the filename is the
+        // last thing to go.
+        if let Some(name) = focused_name(overlay) {
+            let (head, leaf) = crate::ui::path_display::split_path_leaf(&name);
+            metadata.push(
+                div()
+                    .occlude()
+                    .min_w_0()
+                    .flex_shrink(999.)
+                    .child(
+                        h_flex()
+                            .id("diff-overlay-unfocus")
+                            .when(cfg!(test), |d| {
+                                d.debug_selector(|| "diff-overlay-unfocus".into())
+                            })
+                            .items_center()
+                            .min_w_0()
+                            .gap(rems(FOCUS_GAP_REM))
+                            .h(CONTROL_H)
+                            .pl(px(FOCUS_PAD_L))
+                            .pr(ROW_INSET)
+                            .rounded(ROW_RADIUS)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(hover))
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                let active = this.active;
+                                if let Some(overlay) = this
+                                    .tabs
+                                    .get_mut(active)
+                                    .and_then(|t| t.diff_overlay.as_mut())
+                                {
+                                    overlay.focus = None;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(
+                                Icon::new(IconName::ChevronLeft)
+                                    .size(rem * FOCUS_CHEVRON_REM)
+                                    .flex_shrink_0()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                            .child(
+                                h_flex()
+                                    .min_w_0()
+                                    .text_size(rems(META_MONO))
+                                    .font_family(self.font_family.clone())
+                                    .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
+                                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
+                                    .painted("header-path"),
+                            ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        // The file count is the first thing a column drops: the same number is
+        // one line down, at the top of the list. The totals stay — they have no
+        // second home. Filled, it is also one of the two names that give, so
+        // it is held between its minimum and what its line leaves, and its
+        // tooltip has the whole of it.
+        if parts.summary {
+            let mut summary = t_plural(L10nKey::DiffChangedFiles, files, &[]);
+            if untracked > 0 {
+                summary.push_str(&t_plural(L10nKey::DiffUntrackedCount, untracked, &[]));
+            }
+            let whole = SharedString::from(summary);
+            let tip = whole.clone();
+            metadata.push(
+                div()
+                    .id("diff-overlay-summary")
+                    .text_size(rems(META))
+                    .font_features(tabular())
+                    .text_color(cx.theme().muted_foreground)
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-summary".into())
+                    })
+                    .when_some(caps, |d, (_, cap)| {
+                        d.min_w(px(need.map_or(0., |n| n.summary_min())))
+                            .max_w(px(cap))
+                            .truncate()
+                    })
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    .child(whole)
+                    .into_any_element(),
+            );
+        }
+        if parts.added {
+            metadata.push(
+                div()
+                    .text_size(rems(META))
+                    .font_features(tabular())
+                    .text_color(cx.theme().success)
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-added".into())
+                    })
+                    .child(format!("+{added}"))
+                    .into_any_element(),
+            );
+        }
+        if parts.removed {
+            metadata.push(
+                div()
+                    .text_size(rems(META))
+                    .font_features(tabular())
+                    .text_color(cx.theme().danger)
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-removed".into())
+                    })
+                    .child(format!("−{removed}"))
+                    .into_any_element(),
+            );
+        }
+        if parts.loading {
+            metadata.push(
+                div()
+                    .text_size(rems(META))
+                    .text_color(cx.theme().muted_foreground)
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-refreshing".into())
+                    })
+                    .child(t(L10nKey::Refreshing))
+                    .into_any_element(),
+            );
+        }
+        let (inline_metadata, second_line) = if two_line {
+            (Vec::new(), metadata)
+        } else {
+            (metadata, Vec::new())
+        };
+
+        let row = h_flex()
+            .id("diff-overlay-header")
+            .when(cfg!(test) && !two_line, |d| {
+                d.debug_selector(|| "diff-overlay-header".into())
+            });
         let row = if chrome.header_is_title_strip() {
             crate::ui::app::title_bar_drag(row, "diff-overlay-header", window, cx)
         } else {
             row
         };
-        row.flex_shrink_0()
+        let first_line = row
+            .flex_shrink_0()
             // The row's own hairline stays exactly as thin as it is drawn; it
             // only gives back the half point the title bar spends, so this
             // header's tiles land on the traffic lights' line rather than below.
-            .title_strip_row(HAIRLINE_W, hairline(cx))
+            .title_strip_row(
+                HAIRLINE_W,
+                // Wrapped, the one rule is the second line's; this row keeps
+                // the box it has and draws nothing at its bottom edge.
+                if two_line {
+                    gpui::transparent_black()
+                } else {
+                    hairline(cx)
+                },
+            )
             // The header's sha and paths are identifiers, not prose: set the
             // way the patch rows below are, by the Font ligatures setting.
             .font_features(code_features(cx))
@@ -685,40 +979,58 @@ impl Tty59App {
             // The close tile is a notch smaller than the title bar's own, and
             // is pulled in by half the difference so its glyph stays on the
             // column every other trailing tile in the window is centred on.
-            .pr(px(crate::ui::app::tile_trailing_inset()
-                + (crate::ui::app::TILE_SIZE - CLOSE_TILE) / 2.))
-            .gap_2()
+            .pr(px(header_trail()))
+            .gap(rems(HEADER_GAP_REM))
             .items_center()
-            .children(self.render_document_terminal_button(chrome, window, cx))
+            .children(self.render_document_terminal_button_capped(
+                chrome,
+                caps.map(|(name, _)| name),
+                window,
+                cx,
+            ))
             .child(
                 gpui::svg()
                     .path(subject.icon)
                     .flex_shrink_0()
-                    .size(px(13.))
+                    .size(px(SUBJECT_ICON))
                     .text_color(cx.theme().muted_foreground),
             )
             .child(if subject.is_rev {
                 // A revision is an identifier, not a name: it belongs in the
-                // same monospace the patch below it is set in.
+                // same monospace the patch below it is set in. It is also
+                // whatever the source says — an arbitrary ref, a range, a
+                // patch id — so it is the one part of the header that gives
+                // when the controls beside it need the room, the way the branch
+                // name below does, and the tooltip keeps the whole ref.
+                let full = SharedString::from(subject.full);
                 div()
-                    .flex_shrink_0()
+                    .id("diff-overlay-rev")
+                    .min_w_0()
+                    .truncate()
                     .text_size(rems(TEXT_MONO))
                     .font_weight(FontWeight::MEDIUM)
                     .font_family(self.font_family.clone())
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                    })
                     .child(subject.text)
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-rev".into())
+                    })
                     .painted("header-rev")
                     .into_any_element()
             } else {
-                // Docked, this is the name that gives: the header has a
-                // column's width rather than a window's, and a branch name that
-                // refused to yield any of it pushed the view toggle and the
-                // close tile off the end. It takes the slack the spacer below
-                // would otherwise have — the same trade the label branch makes,
-                // and for the same reason two `flex_1` siblings would split the
-                // line and truncate the name with empty space beside it.
+                // This is the name that gives, in a column and filled alike:
+                // the header has the room it has rather than the room a name
+                // would like, and a branch name that refused to yield any of it
+                // pushed the view toggle and the close tile off the end. It
+                // takes the slack the spacer below would otherwise have — the
+                // same trade the label branch makes, and for the same reason
+                // two `flex_1` siblings would split the line and truncate the
+                // name with empty space beside it.
                 div()
-                    .when(subject_takes_the_slack, |d| d.flex_1().min_w_0().truncate())
-                    .when(!subject_takes_the_slack, |d| d.flex_shrink_0())
+                    .when(parts.slack, |d| d.flex_1().min_w_0().truncate())
+                    .when(!parts.slack, |d| d.flex_shrink_0())
                     .text_size(rems(TEXT))
                     .font_weight(FontWeight::MEDIUM)
                     .child(subject.text)
@@ -747,136 +1059,47 @@ impl Tty59App {
             // subject would vanish first however high the others' shrink
             // factors were. Based at its content width it yields last, which
             // is the order the strip wants.
+            //
+            // The two of them are one group in the row, based at zero (`flex_1`)
+            // and held at no less than the gap between them. A group based at
+            // zero has no shrink factor, so it takes only the room left after
+            // the ref and the fixed parts have what they need and gives the ref
+            // none of its own: the ref gives way to nothing but a deficit that
+            // is its own to take, and the label and byline are squeezed first.
+            // Inside the group their order is what it was.
             .when_some(subject.label.as_ref(), |bar, label| {
                 bar.child(
-                    div()
-                        .flex_auto()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(rems(TEXT))
-                        .child(SharedString::from(label.subject.clone())),
-                )
-                // Yields before the subject does, for the same reason the
-                // path below it does: an author name is unbounded too, and of
-                // the three things on this strip it is the one nobody reads
-                // twice.
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_shrink(999.)
-                        .truncate()
-                        .text_size(rems(META))
-                        .font_features(tabular())
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label_byline(label, now_unix())),
-                )
-            })
-            // The focused file's path is the only other thing on the strip
-            // that grows without bound, and it used to refuse to yield any of
-            // it: a header with a commit label already spends its slack on the
-            // subject, so the path pushed the view switch and the close tile
-            // off the end of a docked column and they were clipped away
-            // mid-word. It shrinks now, ahead of the subject (`999.` against
-            // the subject's `1.`) because a path has a second home one line
-            // down in the file list and the subject has none — and it shrinks
-            // head-first, so the filename is the last thing to go.
-            .when_some(focused_name(overlay), |bar, name| {
-                let (head, leaf) = crate::ui::path_display::split_path_leaf(&name);
-                bar.child(
-                    div().occlude().min_w_0().flex_shrink(999.).child(
-                        h_flex()
-                            .id("diff-overlay-unfocus")
-                            .items_center()
-                            .min_w_0()
-                            .gap_1()
-                            .h(CONTROL_H)
-                            .pl(px(4.))
-                            .pr(ROW_INSET)
-                            .rounded(ROW_RADIUS)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(hover))
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                let active = this.active;
-                                if let Some(overlay) = this
-                                    .tabs
-                                    .get_mut(active)
-                                    .and_then(|t| t.diff_overlay.as_mut())
-                                {
-                                    overlay.focus = None;
-                                    cx.notify();
-                                }
-                            }))
-                            .child(
-                                Icon::new(IconName::ChevronLeft)
-                                    .small()
-                                    .flex_shrink_0()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .text_size(rems(META_MONO))
-                                    .font_family(self.font_family.clone())
-                                    .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
-                                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
-                                    .painted("header-path"),
-                            ),
-                    ),
-                )
-            })
-            .when(
-                matches!(overlay.load, DiffLoad::Ready(_)) && overlay.focus.is_none(),
-                |bar| {
-                    let mut summary = t_plural(L10nKey::DiffChangedFiles, files, &[]);
-                    if untracked > 0 {
-                        summary.push_str(&t_plural(L10nKey::DiffUntrackedCount, untracked, &[]));
-                    }
-                    // The file count is the first thing a column drops: the
-                    // same number is one line down, at the top of the list.
-                    // The totals stay — they have no second home.
-                    bar.when(!chrome.is_dock(), |bar| {
-                        bar.child(
+                    h_flex()
+                        .flex_1()
+                        .min_w(rems(HEADER_GAP_REM))
+                        .items_center()
+                        .gap(rems(HEADER_GAP_REM))
+                        .child(
                             div()
+                                .flex_auto()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(rems(TEXT))
+                                .child(SharedString::from(label.subject.clone())),
+                        )
+                        // Yields before the subject does, for the same reason
+                        // the path below it does: an author name is unbounded
+                        // too, and of the three things on this strip it is the
+                        // one nobody reads twice.
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_shrink(999.)
+                                .truncate()
                                 .text_size(rems(META))
                                 .font_features(tabular())
                                 .text_color(cx.theme().muted_foreground)
-                                .child(summary),
-                        )
-                    })
-                    .when(added > 0, |bar| {
-                        bar.child(
-                            div()
-                                .text_size(rems(META))
-                                .font_features(tabular())
-                                .text_color(cx.theme().success)
-                                .child(format!("+{added}")),
-                        )
-                    })
-                    .when(removed > 0, |bar| {
-                        bar.child(
-                            div()
-                                .text_size(rems(META))
-                                .font_features(tabular())
-                                .text_color(cx.theme().danger)
-                                .child(format!("−{removed}")),
-                        )
-                    })
-                },
-            )
-            .when(
-                overlay.loading && matches!(overlay.load, DiffLoad::Ready(_)),
-                |bar| {
-                    bar.child(
-                        div()
-                            .text_size(rems(META))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(t(L10nKey::Refreshing)),
-                    )
-                },
-            )
-            .when(subject.label.is_none() && !subject_takes_the_slack, |bar| {
-                bar.child(div().flex_1())
+                                .child(label_byline(label, now_unix())),
+                        ),
+                )
             })
+            .children(inline_metadata)
+            .when(parts.spacer, |bar| bar.child(div().flex_1()))
             .child(
                 div()
                     .occlude()
@@ -889,21 +1112,52 @@ impl Tty59App {
             // ask for the screen.
             .child(self.document_layout_switch(chrome, cx))
             .child(
-                div().occlude().flex_shrink_0().child(
-                    crate::ui::tab_strip::chrome_tile_sized(
-                        Button::new("diff-overlay-close").icon(Icon::new(IconName::Close)),
-                        CLOSE_TILE,
-                        crate::ui::tab_strip::RAIL_TILE_GLYPH,
-                        false,
-                        cx,
-                    )
-                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-                    .tooltip(t(L10nKey::DiffCloseTooltip))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.close_diff_overlay(window, cx);
-                    })),
-                ),
+                div()
+                    .occlude()
+                    .flex_shrink_0()
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-close".into())
+                    })
+                    .child(
+                        crate::ui::tab_strip::chrome_tile_sized(
+                            Button::new("diff-overlay-close").icon(Icon::new(IconName::Close)),
+                            CLOSE_TILE,
+                            crate::ui::tab_strip::RAIL_TILE_GLYPH,
+                            false,
+                            cx,
+                        )
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                        .tooltip(t(L10nKey::DiffCloseTooltip))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_diff_overlay(window, cx);
+                        })),
+                    ),
+            );
+        if !two_line {
+            return first_line.into_any_element();
+        }
+        // The metadata that did not fit beside the subject, on a line of its
+        // own below the first: every figure and word whole, the summary
+        // holding what its line leaves.
+        v_flex()
+            .flex_shrink_0()
+            .when(cfg!(test), |d| {
+                d.debug_selector(|| "diff-overlay-header".into())
+            })
+            .child(first_line)
+            .child(
+                h_flex()
+                    .h(px(SECOND_LINE_H))
+                    .items_center()
+                    .pl(px(crate::ui::app::CONTENT_INSET))
+                    .pr(px(header_trail()))
+                    .gap(rems(HEADER_GAP_REM))
+                    .font_features(code_features(cx))
+                    .border_b(HAIRLINE_W)
+                    .border_color(hairline(cx))
+                    .children(second_line),
             )
+            .into_any_element()
     }
 
     /// The two views, as a drawn switch on the track the layout switch sits on.
@@ -1054,7 +1308,7 @@ impl Tty59App {
             DiffLoad::Ready(snap) if empty_snapshot(snap) => {
                 return Some(DiffBody::Message(t(L10nKey::DiffWorkingTreeClean)));
             }
-            DiffLoad::Ready(snap) => Arc::clone(snap),
+            DiffLoad::Ready(snap) => Arc::clone(snap.snapshot()),
         };
 
         // A focused *untracked* file has no patch in the snapshot; its card is
@@ -1418,6 +1672,405 @@ const CLOSE_TILE: f32 = crate::ui::tab_strip::RAIL_TILE;
 /// The fill under a neutral chip, the same faint ink the graph's HEAD chip
 /// wears.
 const CHIP_FILL: f32 = 0.06;
+
+/// What the header is drawn from and budgeted from, one definition for both:
+/// the subject's icon, the gap between its children (a share of the rem, so
+/// it follows the interface font), the focused file's back button (its inset,
+/// the gap inside it and its chevron, which is a share of the rem too), and the
+/// room the close tile leaves at the end of the row.
+const SUBJECT_ICON: f32 = 13.;
+/// The height of the filled header's second line, which carries the metadata
+/// that did not fit beside the subject.
+const SECOND_LINE_H: f32 = 36.;
+const HEADER_GAP_REM: f32 = 0.5;
+const FOCUS_PAD_L: f32 = 4.;
+const FOCUS_GAP_REM: f32 = 0.25;
+const FOCUS_CHEVRON_REM: f32 = 0.875;
+
+/// The close tile is a notch smaller than the title bar's own, and is pulled in
+/// by half the difference so its glyph stays on the column every other
+/// trailing tile in the window is centred on.
+fn header_trail() -> f32 {
+    crate::ui::app::tile_trailing_inset() + (crate::ui::app::TILE_SIZE - CLOSE_TILE) / 2.
+}
+
+/// Which of the header's optional children are there. The render asks it what
+/// to draw and the budget asks it how many gaps and which fixed labels to
+/// count, so what is budgeted is what is drawn.
+#[derive(Clone, Copy)]
+struct HeaderParts {
+    /// The branch name takes the slack the row has.
+    slack: bool,
+    /// The filled header leads with the terminal button.
+    terminal: bool,
+    staged: bool,
+    labelled: bool,
+    focused: bool,
+    summary: bool,
+    added: bool,
+    removed: bool,
+    loading: bool,
+    spacer: bool,
+}
+
+impl HeaderParts {
+    fn of(
+        overlay: &DiffOverlayState,
+        shape: SourceShape,
+        chrome: DocumentChrome,
+        (added, removed): (u32, u32),
+    ) -> Self {
+        let ready = matches!(overlay.load, DiffLoad::Ready(_));
+        let stats = ready && overlay.focus.is_none();
+        // The branch name is the part that gives, in a column and filled alike:
+        // a name that refuses to yield pushes the controls off the end.
+        let slack = !shape.is_rev && !shape.labelled;
+        Self {
+            slack,
+            terminal: chrome == DocumentChrome::Fill,
+            staged: shape.staged,
+            labelled: shape.labelled,
+            focused: focused_name_ref(overlay).is_some(),
+            summary: stats && !chrome.is_dock(),
+            added: stats && added > 0,
+            removed: stats && removed > 0,
+            loading: overlay.loading && ready,
+            spacer: !shape.labelled && !slack,
+        }
+    }
+
+    /// How many children the row has on one line: the terminal button of a
+    /// filled header, the icon and the subject, each part that is there (a
+    /// label is its subject and its byline), the two switches and the close
+    /// tile.
+    ///
+    /// A label still counts as the two pieces it is made of, though the row
+    /// holds them as one group: the gap inside that group, which the group is
+    /// held to no less than, is the gap the second piece would have had in the
+    /// row. The count, and so the gaps the budget reserves, is what it was.
+    fn children(&self) -> usize {
+        let one = |there: bool| usize::from(there);
+        one(self.terminal)
+            + 2
+            + one(self.staged)
+            + 2 * one(self.labelled)
+            + one(self.focused)
+            + one(self.summary)
+            + one(self.added)
+            + one(self.removed)
+            + one(self.loading)
+            + one(self.spacer)
+            + 3
+    }
+
+    /// The metadata a second line takes: the focused file's back button, the
+    /// summary, the two counts and the Refreshing word, whichever are there.
+    fn metadata(&self) -> usize {
+        let one = |there: bool| usize::from(there);
+        one(self.focused)
+            + one(self.summary)
+            + one(self.added)
+            + one(self.removed)
+            + one(self.loading)
+    }
+
+    /// How many children the first line has when the metadata is on a second.
+    fn first_line(&self) -> usize {
+        self.children() - self.metadata()
+    }
+}
+
+/// What the header's fixed words and figures measure at the current fonts,
+/// size and language: the Staged chip's word, the Refreshing word, and the
+/// glyphs the added and removed counts are made of.
+///
+/// Measured as they are drawn — the chip in the editor font, the others in
+/// the interface font; the counts with tabular figures at the meta size; the
+/// words with the header's own feature set — and only when what they depend on
+/// has changed: the interface size, the two font families, the feature set the
+/// header inherits (so a live ligature or custom-tag edit measures again) and
+/// the two words' language. Drawing and the budget only read them. The ref is
+/// not in here: it truncates, so it needs no room of its own, and the figures
+/// are counted from their digits when they are read.
+#[derive(Clone)]
+pub(crate) struct DiffHeaderMetrics {
+    rem: f32,
+    ui_family: SharedString,
+    mono_family: String,
+    features: gpui::FontFeatures,
+    staged: &'static str,
+    refreshing: &'static str,
+    /// Whole words, rounded up the way a drawn run is.
+    staged_w: f32,
+    refreshing_w: f32,
+    /// Glyphs of the counts, as the shaper reports them; a count rounds up
+    /// once, as a whole run does.
+    plus: f32,
+    minus: f32,
+    digit: f32,
+    /// One object id at its short length, [`OID_SHORT`] characters, as one run
+    /// as the ref is drawn: the editor font, medium weight, the mono size and
+    /// the header's features. What the header keeps whole of any ref.
+    rev_floor: f32,
+    /// The least a cut summary and a cut terminal name keep: three digits and
+    /// the ellipsis, as one run each in the font and size they are drawn at.
+    /// A readable design minimum for the filled header, not a promise of three
+    /// of any glyphs.
+    summary_min: f32,
+    name_min: f32,
+}
+
+impl DiffHeaderMetrics {
+    pub(crate) fn measure(window: &Window, cx: &gpui::App, mono_family: &str) -> Self {
+        let rem = cx.global::<Config>().ui_font_size;
+        let ui_family = cx.theme().font_family.clone();
+        let features = code_features(cx);
+        let font = |family: SharedString, features: gpui::FontFeatures| gpui::Font {
+            family,
+            features,
+            fallbacks: None,
+            weight: FontWeight::NORMAL,
+            style: gpui::FontStyle::Normal,
+        };
+        let text = window.text_system();
+        let (meta, meta_mono) = (rem * META, rem * META_MONO);
+        let figures = font(ui_family.clone(), tabular());
+        let figure = |glyph: &str| crate::ui::tab_strip::measure_text(text, &figures, meta, glyph);
+        let (staged, refreshing) = (t(L10nKey::ScmChipStaged), t(L10nKey::Refreshing));
+        let chip_font = font(
+            SharedString::from(mono_family.to_string()),
+            features.clone(),
+        );
+        let rev_font = gpui::Font {
+            weight: FontWeight::MEDIUM,
+            ..chip_font.clone()
+        };
+        let word_font = font(ui_family.clone(), features.clone());
+        Self {
+            rem,
+            ui_family,
+            mono_family: mono_family.to_string(),
+            features,
+            staged,
+            refreshing,
+            staged_w: crate::ui::tab_strip::measure_text(text, &chip_font, meta_mono, staged)
+                .ceil(),
+            refreshing_w: crate::ui::tab_strip::measure_text(text, &word_font, meta, refreshing)
+                .ceil(),
+            plus: figure("+"),
+            minus: figure("−"),
+            digit: figure("0"),
+            rev_floor: crate::ui::tab_strip::measure_text(
+                text,
+                &rev_font,
+                rem * TEXT_MONO,
+                &"0".repeat(OID_SHORT),
+            )
+            .ceil(),
+            summary_min: crate::ui::tab_strip::measure_text(text, &figures, meta, "000\u{2026}")
+                .ceil(),
+            name_min: crate::ui::tab_strip::measure_text(
+                text,
+                &word_font,
+                rem * crate::ui::document_column::HEADER_CELL_TEXT,
+                "000\u{2026}",
+            )
+            .ceil(),
+        }
+    }
+
+    pub(crate) fn is_for(&self, mono_family: &str, cx: &gpui::App) -> bool {
+        self.rem == cx.global::<Config>().ui_font_size
+            && self.ui_family == cx.theme().font_family
+            && self.mono_family == mono_family
+            && self.features == code_features(cx)
+            && self.staged == t(L10nKey::ScmChipStaged)
+            && self.refreshing == t(L10nKey::Refreshing)
+    }
+
+    /// A count drawn as `sign` and the digits of `n`, as a run.
+    fn count_w(&self, sign: f32, n: u32) -> f32 {
+        (sign + crate::ui::tab_strip::count_digits(n as usize) as f32 * self.digit).ceil()
+    }
+}
+
+impl Tty59App {
+    /// Where the diff header's first control starts: a header that begins at
+    /// the window's left edge has the traffic lights to clear, a column's does
+    /// not.
+    fn diff_header_lead(&self, chrome: DocumentChrome, cx: &gpui::App) -> f32 {
+        if self.left_panel_open(cx) || chrome.is_dock() {
+            crate::ui::app::CONTENT_INSET
+        } else {
+            crate::ui::app::TITLE_BAR_LEAD
+        }
+    }
+
+    /// The least width the hoisted diff header needs to keep every control
+    /// and every fixed part of what it says: the lead and trail, the icon,
+    /// the two switches and the close tile, the Staged chip, the back button
+    /// and the figures and words that are there now, and the gaps between the
+    /// children that are there. The ref and the other names give: they
+    /// truncate, so they are not in it. Read-only, from the overlay as it is.
+    pub(crate) fn diff_header_need(&self, cx: &gpui::App) -> f32 {
+        let Some(overlay) = self
+            .tabs
+            .get(self.active)
+            .and_then(|t| t.diff_overlay.as_ref())
+        else {
+            return 0.;
+        };
+        self.diff_need(overlay, DocumentChrome::DockHoisted, 0., cx)
+            .one_line
+    }
+
+    /// The filled header's budget, from the overlay as it is.
+    pub(crate) fn diff_fill_need(
+        &self,
+        overlay: &DiffOverlayState,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> DiffNeed {
+        let divider = crate::ui::theme::hairline(window).as_f32();
+        self.diff_need(overlay, DocumentChrome::Fill, divider, cx)
+    }
+
+    /// What the header's parts add up to at `chrome`: the same definition of
+    /// each part as the one that draws it. Arithmetic over what is already
+    /// measured; nothing is shaped here.
+    ///
+    /// The one-line figure is always the one-line budget — every part that is
+    /// there, on the one row, with the refs and names at the least they keep —
+    /// whatever line the header is on, so that moving the metadata to a second
+    /// line cannot lower the figure that decided it. The per-line figures are
+    /// what the header's own lines need when it is on two.
+    fn diff_need(
+        &self,
+        overlay: &DiffOverlayState,
+        chrome: DocumentChrome,
+        divider: f32,
+        cx: &gpui::App,
+    ) -> DiffNeed {
+        let totals = match &overlay.load {
+            DiffLoad::Ready(loaded) => loaded.stats().totals,
+            _ => (0, 0),
+        };
+        let shape = source_shape(&overlay.source);
+        let parts = HeaderParts::of(overlay, shape, chrome, totals);
+        let m = &self.editor.diff_header;
+        let gap = HEADER_GAP_REM * m.rem;
+        let lead = self.diff_header_lead(chrome, cx);
+        // What the first line carries whichever line the metadata is on.
+        let mut first =
+            SUBJECT_ICON + 2. * crate::ui::document_column::layout_switch_w() + CLOSE_TILE;
+        if parts.terminal {
+            first += crate::ui::document_column::terminal_button_fixed_w(divider);
+        }
+        if parts.staged {
+            first += m.staged_w + 2. * crate::ui::right_panel::CHIP_PAD_X;
+        }
+        // A ref gives way before anything else does, but not below one short
+        // id's worth: a readable minimum, the same for every ref, so the text
+        // of a ref never moves the point the header gives way at.
+        if shape.is_rev {
+            first += m.rev_floor;
+        }
+        // What the metadata carries: the figures and words, whole.
+        let mut meta = 0.;
+        if parts.focused {
+            meta += FOCUS_PAD_L
+                + FOCUS_CHEVRON_REM * m.rem
+                + FOCUS_GAP_REM * m.rem
+                + f32::from(ROW_INSET);
+        }
+        if parts.added {
+            meta += m.count_w(m.plus, totals.0);
+        }
+        if parts.removed {
+            meta += m.count_w(m.minus, totals.1);
+        }
+        if parts.loading {
+            meta += m.refreshing_w;
+        }
+        let name_min = if parts.terminal { m.name_min } else { 0. };
+        let summary_min = if parts.summary { m.summary_min } else { 0. };
+        let trail = header_trail();
+        let one_fixed = lead + trail + first + meta + gap * (parts.children() - 1) as f32;
+        let first_fixed = lead + trail + first + gap * (parts.first_line() as f32 - 1.);
+        let second_fixed = crate::ui::app::CONTENT_INSET
+            + trail
+            + meta
+            + gap * (parts.metadata() as f32 - 1.).max(0.);
+        DiffNeed {
+            one_line: one_fixed + name_min + summary_min,
+            one_fixed,
+            first_fixed,
+            second_fixed,
+            name_min,
+            summary_min,
+            summary: parts.summary,
+            second: parts.metadata() > 0,
+        }
+    }
+}
+
+/// What the header's fixed parts add up to, and what is left for the names.
+/// `*_fixed` is every width but the names' own minima: the one-line row's, the
+/// first line's and the second's.
+#[derive(Clone, Copy)]
+pub(crate) struct DiffNeed {
+    /// Everything on one line, with the names at their minima.
+    pub(crate) one_line: f32,
+    one_fixed: f32,
+    first_fixed: f32,
+    second_fixed: f32,
+    name_min: f32,
+    summary_min: f32,
+    summary: bool,
+    /// There is metadata for a second line to carry.
+    second: bool,
+}
+
+impl DiffNeed {
+    /// Whether the metadata goes onto a second line in `body` pixels: when the
+    /// one-line budget does not fit, and held the editor's margin more once it
+    /// has. `was` is the line the header was last found to need.
+    pub(crate) fn wraps(&self, body: f32, was: bool) -> bool {
+        self.second && crate::ui::code_editor::header_inline(body, self.one_line, was)
+    }
+
+    /// The room the terminal button's name and the summary keep, as
+    /// `(name, summary)` caps in whole pixels, floored. On one line they share
+    /// what the fixed parts leave: after each has its minimum, the name takes
+    /// half of what is left (up to the button's own cap) and the summary the
+    /// rest, so the two never add up to more than there is. On two lines each
+    /// has the room its own line leaves. Neither is ever less than its
+    /// minimum.
+    pub(crate) fn caps(&self, body: f32, two_lines: bool) -> (f32, f32) {
+        let cap = crate::ui::document_column::HEADER_CELL_MAX_W;
+        let (name, summary) = if two_lines {
+            ((body - self.first_fixed).min(cap), body - self.second_fixed)
+        } else {
+            let free = body - self.one_fixed;
+            let name = if self.summary {
+                let extra = free - self.name_min - self.summary_min;
+                (self.name_min + extra / 2.).min(cap)
+            } else {
+                free.min(cap)
+            };
+            let name = name.floor().max(self.name_min);
+            (name, free - name)
+        };
+        (
+            name.floor().max(self.name_min),
+            summary.floor().max(self.summary_min),
+        )
+    }
+
+    pub(crate) fn summary_min(&self) -> f32 {
+        self.summary_min
+    }
+}
 
 /// A section label's line in the list — the untracked heading — at the
 /// Changes tab's group-header height.
@@ -2111,6 +2764,10 @@ fn scm_epoch(cx: &gpui::App, host: crate::ui::host_ops::HostId, root: &Path) -> 
 struct SourceSubject {
     icon: &'static str,
     text: String,
+    /// The whole ref, for a source that names one: the original revision, both
+    /// ends of a range, the patch's full id. `text` is what the header has
+    /// room to draw; this is what the tooltip says. Empty for a branch.
+    full: String,
     /// Set only where the branch name alone would be ambiguous.
     chip: Option<&'static str>,
     is_rev: bool,
@@ -2121,34 +2778,39 @@ struct SourceSubject {
 }
 
 fn source_subject(source: &DiffSource, branch: String) -> SourceSubject {
+    let shape = source_shape(source);
     let branch_of = |chip| SourceSubject {
         icon: "icons/git-branch.svg",
         text: branch.clone(),
+        full: String::new(),
         chip,
-        is_rev: false,
+        is_rev: shape.is_rev,
         label: None,
     };
+    // An empty subject is no more use than no label at all, and a
+    // `Default::default()` that leaked through would render as one.
+    let labelled = |label: &Option<CommitLabel>| label.clone().filter(|_| shape.labelled);
     match source {
         // Worktree and Head are both "the branch, right now"; the header for
         // them is what it has always been.
         DiffSource::Worktree | DiffSource::Head => branch_of(None),
         // Staged is the branch too, but a patch that does not match the files
         // on disk — without the chip it is indistinguishable from the above.
-        DiffSource::Staged => branch_of(Some(t(L10nKey::ScmChipStaged))),
+        DiffSource::Staged => branch_of(shape.staged.then(|| t(L10nKey::ScmChipStaged))),
         DiffSource::Commit { rev, label } => SourceSubject {
             icon: "icons/git-commit.svg",
             text: short_rev(rev),
+            full: rev.clone(),
             chip: None,
-            is_rev: true,
-            // An empty subject is no more use than no label at all, and a
-            // `Default::default()` that leaked through would render as one.
-            label: label.clone().filter(|l| !l.subject.is_empty()),
+            is_rev: shape.is_rev,
+            label: labelled(label),
         },
         DiffSource::Range { base, head } => SourceSubject {
             icon: "icons/git-commit.svg",
             text: format!("{}…{}", short_rev(base), short_rev(head)),
+            full: format!("{base}…{head}"),
             chip: None,
-            is_rev: true,
+            is_rev: shape.is_rev,
             label: None,
         },
         // A pull request: `#12` in mono, its title beside it.
@@ -2157,9 +2819,48 @@ fn source_subject(source: &DiffSource, branch: String) -> SourceSubject {
             text: id
                 .rsplit_once('#')
                 .map_or(id.clone(), |(_, n)| format!("#{n}")),
+            full: id.clone(),
             chip: None,
+            is_rev: shape.is_rev,
+            label: labelled(label),
+        },
+    }
+}
+
+/// What a source says about the shape of the header, without building any of
+/// its text: whether its subject is a revision, whether it carries the Staged
+/// chip, whether a commit label stands beside it. The header is drawn from
+/// this and budgeted from it, so the two cannot disagree about what is there.
+#[derive(Clone, Copy)]
+struct SourceShape {
+    is_rev: bool,
+    staged: bool,
+    labelled: bool,
+}
+
+fn source_shape(source: &DiffSource) -> SourceShape {
+    let labelled =
+        |label: &Option<CommitLabel>| label.as_ref().is_some_and(|l| !l.subject.is_empty());
+    match source {
+        DiffSource::Worktree | DiffSource::Head => SourceShape {
+            is_rev: false,
+            staged: false,
+            labelled: false,
+        },
+        DiffSource::Staged => SourceShape {
+            is_rev: false,
+            staged: true,
+            labelled: false,
+        },
+        DiffSource::Commit { label, .. } | DiffSource::Patch { label, .. } => SourceShape {
             is_rev: true,
-            label: label.clone().filter(|l| !l.subject.is_empty()),
+            staged: false,
+            labelled: labelled(label),
+        },
+        DiffSource::Range { .. } => SourceShape {
+            is_rev: true,
+            staged: false,
+            labelled: false,
         },
     }
 }
@@ -2189,10 +2890,15 @@ fn now_unix() -> i64 {
 fn short_rev(rev: &str) -> String {
     let is_oid = rev.len() >= 40 && rev.chars().all(|c| c.is_ascii_hexdigit());
     match is_oid {
-        true => rev[..8].to_string(),
+        true => rev[..OID_SHORT].to_string(),
         false => rev.to_string(),
     }
 }
+
+/// The characters of an object id the header keeps. The readable floor the
+/// header budgets for a ref is one id at this length, so what is drawn for an
+/// id and what is reserved for any ref come from the one number.
+const OID_SHORT: usize = 8;
 
 fn focused_file(snap: &DiffSnapshot, overlay: &DiffOverlayState) -> Option<usize> {
     let path = overlay.focus.as_deref()?;
@@ -2217,13 +2923,21 @@ fn untracked_focus<'a>(snap: &DiffSnapshot, focus: Option<&'a str>) -> Option<&'
 /// left the one view with no way out of it: the breadcrumb never drew, and the
 /// list was reachable again only by closing the overlay and reopening it.
 fn focused_name(overlay: &DiffOverlayState) -> Option<String> {
-    let DiffLoad::Ready(snap) = &overlay.load else {
+    focused_name_ref(overlay).map(str::to_string)
+}
+
+/// [`focused_name`] without the copy, for whoever only needs to know whether
+/// there is one.
+fn focused_name_ref(overlay: &DiffOverlayState) -> Option<&str> {
+    let DiffLoad::Ready(loaded) = &overlay.load else {
         return None;
     };
-    if let Some(idx) = focused_file(snap, overlay) {
-        return Some(snap.files[idx].path.clone());
-    }
-    untracked_focus(snap, overlay.focus.as_deref()).map(str::to_string)
+    // A file with a patch and an untracked one both stand for the focus
+    // string itself, so a path the snapshot names is the answer.
+    overlay
+        .focus
+        .as_deref()
+        .filter(|path| loaded.has_path(path))
 }
 
 fn empty_snapshot(snap: &DiffSnapshot) -> bool {
@@ -3118,11 +3832,14 @@ mod overlay_gpui_tests {
             let active = app.active;
             let overlay = app.tabs[active].diff_overlay.as_mut().unwrap();
             overlay.loading = false;
-            overlay.load = DiffLoad::Ready(Arc::new(DiffSnapshot {
-                source: DiffSource::Worktree,
-                branch: "main".into(),
-                ..Default::default()
-            }));
+            overlay.load = DiffLoad::Ready(
+                Arc::new(DiffSnapshot {
+                    source: DiffSource::Worktree,
+                    branch: "main".into(),
+                    ..Default::default()
+                })
+                .into(),
+            );
         });
 
         app.update_in(&mut vcx, |app, window, cx| {
@@ -3139,6 +3856,149 @@ mod overlay_gpui_tests {
             overlay_source_and_load(&app, &mut vcx),
             (DiffSource::Staged, true),
             "the same file from a different source is a different question"
+        );
+    }
+
+    /// What the header and its budget read off a loaded snapshot — its totals,
+    /// its untracked count and whether a focus names a path in it — is what a
+    /// fresh walk of the same snapshot finds, for an empty one, a single file,
+    /// many hunks, a name that is both a patch and untracked, and untracked
+    /// names alone. Asked only through the snapshot's own methods and the
+    /// header's `focused_name`, so it holds however they are answered.
+    #[gpui::test]
+    fn a_loaded_snapshot_answers_what_a_fresh_traversal_finds(cx: &mut TestAppContext) {
+        use crate::terminal::git_diff::{
+            AUTO_COLLAPSE_TOTAL_FILES, AUTO_COLLAPSE_TOTAL_LINES, DiffLine, Hunk,
+        };
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        let file =
+            |path: &str, added: u32, removed: u32, hunks: usize, truncated: Option<Truncation>| {
+                FileDiff {
+                    path: path.into(),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    added,
+                    removed,
+                    binary: false,
+                    truncated,
+                    hunks: (0..hunks)
+                        .map(|i| Hunk {
+                            header: format!("@@ -{i} +{i} @@"),
+                            lines: vec![DiffLine {
+                                kind: LineKind::Added,
+                                old_no: None,
+                                new_no: Some(1),
+                                text: "x".into(),
+                            }],
+                        })
+                        .collect(),
+                }
+            };
+        let snapshots = [
+            DiffSnapshot::default(),
+            DiffSnapshot {
+                files: vec![file("a.rs", 3, 1, 1, None)],
+                ..Default::default()
+            },
+            // Many hunks, both truncations, and a name that is also untracked.
+            DiffSnapshot {
+                files: vec![
+                    file("a.rs", 10, 0, 40, None),
+                    file("b/c.rs", 0, 7, 25, Some(Truncation::PerFile)),
+                    file("dup.rs", 1, 1, 1, Some(Truncation::Budget)),
+                ],
+                untracked: vec!["new.txt".into(), "dup.rs".into()],
+                untracked_total: 9,
+                ..Default::default()
+            },
+            DiffSnapshot {
+                untracked: vec!["only.txt".into()],
+                ..Default::default()
+            },
+            // Oversized by files, and by lines.
+            DiffSnapshot {
+                files: (0..=AUTO_COLLAPSE_TOTAL_FILES)
+                    .map(|i| file(&format!("f{i}.rs"), 1, 0, 0, None))
+                    .collect(),
+                ..Default::default()
+            },
+            DiffSnapshot {
+                files: vec![file(
+                    "long.rs",
+                    AUTO_COLLAPSE_TOTAL_LINES as u32 + 1,
+                    0,
+                    AUTO_COLLAPSE_TOTAL_LINES + 1,
+                    None,
+                )],
+                ..Default::default()
+            },
+        ];
+        let (mut budget, mut per_file, mut oversized) = (false, false, false);
+        for snapshot in snapshots {
+            let snapshot = Arc::new(snapshot);
+            // A fresh walk of the snapshot, written out here.
+            let mut expected = DiffStats::default();
+            for f in &snapshot.files {
+                expected.totals.0 += f.added;
+                expected.totals.1 += f.removed;
+                expected.retained_lines += f.hunks.iter().map(|h| h.lines.len()).sum::<usize>();
+                match f.truncated {
+                    Some(Truncation::Budget) => expected.budget_exhausted = true,
+                    Some(Truncation::PerFile) => expected.per_file_truncated = true,
+                    None => {}
+                }
+            }
+            expected.untracked_count = snapshot.untracked_total.max(snapshot.untracked.len());
+            expected.oversized = snapshot.files.len() > AUTO_COLLAPSE_TOTAL_FILES
+                || expected.retained_lines > AUTO_COLLAPSE_TOTAL_LINES;
+            budget |= expected.budget_exhausted;
+            per_file |= expected.per_file_truncated;
+            oversized |= expected.oversized;
+            let named: Vec<String> = snapshot
+                .files
+                .iter()
+                .map(|f| f.path.clone())
+                .chain(snapshot.untracked.iter().cloned())
+                .chain(["missing.rs".to_string(), String::new()])
+                .collect();
+            let held = Arc::clone(&snapshot);
+            app.update_in(&mut vcx, |app, window, cx| {
+                app.open_diff_overlay(
+                    HostId::LOCAL,
+                    std::path::PathBuf::from("/no/such/tty59/repo"),
+                    DiffSource::Worktree,
+                    None,
+                    window,
+                    cx,
+                );
+                let active = app.active;
+                let overlay = app.tabs[active].diff_overlay.as_mut().unwrap();
+                overlay.loading = false;
+                overlay.load = DiffLoad::Ready(held.into());
+                {
+                    let DiffLoad::Ready(loaded) = &overlay.load else {
+                        panic!("the fixture is ready");
+                    };
+                    assert_eq!(loaded.stats(), expected);
+                    assert_eq!(loaded.totals(), expected.totals);
+                    assert_eq!(loaded.files.len(), snapshot.files.len());
+                }
+                for path in &named {
+                    overlay.focus = Some(path.clone());
+                    let swept = snapshot.files.iter().any(|f| &f.path == path)
+                        || snapshot.untracked.iter().any(|u| u == path);
+                    assert_eq!(
+                        focused_name(overlay),
+                        swept.then(|| path.clone()),
+                        "focus on {path:?}"
+                    );
+                }
+            });
+        }
+        assert!(
+            budget && per_file && oversized,
+            "the fixtures must include both truncations ({budget}, {per_file}) and an oversized \
+             patch ({oversized})"
         );
     }
 
@@ -3193,7 +4053,7 @@ mod overlay_gpui_tests {
             let active = app.active;
             let overlay = app.tabs[active].diff_overlay.as_mut().unwrap();
             overlay.loading = false;
-            overlay.load = DiffLoad::Ready(Arc::new(one_file_snapshot(source)));
+            overlay.load = DiffLoad::Ready(Arc::new(one_file_snapshot(source)).into());
             // The card is what carries the rows, so open it.
             overlay.expanded.insert("a.rs".to_string(), true);
         });
@@ -3306,7 +4166,7 @@ mod overlay_gpui_tests {
                     text: "let f = |a| a -> b;".into(),
                 },
             ];
-            overlay.load = DiffLoad::Ready(Arc::new(snap));
+            overlay.load = DiffLoad::Ready(Arc::new(snap).into());
             cx.notify();
         });
     }
@@ -3613,7 +4473,7 @@ mod overlay_gpui_tests {
             let DiffLoad::Ready(snapshot) = &overlay.load else {
                 panic!("the fixture has a ready patch");
             };
-            snapshot.clone()
+            snapshot.snapshot().clone()
         });
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -3638,7 +4498,7 @@ mod overlay_gpui_tests {
                 panic!("docking keeps the ready patch");
             };
             assert!(
-                Arc::ptr_eq(current, &snapshot),
+                Arc::ptr_eq(current.snapshot(), &snapshot),
                 "docking does not reload the patch"
             );
         });
@@ -3739,13 +4599,16 @@ mod overlay_gpui_tests {
             let active = app.active;
             let overlay = app.tabs[active].diff_overlay.as_mut().unwrap();
             overlay.loading = false;
-            overlay.load = DiffLoad::Ready(Arc::new(DiffSnapshot {
-                source: DiffSource::Worktree,
-                branch: "main".into(),
-                untracked: vec!["scratch.txt".to_string()],
-                untracked_total: 1,
-                ..Default::default()
-            }));
+            overlay.load = DiffLoad::Ready(
+                Arc::new(DiffSnapshot {
+                    source: DiffSource::Worktree,
+                    branch: "main".into(),
+                    untracked: vec!["scratch.txt".to_string()],
+                    untracked_total: 1,
+                    ..Default::default()
+                })
+                .into(),
+            );
         });
 
         app.update_in(&mut vcx, |app, _, _| {
@@ -4133,10 +4996,13 @@ mod selection_gpui_tests {
                 cwd: PathBuf::from("/repo"),
                 source: DiffSource::Head,
                 focus_handle: cx.focus_handle(),
-                load: DiffLoad::Ready(Arc::new(DiffSnapshot {
-                    files: vec![patched_file()],
-                    ..Default::default()
-                })),
+                load: DiffLoad::Ready(
+                    Arc::new(DiffSnapshot {
+                        files: vec![patched_file()],
+                        ..Default::default()
+                    })
+                    .into(),
+                ),
                 loading: false,
                 expanded: HashMap::new(),
                 focus: None,
@@ -4324,16 +5190,19 @@ mod selection_gpui_tests {
         let (app, mut vcx) = window(cx);
         app.update_in(&mut vcx, |this, _, _| {
             let overlay = this.tabs[0].diff_overlay.as_mut().unwrap();
-            overlay.load = DiffLoad::Ready(Arc::new(DiffSnapshot {
-                files: vec![
-                    FileDiff {
-                        path: "src/above.rs".to_string(),
-                        ..patched_file()
-                    },
-                    patched_file(),
-                ],
-                ..Default::default()
-            }));
+            overlay.load = DiffLoad::Ready(
+                Arc::new(DiffSnapshot {
+                    files: vec![
+                        FileDiff {
+                            path: "src/above.rs".to_string(),
+                            ..patched_file()
+                        },
+                        patched_file(),
+                    ],
+                    ..Default::default()
+                })
+                .into(),
+            );
         });
         drag(&app, &mut vcx, DiffViewMode::Unified, None, 1, 3);
 

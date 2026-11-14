@@ -245,11 +245,22 @@ pub(crate) const DOCUMENT_MIN_W: f32 = 280.;
 /// that silently became a half on every window wider than about 720 points of
 /// body would be a lie. The terminal's floor still binds.
 pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
-    if !body.is_finite() || body < TERMINAL_MIN_W + DOCUMENT_MIN_W {
+    document_column_px_min(body, ratio, DOCUMENT_MIN_W)
+}
+
+/// [`document_column_px`] for a column that needs `min` points rather than
+/// [`DOCUMENT_MIN_W`]: a diff, whose header must keep its controls.
+pub(crate) fn document_column_px_min(body: f32, ratio: f32, min: f32) -> Option<f32> {
+    // The most the column may take, worked out once: comparing `body` against
+    // `TERMINAL_MIN_W + min` and clamping to `body - TERMINAL_MIN_W` round
+    // differently, and a body that passes the first can leave the second under
+    // `min`, which is a clamp with its bounds the wrong way round.
+    let max = body - TERMINAL_MIN_W;
+    if !body.is_finite() || max < min {
         return None;
     }
     let ratio = if ratio.is_finite() { ratio } else { 0.5 };
-    Some((body * ratio).clamp(DOCUMENT_MIN_W, body - TERMINAL_MIN_W))
+    Some((body * ratio).clamp(min, max))
 }
 
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 48.;
@@ -9789,7 +9800,11 @@ impl Render for Tty59App {
         // blank and write again.
         let tab_landing = self.tab_landing(window, cx);
         let detach_caret = self.detach_caret(window, cx);
-        let strip = self.tab_strip(!vertical, window, cx);
+        // The pill's count, scanned once for everything this frame draws:
+        // the strip budgets and draws the pill from it, and the hoisted
+        // document header stands clear of the same pill.
+        let attention = self.attention_total();
+        let strip = self.tab_strip(!vertical, attention, window, cx);
         let sidebar = rail.then(|| {
             if agent_mode {
                 self.agent_projects_sidebar(window, cx)
@@ -9919,10 +9934,11 @@ impl Render for Tty59App {
         } else {
             self.document_dock_px(window, cx)
         };
-        let document_chrome = self.docked_document_chrome(window, cx);
+        let hoisted_trail = self.hoisted_header_trail(attention, window, cx);
+        let document_chrome = self.docked_document_chrome(hoisted_trail, window, cx);
         let document_header = document_dock_px
             .is_some()
-            .then(|| self.render_document_header(document_chrome, window, cx))
+            .then(|| self.render_document_header(document_chrome, hoisted_trail, window, cx))
             .flatten();
         let (overlays, document_column) = match document_dock_px {
             Some(w) => (
@@ -10066,10 +10082,9 @@ impl Render for Tty59App {
                             // The document's header, in the strip the spanning
                             // title bar leaves empty above its column. Drawn
                             // after the bar so it sits over the tab strip's
-                            // slack — and stopping short of the trailing
-                            // chrome, which is only in the way when the detail
-                            // panel is closed and this column is the one at the
-                            // window's right edge.
+                            // slack — and stopping short of what the bar draws
+                            // at this end: the Agents pill, and with the
+                            // detail panel closed the trailing chrome too.
                             .when_some(document_header, |this, header| {
                                 this.child(
                                     div()
@@ -10078,11 +10093,7 @@ impl Render for Tty59App {
                                         .h(px(TITLE_BAR_HEIGHT))
                                         .right(px(panel_px))
                                         .w(px(document_px))
-                                        .when(panel_px <= 0., |d| {
-                                            d.pr(px(crate::ui::tab_strip::trailing_chrome_w(
-                                                window.is_fullscreen(),
-                                            )))
-                                        })
+                                        .pr(px(hoisted_trail))
                                         .child(header),
                                 )
                             }),

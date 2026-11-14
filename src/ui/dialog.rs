@@ -214,6 +214,9 @@ pub(crate) fn well(cx: &App) -> Div {
 /// A key named in a hint: a small faint cap, never a button outline. The same
 /// cap the switcher's header and footer draw.
 pub(crate) fn keycap(label: impl Into<SharedString>, cx: &App) -> gpui::AnyElement {
+    let label: SharedString = label.into();
+    #[cfg(test)]
+    let selector = format!("dialog-keycap-{label}");
     let ink = crate::ui::theme::chrome_ink(cx);
     let cap = div()
         .flex_shrink_0()
@@ -227,9 +230,9 @@ pub(crate) fn keycap(label: impl Into<SharedString>, cx: &App) -> gpui::AnyEleme
         .bg(gpui::rgb(ink.keycap_fill))
         .text_size(rems(11. / 16.))
         .text_color(gpui::rgb(ink.keycap_ink))
-        .child(label.into());
+        .child(label);
     #[cfg(test)]
-    let mut cap = cap;
+    let mut cap = cap.debug_selector(move || selector);
     #[cfg(test)]
     crate::ui::paint_probe::note("dialog.keycap", &mut cap);
     cap.into_any_element()

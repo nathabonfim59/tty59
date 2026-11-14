@@ -34,6 +34,7 @@ pub(crate) mod status;
 mod strip;
 
 pub(crate) use nav::KEY_CONTEXT as NAV_KEY_CONTEXT;
+pub(crate) use strip::header_inline;
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -379,14 +380,27 @@ pub(crate) struct EditorPanelState {
     problems: problems::ProblemsPane,
     /// The header's list of every open file, while it is open.
     strip_picker: Option<strip::StripPicker>,
-    /// Whether the docked header was last found not to fit the title bar's
-    /// share of the column, so it is kept inside it a little past the point
-    /// it would fit again. Written by `editor_header_latch_sync` alone.
+    /// Whether the docked header — a code editor's or a diff's — was last
+    /// found not to fit the title bar's share of the column, so it is kept
+    /// inside it a little past the point it would fit again. Written by
+    /// `editor_header_latch_sync` alone.
     header_inline: bool,
+    /// Whether a docked diff was last found too narrow to seat its header
+    /// beside the terminal's floor, so it is kept filled a little past the
+    /// point it would fit again. Written by `editor_header_latch_sync` alone.
+    diff_fill: bool,
+    /// Whether a filled diff's metadata was last found to need a second line,
+    /// so it is kept there a little past the point one line would fit again.
+    /// Written by `editor_header_latch_sync` alone.
+    pub(crate) diff_two_line: bool,
     /// What the `+N` button's glyphs measure at the current font and size.
     /// Drawing only reads it; `editor_header_latch_sync` re-measures when the
     /// font or size it is for has changed.
     overflow_glyphs: strip::OverflowMetrics,
+    /// What the diff header's fixed words and figures measure. Read by the
+    /// diff header's budget; `editor_overflow_refresh` measures it again when
+    /// the size, the fonts, the feature set or the language it is for changes.
+    pub(crate) diff_header: crate::ui::diff_overlay::DiffHeaderMetrics,
     /// The focus of a panel with no file in it. Without one there is nothing
     /// in the panel to hold the focus, so closing the last file handed it to
     /// the terminal and the next ⌘W closed the terminal instead of the panel.
@@ -457,7 +471,14 @@ impl EditorPanelState {
             problems: Default::default(),
             strip_picker: None,
             header_inline: false,
+            diff_fill: false,
+            diff_two_line: false,
             overflow_glyphs: strip::OverflowMetrics::measure(window, cx),
+            diff_header: crate::ui::diff_overlay::DiffHeaderMetrics::measure(
+                window,
+                cx,
+                &cx.global::<crate::core::config::Config>().font_family,
+            ),
             empty_focus: cx.focus_handle(),
             had_focus: None,
         }
@@ -3354,9 +3375,10 @@ impl Tty59App {
             .map(|(id, c)| self.render_editor_conflict_banner(id, c, cx));
         let bar = self.render_editor_bar(cx);
 
+        // Only the hoisted header takes a trail, and it is not drawn here.
         let header = chrome
             .renders_own_header()
-            .then(|| self.render_editor_header(chrome, window, cx));
+            .then(|| self.render_editor_header(chrome, 0., window, cx));
         let editor_col = v_flex()
             .flex_1()
             .min_w_0()
@@ -3808,16 +3830,21 @@ impl Tty59App {
     pub(crate) fn render_editor_header_only(
         &self,
         chrome: DocumentChrome,
+        trail: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        self.render_editor_header(chrome, window, cx)
+        self.render_editor_header(chrome, trail, window, cx)
             .into_any_element()
     }
 
+    /// `trail` is what the title bar leaves at the header's right end, read
+    /// only when the header is the hoisted one; a header drawn by its own
+    /// column or overlay has none to give up.
     fn render_editor_header(
         &self,
         chrome: DocumentChrome,
+        trail: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -3837,7 +3864,7 @@ impl Tty59App {
             crate::ui::tab_strip::RAIL_TILE,
             crate::ui::tab_strip::RAIL_TILE_GLYPH,
         );
-        let cap = self.editor_strip_cap(chrome, window, cx);
+        let cap = self.editor_strip_cap(chrome, trail, window, cx);
         let (shown, hidden) = self
             .tab_code()
             .map(|c| c.strip_split(cap))
@@ -3927,20 +3954,27 @@ impl Tty59App {
             .child(div().flex_1().h_full())
             .child(self.document_layout_switch(chrome, cx))
             .child(
-                div().occlude().flex_none().ml(px(strip::CLOSE_LEAD)).child(
-                    crate::ui::tab_strip::chrome_tile_sized(
-                        Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
-                        tile,
-                        glyph,
-                        false,
-                        cx,
-                    )
-                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-                    .tooltip(t(L10nKey::EditorBackToTerminal))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_code_panel(window, cx);
-                    })),
-                ),
+                div()
+                    .occlude()
+                    .flex_none()
+                    .ml(px(strip::CLOSE_LEAD))
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "editor-panel-close".into())
+                    })
+                    .child(
+                        crate::ui::tab_strip::chrome_tile_sized(
+                            Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
+                            tile,
+                            glyph,
+                            false,
+                            cx,
+                        )
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                        .tooltip(t(L10nKey::EditorBackToTerminal))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_code_panel(window, cx);
+                        })),
+                    ),
             )
     }
 
@@ -4223,7 +4257,8 @@ impl Tty59App {
             DocumentChrome::Fill => DocumentChrome::Fill,
             DocumentChrome::Dock | DocumentChrome::DockHoisted => DocumentChrome::Dock,
         };
-        let room = px((self.editor_header_w(column, window, cx)
+        // `column` is never `DockHoisted`, the one chrome that reads a `trail`.
+        let room = px((self.editor_header_w(column, 0., window, cx)
             - 2. * crate::ui::app::CONTENT_INSET)
             .max(0.));
         let kept = status::kept(window, &face, &content, room);

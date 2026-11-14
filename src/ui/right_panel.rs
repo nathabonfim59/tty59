@@ -2288,7 +2288,7 @@ pub(crate) fn info_chip(
 ) -> AnyElement {
     let pill = pill(text, bg, fg, mono);
     #[cfg(test)]
-    let mut pill = pill;
+    let mut pill = pill.debug_selector(|| "ui-chip".into());
     #[cfg(test)]
     crate::ui::paint_probe::note("ui.chip", &mut pill);
     pill.into_any_element()
@@ -2327,6 +2327,10 @@ fn port_chip(
     port.into_any_element()
 }
 
+/// The padding either side of a pill's text, shared with whatever budgets a
+/// pill's width.
+pub(crate) const CHIP_PAD_X: f32 = 5.;
+
 fn pill(text: &str, bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -> gpui::Div {
     pill_shell(bg, fg, mono).child(text.to_string())
 }
@@ -2337,7 +2341,7 @@ fn pill(text: &str, bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -
 pub(crate) fn pill_shell(bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -> gpui::Div {
     div()
         .flex_none()
-        .px(px(5.))
+        .px(px(CHIP_PAD_X))
         .py(px(1.5))
         .rounded(px(4.))
         .bg(bg)
