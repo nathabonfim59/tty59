@@ -587,7 +587,10 @@ impl Theme {
             Semantic {
                 ink: self.clear_ink(m, seed, TEXT_FLOOR),
                 fill,
-                on_fill: ink_on(fill, fg, TEXT_FLOOR),
+                // The badge ink on a status fill: the authored foreground where it already reads, otherwise
+                // the better of white and black. A walk from the foreground toward one end can stop short of
+                // what the other end gives (white 4.56:1 where black is 4.61:1 on a blue fill).
+                on_fill: legible_foreground(fill, fg),
             }
         };
         // Green and amber are the v4 Git inks (added / modified); the floors
@@ -4007,6 +4010,47 @@ ansi:
                 sf.selected
             );
         }
+    }
+
+    /// A status badge's ink (`Semantic::on_fill`) keeps the authored foreground
+    /// where that already clears 4.5:1 on the fill, and otherwise is whichever of
+    /// white and black contrasts more. Independent of the production helper: the
+    /// expectation is computed here from `contrast` alone.
+    #[test]
+    fn semantic_badge_ink_is_the_better_of_black_and_white_when_the_seed_fails() {
+        let mut misses = Vec::new();
+        for t in sweep_themes() {
+            let r = t.resolve();
+            let sem = t.semantics_with(&r.m);
+            let fg = r.m.foreground;
+            for (label, role) in [
+                ("danger", sem.danger),
+                ("success", sem.success),
+                ("warning", sem.warning),
+                ("info", sem.info),
+                ("link", sem.link),
+            ] {
+                let (white, black) = (contrast(0xffffff, role.fill), contrast(0x000000, role.fill));
+                if contrast(fg, role.fill) >= AA_TEXT {
+                    if role.on_fill != fg {
+                        misses.push(format!(
+                            "{}: {label} on_fill {:#08x} moved off a foreground that already passes ({fg:#08x})",
+                            t.id, role.on_fill
+                        ));
+                    }
+                } else {
+                    let got = contrast(role.on_fill, role.fill);
+                    let best = white.max(black);
+                    if !(role.on_fill == 0xffffff || role.on_fill == 0x000000) || got < best {
+                        misses.push(format!(
+                            "{}: corrected {label} on_fill {:#08x} is {got:.2}:1 on {:#08x}, best of white/black is {best:.2}:1",
+                            t.id, role.on_fill, role.fill
+                        ));
+                    }
+                }
+            }
+        }
+        assert_no_misses("semantic badge ink", misses);
     }
 
     /// The selected title of every surface sits at the corrected text floor on
