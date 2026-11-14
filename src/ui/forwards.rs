@@ -10,11 +10,6 @@ use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::{META, TEXT_MONO};
 
-/// How far a forward's target endpoint fades when the rule is Dynamic and has
-/// no target to name. The rules editor in Settings and the live Forwards panel
-/// draw the same row, so they fade it by the same amount.
-pub(crate) const NO_TARGET_FADE: f32 = 0.4;
-
 /// The managed-forward form's five text fields, read out of their inputs.
 ///
 /// Split out so the question "do these make a rule?" can be asked without a
@@ -287,7 +282,7 @@ impl Tty59App {
             SshForwardKind::Dynamic => "D",
         };
         // A switched-off forward has an error status only because it binds
-        // nothing; it is drawn faded, not red.
+        // nothing; it is drawn quiet, not red.
         let off = !forward.enabled;
         let errored = !off && matches!(forward.status, ForwardStatus::Error(_));
         let bind = if matches!(forward.bind_host.as_str(), "127.0.0.1" | "localhost" | "") {
@@ -308,6 +303,48 @@ impl Tty59App {
         let forward_id = forward.id;
         let forward_for_edit = forward.clone();
         let group = gpui::SharedString::from(format!("panel-forward-{forward_id}"));
+        // A switched-off rule reads dimmer through its muted ink and the
+        // absence of the accent chip, never through a container fade: half
+        // opacity dropped muted text under 4.5:1 on soft palettes.
+        let (chip_fill, chip_ink) = match off {
+            true => (gpui::transparent_black(), muted),
+            false => (theme.accent, theme.foreground),
+        };
+        let column = v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(1.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(crate::ui::right_panel::info_chip(
+                        &bind, chip_fill, chip_ink, mono,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(rems(TEXT_MONO))
+                            .font_family(mono.clone())
+                            .text_color(if errored { theme.danger } else { muted })
+                            .child(tail),
+                    ),
+            )
+            .when_some(forward.description.clone(), |this, desc| {
+                this.child(
+                    div()
+                        .truncate()
+                        .text_size(rems(META))
+                        .text_color(muted)
+                        .child(desc),
+                )
+            });
+        #[cfg(test)]
+        let mut column = column;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("forwards.column", &mut column);
 
         h_flex()
             .id(("panel-forward", forward_id as usize))
@@ -332,43 +369,7 @@ impl Tty59App {
                 if errored { theme.danger } else { muted },
                 mono,
             ))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(1.))
-                    .when(off, |col| col.opacity(0.5))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .child(crate::ui::right_panel::info_chip(
-                                &bind,
-                                theme.accent,
-                                theme.foreground,
-                                mono,
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(rems(TEXT_MONO))
-                                    .font_family(mono.clone())
-                                    .text_color(if errored { theme.danger } else { muted })
-                                    .child(tail),
-                            ),
-                    )
-                    .when_some(forward.description.clone(), |this, desc| {
-                        this.child(
-                            div()
-                                .truncate()
-                                .text_size(rems(META))
-                                .text_color(muted)
-                                .child(desc),
-                        )
-                    }),
-            )
+            .child(column)
             // Always shown, unlike Remove beside it: whether a forward is on is
             // state to read at a glance, not an action to go looking for.
             .child({
@@ -546,24 +547,33 @@ impl Tty59App {
                         this.set_managed_forward_kind(kind, cx);
                     },
                 ))
-                .child(pair(
-                    t(L10nKey::ForwardBindLabel),
-                    &self.loopback_panel.mf_bind_host,
-                    &self.loopback_panel.mf_bind_port,
-                ))
-                .child(
-                    div()
-                        .opacity(if needs_target { 1.0 } else { NO_TARGET_FADE })
-                        .child(pair(
-                            if needs_target {
-                                t(L10nKey::ForwardToLabel)
-                            } else {
-                                t(L10nKey::ForwardSocksLabel)
-                            },
-                            &self.loopback_panel.mf_target_host,
-                            &self.loopback_panel.mf_target_port,
-                        )),
-                )
+                .child({
+                    let bind_pair = pair(
+                        t(L10nKey::ForwardBindLabel),
+                        &self.loopback_panel.mf_bind_host,
+                        &self.loopback_panel.mf_bind_port,
+                    );
+                    #[cfg(test)]
+                    let mut bind_pair = bind_pair;
+                    #[cfg(test)]
+                    crate::ui::paint_probe::note("forwards.pair", &mut bind_pair);
+                    bind_pair
+                })
+                // A Dynamic rule has no target to name, so its pair is left
+                // out instead of drawn faded: no legible label sits below the
+                // floor. Local and Remote keep theirs.
+                .when(needs_target, |form| {
+                    let target_pair = pair(
+                        t(L10nKey::ForwardToLabel),
+                        &self.loopback_panel.mf_target_host,
+                        &self.loopback_panel.mf_target_port,
+                    );
+                    #[cfg(test)]
+                    let mut target_pair = target_pair;
+                    #[cfg(test)]
+                    crate::ui::paint_probe::note("forwards.pair", &mut target_pair);
+                    form.child(target_pair)
+                })
                 .child(Input::new(&self.loopback_panel.mf_description).xsmall())
             })
             .when(incomplete, |form| {
@@ -836,5 +846,154 @@ mod tests {
         let mut remote = managed(3, 8080);
         remote.kind = SshForwardKind::Remote;
         assert_eq!(saved_rule_index(&rules, &remote, false), None);
+    }
+}
+
+/// Remote F21 through the real app render: the Info tab is drawn with forward
+/// rows and the advanced form, and the paints the builders assigned are read
+/// back from the scoped probe.
+#[cfg(test)]
+mod contrast_tests {
+    use gpui::TestAppContext;
+    use gpui_component::ActiveTheme as _;
+
+    use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes as themes;
+    use crate::ui::paint_probe as probe;
+    use crate::ui::right_panel::test_panel::{open_info, port};
+
+    fn forward(id: u64, bind_port: u16, enabled: bool) -> ManagedForward {
+        ManagedForward {
+            id,
+            pane_id: 1,
+            kind: SshForwardKind::Local,
+            bind_host: "127.0.0.1".into(),
+            bind_port,
+            target_host: "10.0.0.5".into(),
+            target_port: 80,
+            description: Some("db tunnel".into()),
+            status: match enabled {
+                true => ForwardStatus::Listening,
+                false => ForwardStatus::Error("not bound".into()),
+            },
+            enabled,
+        }
+    }
+
+    #[gpui::test]
+    fn an_off_forward_is_quiet_without_a_fade_or_an_accent_chip(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(
+            &app,
+            &mut vcx,
+            vec![port(3000, 42, "node")],
+            vec![forward(9, 8080, false), forward(10, 8081, true)],
+        );
+        let _probe = probe::scope();
+
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            let (muted, foreground, accent) = vcx.update(|_, cx| {
+                (
+                    probe::hsla24(cx.theme().muted_foreground),
+                    probe::hsla24(cx.theme().foreground),
+                    probe::hsla24(cx.theme().accent),
+                )
+            });
+            probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let id = theme.id.as_str();
+
+            let columns = probe::all("forwards.column");
+            assert_eq!(
+                columns.len(),
+                2,
+                "{id}: both forward rows reached the real render"
+            );
+            for (n, column) in columns.iter().enumerate() {
+                assert_eq!(
+                    column.opacity, None,
+                    "{id}: forward row {n} is not dimmed by a container fade"
+                );
+            }
+
+            let chips = probe::all("ui.chip");
+            assert_eq!(chips.len(), 2, "{id}: one bind chip per forward row");
+            let (off, live) = (&chips[0], &chips[1]);
+            assert_eq!(
+                off.fill_alpha,
+                Some(0.0),
+                "{id}: the off row's chip carries no fill"
+            );
+            assert_eq!(
+                off.text,
+                Some(muted),
+                "{id}: the off row's bind is muted ink"
+            );
+            assert_eq!(
+                off.text_alpha,
+                Some(1.0),
+                "{id}: the off row's bind is full strength"
+            );
+            assert_eq!(
+                live.fill,
+                Some(accent),
+                "{id}: the live chip keeps its accent fill"
+            );
+            assert_eq!(
+                live.fill_alpha,
+                Some(1.0),
+                "{id}: the live chip fill is solid"
+            );
+            assert_eq!(
+                live.text,
+                Some(foreground),
+                "{id}: the live chip keeps its ink"
+            );
+            assert!(
+                probe::all("port.chip.hover").len() == 1,
+                "{id}: only the port row's chip answers the row's hover; forward chips do not"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn the_advanced_form_draws_a_target_pair_only_for_rules_that_have_a_target(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(&app, &mut vcx, vec![port(3000, 42, "node")], Vec::new());
+        let _probe = probe::scope();
+
+        for (kind, pairs) in [
+            (SshForwardKind::Dynamic, 1),
+            (SshForwardKind::Local, 2),
+            (SshForwardKind::Remote, 2),
+        ] {
+            app.update_in(&mut vcx, |app, _, cx| {
+                app.loopback_panel.form_pane_id = Some(1);
+                app.loopback_panel.mf_advanced = true;
+                app.loopback_panel.mf_kind = kind;
+                cx.notify();
+            });
+            probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let drawn = probe::all("forwards.pair");
+            assert_eq!(
+                drawn.len(),
+                pairs,
+                "{kind:?}: the form drew {} field pairs in the real render",
+                drawn.len()
+            );
+            assert!(
+                drawn.iter().all(|pair| pair.opacity.is_none()),
+                "{kind:?}: no pair stands in faded"
+            );
+        }
     }
 }

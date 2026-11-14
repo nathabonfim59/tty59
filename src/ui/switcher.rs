@@ -3198,13 +3198,22 @@ impl Tty59App {
         }
 
         let theme = cx.theme();
-        let (fg, muted, warn) = (theme.foreground, theme.muted_foreground, theme.warning);
+        let warn = theme.warning;
         // The picked row is a neutral step of the popover's own ladder, not
         // a solid accent slab: it is where the cursor is, not an action, and
         // a saturated block with white text was the loudest thing on screen.
         // The row keeps its own inks, so a warning still reads as one.
         let sf = rungs(cx);
         let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.selected));
+        // Quiet inks come floored on the fills they sit on, derived once per
+        // theme change: plain muted falls short of 4.5:1 on the picked rung
+        // and on the hovered one.
+        let ink = crate::ui::theme::chrome_ink(cx);
+        let secondary: gpui::Hsla = if picked {
+            gpui::rgb(ink.selected_meta).into()
+        } else {
+            gpui::rgb(ink.unpicked_meta).into()
+        };
         let rref = RowRef::of(group, row);
         let click_ref = rref.clone();
         let menu_ref = rref.clone();
@@ -3219,6 +3228,11 @@ impl Tty59App {
         // A machine with no link cannot show this row's panes right now; the
         // row stays, muted, and opening it is what asks for the connection.
         let unlit = group.target.is_some() && matches!(group.link, Link::Offline | Link::Failed);
+        let name_ink: gpui::Hsla = match (unlit, picked) {
+            (true, _) => gpui::rgb(ink.quiet_name).into(),
+            (false, true) => gpui::rgb(sf.text_selected).into(),
+            (false, false) => gpui::rgb(ink.unpicked_title).into(),
+        };
 
         // "Open" is what this workspace would say either way, and it is the
         // wrong word for one another client is driving.
@@ -3268,10 +3282,12 @@ impl Tty59App {
             .relative()
             .flex_shrink_0()
             .size(px(WS_AVATAR))
-            .child(
-                div()
+            .child({
+                // An unlit machine no longer fades its disc: the container
+                // opacity dragged the letter under 4.5:1, and the quiet name
+                // beside it already says the machine is away.
+                let letter = div()
                     .size(px(WS_AVATAR))
-                    .when(unlit, |d| d.opacity(0.5))
                     .rounded_full()
                     .bg(theme.secondary)
                     .flex()
@@ -3279,9 +3295,14 @@ impl Tty59App {
                     .justify_center()
                     .text_size(gpui::rems(11. / 16.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(fg.opacity(0.6))
-                    .child(initial),
-            )
+                    .text_color(gpui::rgb(ink.avatar_ink))
+                    .child(initial);
+                #[cfg(test)]
+                let mut letter = letter;
+                #[cfg(test)]
+                crate::ui::paint_probe::note("switcher.avatar", &mut letter);
+                letter
+            })
             .children(state_dot.map(|state_dot| {
                 // The ring is the row's own fill, so the dot reads as cut
                 // out of the disc whichever state the row is in.
@@ -3324,36 +3345,43 @@ impl Tty59App {
                             .items_center()
                             .gap(px(6.))
                             .min_w_0()
-                            .child(
-                                div()
+                            .child({
+                                let name = div()
                                     .min_w_0()
                                     .truncate()
                                     .text_size(gpui::rems(13. / 16.))
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(match unlit {
-                                        true => muted,
-                                        false => fg,
-                                    })
-                                    .child(row.name.clone()),
-                            )
+                                    .text_color(name_ink)
+                                    .child(row.name.clone());
+                                #[cfg(test)]
+                                let mut name = name;
+                                #[cfg(test)]
+                                crate::ui::paint_probe::note("switcher.name", &mut name);
+                                name
+                            })
                             // The workspace's number — what Go to Workspace N
                             // and the Workspaces menu call it — so the slot a
                             // shortcut reaches can be read off the list that
                             // does not sort by it (#760).
                             .children(row.slot.map(|slot| {
-                                div()
+                                let number = div()
                                     .flex_shrink_0()
                                     .text_size(gpui::rems(11. / 16.))
-                                    .text_color(muted)
-                                    .child((slot + 1).to_string())
+                                    .text_color(secondary)
+                                    .child((slot + 1).to_string());
+                                #[cfg(test)]
+                                let mut number = number;
+                                #[cfg(test)]
+                                crate::ui::paint_probe::note("switcher.slot", &mut number);
+                                number
                             })),
                     )
-                    .child(
-                        h_flex()
+                    .child({
+                        let meta_line = h_flex()
                             .items_center()
                             .min_w_0()
                             .text_size(gpui::rems(11.5 / 16.))
-                            .text_color(muted)
+                            .text_color(secondary)
                             // The path gives way first and the timestamp
                             // never does: with both in one truncating string
                             // the row ended in `~/repo/025/tty59 · …` every
@@ -3366,33 +3394,48 @@ impl Tty59App {
                                         .whitespace_nowrap()
                                         .child(format!("  ·  {}", row.when)),
                                 )
-                            }),
-                    ),
+                            });
+                        #[cfg(test)]
+                        let mut meta_line = meta_line;
+                        #[cfg(test)]
+                        crate::ui::paint_probe::note("switcher.meta", &mut meta_line);
+                        meta_line
+                    }),
             )
             // Tab count over state, both words rather than chips: a filled
             // pill reads as a button, and these are states. Only "taken over"
             // keeps a colour — it is the one that warns.
-            .child(
-                v_flex()
+            .child({
+                let side = v_flex()
                     .flex_shrink_0()
                     .items_end()
                     .gap(px(2.))
                     .text_size(gpui::rems(11.5 / 16.))
-                    .text_color(muted)
+                    .text_color(secondary)
                     // In words, the way the tab column's header says it: a
                     // bare `1` here sat a few pixels from the slot number after
                     // the name, and the two read as the same thing twice.
                     .when(!row.tabs.is_empty(), |c| c.child(tab_count(row.tabs.len())))
                     .children(badge.map(|(label, _here)| {
-                        div()
+                        let tag = div()
                             .text_size(gpui::rems(11. / 16.))
                             .text_color(match row.preempted {
                                 true => warn,
-                                false => muted,
+                                false => secondary,
                             })
-                            .child(label)
-                    })),
-            )
+                            .child(label);
+                        #[cfg(test)]
+                        let mut tag = tag;
+                        #[cfg(test)]
+                        crate::ui::paint_probe::note("switcher.badge", &mut tag);
+                        tag
+                    }));
+                #[cfg(test)]
+                let mut side = side;
+                #[cfg(test)]
+                crate::ui::paint_probe::note("switcher.side", &mut side);
+                side
+            })
             .child(
                 div()
                     .invisible()
@@ -3424,6 +3467,10 @@ impl Tty59App {
                 }
             }));
 
+        #[cfg(test)]
+        let mut line = line;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("switcher.row", &mut line);
         // A held Ctrl makes every click a right click on macOS. Drop the menu
         // and take the right-button press as the pick instead, or clicking
         // during the gesture does nothing at all.
@@ -6879,5 +6926,324 @@ mod key_tests {
             true => assert_eq!(glyph, "⌘"),
             false => assert_eq!(glyph, "Ctrl"),
         }
+    }
+}
+
+/// Switcher F5 and F9, through the real app render: the panel is opened in a
+/// test window, a frame is drawn, and the paints the row and keycap builders
+/// actually assigned are read back from the scoped probe and held to the
+/// floors on the rungs they sit on.
+#[cfg(test)]
+mod contrast_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui_component::ActiveTheme as _;
+
+    use super::{Link, Tty59App, rungs};
+    use crate::core::session::{
+        RemoteRef, RemoteTarget, WindowView, WindowViews, WorkspaceId, WorkspaceStore,
+    };
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, Misses, TEXT_FLOOR};
+    use crate::ui::paint_probe::{self as probe, Painted};
+    use crate::ui::presets::{ChromeInk, Surface};
+
+    /// This window's workspace, another local one that is open, and one on a
+    /// machine nothing is connected to: the three shapes a row takes.
+    const ROWS: usize = 3;
+
+    fn seed(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        let now = crate::ui::home::now_secs();
+        app.update_in(vcx, |app, _, cx| {
+            let local = |id: WorkspaceId, label: &str, age: u64| WindowView {
+                id,
+                open: true,
+                last_active: now.saturating_sub(age),
+                label: Some(label.into()),
+                ..WindowView::default()
+            };
+            let mut away = WindowView::on_remote(RemoteRef::new(
+                RemoteTarget::Alias {
+                    alias: "charlie-box".into(),
+                },
+                WorkspaceId::new(),
+            ));
+            away.label = Some("charlie".into());
+            away.last_active = now.saturating_sub(7200);
+            let views = vec![
+                local(app.workspace, "alpha", 0),
+                local(WorkspaceId::new(), "bravo", 60),
+                away,
+            ];
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views,
+                    active: None,
+                },
+            );
+            cx.notify();
+        });
+    }
+
+    struct Frame {
+        unlit: Vec<bool>,
+        row: Vec<Painted>,
+        name: Vec<Painted>,
+        slot: Vec<Painted>,
+        meta: Vec<Painted>,
+        side: Vec<Painted>,
+        badge: Vec<Painted>,
+        avatar: Vec<Painted>,
+        keycap: Vec<Painted>,
+    }
+
+    /// Puts the cursor on row `picked_at`, draws one frame of the app, and
+    /// returns what the builders painted in it.
+    fn capture(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, picked_at: usize) -> Frame {
+        let unlit = app.update_in(vcx, |app, _, cx| {
+            if let Some(sw) = app.switcher.as_mut() {
+                sw.left_sel = picked_at;
+            }
+            let layout = app.switcher_layout(cx);
+            let unlit: Vec<bool> = layout
+                .nav
+                .iter()
+                .map(|&(g, _)| {
+                    let group = &layout.groups[g];
+                    group.target.is_some() && matches!(group.link, Link::Offline | Link::Failed)
+                })
+                .collect();
+            cx.notify();
+            unlit
+        });
+        probe::clear();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let frame = Frame {
+            unlit,
+            row: probe::all("switcher.row"),
+            name: probe::all("switcher.name"),
+            slot: probe::all("switcher.slot"),
+            meta: probe::all("switcher.meta"),
+            side: probe::all("switcher.side"),
+            badge: probe::all("switcher.badge"),
+            avatar: probe::all("switcher.avatar"),
+            keycap: probe::all("dialog.keycap"),
+        };
+        for (what, painted) in [
+            ("row", frame.row.len()),
+            ("name", frame.name.len()),
+            ("slot", frame.slot.len()),
+            ("meta", frame.meta.len()),
+            ("side", frame.side.len()),
+            ("badge", frame.badge.len()),
+            ("avatar", frame.avatar.len()),
+            ("unlit", frame.unlit.len()),
+        ] {
+            assert_eq!(painted, ROWS, "one {what} per row reached the real render");
+        }
+        assert_eq!(
+            frame.unlit.iter().filter(|unlit| **unlit).count(),
+            1,
+            "the machine nothing is connected to makes exactly one unlit row"
+        );
+        assert!(!frame.keycap.is_empty(), "the footer draws keycaps");
+        frame
+    }
+
+    struct Inks {
+        popover: Surface,
+        chrome: ChromeInk,
+        secondary: u32,
+    }
+
+    fn inks(vcx: &mut VisualTestContext) -> Inks {
+        vcx.update(|_, cx| Inks {
+            popover: rungs(cx),
+            chrome: crate::ui::theme::chrome_ink(cx),
+            secondary: probe::hsla24(cx.theme().secondary),
+        })
+    }
+
+    fn opened(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, 1);
+        seed(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        (app, vcx, streams)
+    }
+
+    fn text(painted: &Painted, what: &str) -> u32 {
+        painted
+            .text
+            .unwrap_or_else(|| panic!("{what} paints a text colour"))
+    }
+
+    #[gpui::test]
+    fn switcher_row_inks_hold_their_floor_on_the_rung_they_are_painted_on(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = opened(cx);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        // The inks an unpicked row keeps (authored foreground name, muted meta,
+        // slot, state column and badge) on its resting and hovered rungs, as
+        // painted. Kept apart so a weak palette that misses there is named
+        // without hiding what the selected-row roles do.
+        let mut unpicked = Misses::default();
+
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            let ink = inks(&mut vcx);
+            let id = theme.id.as_str();
+            for picked_at in 0..ROWS {
+                let frame = capture(&app, &mut vcx, picked_at);
+                for i in 0..ROWS {
+                    let picked = i == picked_at;
+                    let unlit = frame.unlit[i];
+                    if !picked {
+                        for (rung, rung_fill) in [
+                            ("resting", ink.popover.base),
+                            ("hovered", ink.popover.hover),
+                        ] {
+                            for (what, painted) in [
+                                ("name", &frame.name[i]),
+                                ("meta", &frame.meta[i]),
+                                ("slot", &frame.slot[i]),
+                                ("state column", &frame.side[i]),
+                                ("badge", &frame.badge[i]),
+                            ] {
+                                unpicked.floor(
+                                    id,
+                                    &format!("unpicked row {i} {what} on the {rung} rung"),
+                                    text(painted, what),
+                                    rung_fill,
+                                    TEXT_FLOOR,
+                                );
+                            }
+                        }
+                    }
+                    let at = format!("{id} row {i} (picked {picked}, unlit {unlit})");
+                    let fill = if picked {
+                        ink.popover.selected
+                    } else {
+                        ink.popover.base
+                    };
+
+                    assert_eq!(
+                        frame.row[i].fill,
+                        picked.then_some(ink.popover.selected),
+                        "{at}: only the picked row paints the selected rung"
+                    );
+                    assert_eq!(frame.row[i].opacity, None, "{at}: no row fade");
+
+                    let want_name = match (unlit, picked) {
+                        (true, _) => ink.chrome.quiet_name,
+                        (false, true) => ink.popover.text_selected,
+                        (false, false) => ink.chrome.unpicked_title,
+                    };
+                    assert_eq!(text(&frame.name[i], "name"), want_name, "{at}: name ink");
+                    assert_eq!(frame.name[i].text_alpha, Some(1.0), "{at}: name alpha");
+                    assert_eq!(frame.name[i].opacity, None, "{at}: name has no fade");
+                    if unlit {
+                        for (rung, rung_fill) in [
+                            ("resting", ink.popover.base),
+                            ("hovered", ink.popover.hover),
+                            ("selected", ink.popover.selected),
+                        ] {
+                            misses.floor(
+                                id,
+                                &format!("row {i} unlit name on the {rung} rung"),
+                                want_name,
+                                rung_fill,
+                                TEXT_FLOOR,
+                            );
+                        }
+                    }
+                    if picked {
+                        misses.floor(
+                            id,
+                            &format!("row {i} picked name"),
+                            want_name,
+                            fill,
+                            TEXT_FLOOR,
+                        );
+                    }
+
+                    let want_quiet = if picked {
+                        ink.chrome.selected_meta
+                    } else {
+                        ink.chrome.unpicked_meta
+                    };
+                    for (what, painted) in [
+                        ("meta", &frame.meta[i]),
+                        ("slot", &frame.slot[i]),
+                        ("state column", &frame.side[i]),
+                        ("badge", &frame.badge[i]),
+                    ] {
+                        assert_eq!(text(painted, what), want_quiet, "{at}: {what} ink");
+                        assert_eq!(painted.text_alpha, Some(1.0), "{at}: {what} alpha");
+                        assert_eq!(painted.opacity, None, "{at}: {what} has no fade");
+                        if picked {
+                            misses.floor(
+                                id,
+                                &format!("row {i} picked {what}"),
+                                want_quiet,
+                                fill,
+                                TEXT_FLOOR,
+                            );
+                        }
+                    }
+
+                    let avatar = &frame.avatar[i];
+                    assert_eq!(avatar.fill, Some(ink.secondary), "{at}: avatar disc");
+                    assert_eq!(
+                        text(avatar, "avatar"),
+                        ink.chrome.avatar_ink,
+                        "{at}: initial"
+                    );
+                    assert_eq!(avatar.text_alpha, Some(1.0), "{at}: initial alpha");
+                    assert_eq!(
+                        avatar.opacity, None,
+                        "{at}: an unlit machine's disc is not faded"
+                    );
+                    misses.floor(
+                        id,
+                        &format!("row {i} avatar initial"),
+                        ink.chrome.avatar_ink,
+                        ink.secondary,
+                        TEXT_FLOOR,
+                    );
+                }
+
+                for (n, cap) in frame.keycap.iter().enumerate() {
+                    assert_eq!(
+                        cap.fill,
+                        Some(ink.chrome.keycap_fill),
+                        "{id} keycap {n} fill"
+                    );
+                    assert_eq!(cap.fill_alpha, Some(1.0), "{id} keycap {n} fill alpha");
+                    assert_eq!(
+                        text(cap, "keycap"),
+                        ink.chrome.keycap_ink,
+                        "{id} keycap {n} ink"
+                    );
+                    assert_eq!(cap.text_alpha, Some(1.0), "{id} keycap {n} ink alpha");
+                    misses.floor(
+                        id,
+                        &format!("keycap {n} label"),
+                        ink.chrome.keycap_ink,
+                        ink.chrome.keycap_fill,
+                        TEXT_FLOOR,
+                    );
+                }
+            }
+        }
+        misses.assert_none("switcher row and keycap inks");
+        unpicked.assert_none("unpicked switcher row inks");
     }
 }
