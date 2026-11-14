@@ -70,6 +70,8 @@ pub(crate) struct Tk {
     pub chip: Hsla,
     pub warn: Hsla,
     pub warn_text: Hsla,
+    /// The Unsaved meta of a host row (the open host row it is painted on).
+    pub unsaved: Hsla,
     pub danger: Hsla,
     pub ok: Hsla,
 }
@@ -120,6 +122,7 @@ impl Tk {
             chip: if dark { pole.opacity(0.16) } else { raised },
             warn: role(ink.warn),
             warn_text: role(ink.warn_text),
+            unsaved: role(ink.unsaved),
             danger: role(ink.danger),
             ok: role(ink.ok),
         }
@@ -1109,6 +1112,7 @@ mod tests {
                 assert_eq!(pack(tk.switch_off), ink.switch_off, "{id}: switch_off");
                 assert_eq!(pack(tk.danger), ink.danger, "{id}: danger");
                 assert_eq!(pack(tk.warn_text), ink.warn_text, "{id}: warn_text");
+                assert_eq!(pack(tk.unsaved), ink.unsaved, "{id}: unsaved");
                 assert_eq!(pack(tk.warn), ink.warn, "{id}: warn");
                 assert_eq!(pack(tk.ok), ink.ok, "{id}: ok");
                 assert_eq!(pack(tk.glyph), ink.glyph, "{id}: glyph is the cached role");
@@ -1161,10 +1165,17 @@ mod tests {
                 // small role: it holds the literal 5.0 there, and the 4.5 floor on it too.
                 let host_row = over(pack(tk.page), tk.k04);
                 assert!(
-                    contrast(pack(tk.warn_text), host_row) >= 5.0,
-                    "{id}: warn_text {:#08x} is {:.2}:1 on the open host row {host_row:#08x}, under 5.0",
+                    contrast(pack(tk.unsaved), host_row) >= 5.0,
+                    "{id}: unsaved {:#08x} is {:.2}:1 on the open host row {host_row:#08x}, under 5.0",
+                    pack(tk.unsaved),
+                    contrast(pack(tk.unsaved), host_row)
+                );
+                // The general warning text (agent hooks Unavailable) is painted on the page.
+                assert!(
+                    contrast(pack(tk.warn_text), pack(tk.page)) >= TEXT_FLOOR,
+                    "{id}: warn_text {:#08x} is {:.2}:1 on the page",
                     pack(tk.warn_text),
-                    contrast(pack(tk.warn_text), host_row)
+                    contrast(pack(tk.warn_text), pack(tk.page))
                 );
                 for (what, text) in [("danger", tk.danger), ("ok", tk.ok)] {
                     for fill in status_fills {

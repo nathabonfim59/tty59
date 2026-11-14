@@ -1951,6 +1951,94 @@ mod tests {
         check_wash("settings.search-row-selected", settings_wash::ROW);
     }
 
+    /// The agent hooks' Unavailable line is painted on the page in the general
+    /// warning role, and the Unsaved meta of a host is a separate, stronger role.
+    /// The default theme is light, where the two differ, so the comparison is not
+    /// vacuous. Drives the real Agents page render.
+    #[gpui::test]
+    fn the_unavailable_agents_page_paints_the_general_warning_role_not_the_unsaved_one(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::paint_probe::{self, hsla24};
+
+        let _probe = paint_probe::scope();
+        let (app, mut vcx) = harness(cx);
+        let tk = vcx.update(|_, cx| Tk::of(cx));
+        assert!(!tk.dark, "the witness theme is light");
+        assert_ne!(
+            hsla24(tk.warn_text),
+            hsla24(tk.unsaved),
+            "the general warning role and the Unsaved role differ on the light witness"
+        );
+        paint_probe::clear();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Agents, window, cx);
+            let s = app.active_settings_mut().unwrap();
+            s.agent_hooks_seq += 1;
+            s.agent_hooks_states =
+                AgentHooksView::Unavailable("The agent config is unavailable.".into());
+            cx.notify();
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        vcx.run_until_parked();
+        let painted = paint_probe::all("settings.agents-unavailable");
+        assert!(!painted.is_empty(), "the Unavailable line is drawn");
+        for p in painted {
+            assert_eq!(p.text, Some(hsla24(tk.warn_text)), "Unavailable text role");
+            assert_eq!(p.text_alpha, Some(1.), "the role is opaque, not a ramp");
+            assert_ne!(p.text, Some(hsla24(tk.unsaved)), "not the Unsaved role");
+        }
+    }
+
+    /// A host being edited with a changed field shows the Unsaved meta in its own role, not the
+    /// general warning role. Driven through the real actions: Edit host (`ssh_form_load`) on a saved
+    /// host, then a change to its address field; the row is the one the SSH page renders.
+    #[gpui::test]
+    fn an_edited_host_paints_its_unsaved_meta_in_the_unsaved_role(cx: &mut TestAppContext) {
+        use crate::ui::paint_probe::{self, hsla24};
+
+        let _probe = paint_probe::scope();
+        let (app, mut vcx) = harness(cx);
+        let tk = vcx.update(|_, cx| Tk::of(cx));
+        assert_ne!(
+            hsla24(tk.warn_text),
+            hsla24(tk.unsaved),
+            "the two warning roles differ on the light witness"
+        );
+        let mut profile = crate::core::ssh_profile::SshProfile::new("host-0");
+        profile.host = "h0.example".to_string();
+        paint_probe::clear();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            cx.global_mut::<Config>().ssh_profiles = vec![profile.clone()];
+            app.ssh_form_load(&profile, window, cx);
+            let host = app
+                .ssh_form_mut()
+                .expect("Edit host opened its form")
+                .host
+                .clone();
+            host.update(cx, |input, cx| {
+                input.set_value("changed.example".to_string(), window, cx)
+            });
+            cx.notify();
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        vcx.run_until_parked();
+        let metas = paint_probe::all("settings.host-meta");
+        assert!(
+            metas.iter().any(|p| p.text == Some(hsla24(tk.unsaved))),
+            "the edited host's Unsaved meta is painted in the unsaved role"
+        );
+        for p in metas {
+            assert_eq!(p.text_alpha, Some(1.), "the meta ink is opaque");
+            assert_ne!(
+                p.text,
+                Some(hsla24(tk.warn_text)),
+                "no host meta uses the general warning role"
+            );
+        }
+    }
+
     /// The empty state and its link fit the window in every language, at the
     /// narrowest width the settings window opens to.
     #[gpui::test]

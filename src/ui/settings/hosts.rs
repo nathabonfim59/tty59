@@ -434,7 +434,7 @@ impl Tty59App {
         // and stays.
         let echo = !editing && address == title;
         let (meta, meta_color) = if dirty {
-            (t(L10nKey::SettingsUnsaved).to_string(), tk.warn_text)
+            (t(L10nKey::SettingsUnsaved).to_string(), tk.unsaved)
         } else if live {
             (t(L10nKey::SettingsLive).to_string(), tk.ok)
         } else {

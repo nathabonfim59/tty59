@@ -1991,6 +1991,12 @@ mod tests {
                 assert_eq!(settings.sub, expected.sub, "{}: sub", theme.id);
                 assert_eq!(settings.warn, expected.warn, "{}: warn", theme.id);
                 assert_eq!(
+                    settings.warn_text, expected.warn_text,
+                    "{}: warn_text",
+                    theme.id
+                );
+                assert_eq!(settings.unsaved, expected.unsaved, "{}: unsaved", theme.id);
+                assert_eq!(
                     settings.switch_off, expected.switch_off,
                     "{}: switch_off",
                     theme.id

@@ -217,14 +217,16 @@ impl Tty59App {
                     .child(t(L10nKey::SettingsReadingAgentConfig))
                     .into_any_element(),
             ),
-            AgentHooksView::Unavailable(reason) => body.push(
-                div()
+            AgentHooksView::Unavailable(reason) => {
+                let line = div()
                     .py(px(12.))
                     .text_size(fs(12.5))
                     .text_color(tk.warn_text)
-                    .child(reason.clone())
-                    .into_any_element(),
-            ),
+                    .child(reason.clone());
+                #[cfg(test)]
+                let line = kit::probe("settings.agents-unavailable", line);
+                body.push(line.into_any_element());
+            }
             AgentHooksView::Ready(rows) => {
                 let has = |r: &AgentHookRow| r.state != HooksState::NotInstalled;
                 let is_focused =

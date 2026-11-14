@@ -117,9 +117,13 @@ pub struct SettingsInk {
     /// settings fills they are painted on, which are lower-contrast than the
     /// bases `Semantics` is floored on: a hovered row, a dropdown row.
     pub danger: u32,
-    /// Held to `SETTINGS_SMALL_TEXT_TARGET` on the open host row it is painted on (the Unsaved
-    /// meta, shown only while a host is being edited, which opens it): it is drawn at 12px or less.
+    /// The general warning text drawn on the settings page itself (the agent hooks' Unavailable
+    /// line, 12.5px body text): floored on the page, 4.6:1 where it had to move.
     pub warn_text: u32,
+    /// The Unsaved meta of a host row. Held to `SETTINGS_SMALL_TEXT_TARGET` on the open host row it
+    /// is painted on (shown only while a host is being edited, which opens it): it is drawn at 12px
+    /// or less. A separate role from `warn_text`, which is painted on the page.
+    pub unsaved: u32,
     pub ok: u32,
     /// The warning dot and ring, a mark: the semantic warning fill floored at
     /// 3:1 on the page and on the row wash a shortcut conflict sits on.
@@ -184,7 +188,7 @@ pub struct ChromeInk {
 /// captures missed the floor, chosen from offline capture evidence (nothing is measured at runtime);
 /// roles and seeds already verified above the 1x floor stay authored. The derivation itself is pure
 /// and only guarantees that a seed above its assigned target is returned unchanged. Scope today:
-/// `SettingsInk::warn_text` and `SettingsInk::glyph`.
+/// `SettingsInk::unsaved` and `SettingsInk::glyph`.
 pub(crate) const SETTINGS_SMALL_TEXT_TARGET: f32 = 5.0;
 pub(crate) const SETTINGS_GLYPH_TARGET: f32 = 3.2;
 
@@ -230,6 +234,8 @@ pub(crate) struct Resolved {
     settings_warn: Vec<u32>,
     /// The open host row: the page under the row's ROW wash. The only fill the Unsaved text is painted on.
     settings_host_row: Vec<u32>,
+    /// The settings page itself: the fill the Unavailable warning line is painted on.
+    settings_page: Vec<u32>,
     panel: Vec<u32>,
     popover_rows: Vec<u32>,
     port_chip: Vec<u32>,
@@ -754,6 +760,7 @@ impl Theme {
             ],
             settings_warn: vec![page, host_row],
             settings_host_row: vec![host_row],
+            settings_page: vec![page],
             panel: vec![
                 sf.sidebar.base,
                 sf.sidebar.hover,
@@ -815,7 +822,8 @@ impl Theme {
                 SETTINGS_GLYPH_TARGET,
             ),
             danger: legible_across(&r.settings_status, sem.danger.ink, TEXT_FLOOR),
-            warn_text: legible_across(
+            warn_text: legible_across(&r.settings_page, sem.warning.ink, TEXT_FLOOR),
+            unsaved: legible_across(
                 &r.settings_host_row,
                 sem.warning.ink,
                 SETTINGS_SMALL_TEXT_TARGET,
@@ -3525,6 +3533,12 @@ ansi:
         add(
             "settings warn_text text",
             settings.warn_text,
+            &r.settings_page,
+            AA_TEXT,
+        );
+        add(
+            "settings unsaved text",
+            settings.unsaved,
             &r.settings_host_row,
             AA_TEXT,
         );
@@ -3809,6 +3823,8 @@ ansi:
             "inbox reason meta",
             "settings sub",
             "settings switch_off",
+            "settings warn_text text",
+            "settings unsaved text",
             "settings warn mark",
             "chrome selected_meta",
             "chrome quiet_name",
@@ -4317,6 +4333,13 @@ ansi:
                 (
                     "warn_text",
                     settings.warn_text,
+                    t.semantics_with(m).warning.ink,
+                    &r.settings_page[..],
+                    AA_TEXT,
+                ),
+                (
+                    "unsaved",
+                    settings.unsaved,
                     t.semantics_with(m).warning.ink,
                     &r.settings_host_row[..],
                     AA_SMALL_TEXT,
