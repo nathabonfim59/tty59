@@ -944,12 +944,11 @@ struct NewTabMenu {
     /// Saved host, its display name, and the `user@host:port` beside it —
     /// empty when the name already says it.
     hosts: Vec<(uuid::Uuid, SharedString, SharedString)>,
-    /// Agents the menu names — at most [`MENU_AGENTS`], and only ones that
-    /// have actually been run.
+    /// Agents the menu names — at most [`MENU_AGENTS`]: the ones actually
+    /// run, or the first offered while nothing has run yet.
     agents: Vec<CLIAgent>,
     /// The window can offer agents the menu does not name, so the section
-    /// closes with a row into the palette. Also the reason the section exists
-    /// when nothing has been run yet: the installed agents are all in there.
+    /// closes with a row into the palette.
     more_agents: bool,
 }
 
@@ -1076,8 +1075,9 @@ impl NewTabMenu {
 
         // A peer of Local and SSH, and absent when this machine has no agent
         // to offer — an empty heading would be a section about nothing. The
-        // rows are the ones actually run; the seam holds the rest, already
-        // filtered, the way Other Shells does.
+        // rows are the ones actually run — or the first few offered, while
+        // nothing has run yet; the seam holds the rest, already filtered,
+        // the way Other Shells does.
         if !self.agents.is_empty() || self.more_agents {
             menu = menu
                 .item(PopupMenuItem::separator())
@@ -1173,24 +1173,30 @@ fn menu_shells<'a>(
 }
 
 /// The agents the menu names, off the front of the frecency-ordered list
-/// quick launch already built: only those that have actually been run, at
-/// most [`MENU_AGENTS`].
+/// quick launch already built: those that have actually been run, at most
+/// [`MENU_AGENTS`].
 ///
-/// An agent nobody has run is not named just because it is installed and
-/// there is room. A zero count is not a use either — launching stamps
-/// recency before the pane reports the agent, and the count is what says it
-/// really ran. `offered` is already most-used-first; this does not reorder.
+/// A zero count is not a use — launching stamps recency before the pane
+/// reports the agent, and the count is what says it really ran. But when
+/// nothing offered has run yet the first [`MENU_AGENTS`] are named anyway:
+/// a fresh profile's menu that is only a heading and the seam makes the
+/// first launch take a menu, a search scope and a pick. `offered` is
+/// already most-used-first; this does not reorder.
 fn menu_agents(
     offered: &[CLIAgent],
     usage: &std::collections::HashMap<String, crate::core::config::ProfileUsage>,
     now: u64,
 ) -> Vec<CLIAgent> {
-    offered
+    let named: Vec<CLIAgent> = offered
         .iter()
         .copied()
         .filter(|agent| usage.get(agent.slug()).is_some_and(|u| u.score(now) > 0.0))
         .take(MENU_AGENTS)
-        .collect()
+        .collect();
+    match named.is_empty() {
+        true => offered.iter().copied().take(MENU_AGENTS).collect(),
+        false => named,
+    }
 }
 
 /// The hosts the menu names, in the order they were handed over — frecency,
@@ -4319,17 +4325,35 @@ mod tests {
         );
         assert!(named.len() < offered.len(), "the rest are the seam row's");
 
+        // Nothing has run yet: the menu still leads with the first agents
+        // the machine offers, and the seam covers the rest — a heading above
+        // a single "Other Agents…" makes launching the first agent take a
+        // menu, a search scope and a pick.
         let none = used(&[]);
         let named = menu_agents(&offered, &none, now);
-        assert!(named.is_empty(), "installed but never run is not named");
+        assert_eq!(
+            named,
+            vec![CLIAgent::Claude, CLIAgent::Amp, CLIAgent::Codex],
+            "a fresh profile names the first offered agents, in offered order"
+        );
         assert!(
             named.len() < offered.len(),
-            "so the section is only the seam"
+            "the rest remain the seam row's"
         );
+        // A record for an agent this machine does not offer is no use either.
+        let stale = used(&[("goose", 9, now)]);
+        assert_eq!(menu_agents(&offered, &stale, now), named);
+
+        // Offered fewer than the cap, every one is named — no seam row.
+        let few = [CLIAgent::Claude, CLIAgent::Codex];
+        let named = menu_agents(&few, &none, now);
+        assert_eq!(named, few);
+        assert_eq!(named.len(), few.len());
+
+        assert!(menu_agents(&[], &none, now).is_empty());
         assert!(menu_agents(&[], &usage, now).is_empty());
 
         // Every offered agent has been run and they fit: no seam row.
-        let few = [CLIAgent::Claude, CLIAgent::Codex];
         let two = used(&[("claude", 4, now), ("codex", 1, now)]);
         let named = menu_agents(&few, &two, now);
         assert_eq!(named, vec![CLIAgent::Claude, CLIAgent::Codex]);

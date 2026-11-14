@@ -6816,23 +6816,10 @@ impl Tty59App {
             }
             out.push(item);
         }
-        for agent in self.offered_agents(cx) {
-            out.push(
-                Item::new(
-                    t_fmt(
-                        L10nKey::AppCmdAgentLaunchTitle,
-                        &[("name", agent.display_name())],
-                    ),
-                    CommandKind::LaunchAgent(agent),
-                )
-                .with_subtitle(agent.launch_command(&cx.global::<Config>().agent_launch))
-                .with_avatar(Avatar {
-                    agent: Some(agent),
-                    ..Avatar::default()
-                })
-                .in_section(new_terminal.clone()),
-            );
-        }
+        out.extend(crate::ui::search::agent_launch_items(
+            &self.offered_agents(cx),
+            &cx.global::<Config>().agent_launch,
+        ));
         out
     }
 
