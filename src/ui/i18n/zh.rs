@@ -2060,6 +2060,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
             "此窗格的 tty59 shell 集成没生效，内联补全和 Ctrl+R 菜单不可用。常见原因：用自己参数启动的 shell、PTY 包装器，或不受支持的 shell。"
         }
         L10nKey::PaneTitleDisconnected => "{title} — 已断开",
+        L10nKey::PaneTitleNotConnected => "{title} — 未连接",
         L10nKey::PaneTitleProcessExited => "{title} — 进程已退出",
         L10nKey::LoopbackForwardFailed => "无法转发 :{port}——{error}",
         L10nKey::TrayTooltipAgents => "tty59：{parts}",

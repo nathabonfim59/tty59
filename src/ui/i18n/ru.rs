@@ -2431,6 +2431,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Интеграция оболочки tty59 не включилась в этой панели. Встроенное дополнение и меню Ctrl+R недоступны. Возможные причины: свои аргументы запуска оболочки, обёртка PTY или неподдерживаемая оболочка."
         }
         L10nKey::PaneTitleDisconnected => "{title}: нет соединения",
+        L10nKey::PaneTitleNotConnected => "{title}: не подключено",
         L10nKey::PaneTitleProcessExited => "{title}: процесс завершён",
         L10nKey::LoopbackForwardFailed => "Не удалось пробросить :{port}: {error}",
         L10nKey::TrayTooltipAgents => "tty59: {parts}",

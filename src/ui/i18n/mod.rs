@@ -1844,6 +1844,7 @@ l10n_keys! {
     IntegrationNoticeBlocked,
     IntegrationNoticeNotEngaged,
     PaneTitleDisconnected,
+    PaneTitleNotConnected,
     PaneTitleProcessExited,
     LoopbackForwardFailed,
     TrayTooltipAgents,
