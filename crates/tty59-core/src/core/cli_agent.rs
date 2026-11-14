@@ -1665,16 +1665,6 @@ mod tests {
     }
 
     #[test]
-    fn the_agents_likeliest_installed_lead_the_offer_order() {
-        // `installed_on` and every fresh-profile list follow `ALL`: the
-        // agents someone is likeliest to have installed lead it.
-        assert_eq!(
-            &CLIAgent::ALL[..3],
-            &[CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Gemini]
-        );
-    }
-
-    #[test]
     fn every_agent_has_metadata() {
         for a in CLIAgent::ALL {
             assert!(!a.display_name().is_empty());

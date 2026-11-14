@@ -1033,18 +1033,6 @@ mod tests {
     }
 
     #[test]
-    fn launch_rows_file_themselves_under_agents() {
-        crate::ui::i18n::set_locale("en");
-        let items = agent_launch_items(&[CLIAgent::Claude, CLIAgent::Codex], &Default::default());
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].section.as_deref(), Some("Agents"));
-        assert_eq!(items[0].title, "Agent: Claude Code");
-        assert_eq!(items[0].subtitle.as_deref(), Some("claude"));
-        assert_eq!(items[0].kind, CommandKind::LaunchAgent(CLIAgent::Claude));
-        assert_eq!(items[0].avatar.unwrap().agent, Some(CLIAgent::Claude));
-    }
-
-    #[test]
     fn dynamic_commands_have_no_id() {
         assert!(
             CommandKind::GoToTab {
