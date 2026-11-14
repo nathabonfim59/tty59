@@ -27,6 +27,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::VisionDone => "已完成",
         L10nKey::VisionIdle => "空闲",
         L10nKey::VisionExited => "已退出",
+        L10nKey::VisionExitedAge => "已退出 · {age}",
         L10nKey::VisionPane => "窗格 {i}/{n}",
         L10nKey::VisionDefault => "新窗口使用 Agent 视图",
         L10nKey::VisionDefaultDesc => "新窗口打开收件箱。可从顶部栏返回工作台。",

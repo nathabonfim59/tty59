@@ -11,6 +11,40 @@ use crate::ui::i18n::{L10nKey, t};
 
 use super::{FocusZone, PaneSummary, ProjectFilter, State, ViewMode};
 
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RenderedAgentRow {
+    pub key: super::PaneKey,
+    pub card: bool,
+    pub title: String,
+    pub reason: String,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RenderedReaderHeader {
+    pub key: super::PaneKey,
+    pub title: String,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static RENDERED_ROWS: std::cell::RefCell<Vec<RenderedAgentRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static RENDERED_HEADERS: std::cell::RefCell<Vec<RenderedReaderHeader>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn take_rendered_rows() -> Vec<RenderedAgentRow> {
+    RENDERED_ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()))
+}
+
+#[cfg(test)]
+pub(super) fn take_rendered_headers() -> Vec<RenderedReaderHeader> {
+    RENDERED_HEADERS.with(|headers| std::mem::take(&mut *headers.borrow_mut()))
+}
+
 impl State {
     pub(super) fn label(self) -> &'static str {
         t(match self {
@@ -241,29 +275,46 @@ impl Tty59App {
             .iter()
             .find(|project| project.group == pane.location.group)
             .map_or("", |project| project.name.as_str());
-        let title = match pane.pane_marker() {
-            Some(marker) => format!("{} · {marker}", pane.location.tab_title),
-            None => pane.location.tab_title.clone(),
-        };
-        let reason = pane.reason.as_deref().unwrap_or(pane.state.label());
+        let exited = pane.state == State::Exited;
+        let title = pane.heading();
+        let now = crate::core::config::unix_now();
+        let reason = pane.reason_line(now);
         let mut meta = format!("{} · {}", pane.agent_name(), project);
-        if let Some(since) = pane.since_ms {
-            let age = crate::core::config::unix_now().saturating_sub(since / 1000);
+        if let Some(since) = pane.since_ms.filter(|_| !exited) {
+            let age = now.saturating_sub(since / 1000);
             meta.push_str(&format!(" · {}", crate::ui::home::compact_age(age)));
         }
-        let status = if pane.state == State::Exited || pane.state == State::Idle {
-            div()
-                .size(px(6.))
-                .rounded_full()
-                .border_1()
-                .border_color(cx.theme().muted_foreground)
-                .when(pane.state == State::Idle, |dot| {
-                    dot.bg(cx.theme().muted_foreground)
-                })
-                .into_any_element()
-        } else {
-            self.row_status_dot(Some(pane.state.status()), 0, rgb(sf.base).into())
-                .unwrap_or_else(|| div().into_any_element())
+        #[cfg(test)]
+        RENDERED_ROWS.with(|rows| {
+            rows.borrow_mut().push(RenderedAgentRow {
+                key,
+                card,
+                title: title.clone(),
+                reason: reason.clone(),
+            });
+        });
+        let status = match pane.state {
+            State::Exited => None,
+            State::Idle => Some(
+                div()
+                    .size(px(6.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(cx.theme().muted_foreground)
+                    .bg(cx.theme().muted_foreground)
+                    .map(|dot| {
+                        #[cfg(test)]
+                        let dot = dot.debug_selector(move || {
+                            format!("agent-row-dot-{}-{}", key.host.0, key.pane)
+                        });
+                        dot
+                    })
+                    .into_any_element(),
+            ),
+            state => Some(
+                self.row_status_dot(Some(state.status()), 0, rgb(sf.base).into())
+                    .unwrap_or_else(|| div().into_any_element()),
+            ),
         };
         let row = h_flex()
             .id(SharedString::from(format!(
@@ -328,6 +379,9 @@ impl Tty59App {
                             .truncate()
                             .text_sm()
                             .when(selected, |row| row.font_weight(FontWeight::MEDIUM))
+                            .when(exited, |title| {
+                                title.text_color(cx.theme().muted_foreground)
+                            })
                             .map(|title| {
                                 #[cfg(test)]
                                 let title = title.debug_selector(move || {
@@ -337,14 +391,29 @@ impl Tty59App {
                             })
                             .child(title),
                     )
-                    .child(div().truncate().text_xs().child(reason.to_string()))
-                    .when(card, |column| {
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .when(exited, |reason| {
+                                reason.text_color(cx.theme().muted_foreground)
+                            })
+                            .child(reason),
+                    )
+                    .when(card && !exited, |column| {
                         column.when_some(pane.last_line.clone(), |column, line| {
                             column.child(
                                 div()
                                     .truncate()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
+                                    .map(|preview| {
+                                        #[cfg(test)]
+                                        let preview = preview.debug_selector(move || {
+                                            format!("agent-row-preview-{}-{}", key.host.0, key.pane)
+                                        });
+                                        preview
+                                    })
                                     .child(line),
                             )
                         })
@@ -363,7 +432,7 @@ impl Tty59App {
                 !card
                     || (pane.state == State::Done
                         && self.agent_vision.reads.attention(pane).is_some()),
-                |row| row.child(status),
+                |row| row.children(status),
             )
             .on_click(
                 cx.listener(move |app, _, window, cx| app.open_agent_terminal(key, window, cx)),
@@ -535,6 +604,14 @@ impl Tty59App {
                 .h_full()
                 .when_some(selected, |reader, pane| {
                     let key = pane.location.key;
+                    let heading = pane.heading();
+                    #[cfg(test)]
+                    RENDERED_HEADERS.with(|headers| {
+                        headers.borrow_mut().push(RenderedReaderHeader {
+                            key,
+                            title: heading.clone(),
+                        });
+                    });
                     reader
                         .child(
                             v_flex()
@@ -554,13 +631,10 @@ impl Tty59App {
                                                 .truncate()
                                                 .text_sm()
                                                 .font_weight(FontWeight::MEDIUM)
-                                                .child(match pane.pane_marker() {
-                                                    Some(marker) => format!(
-                                                        "{} · {marker}",
-                                                        pane.location.tab_title
-                                                    ),
-                                                    None => pane.location.tab_title.clone(),
-                                                }),
+                                                .when(pane.state == State::Exited, |title| {
+                                                    title.text_color(cx.theme().muted_foreground)
+                                                })
+                                                .child(heading),
                                         )
                                         .child(
                                             div()

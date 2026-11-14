@@ -178,6 +178,46 @@ impl PaneSummary {
         }
     }
 
+    /// The tab's label, except that an exited agent's tab has reverted to the
+    /// shell's cwd: the agent's own name keeps the row identifiable.
+    pub fn title(&self) -> &str {
+        match self.state {
+            State::Exited => self.agent_name(),
+            _ => &self.location.tab_title,
+        }
+    }
+
+    /// [`title`](Self::title) plus the split marker, for Inbox and Kanban.
+    pub fn heading(&self) -> String {
+        match self.pane_marker() {
+            Some(marker) => format!("{} · {marker}", self.title()),
+            None => self.title().to_string(),
+        }
+    }
+
+    /// The reason without its age, as searched. An exit drops the session's
+    /// last message, which described a turn that no longer runs.
+    pub fn reason_text(&self) -> &str {
+        match self.state {
+            State::Exited => self.state.label(),
+            _ => self.reason.as_deref().unwrap_or(self.state.label()),
+        }
+    }
+
+    /// The reason line a row shows; an exit says how long ago it happened.
+    pub fn reason_line(&self, now_s: u64) -> String {
+        match (self.state, self.since_ms) {
+            (State::Exited, Some(since)) => crate::ui::i18n::t_fmt(
+                crate::ui::i18n::L10nKey::VisionExitedAge,
+                &[(
+                    "age",
+                    &crate::ui::home::compact_age(now_s.saturating_sub(since / 1000)),
+                )],
+            ),
+            _ => self.reason_text().to_string(),
+        }
+    }
+
     pub fn pane_marker(&self) -> Option<String> {
         self.pane_position.map(|(index, total)| {
             crate::ui::i18n::t_fmt(
@@ -204,11 +244,11 @@ impl PaneSummary {
     pub fn matches_search(&self, query: &str, project: &str) -> bool {
         query.split_whitespace().all(|word| {
             [
-                self.location.tab_title.as_str(),
+                self.title(),
                 self.agent_name(),
                 &self.kind,
                 project,
-                self.reason.as_deref().unwrap_or(self.state.label()),
+                self.reason_text(),
             ]
             .iter()
             .any(|text| text.to_lowercase().contains(word))
