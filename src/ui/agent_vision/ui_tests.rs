@@ -481,7 +481,6 @@ fn exited_agent_preserves_identity_across_collector_inbox_and_kanban(cx: &mut Te
         .expect("exited codex row rendered in Inbox");
     assert_eq!(inbox_p1.title, CLIAgent::Codex.display_name());
     assert_eq!(inbox_p1.reason, "Exited · 3m");
-    assert!(vcx.debug_bounds("agent-row-dot-0-1").is_none());
 
     let reader_header = inbox_headers
         .iter()
@@ -495,7 +494,6 @@ fn exited_agent_preserves_identity_across_collector_inbox_and_kanban(cx: &mut Te
         .expect("exited gemini row rendered in Inbox");
     assert_eq!(inbox_p2.title, CLIAgent::Gemini.display_name());
     assert_eq!(inbox_p2.reason, "Exited");
-    assert!(vcx.debug_bounds("agent-row-dot-0-2").is_none());
 
     let inbox_p3 = inbox_rows
         .iter()
@@ -504,7 +502,6 @@ fn exited_agent_preserves_identity_across_collector_inbox_and_kanban(cx: &mut Te
     assert_eq!(inbox_p3.title, CLIAgent::Claude.display_name());
     assert_eq!(inbox_p3.reason, "Working");
     assert!(vcx.debug_bounds("row-status-circle-0").is_some());
-    assert!(vcx.debug_bounds("agent-row-dot-0-4").is_some());
 
     // Render Kanban and verify cards, absent preview, and absent dot.
     app.update_in(&mut vcx, |app, window, cx| {
@@ -528,7 +525,6 @@ fn exited_agent_preserves_identity_across_collector_inbox_and_kanban(cx: &mut Te
     assert_eq!(card_p1.title, CLIAgent::Codex.display_name());
     assert_eq!(card_p1.reason, "Exited · 3m");
     assert!(vcx.debug_bounds("agent-row-preview-0-1").is_none());
-    assert!(vcx.debug_bounds("agent-row-dot-0-1").is_none());
 
     let card_p2 = kanban_rows
         .iter()
@@ -537,7 +533,6 @@ fn exited_agent_preserves_identity_across_collector_inbox_and_kanban(cx: &mut Te
     assert_eq!(card_p2.title, CLIAgent::Gemini.display_name());
     assert_eq!(card_p2.reason, "Exited");
     assert!(vcx.debug_bounds("agent-row-preview-0-2").is_none());
-    assert!(vcx.debug_bounds("agent-row-dot-0-2").is_none());
 
     let card_p3 = kanban_rows
         .iter()
@@ -546,4 +541,147 @@ fn exited_agent_preserves_identity_across_collector_inbox_and_kanban(cx: &mut Te
     assert_eq!(card_p3.title, CLIAgent::Claude.display_name());
     assert_eq!(card_p3.reason, "Working");
     assert!(vcx.debug_bounds("agent-row-preview-0-3").is_some());
+}
+
+/// Agents F6 on the drawn Inbox: one agent walked through every state with
+/// real daemon reports, so each frame holds one row and at most one status
+/// mark, and the shared `row-status-circle-0` selector names that row's mark
+/// (in agent mode the rail is the projects list, which draws none). Working,
+/// Waiting and Done carry the 5px dot centred in the 18px trailing slot;
+/// Idle and Exited carry none and their text runs to the row's 8px padding.
+/// Only Waiting is hollow, in the warning ink. Sizes are the finding's,
+/// written out rather than read from the constants the row is drawn with.
+#[gpui::test]
+fn one_agent_through_every_state_dots_only_working_waiting_and_done(cx: &mut TestAppContext) {
+    let _probe = crate::ui::paint_probe::scope();
+    let (app, mut vcx, mut streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+    let now_s = crate::core::config::unix_now();
+    DaemonMsg::Agent(Some(CLIAgent::Claude))
+        .encode(&mut streams[0])
+        .unwrap();
+    let sem = vcx.update(|_, cx| crate::ui::theme::semantics(cx));
+    let eps = 0.01;
+    // (reported status, exited, settled state, expected (fill, border) of the mark)
+    let steps = [
+        (
+            AgentStatus::Working,
+            false,
+            State::Working,
+            Some((Some(sem.info.ink), None)),
+        ),
+        (
+            AgentStatus::Waiting,
+            false,
+            State::Waiting,
+            Some((None, Some(sem.warning.ink))),
+        ),
+        (
+            AgentStatus::Done,
+            false,
+            State::Done,
+            Some((Some(sem.success.ink), None)),
+        ),
+        (AgentStatus::Idle, false, State::Idle, None),
+        (AgentStatus::Idle, true, State::Exited, None),
+    ];
+    for (status, exited, want, mark) in steps {
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status,
+            since_ms: Some(now_s.saturating_sub(60) * 1000),
+            detection: Some(AgentDetectionSession {
+                kind: "claude".into(),
+                epoch: if exited { 2 } else { 1 },
+                exited,
+                source: None,
+                rule: None,
+            }),
+            ..Default::default()
+        }))
+        .encode(&mut streams[0])
+        .unwrap();
+        if exited {
+            DaemonMsg::Agent(None).encode(&mut streams[0]).unwrap();
+        }
+        let mut key = None;
+        for _ in 0..200 {
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(50));
+            vcx.run_until_parked();
+            key = app.read_with(&vcx, |app, cx| {
+                app.agent_pane_summaries(cx)
+                    .iter()
+                    .find(|p| p.state == want)
+                    .map(|p| p.location.key)
+            });
+            if key.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let key = key.unwrap_or_else(|| panic!("the agent never settled as {want:?}"));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.set_agent_mode(ViewMode::Inbox, window, cx);
+            app.agent_vision.state.show_other = true;
+            app.working_dot_on = true;
+            cx.notify();
+        });
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            crate::ui::paint_probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        // The one tab's agent is host 0, pane 1: the selectors are literals
+        // because `debug_bounds` takes `&'static str`.
+        assert_eq!(
+            (key.host.0, key.pane),
+            (0, 1),
+            "{want:?}: the fixture's only agent"
+        );
+        let frame = vcx
+            .debug_bounds("agent-row-frame-0-1")
+            .unwrap_or_else(|| panic!("{want:?}: the row was painted"));
+        let title = vcx
+            .debug_bounds("agent-row-title-0-1")
+            .unwrap_or_else(|| panic!("{want:?}: the title was painted"));
+        let trailing = (frame.right() - title.right()).as_f32();
+        let dot = vcx.debug_bounds("row-status-circle-0");
+        let notes = crate::ui::paint_probe::all("row-status-dot");
+        match mark {
+            Some(paint) => {
+                let dot = dot.unwrap_or_else(|| panic!("{want:?}: the row has its dot"));
+                assert_eq!(
+                    dot.size,
+                    gpui::size(gpui::px(5.), gpui::px(5.)),
+                    "{want:?}: a 5px dot"
+                );
+                let slot_centre = frame.right().as_f32() - 8. - 18. / 2.;
+                assert!(
+                    (dot.center().x.as_f32() - slot_centre).abs() < eps,
+                    "{want:?}: centred in the 18px slot on the row's padding: {dot:?} in {frame:?}"
+                );
+                assert!(
+                    (trailing - (8. + 18. + 8.)).abs() < eps,
+                    "{want:?}: text stops before the slot and its gap, {trailing}"
+                );
+                assert_eq!(notes.len(), 1, "{want:?}: one mark: {notes:?}");
+                assert_eq!(
+                    (notes[0].fill, notes[0].border),
+                    paint,
+                    "{want:?}: filled in its role's ink, hollow only while waiting"
+                );
+            }
+            None => {
+                assert!(dot.is_none(), "{want:?}: no dot");
+                assert!(notes.is_empty(), "{want:?}: no mark built: {notes:?}");
+                assert!(
+                    (trailing - 8.).abs() < eps,
+                    "{want:?}: with no mark the text runs to the padding, {trailing}"
+                );
+            }
+        }
+    }
 }
