@@ -104,11 +104,17 @@ impl Semantics {
 }
 
 /// The settings page's secondary text and off-state switch track, cached per
-/// theme by `apply_theme`.
+/// theme by `apply_theme`. The dark track is the authored foreground at a faint
+/// translucent opacity (owner decision, under the 3:1 mark floor: the knob
+/// carries the state); the light track is opaque and floored at 3:1.
 #[derive(Debug, Clone, Copy)]
 pub struct SettingsInk {
     pub sub: u32,
     pub switch_off: u32,
+    /// The opacity the off track is painted at over whatever it sits on: 1 in
+    /// light (an opaque, floored track); in dark the foreground at
+    /// `SWITCH_OFF_DARK_ALPHA`, translucent as it has always been.
+    pub switch_off_alpha: f32,
     /// The search glass and its like: a small mark, held to
     /// `SETTINGS_GLYPH_TARGET` on the settings fills it sits on, from a seed
     /// at half the foreground's strength.
@@ -289,6 +295,12 @@ pub(crate) mod settings_wash {
     /// Lightness a dark popover sits above the page.
     pub const MENU_LIFT_DARK: f32 = 0.06;
 }
+
+/// The opacity of the dark off-switch track: the authored foreground at 16%
+/// over whatever the switch sits on (the old `k15`). Deliberately faint, by
+/// owner decision, so the knob carries the state. Not a step toward the shared
+/// pole and not floored.
+const SWITCH_OFF_DARK_ALPHA: f32 = 0.16;
 
 /// A wash of `pole` at `share` laid over `surface`, composited and rounded the
 /// way the painters' `Hsla` washes are (blend, then eight bits), so the fills
@@ -803,22 +815,28 @@ impl Theme {
 
     pub(crate) fn settings_ink_from(&self, r: &Resolved) -> SettingsInk {
         let sem = self.semantics_with(&r.m);
-        let (sub_share, off_share) = if self.dark {
-            (0.55, 0.40)
-        } else {
-            (0.65, 0.50)
-        };
+        let sub_share = if self.dark { 0.55 } else { 0.65 };
         SettingsInk {
             sub: legible_across(
                 &r.settings_text,
                 mix(r.m.background, r.m.foreground, sub_share),
                 TEXT_FLOOR,
             ),
-            switch_off: legible_across(
-                &r.settings_marks,
-                mix(r.m.background, r.m.foreground, off_share),
-                ACCENT_FLOOR,
-            ),
+            // Dark keeps the track it has always had, by owner decision: the
+            // authored foreground, painted translucent (`switch_off_alpha`)
+            // over whatever the switch sits on, and not floored; the knob
+            // carries the state. Light is an opaque mid track floored at 3:1
+            // on the page fills.
+            switch_off: if self.dark {
+                r.m.foreground
+            } else {
+                legible_across(
+                    &r.settings_marks,
+                    mix(r.m.background, r.m.foreground, 0.50),
+                    ACCENT_FLOOR,
+                )
+            },
+            switch_off_alpha: if self.dark { SWITCH_OFF_DARK_ALPHA } else { 1. },
             glyph: legible_across(
                 &r.settings_glyph,
                 mix(r.m.background, r.m.foreground, 0.5),
@@ -3429,6 +3447,12 @@ ansi:
         );
     }
 
+    /// `ink` at `alpha` laid over `surface`, composited and rounded to eight
+    /// bits the way the painters' translucent fills are.
+    fn composite(surface: u32, ink: u32, alpha: f32) -> u32 {
+        pack(Hsla::from(gpui::rgb(surface)).blend(Hsla::from(gpui::rgb(ink)).opacity(alpha)))
+    }
+
     /// One ink on one fill it is painted on, and the floor it must clear.
     struct Check {
         role: String,
@@ -3526,12 +3550,30 @@ ansi:
         }
         let settings = t.settings_ink_from(&r);
         add("settings sub", settings.sub, &r.settings_text, AA_TEXT);
-        add(
-            "settings switch_off",
-            settings.switch_off,
-            &r.settings_marks,
-            AA_MARK,
-        );
+        if t.dark {
+            // Owner exception to the 3:1 mark floor: the dark off track stays the
+            // faint translucent authored foreground (about 1.5:1 on the page), so
+            // it is not held to the mark floor; the knob carries the state and,
+            // being a non-text mark, is held to the 3:1 mark floor on the page
+            // and on the track as it composites over the page and over an open
+            // row.
+            let row = r.settings_host_row[0];
+            let track_over =
+                |surface: u32| composite(surface, settings.switch_off, settings.switch_off_alpha);
+            add(
+                "settings switch_off knob",
+                m.foreground,
+                &[m.background, track_over(m.background), track_over(row)],
+                AA_MARK,
+            );
+        } else {
+            add(
+                "settings switch_off",
+                settings.switch_off,
+                &r.settings_marks,
+                AA_MARK,
+            );
+        }
         add("settings glyph", settings.glyph, &r.settings_glyph, AA_MARK);
         add(
             "settings warn_text text",
@@ -3676,6 +3718,75 @@ ansi:
     fn every_role_holds_its_floor_in_every_builtin_and_generated_theme() {
         let misses: Vec<String> = sweep_themes().iter().flat_map(role_misses).collect();
         assert_no_misses("role floors", misses);
+    }
+
+    /// Owner exception to the 3:1 mark floor: a dark off-switch track is the
+    /// authored foreground at 16%, translucent over whatever the switch sits on
+    /// (the old `k15`; the default dark composites to #3a3a3c on #18181a,
+    /// 1.56:1), and the knob carries the state. It is not a step toward the
+    /// shared pole, so a pole-inverted palette keeps its foreground too. The
+    /// light track keeps colour and an alpha of 1. Expectations are written out
+    /// from the definition (foreground, 16%), not read from the derivation.
+    #[test]
+    fn dark_off_track_is_the_translucent_authored_foreground_by_owner_decision() {
+        let mut dark = 0;
+        for t in sweep_themes() {
+            let r = t.resolve();
+            let ink = t.settings_ink_from(&r);
+            if !t.dark {
+                assert_eq!(
+                    ink.switch_off_alpha, 1.,
+                    "{}: the light track is opaque",
+                    t.id
+                );
+                continue;
+            }
+            dark += 1;
+            assert_eq!(
+                ink.switch_off, r.m.foreground,
+                "{}: the dark track is the foreground, not a pole wash",
+                t.id
+            );
+            assert_eq!(ink.switch_off_alpha, 0.16, "{}: dark track opacity", t.id);
+            if builtins().iter().any(|b| b.id == t.id) {
+                assert_eq!(ink.switch_off, t.foreground, "{}: the authored fg", t.id);
+            }
+        }
+        assert!(dark >= 1, "no dark theme was checked");
+
+        let default_dark = builtins().into_iter().find(|t| t.id == "dark").unwrap();
+        let ink = default_dark.settings_ink();
+        let over_page = composite(0x18181a, ink.switch_off, ink.switch_off_alpha);
+        for (shift, want) in [(16, 0x3a), (8, 0x3a), (0, 0x3c)] {
+            let got = (over_page >> shift) & 0xff;
+            assert!(
+                got.abs_diff(want) <= 1,
+                "the default dark track over the page is {over_page:#08x}, not #3a3a3c"
+            );
+        }
+        // Informational only (the knob, not the track, identifies the switch): recorded, never asserted.
+        eprintln!(
+            "default dark off track {over_page:#08x} over the page: {:.2}:1 (informational)",
+            contrast(over_page, 0x18181a)
+        );
+    }
+
+    /// With the track left faint, the dark knob has to separate from the page
+    /// and from the translucent track composited over the page and over an open
+    /// row, at the non-text mark floor (3:1, literal), in every built-in and
+    /// generated dark theme. Misses are listed exactly, never excluded.
+    #[test]
+    fn dark_off_knob_separates_from_page_and_track_in_every_dark_theme() {
+        let misses: Vec<String> = sweep_themes()
+            .iter()
+            .filter(|t| t.dark)
+            .flat_map(|t| {
+                role_misses(t)
+                    .into_iter()
+                    .filter(|m| m.contains("settings switch_off knob"))
+            })
+            .collect();
+        assert_no_misses("dark knob separation", misses);
     }
 
     fn crossover_theme(background: u32, foreground: u32) -> Theme {
@@ -3825,7 +3936,11 @@ ansi:
             "caption",
             "inbox reason meta",
             "settings sub",
-            "settings switch_off",
+            if t.dark {
+                "settings switch_off knob"
+            } else {
+                "settings switch_off"
+            },
             "settings warn_text text",
             "settings unsaved text",
             "settings warn mark",
@@ -4166,7 +4281,10 @@ ansi:
             let fg = m.foreground;
             let settings = t.settings_ink_from(&r);
             let chrome = t.chrome_ink_from(&r);
-            let (sub_share, off_share) = if t.dark { (0.55, 0.40) } else { (0.65, 0.50) };
+            let sub_share = if t.dark { 0.55 } else { 0.65 };
+            // The light off track's seed; the dark one is the translucent foreground, checked in
+            // `dark_off_track_is_the_translucent_authored_foreground_by_owner_decision`.
+            let off_share = 0.50;
             let popover = [s.popover.base, s.popover.hover, s.popover.selected];
             let panel = [
                 s.sidebar.base,
@@ -4430,6 +4548,8 @@ ansi:
             .map(|(what, color, seed, fills, floor)| {
                 (what.to_string(), color, seed, fills.to_vec(), floor)
             })
+            // Dark off track: owner exception to the 3:1 mark floor, see above.
+            .filter(|(what, ..)| !(t.dark && what == "switch_off"))
             .chain(extra)
             {
                 if fills.iter().all(|&fill| contrast(seed, fill) >= floor) && color != seed {

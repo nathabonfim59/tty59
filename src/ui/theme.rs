@@ -2001,6 +2001,11 @@ mod tests {
                     "{}: switch_off",
                     theme.id
                 );
+                assert_eq!(
+                    settings.switch_off_alpha, expected.switch_off_alpha,
+                    "{}: switch_off_alpha",
+                    theme.id
+                );
                 let chrome = chrome_ink(cx);
                 let expected = theme.chrome_ink();
                 for (name, got, want) in [

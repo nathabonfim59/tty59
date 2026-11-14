@@ -1877,11 +1877,13 @@ mod tests {
             assert_eq!(p.text, Some(hsla24(tk.glyph)), "search glass ink");
             assert_eq!(p.text_alpha, Some(1.), "the glass ink is opaque");
         }
+        let off_alpha = vcx.update(|_, cx| crate::ui::theme::settings_ink(cx).switch_off_alpha);
         let off = paint_probe::all("settings.switch-off");
         assert!(!off.is_empty(), "the rail's modified-only switch is off");
         for p in off {
             assert_eq!(p.fill, Some(hsla24(tk.switch_off)), "off track");
-            assert_eq!(p.fill_alpha, Some(1.), "off track is opaque");
+            // The cached opacity: 1 in light, the translucent 0.16 in dark.
+            assert_eq!(p.fill_alpha, Some(off_alpha), "off track opacity");
         }
 
         // Terminal: a group's intro sentence.

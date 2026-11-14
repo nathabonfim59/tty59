@@ -54,7 +54,9 @@ pub(crate) struct Tk {
     /// Secondary text that carries information: descriptions, counts, Reset,
     /// addresses, empty states. Cached per theme, floored on the page fills.
     pub sub: Hsla,
-    /// An off switch's track, floored at 3:1 on the page fills.
+    /// An off switch's track. Light: floored at 3:1 on the page fills. Dark: the
+    /// faint 16% wash it always was, deliberately under 3:1; the knob carries
+    /// the state.
     pub switch_off: Hsla,
     /// A group heading: quieter than a label, but still read at a glance.
     pub heading: Hsla,
@@ -109,7 +111,7 @@ impl Tk {
             glyph: role(ink.glyph),
             k45: a(0.45, 0.5),
             sub: role(ink.sub),
-            switch_off: role(ink.switch_off),
+            switch_off: role(ink.switch_off).opacity(ink.switch_off_alpha),
             heading: a(0.9, 0.9),
             nav: a(0.82, 0.8),
             btn: if dark { pole.opacity(0.1) } else { raised },
@@ -1076,7 +1078,8 @@ mod tests {
     fn tk_reads_the_cached_roles_and_they_clear_their_floors_on_the_painted_fills(
         cx: &mut TestAppContext,
     ) {
-        // WCAG AA for text; an off track is a mark, held to 3:1 below.
+        // WCAG AA for text; a light off track is a mark, held to 3:1 below.
+        // A dark one is the owner's faint wash; its knob, a non-text mark, is held to 3:1.
         const TEXT_FLOOR: f32 = 4.5;
         crate::core::config::pin_test_config_dir();
         cx.update(|cx| {
@@ -1213,13 +1216,50 @@ mod tests {
                         "{id}: button fill follows the pole"
                     );
                 }
-                for fill in mark_fills {
-                    assert!(
-                        contrast(pack(tk.switch_off), fill) >= 3.,
-                        "{id}: off track {:#08x} is {:.2}:1 on {fill:#08x}",
+                if tk.dark {
+                    // Owner exception to the 3:1 mark floor: the dark off track is
+                    // exactly what `k15` always was, the foreground at 16%,
+                    // translucent over whatever it sits on. Not a pole wash, not
+                    // floored, not an opaque composite; the knob carries the state.
+                    assert_eq!(tk.switch_off.a, 0.16, "{id}: dark off track opacity");
+                    assert_eq!(tk.switch_off.a, tk.k15.a, "{id}: the old k15 opacity");
+                    assert_eq!(
                         pack(tk.switch_off),
-                        contrast(pack(tk.switch_off), fill)
+                        pack(tk.k15),
+                        "{id}: the track's ink is the old k15's foreground"
                     );
+                    assert_eq!(
+                        pack(tk.switch_off),
+                        pack(tk.fg),
+                        "{id}: the track's ink is the foreground"
+                    );
+                    // The painted knob is `tk.knob` (the foreground), a non-text mark
+                    // held to 3:1, seen against the page and against the track
+                    // composited over the page and over a hovered or open row.
+                    let page = pack(tk.page);
+                    let row = over(page, tk.k04);
+                    for (what, fill) in [
+                        ("page", page),
+                        ("track on the page", over(page, tk.switch_off)),
+                        ("track on a row", over(row, tk.switch_off)),
+                    ] {
+                        assert!(
+                            contrast(pack(tk.knob), fill) >= 3.,
+                            "{id}: dark off knob {:#08x} is {:.2}:1 on the {what} {fill:#08x}",
+                            pack(tk.knob),
+                            contrast(pack(tk.knob), fill)
+                        );
+                    }
+                } else {
+                    assert_eq!(tk.switch_off.a, 1., "{id}: the light off track is opaque");
+                    for fill in mark_fills {
+                        assert!(
+                            contrast(pack(tk.switch_off), fill) >= 3.,
+                            "{id}: off track {:#08x} is {:.2}:1 on {fill:#08x}",
+                            pack(tk.switch_off),
+                            contrast(pack(tk.switch_off), fill)
+                        );
+                    }
                 }
             }
         });
