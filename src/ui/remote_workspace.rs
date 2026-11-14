@@ -669,14 +669,27 @@ impl Tty59App {
             Ok(connected) => {
                 let home = connected.home.clone();
                 let rows = connected.rows.clone();
+                let host = choice.target.host_id();
+                // This link may be the first thing to see the machine's server
+                // process, so it records the baseline a later reconnect is
+                // compared against; and if a server this client already knew
+                // came back as another process, everything on screen for it
+                // is stale.
+                let restarted = server_restarted(cx, host, &connected.host);
                 self.host_snapshots.insert(
-                    choice.target.host_id(),
+                    host,
                     crate::ui::switcher::HostSnapshot {
                         target: choice.target.clone(),
                         rows: rows.clone(),
                     },
                 );
                 remote_connect::HostLinks::insert(cx, connected.host, home.clone());
+                if restarted {
+                    // Deferred past this update: a resync reads each window's
+                    // tabs, and this app may be one of those windows while its
+                    // own lease is held.
+                    cx.defer(move |cx| replace_windows_on(cx, host));
+                }
                 // The listing outlives the link: mirrored into the store so
                 // the switcher still knows this machine's workspaces after a
                 // restart, without a connection.
@@ -2547,6 +2560,15 @@ fn server_restarted(cx: &mut gpui::App, host: HostId, peer: &RemoteHost) -> bool
     crate::ui::tree_sync::note_instance(seen.entry(host).or_default(), &instance)
 }
 
+/// Rebuilds every open window on `host` from the machine's tree, for a server
+/// that came back as another process: the panes those windows show belong to
+/// the one that is gone.
+fn replace_windows_on(cx: &mut gpui::App, host: HostId) {
+    for (workspace, _) in workspaces_on(cx, host) {
+        crate::ui::tree_sync::resync_window_from_tree(cx, workspace);
+    }
+}
+
 fn refresh_window_shells(cx: &mut gpui::App, workspace: WorkspaceId) {
     let Some(app) =
         crate::ui::windows::WindowRegistry::app_for(cx, workspace).and_then(|app| app.upgrade())
@@ -2929,6 +2951,213 @@ mod tests {
             home: std::path::PathBuf::from("/tmp"),
             rows: Vec::new(),
         }
+    }
+
+    /// Like `fake_connected`, but the far end announces `instance` in its
+    /// hello, so a test can play a server that came back as another process.
+    #[cfg(unix)]
+    fn fake_connected_as(connection_key: &str, instance: &str) -> remote_connect::Connected {
+        use std::io::Read as _;
+        use tty59_core::daemon::control::{
+            CONTROL_VERSION, ControlClientMsg, ControlHello, ControlHelloOk, ControlServerMsg,
+        };
+
+        let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let instance = instance.to_string();
+        std::thread::spawn(move || {
+            let mut server = server;
+            let _ = ControlClientMsg::read(&mut server);
+            let _ = ControlServerMsg::HelloOk(ControlHelloOk {
+                control_version: CONTROL_VERSION,
+                protocol_version: crate::daemon::protocol::PROTOCOL_VERSION,
+                build: "test".into(),
+                separator: '/',
+                home: "/tmp".into(),
+                features: Vec::new(),
+                instance,
+            })
+            .encode(&mut server);
+            // Hold the link open until the client lets go, answering nothing.
+            let mut sink = [0u8; 256];
+            while matches!(server.read(&mut sink), Ok(n) if n > 0) {}
+        });
+        let hello = ControlHello::host_rpc("test-token", "test-client");
+        let host = RemoteHost::over_unix(client, connection_key, &hello)
+            .expect("the fake server answers the hello");
+        remote_connect::Connected {
+            host,
+            home: std::path::PathBuf::from("/tmp"),
+            rows: Vec::new(),
+        }
+    }
+
+    /// The switcher's own connect landing on `target`, the way a click on a
+    /// machine ends: `finish_connect` installs the link.
+    #[cfg(unix)]
+    fn the_switcher_connects(
+        app: &gpui::Entity<crate::ui::app::Tty59App>,
+        vcx: &mut gpui::VisualTestContext,
+        target: &RemoteTarget,
+        instance: &str,
+    ) {
+        let choice = HostChoice {
+            target: target.clone(),
+            label: "box".into(),
+            detail: String::new(),
+        };
+        app.update_in(vcx, |app, window, cx| {
+            app.connect = Some(ConnectFlow::Connecting { choice });
+            app.finish_connect(
+                Ok(fake_connected_as(&target.connection_key(), instance)),
+                window,
+                cx,
+            );
+        });
+    }
+
+    /// Two open workspaces, each on its own machine — the setup a
+    /// restarted-server test needs. The first is the harness window's own
+    /// workspace, registered like a real window: a connect that resyncs it runs
+    /// inside that window's update lease, which is why the resync is deferred.
+    /// The second is a window the registry does not know.
+    #[cfg(unix)]
+    fn two_machines_with_an_open_workspace_each(
+        cx: &mut gpui::TestAppContext,
+    ) -> (
+        gpui::Entity<crate::ui::app::Tty59App>,
+        gpui::VisualTestContext,
+        [(RemoteTarget, WorkspaceId); 2],
+    ) {
+        use gpui::VisualContext as _;
+
+        let (app, vcx) = crate::ui::app::test_window::harness(cx);
+        let handle = vcx.window_handle();
+        let weak = app.downgrade();
+        let own = app.read_with(cx, |app, _| app.workspace);
+        let machines = [
+            ("tty59-test-restarted-box", own),
+            ("tty59-test-steady-box", WorkspaceId::new()),
+        ]
+        .map(|(alias, id)| {
+            let target = RemoteTarget::Alias {
+                alias: alias.into(),
+            };
+            let view = crate::core::session::WindowView {
+                id,
+                host: Some(RemoteRef::new(target.clone(), WorkspaceId::new())),
+                open: true,
+                ..Default::default()
+            };
+            (target, view)
+        });
+        let views = machines.iter().map(|(_, view)| view.clone()).collect();
+        app.update(cx, |app, cx| {
+            crate::core::session::WorkspaceStore::install_for_test(
+                cx,
+                crate::core::session::WindowViews {
+                    views,
+                    active: None,
+                },
+            );
+            crate::ui::windows::WindowRegistry::init(cx);
+            crate::ui::windows::WindowRegistry::register(cx, app.workspace, handle, weak);
+        });
+        let machines = machines.map(|(target, view)| (target, view.id));
+        (app, vcx, machines)
+    }
+
+    #[cfg(unix)]
+    fn prime_as_informed(cx: &mut gpui::TestAppContext, workspaces: &[WorkspaceId]) {
+        cx.update(|cx| {
+            for ws in workspaces {
+                crate::ui::tree_sync::prime_for_test(cx, *ws, Vec::new());
+                assert!(crate::ui::tree_sync::informed_for_test(cx, *ws));
+            }
+        });
+    }
+
+    /// The link the switcher connected is the first one this client ever saw
+    /// of that machine, and the server behind it is later replaced — killed and
+    /// started again, which is what the audited `tty59-server` kill does. The
+    /// reconnect that finds the new process has to take it for what it is:
+    /// every pane on screen belongs to a process that is gone. Without a
+    /// baseline from the install, that reconnect is a "first sighting", the
+    /// stale panes are asked back one by one from a server that has never
+    /// heard of them, and the workspace stays `Attached` over a frozen screen.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_server_replaced_after_the_switchers_connect_replaces_the_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, mut vcx, [(restarted, restarted_ws), (steady, steady_ws)]) =
+            two_machines_with_an_open_workspace_each(cx);
+        the_switcher_connects(&app, &mut vcx, &restarted, "instance-1");
+        the_switcher_connects(&app, &mut vcx, &steady, "instance-1");
+        prime_as_informed(cx, &[restarted_ws, steady_ws]);
+
+        cx.update(|cx| {
+            // The machine that kept its server: the reconnect re-pulls what
+            // the window already shows and takes nothing back.
+            finish_attempt(
+                cx,
+                steady.host_id(),
+                &steady,
+                Ok((
+                    fake_connected_as(&steady.connection_key(), "instance-1"),
+                    Vec::new(),
+                )),
+            );
+            // The machine whose server was replaced: a Replace resync, which
+            // is the statement that the window no longer speaks for it.
+            finish_attempt(
+                cx,
+                restarted.host_id(),
+                &restarted,
+                Ok((
+                    fake_connected_as(&restarted.connection_key(), "instance-2"),
+                    Vec::new(),
+                )),
+            );
+
+            assert!(
+                crate::ui::tree_sync::informed_for_test(cx, steady_ws),
+                "the same server process is a plain reconnect, not a rebuild"
+            );
+            assert!(
+                !crate::ui::tree_sync::informed_for_test(cx, restarted_ws),
+                "a new server process behind a link the switcher installed must \
+                 resync the window, not relink panes it never had"
+            );
+        });
+    }
+
+    /// The same blind spot reached from the other side: the switcher connects
+    /// at a machine again after its server was replaced, with no reconnect
+    /// attempt in between to have recorded the new process. The link it
+    /// installs is the evidence, and the windows on that machine are as stale
+    /// as after a supervised reconnect.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_switcher_connect_to_a_replaced_server_replaces_the_window(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx, [(restarted, restarted_ws), (steady, steady_ws)]) =
+            two_machines_with_an_open_workspace_each(cx);
+        the_switcher_connects(&app, &mut vcx, &restarted, "instance-1");
+        the_switcher_connects(&app, &mut vcx, &steady, "instance-1");
+        prime_as_informed(cx, &[restarted_ws, steady_ws]);
+
+        the_switcher_connects(&app, &mut vcx, &steady, "instance-1");
+        the_switcher_connects(&app, &mut vcx, &restarted, "instance-2");
+
+        cx.update(|cx| {
+            assert!(
+                crate::ui::tree_sync::informed_for_test(cx, steady_ws),
+                "connecting again at the same server process rebuilds nothing"
+            );
+            assert!(
+                !crate::ui::tree_sync::informed_for_test(cx, restarted_ws),
+                "connecting at a replaced server process must resync its windows"
+            );
+        });
     }
 
     /// The regression behind "I clicked update and nothing happened": a create
