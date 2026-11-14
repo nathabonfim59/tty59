@@ -786,6 +786,8 @@ pub(in crate::ui) fn titlebar_search_fill(cx: &App) -> gpui::Hsla {
     gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().rail.base).into()
 }
 
+/// The label is always a single glyph: counts past nine read "9", so the
+/// pills only ever carry one digit and their fixed geometry holds.
 fn unread_count_label(unread: usize) -> Option<String> {
     (unread > 1).then(|| unread.min(9).to_string())
 }
@@ -1610,7 +1612,7 @@ impl Tty59App {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px((nd * 0.62).round()))
+                .text_size(px((nd * 0.62).round().max(10.)))
                 .line_height(px(nd))
                 .font_features(crate::ui::theme::tabular_figures())
                 .font_weight(FontWeight::BOLD)
@@ -1718,7 +1720,7 @@ impl Tty59App {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(9.))
+                    .text_size(px(10.))
                     .line_height(px(14.))
                     .font_features(crate::ui::theme::tabular_figures())
                     .font_weight(FontWeight::BOLD)
@@ -3193,32 +3195,34 @@ mod tests {
                 let app = self.0.read(cx);
                 let status = crate::core::cli_agent::AgentStatus::Done;
                 let surface = cx.theme().background;
-                div().flex().children((0..=2).flat_map(|unread| {
-                    [
-                        div()
-                            .relative()
-                            .size(px(32.))
-                            .children(app.row_status_dot(Some(status), unread, surface, cx))
-                            .into_any_element(),
-                        div()
-                            .relative()
-                            .size(px(32.))
-                            .child(
-                                crate::ui::theme::agent_status_semantic(status, cx)
-                                    .map(|sem| {
-                                        Tty59App::status_dot(
-                                            status_paints(sem, surface, false),
-                                            unread,
-                                            18.,
-                                            surface,
-                                            false,
-                                        )
-                                    })
-                                    .expect("a status with a mark resolves a semantic role"),
-                            )
-                            .into_any_element(),
-                    ]
-                }))
+                div()
+                    .flex()
+                    .children([0usize, 1, 2, 12].into_iter().flat_map(|unread| {
+                        [
+                            div()
+                                .relative()
+                                .size(px(32.))
+                                .children(app.row_status_dot(Some(status), unread, surface, cx))
+                                .into_any_element(),
+                            div()
+                                .relative()
+                                .size(px(32.))
+                                .child(
+                                    crate::ui::theme::agent_status_semantic(status, cx)
+                                        .map(|sem| {
+                                            Tty59App::status_dot(
+                                                status_paints(sem, surface, false),
+                                                unread,
+                                                18.,
+                                                surface,
+                                                false,
+                                            )
+                                        })
+                                        .expect("a status with a mark resolves a semantic role"),
+                                )
+                                .into_any_element(),
+                        ]
+                    }))
             }
         }
         let (app, _app_window) = crate::ui::app::test_window::harness(cx);
@@ -3228,18 +3232,20 @@ mod tests {
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        for (circles, counts, two_circle, two_count) in [
+        for (circles, counts, two_circle, two_count, capped_count) in [
             (
                 ["row-status-circle-0", "row-status-circle-1"],
                 ["row-status-count-0", "row-status-count-1"],
                 "row-status-circle-2",
                 "row-status-count-2",
+                "row-status-count-12",
             ),
             (
                 ["avatar-status-circle-0", "avatar-status-circle-1"],
                 ["avatar-status-count-0", "avatar-status-count-1"],
                 "avatar-status-circle-2",
                 "avatar-status-count-2",
+                "avatar-status-count-12",
             ),
         ] {
             for circle in circles {
@@ -3257,6 +3263,16 @@ mod tests {
                 "the count has room on both sides"
             );
             assert!(pill.size.height >= px(13.));
+            let capped = vcx
+                .debug_bounds(capped_count)
+                .expect("a count past nine still paints its pill");
+            // Tabular figures give every digit the same advance, so the
+            // capped label keeps the identical pill box.
+            assert_eq!(
+                (capped.size.width, capped.size.height),
+                (pill.size.width, pill.size.height),
+                "the capped single-glyph label keeps the pill geometry"
+            );
         }
     }
 
