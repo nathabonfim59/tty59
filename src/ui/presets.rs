@@ -168,8 +168,8 @@ pub struct ChromeInk {
     /// An unpicked switcher row's title on the popover's resting and hovered
     /// rows: the authored foreground, floored.
     pub unpicked_title: u32,
-    /// An unpicked switcher row's meta on the same rows: the theme's muted
-    /// foreground, floored.
+    /// An unpicked switcher row's meta and count (11.5-12px) on the same rows: the theme's muted
+    /// foreground, held to `CHROME_SMALL_META_TARGET` where it had to move.
     pub unpicked_meta: u32,
     /// An Inbox row's reason and meta lines while the row is SELECTED, on the
     /// sidebar's and the rail's selected fills only: the shared caption ink
@@ -190,6 +190,9 @@ pub struct ChromeInk {
 /// and only guarantees that a seed above its assigned target is returned unchanged. Scope today:
 /// `SettingsInk::unsaved` and `SettingsInk::glyph`.
 pub(crate) const SETTINGS_SMALL_TEXT_TARGET: f32 = 5.0;
+/// The same small-text target for the switcher's unpicked meta and count (11.5-12px regular text),
+/// whose 1x captures missed the floor. Chrome-side, derived once in `apply_theme`.
+pub(crate) const CHROME_SMALL_META_TARGET: f32 = 5.0;
 pub(crate) const SETTINGS_GLYPH_TARGET: f32 = 3.2;
 
 /// The contrast a caption keeps on a selected panel row: above the 4.5:1 text
@@ -877,7 +880,7 @@ impl Theme {
                 TEXT_FLOOR,
             ),
             unpicked_title: legible_across(&unpicked, fg, TEXT_FLOOR),
-            unpicked_meta: legible_across(&unpicked, m.muted_foreground, TEXT_FLOOR),
+            unpicked_meta: legible_across(&unpicked, m.muted_foreground, CHROME_SMALL_META_TARGET),
             selected_caption: legible_across(
                 &[sf.sidebar.selected, sf.rail.selected],
                 m.muted_foreground,
@@ -4413,7 +4416,7 @@ ansi:
                     chrome.unpicked_meta,
                     m.muted_foreground,
                     &[s.popover.base, s.popover.hover][..],
-                    AA_TEXT,
+                    AA_SMALL_TEXT,
                 ),
                 (
                     "selected_caption",
