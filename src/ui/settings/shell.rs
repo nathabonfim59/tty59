@@ -1890,7 +1890,7 @@ mod tests {
         open(&app, &mut vcx, SettingsSection::Terminal, &|_, _, _| {});
         check_text(&["settings.section-desc"]);
 
-        // SSH: a host's address and its "Never" line.
+        // SSH: a host's address and last-used caption. Unused hosts have no caption.
         open(&app, &mut vcx, SettingsSection::Ssh, &|_, _, cx| {
             cx.global_mut::<Config>().ssh_profiles = (0..3)
                 .map(|i| {
@@ -1899,6 +1899,14 @@ mod tests {
                     p
                 })
                 .collect();
+            let used_id = cx.global::<Config>().ssh_profiles[0].id;
+            cx.global_mut::<Config>().ssh_profile_frecency.insert(
+                used_id,
+                crate::core::config::ProfileUsage {
+                    count: 1,
+                    last_used: crate::core::config::unix_now().saturating_sub(3600),
+                },
+            );
         });
         check_text(&["settings.host-address", "settings.host-meta"]);
 
