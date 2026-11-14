@@ -430,8 +430,11 @@ fn surface(
         .occlude()
         .bg(theme.background)
         .track_focus(&frame.focus)
-        .when(frame.dragging, |el| el.cursor(CursorStyle::ClosedHand))
-        .when(!frame.dragging, |el| el.cursor(CursorStyle::OpenHand))
+        .cursor(if frame.dragging {
+            CursorStyle::ClosedHand
+        } else {
+            CursorStyle::Arrow
+        })
         .on_action(move |_: &IncreaseFontSize, window, cx| {
             zoom_by(identity, ACTION_ZOOM, None, window, cx);
         })
@@ -453,11 +456,33 @@ fn surface(
             pan_by(identity, (delta.x.as_f32(), delta.y.as_f32()), window, cx);
             cx.stop_propagation();
         })
-        .on_mouse_down(gpui::MouseButton::Left, move |ev, _window, cx| {
+        // Only the middle button pans: hovering or pressing the primary
+        // button must never move the diagram. The refreshes put the grab
+        // cursor on screen (and take it off) without waiting for a move.
+        .on_mouse_down(gpui::MouseButton::Middle, move |ev, window, cx| {
             with_mut(identity, cx, |viewer| viewer.drag = Some(ev.position));
+            window.refresh();
         })
         .on_mouse_move(move |ev, window, cx| {
-            let from = with_mut(identity, cx, |viewer| viewer.drag.replace(ev.position)).flatten();
+            // The pointer only pans while the middle button is physically
+            // held: a move without it ends a drag whose release was missed,
+            // so the cursor goes back to the arrow instead of sticking.
+            if ev.pressed_button != Some(gpui::MouseButton::Middle) {
+                let stale =
+                    with_mut(identity, cx, |viewer| viewer.drag.take().is_some()).unwrap_or(false);
+                if stale {
+                    window.refresh();
+                }
+                return;
+            }
+            // The drag point only advances while a drag is active.
+            let from = with_mut(identity, cx, |viewer| {
+                viewer
+                    .drag
+                    .as_mut()
+                    .map(|point| std::mem::replace(point, ev.position))
+            })
+            .flatten();
             if let Some(from) = from {
                 let delta = (
                     (ev.position.x - from.x).as_f32(),
@@ -466,13 +491,15 @@ fn surface(
                 pan_by(identity, delta, window, cx);
             }
         })
-        .on_mouse_up(gpui::MouseButton::Left, move |_ev, _window, cx| {
+        .on_mouse_up(gpui::MouseButton::Middle, move |_ev, window, cx| {
             with_mut(identity, cx, |viewer| viewer.drag = None);
+            window.refresh();
         })
         // Releasing outside the overlay ends the drag too, or the viewer
         // would keep panning under a button nobody is holding.
-        .on_mouse_up_out(gpui::MouseButton::Left, move |_ev, _window, cx| {
+        .on_mouse_up_out(gpui::MouseButton::Middle, move |_ev, window, cx| {
             with_mut(identity, cx, |viewer| viewer.drag = None);
+            window.refresh();
         })
         .on_click(move |ev, window, cx| {
             if ev.click_count() == 2 {
@@ -1162,18 +1189,27 @@ mod tests {
         close_to(img.origin.y.as_f32(), 237., "painted y");
     }
 
-    /// A left drag pans — in both axes, since a fitted diagram is not locked
-    /// to the centre — and the frame the drag asked for paints it.
+    fn dragging(identity: PreviewIdentity, cx: &App) -> bool {
+        cx.global::<DiagramViewers>().map[&identity].drag.is_some()
+    }
+
+    /// A middle drag pans — in both axes, since a fitted diagram is not
+    /// locked to the centre — and the frame the drag asked for paints it.
     #[gpui::test]
-    fn a_drag_pans_the_viewer_and_paints(cx: &mut TestAppContext) {
-        let (_, mut vcx) = interactive_viewer(cx);
+    fn a_middle_drag_pans_the_viewer_and_paints(cx: &mut TestAppContext) {
+        let (the_identity, mut vcx) = interactive_viewer(cx);
         let before = painted(&mut vcx);
 
         let start = gpui::point(px(200.), px(300.));
         let end = gpui::point(px(160.), px(280.));
-        vcx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
-        vcx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
-        vcx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_down(start, gpui::MouseButton::Middle, gpui::Modifiers::none());
+        assert!(vcx.update(|_, cx| dragging(the_identity, cx)));
+        vcx.simulate_mouse_move(
+            end,
+            Some(gpui::MouseButton::Middle),
+            gpui::Modifiers::none(),
+        );
+        vcx.simulate_mouse_up(end, gpui::MouseButton::Middle, gpui::Modifiers::none());
         vcx.run_until_parked();
 
         let after = painted(&mut vcx);
@@ -1186,6 +1222,140 @@ mod tests {
             after.origin.y.as_f32(),
             before.origin.y.as_f32() - 20.,
             "painted y",
+        );
+        assert!(
+            !vcx.update(|_, cx| dragging(the_identity, cx)),
+            "the middle release ends the drag"
+        );
+    }
+
+    /// Moving the pointer over the viewer with no button down is not a drag:
+    /// the first move must not arm one that the next move then pans by.
+    #[gpui::test]
+    fn plain_hover_does_not_pan_the_viewer(cx: &mut TestAppContext) {
+        let (the_identity, mut vcx) = interactive_viewer(cx);
+        let before = painted(&mut vcx);
+        let offset = vcx.update(|_, cx| view_of(the_identity, cx).offset);
+
+        for (x, y) in [(200., 300.), (170., 285.), (120., 250.)] {
+            vcx.simulate_mouse_move(gpui::point(px(x), px(y)), None, gpui::Modifiers::none());
+        }
+        vcx.run_until_parked();
+
+        assert_eq!(
+            vcx.update(|_, cx| view_of(the_identity, cx).offset),
+            offset,
+            "hover leaves the offset alone"
+        );
+        assert!(
+            !vcx.update(|_, cx| dragging(the_identity, cx)),
+            "hover starts no drag"
+        );
+        let after = painted(&mut vcx);
+        close_to(
+            after.origin.x.as_f32(),
+            before.origin.x.as_f32(),
+            "painted x",
+        );
+        close_to(
+            after.origin.y.as_f32(),
+            before.origin.y.as_f32(),
+            "painted y",
+        );
+
+        // A middle press whose release never arrived: the next move with no
+        // button held pans nothing and drops the stale drag.
+        vcx.simulate_mouse_down(
+            gpui::point(px(200.), px(300.)),
+            gpui::MouseButton::Middle,
+            gpui::Modifiers::none(),
+        );
+        assert!(vcx.update(|_, cx| dragging(the_identity, cx)));
+        vcx.simulate_mouse_move(
+            gpui::point(px(150.), px(250.)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.update(|_, cx| view_of(the_identity, cx).offset),
+            offset,
+            "a no-button move after a middle press leaves the offset alone"
+        );
+        assert!(
+            !vcx.update(|_, cx| dragging(the_identity, cx)),
+            "a no-button move drops the stale drag"
+        );
+    }
+
+    /// The left button is not the pan button: pressing, moving and releasing
+    /// it leaves the diagram where it was.
+    #[gpui::test]
+    fn a_left_drag_never_pans_the_viewer(cx: &mut TestAppContext) {
+        let (the_identity, mut vcx) = interactive_viewer(cx);
+        let offset = vcx.update(|_, cx| view_of(the_identity, cx).offset);
+
+        let start = gpui::point(px(200.), px(300.));
+        let end = gpui::point(px(160.), px(280.));
+        vcx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+        assert!(
+            !vcx.update(|_, cx| dragging(the_identity, cx)),
+            "a left press starts no drag"
+        );
+        vcx.simulate_mouse_move(end, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
+        vcx.simulate_mouse_move(
+            gpui::point(px(100.), px(200.)),
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::none(),
+        );
+        vcx.simulate_mouse_up(end, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.run_until_parked();
+
+        assert_eq!(
+            vcx.update(|_, cx| view_of(the_identity, cx).offset),
+            offset,
+            "a left drag leaves the offset alone"
+        );
+    }
+
+    /// A middle release outside the viewer ends the drag: moving back over
+    /// it with no button held pans nothing.
+    #[gpui::test]
+    fn a_middle_release_outside_ends_the_drag(cx: &mut TestAppContext) {
+        let (the_identity, mut vcx) = interactive_viewer(cx);
+
+        vcx.simulate_mouse_down(
+            gpui::point(px(200.), px(300.)),
+            gpui::MouseButton::Middle,
+            gpui::Modifiers::none(),
+        );
+        vcx.simulate_mouse_move(
+            gpui::point(px(180.), px(290.)),
+            Some(gpui::MouseButton::Middle),
+            gpui::Modifiers::none(),
+        );
+        assert!(vcx.update(|_, cx| dragging(the_identity, cx)));
+        // Released beyond the 400×600 window, where the overlay is not hit.
+        vcx.simulate_mouse_up(
+            gpui::point(px(700.), px(900.)),
+            gpui::MouseButton::Middle,
+            gpui::Modifiers::none(),
+        );
+        vcx.run_until_parked();
+        assert!(
+            !vcx.update(|_, cx| dragging(the_identity, cx)),
+            "the outside release ends the drag"
+        );
+
+        let offset = vcx.update(|_, cx| view_of(the_identity, cx).offset);
+        for (x, y) in [(150., 250.), (100., 200.)] {
+            vcx.simulate_mouse_move(gpui::point(px(x), px(y)), None, gpui::Modifiers::none());
+        }
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.update(|_, cx| view_of(the_identity, cx).offset),
+            offset,
+            "no pan after the drag ended"
         );
     }
 
