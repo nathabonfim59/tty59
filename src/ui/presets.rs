@@ -109,13 +109,15 @@ impl Semantics {
 pub struct SettingsInk {
     pub sub: u32,
     pub switch_off: u32,
-    /// The search glass and its like: a mark, held to 3:1 on the settings
-    /// fills it sits on, from a seed at half the foreground's strength.
+    /// The search glass and its like: a small mark, held to
+    /// `SETTINGS_GLYPH_TARGET` on the settings fills it sits on, from a seed
+    /// at half the foreground's strength.
     pub glyph: u32,
     /// The semantic text inks (an error, Unsaved, Live) floored on the
     /// settings fills they are painted on, which are lower-contrast than the
     /// bases `Semantics` is floored on: a hovered row, a dropdown row.
     pub danger: u32,
+    /// Held to `SETTINGS_SMALL_TEXT_TARGET`: it is drawn at 12px or less.
     pub warn_text: u32,
     pub ok: u32,
     /// The warning dot and ring, a mark: the semantic warning fill floored at
@@ -171,6 +173,15 @@ pub struct ChromeInk {
     /// unselected captions and the shared caption itself are unchanged.
     pub selected_caption: u32,
 }
+
+/// Headroom by size, derived once in `apply_theme` and never at render time. Text painted at 12px or
+/// less in regular weight, and icons or glyphs of 12px or less, lose contrast to antialiasing, so the
+/// settings roles that are only ever drawn that small derive above the public floor: such text at
+/// `SETTINGS_SMALL_TEXT_TARGET` (5.0:1), such glyphs at `SETTINGS_GLYPH_TARGET` (3.2:1). Everything
+/// else keeps 4.6:1 for text and 3:1 for marks. A seed that already clears the target on every fill it
+/// is painted on stays as authored. Scope today: `SettingsInk::warn_text` and `SettingsInk::glyph`.
+pub(crate) const SETTINGS_SMALL_TEXT_TARGET: f32 = 5.0;
+pub(crate) const SETTINGS_GLYPH_TARGET: f32 = 3.2;
 
 /// The contrast a caption keeps on a selected panel row: above the 4.5:1 text
 /// floor, because the selected fill is the lowest-contrast surface a caption
@@ -790,10 +801,14 @@ impl Theme {
             glyph: legible_across(
                 &r.settings_glyph,
                 mix(r.m.background, r.m.foreground, 0.5),
-                ACCENT_FLOOR,
+                SETTINGS_GLYPH_TARGET,
             ),
             danger: legible_across(&r.settings_status, sem.danger.ink, TEXT_FLOOR),
-            warn_text: legible_across(&r.settings_status, sem.warning.ink, TEXT_FLOOR),
+            warn_text: legible_across(
+                &r.settings_status,
+                sem.warning.ink,
+                SETTINGS_SMALL_TEXT_TARGET,
+            ),
             ok: legible_across(&r.settings_status, sem.success.ink, TEXT_FLOOR),
             warn: legible_across(&r.settings_warn, sem.warning.fill, ACCENT_FLOOR),
             raise: r.raise,
@@ -3367,6 +3382,9 @@ ansi:
     const AA_CORRECTED: f32 = 4.6;
     /// The selected-caption target, written out for the same reason.
     const AA_SELECTED_CAPTION: f32 = 5.0;
+    /// The small-text and small-glyph targets of the settings roles, written out likewise.
+    const AA_SMALL_TEXT: f32 = 5.0;
+    const AA_GLYPH: f32 = 3.2;
     const AA_MARK: f32 = 3.0;
 
     fn sweep_themes() -> Vec<Theme> {
@@ -4274,7 +4292,7 @@ ansi:
                     settings.glyph,
                     mix(m.background, fg, 0.5),
                     &r.settings_glyph[..],
-                    AA_MARK,
+                    AA_GLYPH,
                 ),
                 (
                     "danger text",
@@ -4288,7 +4306,7 @@ ansi:
                     settings.warn_text,
                     t.semantics_with(m).warning.ink,
                     &r.settings_status[..],
-                    AA_TEXT,
+                    AA_SMALL_TEXT,
                 ),
                 (
                     "ok text",
@@ -4389,11 +4407,11 @@ ansi:
                 // seed unchanged must be caught here, not skipped. A role with its own target then reaches
                 // it on every fill; an infeasible case (a mid-grey selection) is printed with its ratio.
                 let seed_misses = fills.iter().any(|&fill| contrast(seed, fill) < floor);
-                if floor == AA_SELECTED_CAPTION && seed_misses {
+                if [AA_SELECTED_CAPTION, AA_SMALL_TEXT, AA_GLYPH].contains(&floor) && seed_misses {
                     for &fill in &fills {
-                        if contrast(color, fill) < AA_SELECTED_CAPTION {
+                        if contrast(color, fill) < floor {
                             misses.push(format!(
-                                "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the 5.0 target",
+                                "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the {floor} target",
                                 t.id,
                                 contrast(color, fill)
                             ));
