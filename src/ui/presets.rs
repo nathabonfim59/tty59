@@ -164,7 +164,20 @@ pub struct ChromeInk {
     /// An unpicked switcher row's meta on the same rows: the theme's muted
     /// foreground, floored.
     pub unpicked_meta: u32,
+    /// An Inbox row's reason and meta lines while the row is SELECTED, on the
+    /// sidebar's and the rail's selected fills only: the shared caption ink
+    /// (`Neutrals::muted_foreground`), kept where it already holds
+    /// `SELECTED_CAPTION_TARGET` there and walked to it where it does not. The
+    /// unselected captions and the shared caption itself are unchanged.
+    pub selected_caption: u32,
 }
+
+/// The contrast a caption keeps on a selected panel row: above the 4.5:1 text
+/// floor, because the selected fill is the lowest-contrast surface a caption
+/// is drawn on and the caption is not set in a heavier weight to make up for
+/// it. Where the fill cannot give it (a mid-grey selection) the best the
+/// derivation can reach is what the role holds.
+pub(crate) const SELECTED_CAPTION_TARGET: f32 = 5.0;
 
 /// How far a port chip's wash steps off the row it sits on, as a share of the
 /// foreground. The chip paints with it and `Theme::chrome_ink` floors against
@@ -831,6 +844,11 @@ impl Theme {
             ),
             unpicked_title: legible_across(&unpicked, fg, TEXT_FLOOR),
             unpicked_meta: legible_across(&unpicked, m.muted_foreground, TEXT_FLOOR),
+            selected_caption: legible_across(
+                &[sf.sidebar.selected, sf.rail.selected],
+                m.muted_foreground,
+                SELECTED_CAPTION_TARGET,
+            ),
         }
     }
 
@@ -3347,6 +3365,8 @@ ansi:
     /// purpose: asserting against the production constant would pass if that
     /// constant were ever lowered.
     const AA_CORRECTED: f32 = 4.6;
+    /// The selected-caption target, written out for the same reason.
+    const AA_SELECTED_CAPTION: f32 = 5.0;
     const AA_MARK: f32 = 3.0;
 
     fn sweep_themes() -> Vec<Theme> {
@@ -3511,6 +3531,12 @@ ansi:
             AA_TEXT,
         );
         add("chrome quiet_name", chrome.quiet_name, &popover, AA_TEXT);
+        add(
+            "chrome selected_caption",
+            chrome.selected_caption,
+            &[s.sidebar.selected, s.rail.selected],
+            AA_TEXT,
+        );
         let unpicked = [s.popover.base, s.popover.hover];
         add(
             "chrome unpicked_title",
@@ -3757,6 +3783,7 @@ ansi:
             "chrome quiet_name",
             "chrome unpicked_title",
             "chrome unpicked_meta",
+            "chrome selected_caption",
             "chrome avatar_ink",
             "chrome keycap_ink",
             "chrome grip_idle",
@@ -4334,6 +4361,13 @@ ansi:
                     &[s.popover.base, s.popover.hover][..],
                     AA_TEXT,
                 ),
+                (
+                    "selected_caption",
+                    chrome.selected_caption,
+                    m.muted_foreground,
+                    &[s.sidebar.selected, s.rail.selected][..],
+                    AA_SELECTED_CAPTION,
+                ),
             ]
             .into_iter()
             .map(|(what, color, seed, fills, floor)| {
@@ -4350,6 +4384,19 @@ ansi:
                 // A text role that did have to move lands at the 4.6 target on every fill, so
                 // antialiasing cannot take it back under 4.5. Reported as exact cases, never
                 // excluded: an infeasible one shows up here with its ratio.
+                // A role with its own target reaches it on every fill where it moved. An infeasible
+                // case (a mid-grey selection) is printed with its ratio, never skipped.
+                if floor == AA_SELECTED_CAPTION && color != seed {
+                    for &fill in &fills {
+                        if contrast(color, fill) < AA_SELECTED_CAPTION {
+                            misses.push(format!(
+                                "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the 5.0 target",
+                                t.id,
+                                contrast(color, fill)
+                            ));
+                        }
+                    }
+                }
                 if floor == AA_TEXT && color != seed {
                     for &fill in &fills {
                         if contrast(color, fill) < AA_CORRECTED {

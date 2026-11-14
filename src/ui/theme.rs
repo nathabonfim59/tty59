@@ -2021,6 +2021,11 @@ mod tests {
                         expected.unpicked_meta,
                     ),
                     (
+                        "selected_caption",
+                        chrome.selected_caption,
+                        expected.selected_caption,
+                    ),
+                    (
                         "port_chip_ink",
                         chrome.port_chip_ink,
                         expected.port_chip_ink,
