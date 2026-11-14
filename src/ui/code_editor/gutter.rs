@@ -865,6 +865,9 @@ impl Tty59App {
                 .into_any_element()
         } else {
             let text = peek.original.strip_suffix('\n').unwrap_or(&peek.original);
+            // The hunk's text is the source's own size, so the peek shows it
+            // the way the editor around it is being read.
+            let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
             div()
                 .id("editor-gutter-peek-body")
                 .max_h(px(240.))
@@ -873,7 +876,7 @@ impl Tty59App {
                 .px_3()
                 .py_1()
                 .font_family(theme.mono_font_family.clone())
-                .text_size(theme.mono_font_size)
+                .text_size(px(f32::from(theme.mono_font_size) * zoom))
                 .children(
                     text.split('\n')
                         .map(|l| div().whitespace_nowrap().child(l.to_string())),

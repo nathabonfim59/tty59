@@ -15,12 +15,14 @@ use gpui_component::{
 };
 use tty59_core::core::machine::TabId;
 
+use crate::core::actions::{DecreaseFontSize, IncreaseFontSize, ResetFontSize};
 use crate::ui::app::{TITLE_BAR_BORDER, TitleStripRow as _, Tty59App};
 use crate::ui::document_column::DocumentChrome;
 use crate::ui::editor_session::{self, TabEditor};
 use crate::ui::editor_text::{self, EditorConfig, Indent, LineEnding, TextFormat};
 use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::zoom::SCROLL_GESTURE_IDLE;
 
 mod gutter;
 mod nav;
@@ -88,6 +90,28 @@ pub(crate) enum DiskConflict {
     Deleted,
 }
 
+/// Where the preview was reading from when a zoom changed its content
+/// height: a point in the viewport and that point's fraction of the
+/// document. Reflow makes an exact anchor impossible — the lines move under
+/// the fraction — but this keeps the reading position within a line or two.
+#[derive(Clone, Copy)]
+struct PreviewAnchor {
+    /// The anchor's y within the viewport, in px: the pointer's for a wheel
+    /// zoom, the top edge for keys.
+    y_in_viewport: f32,
+    /// `(scroll_top + y_in_viewport) / content_height` at the old size.
+    fraction: f32,
+}
+
+/// The source view's answer to the same question: the scroll offset in px
+/// and the zoom it was measured at, so the offset can be rescaled by the
+/// zoom ratio and leave the same lines at the top.
+#[derive(Clone, Copy)]
+struct SourceAnchor {
+    top: f32,
+    from_zoom: f32,
+}
+
 /// One open file, shared by every tab that shows it.
 ///
 /// Buffers used to belong to a tab, which meant the same file open in two tabs
@@ -126,6 +150,24 @@ pub(crate) struct OpenFile {
     /// scrollbar every other scrolling surface in tty59 has. The editor itself
     /// gets one from `Input`.
     pub(crate) preview_scroll: gpui::ScrollHandle,
+    /// The rendered pane's own focus. Without one, focus sits on the source
+    /// `Input` even while the preview is shown — a handle to an element that
+    /// is not in the tree — and the font-size actions have nowhere local to
+    /// land, so they would zoom the terminal instead of the document.
+    pub(crate) preview_focus: gpui::FocusHandle,
+    /// The wheel-zoom latch for this buffer, in the terminal's shape: a
+    /// trackpad gesture answers "scroll or zoom?" once and keeps the answer
+    /// until the stream dies, and sub-step travel accumulates as debt. Per
+    /// buffer so two panes mid-gesture cannot spend each other's debt.
+    gesture_zoom: Option<bool>,
+    zoom_debt: f32,
+    gesture_until: Option<std::time::Instant>,
+    /// Where the preview must land after a zoom reflows it — recorded
+    /// before the zoom applies, consumed on the frame the new layout exists.
+    preview_anchor: Option<PreviewAnchor>,
+    /// The source view's anchor for the same moment: its scroll offset and
+    /// the zoom it was measured at, so the same lines stay on screen.
+    source_anchor: Option<SourceAnchor>,
     /// Git change markers — see `gutter`.
     gutter: gutter::BufferGutter,
     _sub: Subscription,
@@ -1404,6 +1446,12 @@ impl Tty59App {
             preview,
             wrap,
             preview_scroll: gpui::ScrollHandle::new(),
+            preview_focus: cx.focus_handle(),
+            gesture_zoom: None,
+            zoom_debt: 0.,
+            gesture_until: None,
+            preview_anchor: None,
+            source_anchor: None,
             gutter: git_gutter,
             _sub: sub,
             _observe: observe,
@@ -1541,7 +1589,15 @@ impl Tty59App {
 
     fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(f) = self.active_buffer() {
-            f.input.update(cx, |input, cx| input.focus(window, cx));
+            // A file shown rendered focuses the preview, not the source
+            // input behind it — the input is not even in the tree, and a
+            // focus on an unpainted element sends the font-size actions the
+            // terminal's way instead of the document's.
+            if f.preview {
+                window.focus(&f.preview_focus, cx);
+            } else {
+                f.input.update(cx, |input, cx| input.focus(window, cx));
+            }
         }
     }
 
@@ -1569,7 +1625,7 @@ impl Tty59App {
     /// Markdown and the code panel is on screen — anything else has no
     /// rendered form to switch to. The new state is remembered for the next
     /// Markdown file opened.
-    pub(crate) fn toggle_document_preview(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_document_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.code_panel_visible() {
             return;
         }
@@ -1585,6 +1641,10 @@ impl Tty59App {
         f.preview = !f.preview;
         let preview = f.preview;
         self.update_config(cx, |cfg| cfg.editor_markdown_preview = preview);
+        // The view that just came up takes the focus: the preview's handle
+        // when rendering, the input when editing. Leaving the focus on the
+        // view that went away parks it on an unpainted element.
+        self.focus_editor(window, cx);
         cx.notify();
     }
 
@@ -1725,10 +1785,14 @@ impl Tty59App {
     pub(crate) fn editor_has_focus(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.code_panel_visible()
             && self.active_buffer().is_some_and(|f| {
+                // A file shown rendered holds the focus on its preview, not
+                // on the source input behind it; the panel's shortcuts (save,
+                // close, the toggle) belong to either view.
                 f.input
                     .read(cx)
                     .focus_handle(cx)
                     .contains_focused(window, cx)
+                    || (f.preview && f.preview_focus.contains_focused(window, cx))
             })
     }
 
@@ -3278,73 +3342,361 @@ impl Tty59App {
         slot: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match id.and_then(|id| self.buffer(id)) {
-            None => self.render_editor_empty(cx).into_any_element(),
-            Some(f) if f.preview => {
+        let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
+        // The body and the buffer it belongs to, for the wheel-zoom wrapper
+        // below; `None` is the empty panel, which has no text to zoom.
+        let body = match id.and_then(|id| self.buffer(id)) {
+            None => None,
+            Some(f) if f.preview => Some((f.id(), {
+                let id = f.id();
                 let markdown = f.input.read(cx).text().to_string();
                 let scroll = f.preview_scroll.clone();
+                let focus = f.preview_focus.clone();
+                let rem = cx.global::<crate::core::config::Config>().ui_font_size * zoom;
+                let text_view = gpui_component::text::TextView::markdown(
+                    ("editor-md-preview-body", slot),
+                    markdown,
+                )
+                .style(crate::ui::theme::markdown_style_at(cx, zoom))
+                // The preview identity is the buffer entity
+                // plus this group's slot, so each pane keeps
+                // its own last-good diagram images. The
+                // factory keeps the plugin registration
+                // stable across rebuilds.
+                .plugin(crate::ui::markdown_mermaid::preview_plugin_for(
+                    crate::ui::markdown_mermaid::PreviewIdentity::from_buffer(id, slot),
+                    cx,
+                ))
+                .into_any_element();
                 // The bar's wrapper takes its height from `flex_1`, so it needs
                 // a column with a definite height to grow inside — hand it one
                 // rather than dropping it straight into the overlay, or the
                 // pane sizes to its content and there is nothing left to
                 // scroll.
+                let body = div()
+                    .id(("editor-md-preview", slot))
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    // The preview is its own focusable surface, so the
+                    // font-size actions have a handler on the dispatch path
+                    // while it is shown — zooming the document, not the
+                    // terminal — and clicking into the text puts the focus
+                    // there. `track_focus` takes the mouse-down itself.
+                    .track_focus(&focus)
+                    .on_action(cx.listener(move |this, _: &IncreaseFontSize, window, cx| {
+                        this.editor_zoom_step(id, 1, None, window, cx);
+                    }))
+                    .on_action(cx.listener(move |this, _: &DecreaseFontSize, window, cx| {
+                        this.editor_zoom_step(id, -1, None, window, cx);
+                    }))
+                    .on_action(cx.listener(move |this, _: &ResetFontSize, window, cx| {
+                        this.editor_zoom_reset(id, None, window, cx);
+                    }))
+                    .px_4()
+                    .py_3()
+                    // The scoped rem is the preview's main zoom lever: body
+                    // text, lists, the paragraph gap — every `rems()` length
+                    // the text view resolves. The frame's own padding and
+                    // the scrollbar stay outside it, so the chrome around
+                    // the text does not grow with the text.
+                    .child(crate::ui::rem_scope::RemScope::new(px(rem), text_view));
                 v_flex()
                     .size_full()
                     .child(crate::ui::scrollbar::with_vertical_scrollbar(
                         ("editor-md-preview-scrollbar", slot),
-                        div()
-                            .id(("editor-md-preview", slot))
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&scroll)
-                            .px_4()
-                            .py_3()
-                            .child(
-                                gpui_component::text::TextView::markdown(
-                                    ("editor-md-preview-body", slot),
-                                    markdown,
-                                )
-                                .style(crate::ui::theme::markdown_style(cx))
-                                // The preview identity is the buffer entity
-                                // plus this group's slot, so each pane keeps
-                                // its own last-good diagram images. The
-                                // factory keeps the plugin registration
-                                // stable across rebuilds.
-                                .plugin(
-                                    crate::ui::markdown_mermaid::preview_plugin_for(
-                                        crate::ui::markdown_mermaid::PreviewIdentity::from_buffer(
-                                            f.id(),
-                                            slot,
-                                        ),
-                                        cx,
-                                    ),
-                                ),
-                            ),
+                        body,
                         &scroll,
                     ))
                     .into_any_element()
-            }
-            Some(f) => {
+            })),
+            Some(f) => Some((f.id(), {
                 let input = f.input.clone();
                 let id = f.id();
                 let app = cx.entity().downgrade();
                 div()
                     .id(("editor-body", slot))
                     .size_full()
-                    .child(
-                        Input::new(&input)
-                            .appearance(false)
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_size(cx.theme().mono_font_size)
-                            .size_full(),
-                    )
+                    // The source zooms with the same actions as the preview:
+                    // the Input's focus handle is inside this div, so these
+                    // handlers sit on its dispatch path and the terminal's
+                    // zoom never sees the keys while the source is focused.
+                    .on_action(cx.listener(move |this, _: &IncreaseFontSize, window, cx| {
+                        this.editor_zoom_step(id, 1, None, window, cx);
+                    }))
+                    .on_action(cx.listener(move |this, _: &DecreaseFontSize, window, cx| {
+                        this.editor_zoom_step(id, -1, None, window, cx);
+                    }))
+                    .on_action(cx.listener(move |this, _: &ResetFontSize, window, cx| {
+                        this.editor_zoom_reset(id, None, window, cx);
+                    }))
+                    .child({
+                        // The Input lays its lines out at `rems(1.25)` — the
+                        // window's rem, which the text size does not move.
+                        // Without the scope the glyphs scale and the line
+                        // pitch does not: at 200 % the lines touch, at 50 %
+                        // they float apart. Scoped, both move together, and
+                        // the line numbers and gutter markers — laid out
+                        // from the same line height — stay glued to their
+                        // rows.
+                        let rem = cx.global::<crate::core::config::Config>().ui_font_size * zoom;
+                        crate::ui::rem_scope::RemScope::new(
+                            px(rem),
+                            Input::new(&input)
+                                .appearance(false)
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_size(px(f32::from(cx.theme().mono_font_size) * zoom))
+                                .size_full()
+                                .into_any_element(),
+                        )
+                    })
                     .children(self.render_editor_gutter_peek(id, cx))
                     .context_menu(move |menu, _window, cx| {
                         Self::editor_body_menu(menu, &app, id, cx)
                     })
                     .into_any_element()
-            }
+            })),
+        };
+        // The wheel-zoom wrapper goes around whichever body this is, capture
+        // phase before its own scroll listeners, so modifier+wheel over the
+        // editor zooms it wherever the focus happens to be.
+        match body {
+            Some((id, element)) => self
+                .editor_wheel_zoom(slot, id, element, cx)
+                .into_any_element(),
+            None => self.render_editor_empty(cx).into_any_element(),
         }
+    }
+
+    /// The font-size actions' shared path: `direction` steps along the
+    /// ladder, anchored so the point being read stays put. `pointer` is the
+    /// wheel gesture's y, in window coordinates; keys pass `None` and anchor
+    /// to the top of the viewport.
+    fn editor_zoom_step(
+        &mut self,
+        id: BufferId,
+        direction: i32,
+        pointer: Option<gpui::Point<gpui::Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = crate::core::config::zoom_steps(
+            cx.global::<crate::core::config::Config>().editor_zoom,
+            direction,
+        );
+        self.editor_zoom_to(id, target, pointer, window, cx);
+    }
+
+    /// [`Self::editor_zoom_step`]'s reset counterpart.
+    fn editor_zoom_reset(
+        &mut self,
+        id: BufferId,
+        pointer: Option<gpui::Point<gpui::Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor_zoom_to(
+            id,
+            crate::core::config::Config::default().editor_zoom,
+            pointer,
+            window,
+            cx,
+        );
+    }
+
+    /// Apply `zoom` to the editor in one go: the anchors are noted once,
+    /// against the layout and zoom as they are right now, the setting is
+    /// written once, and one restore is scheduled. A wheel event worth
+    /// several ladder steps composes its target first and comes here a
+    /// single time — noting anchors mid-sequence would measure the second
+    /// step against the first one's already-changed zoom.
+    fn editor_zoom_to(
+        &mut self,
+        id: BufferId,
+        zoom: f32,
+        pointer: Option<gpui::Point<gpui::Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor_note_anchors(id, pointer, cx);
+        self.set_editor_zoom(zoom, cx);
+        self.editor_apply_anchors(id, window, cx);
+    }
+
+    /// Record where each of the buffer's two views is looking, before a zoom
+    /// changes their layout. The preview stores a fraction of the document
+    /// under a viewport point; the source stores its pixel offset, which
+    /// scales by the zoom ratio and leaves the same lines at the top.
+    fn editor_note_anchors(
+        &mut self,
+        id: BufferId,
+        pointer: Option<gpui::Point<gpui::Pixels>>,
+        cx: &mut Context<Self>,
+    ) {
+        let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
+        let Some(f) = self.buffer_mut(id) else {
+            return;
+        };
+        let scroll = f.preview_scroll.clone();
+        let viewport = scroll.bounds();
+        let content = viewport.size.height.as_f32() + scroll.max_offset().y.as_f32();
+        if content > 0. {
+            // The anchor point is the pointer for a wheel zoom — that is
+            // what the eye is watching — and the viewport's top edge for
+            // keys, which have no pointer.
+            let y_in_viewport = pointer
+                .map(|p| (p.y - viewport.origin.y).as_f32())
+                .unwrap_or(0.)
+                .clamp(0., viewport.size.height.as_f32());
+            f.preview_anchor = Some(PreviewAnchor {
+                y_in_viewport,
+                fraction: ((scroll.offset().y.as_f32() + y_in_viewport) / content).clamp(0., 1.),
+            });
+        }
+        f.source_anchor = Some(SourceAnchor {
+            top: f.input.read(cx).scroll_offset().y.as_f32(),
+            from_zoom: zoom,
+        });
+    }
+
+    /// Put the two views back at their anchors once the zoomed layout
+    /// exists. The content height is only known after the next frame's
+    /// layout, so each restore lands in an `on_next_frame`; the zoom's own
+    /// refresh is the frame that lays the new size out, and each restore
+    /// asks for the one after it.
+    fn editor_apply_anchors(&mut self, id: BufferId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(f) = self.buffer_mut(id) else {
+            return;
+        };
+        let preview = f.preview_anchor.take();
+        let source = f.source_anchor.take();
+        let input = f.input.clone();
+        let scroll = f.preview_scroll.clone();
+        let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
+        if let Some(anchor) = preview {
+            window.on_next_frame(move |window, _cx| {
+                let max = scroll.max_offset().y.as_f32();
+                let content = scroll.bounds().size.height.as_f32() + max;
+                let top = (anchor.fraction * content - anchor.y_in_viewport).clamp(0., max);
+                scroll.set_offset(gpui::point(px(0.), px(top)));
+                window.refresh();
+            });
+        }
+        if let Some(anchor) = source
+            && anchor.from_zoom > 0.
+            && zoom != anchor.from_zoom
+        {
+            window.on_next_frame(move |_window, cx| {
+                input.update(cx, |state, cx| {
+                    let top = anchor.top * zoom / anchor.from_zoom;
+                    state.set_scroll_offset(gpui::point(px(0.), px(top)), cx);
+                });
+            });
+        }
+    }
+
+    /// Wraps one editor body — source or preview — with the wheel-zoom
+    /// decision. A zero-size canvas over the body registers a capture-phase
+    /// scroll listener each frame: capture, because the body's own scroll
+    /// listeners are the built-in bubble ones and a zoom wheel must be
+    /// decided before they scroll; bounds-checked, because zooming follows
+    /// the pointer the way the terminal's does, whatever has the focus.
+    /// Keyed by `slot`: a group shows one body, and the same buffer in two
+    /// groups is two bodies in one window.
+    fn editor_wheel_zoom(
+        &self,
+        slot: usize,
+        id: BufferId,
+        body: AnyElement,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let app = cx.entity();
+        let zoom_canvas = gpui::canvas(
+            |_bounds, _window, _cx| {},
+            move |bounds, _prepaint, window, _cx| {
+                window.on_mouse_event(move |ev: &gpui::ScrollWheelEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture
+                        || !bounds.contains(&window.mouse_position())
+                    {
+                        return;
+                    }
+                    let zoomed =
+                        app.update(cx, |this, cx| this.editor_zoom_wheel(id, ev, window, cx));
+                    if zoomed {
+                        cx.stop_propagation();
+                    }
+                });
+            },
+        );
+        div()
+            .id(("editor-wheel-zoom", slot))
+            .relative()
+            .size_full()
+            .child(body)
+            .child(zoom_canvas.absolute().inset_0())
+    }
+
+    /// One wheel event over buffer `id`'s editor body: the terminal's
+    /// zoom-wheel decision on the editor's own latch. Returns whether the
+    /// event was a zoom (the caller then stops it reaching the scroll).
+    fn editor_zoom_wheel(
+        &mut self,
+        id: BufferId,
+        ev: &gpui::ScrollWheelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        // The latch work ends before the stepping starts: both borrow self.
+        let steps = {
+            let Some(f) = self.buffer_mut(id) else {
+                return false;
+            };
+            // The gesture latch, in the terminal's shape: `Started` asks
+            // "scroll or zoom?" and the answer holds for the whole stream —
+            // momentum tail included — so reaching for the modifier mid-coast
+            // cannot turn a scroll into a zoom, and a zoom cannot leak into
+            // the next flick.
+            let gesturing = {
+                let now = std::time::Instant::now();
+                let live = matches!(ev.touch_phase, gpui::TouchPhase::Started)
+                    || f.gesture_until.is_some_and(|until| now < until);
+                f.gesture_until = live.then(|| now + SCROLL_GESTURE_IDLE);
+                live
+            };
+            let wants_zoom = crate::ui::zoom::zoom_wheel(
+                cx.global::<crate::core::config::Config>()
+                    .mouse_zoom_modifier,
+                &ev.modifiers,
+            );
+            if !gesturing || matches!(ev.touch_phase, gpui::TouchPhase::Started) {
+                f.gesture_zoom = None;
+                f.zoom_debt = 0.;
+            }
+            let zoom = if gesturing {
+                *f.gesture_zoom.get_or_insert(wants_zoom)
+            } else {
+                wants_zoom
+            };
+            if !zoom {
+                return false;
+            }
+            let lines = match ev.delta {
+                gpui::ScrollDelta::Lines(p) => p.y,
+                gpui::ScrollDelta::Pixels(p) => p.y.as_f32() / 16.,
+            };
+            let (steps, debt) = crate::ui::zoom::zoom_scroll_steps(lines, f.zoom_debt, gesturing);
+            f.zoom_debt = debt;
+            steps
+        };
+        // Compose the whole jump — N ladder steps is one target, applied
+        // with one anchor note, not N anchored zooms chained onto layouts
+        // that have not happened yet.
+        if steps != 0 {
+            let current = cx.global::<crate::core::config::Config>().editor_zoom;
+            let target = crate::core::config::zoom_steps(current, steps);
+            self.editor_zoom_to(id, target, Some(ev.position), window, cx);
+        }
+        true
     }
 
     /// The editor header alone, for the strip above a docked column.
@@ -3643,6 +3995,7 @@ impl Tty59App {
         // No path here: the breadcrumbs over the text show where the file is.
         let muted = cx.theme().muted_foreground;
         let active = self.active_buffer();
+        let active_id = active.map(|f| f.id());
         let cursor: Option<SharedString> = active.map(|f| {
             let input = f.input.read(cx);
             let pos = input.cursor_position();
@@ -3736,10 +4089,9 @@ impl Tty59App {
                 } else {
                     t(L10nKey::EditorPreview)
                 };
-                this.child(
-                    item("status-md-preview", label.into())
-                        .on_click(cx.listener(|this, _, _w, cx| this.toggle_document_preview(cx))),
-                )
+                this.child(item("status-md-preview", label.into()).on_click(
+                    cx.listener(|this, _, window, cx| this.toggle_document_preview(window, cx)),
+                ))
             })
             .when_some(wrap, |this, wrap| {
                 let label = if wrap {
@@ -3772,6 +4124,28 @@ impl Tty59App {
                 )
             })
             .when_some(language, |this, l| this.child(div().flex_none().child(l)))
+            // The editor's zoom, next to the language, only while it is not
+            // 100 % — the status bar reports state, and "100 %" is the state
+            // nobody needs told about. A click resets, like Ctrl+0.
+            .when(
+                active_id.is_some() && {
+                    let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
+                    zoom != 1.0
+                },
+                |this| {
+                    let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
+                    let label = format!("{}%", (zoom * 100.).round());
+                    this.child(
+                        item("status-editor-zoom", label.into()).on_click(cx.listener(
+                            |this, _, window, cx| {
+                                if let Some(id) = this.tab_code().and_then(TabCode::active_id) {
+                                    this.editor_zoom_reset(id, None, window, cx);
+                                }
+                            },
+                        )),
+                    )
+                },
+            )
     }
 
     fn render_editor_empty(&self, cx: &Context<Self>) -> gpui::Div {
@@ -4234,5 +4608,93 @@ mod close_gpui_tests {
             app.editor_close_active_if_focused(window, cx)
         }));
         assert_eq!(panel(&app, &mut vcx), (true, 0));
+    }
+}
+
+#[cfg(test)]
+mod zoom_gpui_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::nav::gpui_tests::open_rs;
+    use super::*;
+    use crate::core::config::Config;
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+    }
+
+    fn sizes(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> (f32, f32) {
+        app.read_with(vcx, |_, cx| {
+            let cfg = cx.global::<Config>();
+            (cfg.editor_zoom, cfg.font_size)
+        })
+    }
+
+    /// The font-size actions zoom whichever surface has the focus: the
+    /// editor's own zoom in the source view and in the rendered preview,
+    /// the terminal's font everywhere else. One action, three routes.
+    #[gpui::test]
+    fn font_size_actions_zoom_the_focused_surface(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+
+        // Source view: opening a file focuses its input, which sits inside
+        // the editor-body div that owns the actions.
+        open_rs(&app, &mut vcx, "/zoom/a.rs");
+        settle(&mut vcx);
+        vcx.dispatch_action(IncreaseFontSize);
+        settle(&mut vcx);
+        assert_eq!(sizes(&app, &mut vcx), (1.1, 15.0), "source: zoom, not font");
+
+        // Rendered preview: the preview's own focus handle carries the
+        // actions, and the hidden source input no longer does.
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.editor_markdown_preview = true;
+            cx.set_global(cfg);
+        });
+        open_rs(&app, &mut vcx, "/zoom/doc.md");
+        settle(&mut vcx);
+        let preview_focused = app.update_in(&mut vcx, |app, window, _| {
+            app.active_buffer()
+                .is_some_and(|f| f.preview_focus.is_focused(window))
+        });
+        assert!(
+            preview_focused,
+            "opening a previewed file focuses the preview"
+        );
+        vcx.dispatch_action(IncreaseFontSize);
+        settle(&mut vcx);
+        assert_eq!(
+            sizes(&app, &mut vcx),
+            (1.25, 15.0),
+            "preview: zoom, not font"
+        );
+
+        // Terminal: the same action goes back to changing the grid's font.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.focus_active(window, cx);
+        });
+        settle(&mut vcx);
+        vcx.dispatch_action(IncreaseFontSize);
+        settle(&mut vcx);
+        assert_eq!(
+            sizes(&app, &mut vcx),
+            (1.25, 16.0),
+            "terminal: font, not zoom"
+        );
+
+        // And reset, from the preview, puts the editor back at 100 % without
+        // touching the terminal's font.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.focus_editor(window, cx);
+        });
+        settle(&mut vcx);
+        vcx.dispatch_action(ResetFontSize);
+        settle(&mut vcx);
+        assert_eq!(sizes(&app, &mut vcx), (1.0, 16.0), "reset: zoom only");
     }
 }

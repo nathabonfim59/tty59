@@ -273,6 +273,12 @@ pub struct Config {
     /// [`Self::editor_soft_wrap`]. Files that are not Markdown ignore it.
     #[serde(default)]
     pub editor_markdown_preview: bool,
+    /// Scale of the code editor's text, source and rendered Markdown alike,
+    /// 1.0 = 100%. Changed with the font-size actions while the editor has
+    /// the focus or the pointer, the way the terminal's `font_size` is; the
+    /// two are separate, so zooming a document never resizes the grid.
+    #[serde(default = "default_editor_zoom")]
+    pub editor_zoom: f32,
     /// Whether Mermaid diagrams in the Markdown preview color their shapes,
     /// one accent from the theme's inks per shape, rather than drawing every
     /// shape in the neutral fill and border. On by default; off restores the
@@ -864,6 +870,7 @@ impl Default for Config {
             scm_changes_tree: false,
             editor_soft_wrap: false,
             editor_markdown_preview: false,
+            editor_zoom: default_editor_zoom(),
             editor_mermaid_colors: true,
             editor_lsp: true,
             editor_git_gutter: true,
@@ -1132,6 +1139,10 @@ impl Config {
         // shrink one label — it makes the window unusable. Keep the range to
         // sizes the layout still holds together at.
         self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
+        if !self.editor_zoom.is_finite() || self.editor_zoom <= 0.0 {
+            self.editor_zoom = default_editor_zoom();
+        }
+        self.editor_zoom = self.editor_zoom.clamp(EDITOR_ZOOM_MIN, EDITOR_ZOOM_MAX);
         if let Some(family) = &self.ui_font_family
             && family.trim().is_empty()
         {
@@ -1713,6 +1724,58 @@ pub const FONT_SIZE_MAX: f32 = 256.0;
 pub const LINE_HEIGHT_MIN: f32 = 0.5;
 pub const LINE_HEIGHT_MAX: f32 = 4.0;
 
+/// The ends of [`EDITOR_ZOOM_STEPS`], shared by `sanitize` and the actions
+/// that step along the ladder so a GUI can never write a value the file
+/// would move on the next launch.
+pub const EDITOR_ZOOM_MIN: f32 = 0.5;
+pub const EDITOR_ZOOM_MAX: f32 = 3.0;
+
+/// The zoom levels the code editor steps through, browser-style: coarse at
+/// the ends, fine in the middle where reading happens. The font-size
+/// actions walk one entry at a time; the settings page lists them all.
+pub const EDITOR_ZOOM_STEPS: [f32; 13] = [
+    0.5, 0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0,
+];
+
+/// One step along [`EDITOR_ZOOM_STEPS`] from `current`, in `direction`
+/// (−1, 0 or +1). An off-ladder value — a hand-edited config, say — snaps
+/// to the nearest step in the direction of travel, and both ends stop:
+/// stepping up from 300 % stays at 300 %.
+pub fn zoom_step(current: f32, direction: i32) -> f32 {
+    let current = current.clamp(EDITOR_ZOOM_MIN, EDITOR_ZOOM_MAX);
+    if direction > 0 {
+        EDITOR_ZOOM_STEPS
+            .iter()
+            .copied()
+            .find(|step| *step > current)
+            .unwrap_or(EDITOR_ZOOM_MAX)
+    } else if direction < 0 {
+        EDITOR_ZOOM_STEPS
+            .iter()
+            .rev()
+            .copied()
+            .find(|step| *step < current)
+            .unwrap_or(EDITOR_ZOOM_MIN)
+    } else {
+        current
+    }
+}
+
+/// `steps` ladder steps from `current`, composed into one target — the
+/// value a wheel event worth several steps must reach in a single write,
+/// so nothing between the first step and the last is ever observed.
+pub fn zoom_steps(current: f32, steps: i32) -> f32 {
+    let mut zoom = current.clamp(EDITOR_ZOOM_MIN, EDITOR_ZOOM_MAX);
+    for _ in 0..steps.unsigned_abs() {
+        zoom = zoom_step(zoom, steps.signum());
+    }
+    zoom
+}
+
+fn default_editor_zoom() -> f32 {
+    1.0
+}
+
 fn default_ui_font_size() -> f32 {
     UI_FONT_SIZE_DEFAULT
 }
@@ -2028,6 +2091,88 @@ mod tests {
             let back: Config = serde_json::from_str(&json).unwrap();
             assert_eq!(back.editor_mermaid_colors, on, "round trip keeps {on}");
         }
+    }
+
+    #[test]
+    fn editor_zoom_defaults_to_100_percent_and_round_trips() {
+        assert_eq!(Config::default().editor_zoom, 1.0);
+
+        // A file written before the key existed renders at 100 %, which is
+        // the size the editor always drew at — absence must not zoom.
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert_eq!(old.editor_zoom, 1.0, "missing field defaults to 1.0");
+
+        for zoom in [0.5, 1.0, 3.0] {
+            let cfg: Config =
+                serde_json::from_str(&format!(r#"{{"editor_zoom": {zoom}}}"#)).unwrap();
+            assert_eq!(cfg.editor_zoom, zoom);
+            let json = serde_json::to_string(&cfg).unwrap();
+            let back: Config = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.editor_zoom, zoom, "round trip keeps {zoom}");
+        }
+    }
+
+    #[test]
+    fn editor_zoom_sanitizes_degenerate_values() {
+        let sanitized = |zoom: f32| {
+            let mut cfg = Config {
+                editor_zoom: zoom,
+                ..Config::default()
+            };
+            cfg.sanitize();
+            cfg.editor_zoom
+        };
+
+        assert_eq!(sanitized(f32::NAN), 1.0, "NaN falls back to the default");
+        assert_eq!(sanitized(0.0), 1.0, "zero falls back to the default");
+        assert_eq!(sanitized(-2.0), 1.0, "negative falls back to the default");
+        assert_eq!(sanitized(99.0), EDITOR_ZOOM_MAX, "99 clamps to the top");
+        assert_eq!(
+            sanitized(0.01),
+            EDITOR_ZOOM_MIN,
+            "0.01 clamps to the bottom"
+        );
+        assert_eq!(sanitized(1.25), 1.25, "a ladder value survives as-is");
+    }
+
+    #[test]
+    fn editor_zoom_steps_walk_the_ladder_and_stop_at_the_ends() {
+        // One step up and down from the default.
+        assert_eq!(zoom_step(1.0, 1), 1.1);
+        assert_eq!(zoom_step(1.0, -1), 0.9);
+
+        // Walking all the way up runs out of ladder and stays there.
+        let mut z = 1.0;
+        for _ in 0..20 {
+            z = zoom_step(z, 1);
+        }
+        assert_eq!(z, EDITOR_ZOOM_MAX, "up stops at the top");
+        let mut z = 1.0;
+        for _ in 0..20 {
+            z = zoom_step(z, -1);
+        }
+        assert_eq!(z, EDITOR_ZOOM_MIN, "down stops at the bottom");
+
+        // An off-ladder value snaps to the nearest step in the direction of
+        // travel — a hand-edited 0.95 goes to 1.0 up and 0.9 down, never
+        // sideways to a step it was already past.
+        assert_eq!(zoom_step(0.95, 1), 1.0);
+        assert_eq!(zoom_step(0.95, -1), 0.9);
+        assert_eq!(zoom_step(2.99, 1), EDITOR_ZOOM_MAX);
+        assert_eq!(zoom_step(0.51, -1), EDITOR_ZOOM_MIN);
+
+        // Direction zero is a clamp-only no-op.
+        assert_eq!(zoom_step(2.0, 0), 2.0);
+
+        // Several steps compose into one target: two steps from 100 % is
+        // 125 %, not two writes of 110 % observed between layouts; and a
+        // huge event stops at the ends like the walk does.
+        assert_eq!(zoom_steps(1.0, 2), zoom_step(zoom_step(1.0, 1), 1));
+        assert_eq!(zoom_steps(1.0, 2), 1.25);
+        assert_eq!(zoom_steps(1.0, -3), 0.75, "1.0 → 0.9 → 0.8 → 0.75");
+        assert_eq!(zoom_steps(1.0, 99), EDITOR_ZOOM_MAX);
+        assert_eq!(zoom_steps(1.0, -99), EDITOR_ZOOM_MIN);
+        assert_eq!(zoom_steps(1.0, 0), 1.0);
     }
 
     #[test]

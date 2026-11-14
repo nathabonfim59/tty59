@@ -5,14 +5,17 @@ use super::*;
 
 impl Tty59App {
     pub(super) fn render_editor_group(&self, cx: &mut Context<Self>) -> AnyElement {
-        let cfg = cx.global::<Config>();
-        let (git_gutter, lsp, soft_wrap, markdown, mermaid_colors) = (
-            cfg.editor_git_gutter,
-            cfg.editor_lsp,
-            cfg.editor_soft_wrap,
-            cfg.editor_markdown_preview,
-            cfg.editor_mermaid_colors,
-        );
+        let (git_gutter, lsp, soft_wrap, markdown, mermaid_colors, editor_zoom) = {
+            let cfg = cx.global::<Config>();
+            (
+                cfg.editor_git_gutter,
+                cfg.editor_lsp,
+                cfg.editor_soft_wrap,
+                cfg.editor_markdown_preview,
+                cfg.editor_mermaid_colors,
+                cfg.editor_zoom,
+            )
+        };
         let git_gutter =
             self.settings_switch("wt-editor-git-gutter", git_gutter, cx, |this, on, _, cx| {
                 this.set_editor_git_gutter(on, cx)
@@ -33,6 +36,29 @@ impl Tty59App {
             mermaid_colors,
             cx,
             |this, on, _, cx| this.set_editor_mermaid_colors(on, cx),
+        );
+        // The ladder as percentages; a value the ladder does not hold (a
+        // hand-edited config) gets the usual custom cell rather than a
+        // highlight it does not have (#550's rule, applied here too).
+        let zoom_names: Vec<String> = EDITOR_ZOOM_STEPS
+            .iter()
+            .map(|step| format!("{}%", (step * 100.).round()))
+            .collect();
+        let zoom_labels: Vec<&str> = zoom_names.iter().map(String::as_str).collect();
+        let (zoom_sel, zoom_custom) = preset_choice(&EDITOR_ZOOM_STEPS, editor_zoom, |z: f32| {
+            format!("{}%", (z * 100.).round())
+        });
+        let zoom = self.settings_choice_valued(
+            "wt-editor-zoom",
+            &zoom_labels,
+            zoom_sel,
+            zoom_custom,
+            cx,
+            |this, ix, _w, cx| {
+                if let Some(z) = EDITOR_ZOOM_STEPS.get(ix) {
+                    this.set_editor_zoom(*z, cx);
+                }
+            },
         );
         self.settings_group(
             Some(t(L10nKey::SettingsEditor)),
@@ -66,6 +92,12 @@ impl Tty59App {
                     t(L10nKey::SettingsEditorMermaidColors),
                     t(L10nKey::SettingsEditorMermaidColorsDesc),
                     mermaid_colors,
+                    cx,
+                ),
+                self.settings_row(
+                    t(L10nKey::SettingsEditorZoom),
+                    t(L10nKey::SettingsEditorZoomDesc),
+                    zoom,
                     cx,
                 ),
             ]

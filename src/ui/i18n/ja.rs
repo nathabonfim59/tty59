@@ -1439,6 +1439,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsEditorMermaidColorsDesc => {
             "Markdown プレビューの Mermaid 図の図形に色を付けます。オフではテーマの中立色で描画します。"
         }
+        L10nKey::SettingsEditorZoom => "ズーム",
+        L10nKey::SettingsEditorZoomDesc => {
+            "コードエディタと Markdown プレビューの文字サイズを、標準サイズに対する割合で指定します。"
+        }
         L10nKey::SettingsSearchEditorGitGutterKeywords => {
             "git 変更 マーカー 差分 ステージ 変更 追加 削除 gutter diff"
         }
@@ -1449,6 +1453,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchEditorMermaidColorsKeywords => {
             "mermaid 図 グラフ 色 アクセント 図形 markdown プレビュー"
+        }
+        L10nKey::SettingsSearchEditorZoomKeywords => {
+            "ズーム 文字サイズ フォントサイズ 拡大 縮小 エディタ markdown プレビュー zoom"
         }
         L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "エディタ内のシンボルへ移動…",

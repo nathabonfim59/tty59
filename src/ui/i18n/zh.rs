@@ -1283,6 +1283,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsEditorMermaidColorsDesc => {
             "在 Markdown 预览中为 Mermaid 图表的形状着色。关闭后使用主题的中性填充色。"
         }
+        L10nKey::SettingsEditorZoom => "缩放",
+        L10nKey::SettingsEditorZoomDesc => {
+            "代码编辑器和 Markdown 预览的文字大小，以正常大小的百分比表示。"
+        }
         L10nKey::SettingsSearchEditorGitGutterKeywords => {
             "git 更改 标记 差异 暂存 修改 新增 删除 gutter diff"
         }
@@ -1291,6 +1295,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorMarkdownPreviewKeywords => "markdown 预览 渲染 md",
         L10nKey::SettingsSearchEditorMermaidColorsKeywords => {
             "mermaid 图表 颜色 着色 形状 markdown 预览"
+        }
+        L10nKey::SettingsSearchEditorZoomKeywords => {
+            "缩放 文字大小 字体大小 放大 缩小 编辑器 markdown 预览 zoom"
         }
         L10nKey::EditorGoToLinePlaceholder => "行号，或 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "跳转到编辑器中的符号…",

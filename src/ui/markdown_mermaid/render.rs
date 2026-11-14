@@ -79,7 +79,16 @@ const PENDING_HEIGHT: f32 = 96.;
 /// intersect the visible clip.
 pub(super) fn render_block(block: &MermaidBlock, window: &mut Window, cx: &mut App) -> AnyElement {
     let theme = crate::ui::theme::mermaid_theme(cx);
-    let scale = window.scale_factor();
+    // Diagrams follow the text zoom, so the document keeps its proportions:
+    // the raster is requested at the window's scale times the zoom, and laid
+    // out at its logical size times the zoom. No `Config` installed (the
+    // standalone render tests) means 100 %, exactly what those tests drew
+    // before the setting existed. Ladder values are discrete, so each zoom
+    // level is one cache entry per diagram.
+    let zoom = cx
+        .try_global::<crate::core::config::Config>()
+        .map_or(1.0, |cfg| cfg.editor_zoom);
+    let scale = window.scale_factor() * zoom;
     let key = CacheKey::new(&block.source, theme.clone(), scale);
 
     // First use installs the production cache; tests install their own with
@@ -92,15 +101,12 @@ pub(super) fn render_block(block: &MermaidBlock, window: &mut Window, cx: &mut A
     let decision = cx.global::<MermaidCache>().peek(&key);
 
     // The display for not-yet-drawable states is decided once: the block's
-    // own last-good image when it matches the theme and scale, else the
-    // stable-height placeholder.
+    // own last-good image when it matches the theme — at any scale, briefly
+    // soft under a new zoom — else the stable-height placeholder.
     let pending = match &decision {
-        Decision::Pending | Decision::Idle => Some(pending_display(
-            block.block_id,
-            &theme,
-            key.scale_bits(),
-            cx,
-        )),
+        Decision::Pending | Decision::Idle => {
+            Some(pending_display(block.block_id, &theme, zoom, cx))
+        }
         Decision::Ready(..) | Decision::Failed(..) => None,
     };
 
@@ -130,9 +136,9 @@ pub(super) fn render_block(block: &MermaidBlock, window: &mut Window, cx: &mut A
     };
 
     let inner = match (&decision, &pending) {
-        (Decision::Ready(image, logical), _) => diagram_element(image, *logical),
-        (Decision::Failed(message), _) => failure_element(block, message, cx),
-        (_, Some(PendingDisplay::Image(image, logical))) => diagram_element(image, *logical),
+        (Decision::Ready(image, logical), _) => diagram_element(image, *logical, zoom),
+        (Decision::Failed(message), _) => failure_element(block, message, zoom, cx),
+        (_, Some(PendingDisplay::Image(image, logical))) => diagram_element(image, *logical, zoom),
         (_, Some(PendingDisplay::Placeholder(height))) => pending_element(Some(*height), cx),
         (Decision::Pending | Decision::Idle, None) => {
             unreachable!("pending states always carry a display")
@@ -159,28 +165,27 @@ pub(super) fn render_block(block: &MermaidBlock, window: &mut Window, cx: &mut A
 
 /// What a pending or idle block displays while its own render is not
 /// drawable yet: the block's last-good image when it matches the current
-/// theme and scale, or the stable-height placeholder.
+/// theme — at any scale, so a zoom change shows it briefly soft rather than
+/// flashing a placeholder — or the stable-height placeholder.
 enum PendingDisplay {
     Image(Arc<RenderImage>, LogicalSize),
     Placeholder(f32),
 }
 
-fn pending_display(
-    block_id: u64,
-    theme: &MermaidTheme,
-    scale_bits: u32,
-    cx: &App,
-) -> PendingDisplay {
+fn pending_display(block_id: u64, theme: &MermaidTheme, zoom: f32, cx: &App) -> PendingDisplay {
     if let Some((image, logical)) = cx
         .global::<MermaidCache>()
-        .last_good_for_block(block_id, theme, scale_bits)
+        .last_good_for_block(block_id, theme)
     {
         return PendingDisplay::Image(image, logical);
     }
+    // Both heights are of the un-zoomed document; the box the reader is
+    // looking at is the zoomed one.
     PendingDisplay::Placeholder(
         cx.global::<MermaidCache>()
             .last_good_height(block_id)
-            .unwrap_or(PENDING_HEIGHT),
+            .unwrap_or(PENDING_HEIGHT)
+            * zoom,
     )
 }
 
@@ -301,7 +306,6 @@ impl gpui::Element for VisibleBlock {
                 decided.extend(cache.store_last_good(
                     self.block_id,
                     self.key.theme().clone(),
-                    self.key.scale_bits(),
                     image.clone(),
                     *logical,
                 ));
@@ -414,13 +418,16 @@ fn release_on_windows(release: Release, window: &mut Window, cx: &mut App) -> us
     dropped
 }
 
-/// A ready diagram: intrinsic logical width (never upscaled), shrunk to the
-/// available width, aspect kept by the wrapper's `aspect_ratio`.
-fn diagram_element(image: &Arc<RenderImage>, logical: LogicalSize) -> AnyElement {
+/// A ready diagram: its logical size times the editor zoom (never grown past
+/// that), shrunk to the available width, aspect kept by the wrapper's
+/// `aspect_ratio`. `logical` is device px over the scale the raster *reports*,
+/// so a raster capped by `MAX_PIXELS` still lays out at the right size, only
+/// softer.
+fn diagram_element(image: &Arc<RenderImage>, logical: LogicalSize, zoom: f32) -> AnyElement {
     // Degenerate sizes are clamped so the ratio stays positive even if a
     // renderer returns something extreme.
-    let width = logical.width.max(1.0);
-    let height = logical.height.max(1.0);
+    let width = (logical.width.max(1.0) * zoom).max(1.0);
+    let height = (logical.height.max(1.0) * zoom).max(1.0);
     div()
         .w(px(width))
         .max_w_full()
@@ -456,7 +463,7 @@ fn pending_element(height: Option<f32>, cx: &App) -> AnyElement {
 /// A failed render: one localized error line in the theme's danger color
 /// above the original fence, rendered as an ordinary code block by a
 /// nested text view without this plugin — the fallback cannot recurse.
-fn failure_element(block: &MermaidBlock, message: &str, cx: &App) -> AnyElement {
+fn failure_element(block: &MermaidBlock, message: &str, zoom: f32, cx: &App) -> AnyElement {
     v_flex()
         .gap_1()
         .child(error_line(message, cx))
@@ -465,7 +472,9 @@ fn failure_element(block: &MermaidBlock, message: &str, cx: &App) -> AnyElement 
                 ("mermaid-fallback", block.block_id),
                 block.original_fence.clone(),
             )
-            .style(crate::ui::theme::markdown_style(cx)),
+            // The fence reads at the document's zoom, like the preview
+            // around it.
+            .style(crate::ui::theme::markdown_style_at(cx, zoom)),
         )
         .into_any_element()
 }
@@ -800,6 +809,56 @@ mod tests {
         });
         assert_close(f32::from(huge.size.width), 100.0, "no upscaling");
         assert_close(f32::from(huge.size.height), 50.0, "no upscaling (height)");
+
+        // At 2× editor zoom the box doubles — the raster is re-requested at
+        // the zoomed scale — and still shrinks to the available width.
+        // "Never upscaled" means never past the diagram's own size *at this
+        // zoom*, so 200×100 in a wide column is the intrinsic size now.
+        vcx.update(|_, cx| {
+            let mut cfg = crate::core::config::Config::default();
+            cfg.editor_zoom = 2.0;
+            cx.set_global(cfg);
+        });
+        // First zoomed draw is pending (the zoomed key is new); let it land.
+        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            let theme = crate::ui::theme::mermaid_theme(cx);
+            let key = CacheKey::new("graph TD\nA-->B", theme, TEST_SCALE * 2.0);
+            assert_eq!(
+                cx.global::<MermaidCache>().state_of(&key),
+                Some("ready"),
+                "the zoomed raster rendered"
+            );
+        });
+        let zoomed = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_close(
+            f32::from(zoomed.size.width),
+            200.0,
+            "zoom doubles the width",
+        );
+        assert_close(
+            f32::from(zoomed.size.height),
+            100.0,
+            "zoom doubles the height",
+        );
+        let zoomed_narrow = draw_measured(vcx, size(px(75.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_close(
+            f32::from(zoomed_narrow.size.width),
+            75.0,
+            "zoomed still clamps to the column",
+        );
+        assert_close(
+            f32::from(zoomed_narrow.size.height),
+            37.5,
+            "zoomed clamp keeps the ratio",
+        );
     }
 
     /// While a block re-renders (source edit) its last-good image stays on
@@ -861,6 +920,65 @@ mod tests {
             let key = CacheKey::new("graph TD\nA-->B3", dark_theme, TEST_SCALE);
             assert_eq!(cx.global::<MermaidCache>().state_of(&key), Some("ready"));
         });
+    }
+
+    /// A zoom change re-keys every diagram; while the new rasters render, the
+    /// same-theme last-good stays up at the new size — briefly soft, never a
+    /// placeholder flashing over the document the eye is reading. The zoomed
+    /// raster then lands at its own key and lays out the same size.
+    #[gpui::test]
+    fn a_zoom_change_shows_the_last_good_at_the_new_size(cx: &mut TestAppContext) {
+        cx.update(|cx| install(cx, ok_renderer(100, 50, 1.0)));
+        let vcx = cx.add_empty_window();
+
+        // Render block 9 once so it has a last-good: 100×50 logical.
+        let drawn = block(9, "graph TD\nA-->B");
+        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        vcx.run_until_parked();
+        draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+
+        // 2× zoom: the key moves to TEST_SCALE × 2, the entry is idle, and
+        // the pending display is the last-good image drawn at 200×100 — not
+        // the placeholder, which would span the full 400px column.
+        vcx.update(|_, cx| {
+            let mut cfg = crate::core::config::Config::default();
+            cfg.editor_zoom = 2.0;
+            cx.set_global(cfg);
+        });
+        let zoomed = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_close(
+            f32::from(zoomed.size.width),
+            200.0,
+            "last-good at the zoomed width",
+        );
+        assert_close(
+            f32::from(zoomed.size.height),
+            100.0,
+            "last-good at the zoomed height",
+        );
+
+        // The zoomed raster lands under its own key and lays out identically.
+        vcx.run_until_parked();
+        vcx.update(|_, cx| {
+            let theme = crate::ui::theme::mermaid_theme(cx);
+            let key = CacheKey::new("graph TD\nA-->B", theme, TEST_SCALE * 2.0);
+            assert_eq!(
+                cx.global::<MermaidCache>().state_of(&key),
+                Some("ready"),
+                "the zoomed key rendered"
+            );
+        });
+        let landed = draw_measured(vcx, size(px(400.), px(2000.)), |window, cx| {
+            render_block(&drawn, window, cx)
+        });
+        assert_close(f32::from(landed.size.width), 200.0, "no size jump");
+        assert_close(f32::from(landed.size.height), 100.0, "no size jump");
     }
 
     /// The colors toggle is a live palette change, driven through
@@ -953,9 +1071,7 @@ mod tests {
                 "exactly one neutral request, already in flight"
             );
             assert!(
-                cache
-                    .last_good_for_block(9, key.theme(), key.scale_bits())
-                    .is_none(),
+                cache.last_good_for_block(9, key.theme()).is_none(),
                 "the colored last-good must not match the neutral theme"
             );
         });
@@ -1628,13 +1744,7 @@ mod tests {
             }
             for block_id in 0..CAP_LAST_GOOD as u64 {
                 let (image, logical) = raster_to_image(raster(2, 2, 1.0)).expect("dummy image");
-                cache.store_last_good(
-                    100_000 + block_id,
-                    MermaidTheme::light(),
-                    1.0f32.to_bits(),
-                    image,
-                    logical,
-                );
+                cache.store_last_good(100_000 + block_id, MermaidTheme::light(), image, logical);
             }
             cache
                 .collect_releases(&live)
