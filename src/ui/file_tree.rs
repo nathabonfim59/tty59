@@ -48,8 +48,9 @@ const TREE_PAD_BOTTOM: f32 = 16.;
 const TREE_ROW_H: f32 = 26.;
 
 /// The disclosure chevron's column, drawn on folders and left empty on files
-/// so every name at one depth starts at the same x.
-const CHEVRON_W: f32 = 10.;
+/// so every name at one depth starts at the same x. The panel's one
+/// disclosure size, so the mark fills its column exactly.
+const CHEVRON_W: f32 = crate::ui::right_panel::DISCLOSURE_CHEVRON;
 
 /// The gap between a row's chevron, icon and name.
 const TREE_GAP: f32 = 6.;
@@ -2006,6 +2007,10 @@ impl Tty59App {
             .size(px(CHEVRON_W))
             .text_color(muted)
         });
+        // The basename, not the path: `debug_bounds` takes a literal, and a
+        // test's scratch root is not one.
+        #[cfg(test)]
+        let chevron_selector = format!("tree-chevron-{}", row.entry.name);
         let row_el = h_flex()
             .id(SharedString::from(format!("tree-{}", path.display())))
             .role(gpui::Role::TreeItem)
@@ -2025,14 +2030,17 @@ impl Tty59App {
             .cursor_pointer()
             .when(selected, |d| d.bg(gpui::rgb(sf.selected)))
             .when(!selected, |d| d.hover(|s| s.bg(gpui::rgb(sf.hover))))
-            .child(
-                div()
+            .child({
+                let cell = div()
                     .flex_none()
                     .w(px(CHEVRON_W))
                     .flex()
                     .justify_center()
-                    .children(chevron),
-            )
+                    .children(chevron);
+                #[cfg(test)]
+                let cell = cell.debug_selector(move || chevron_selector);
+                cell
+            })
             .child(
                 div()
                     .flex_none()
@@ -3466,6 +3474,93 @@ mod render_idle_gpui_tests {
         let (app, mut vcx, _pane) = files_panel_on(cx, &root);
         assert!(rows(&app, &mut vcx) > 1, "the tree listed nothing");
         assert_eq!(draws_while_idle(&mut vcx), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Panels F20 guard: the Files tree already drew a 10px chevron, and now
+    /// takes it from the panel's shared disclosure size. `src` folded, then
+    /// opened through the row's own activate path with `ui` folded inside
+    /// it; a file keeps the 10px column and draws no mark in it. Selectors
+    /// are the rows' basenames, unique in this fixture, as literals.
+    #[gpui::test]
+    fn tree_chevrons_are_10px_open_and_folded(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("chevrons");
+        std::fs::create_dir_all(root.join("src/ui")).unwrap();
+        std::fs::write(root.join("a.rs"), "").unwrap();
+        let src = root.join("src");
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        let drawn = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, _, cx| {
+                let code = app.tab_code().expect("panel state");
+                let rows = app
+                    .file_tree
+                    .visible_rows(HostId::LOCAL, &code.roots, &code.expanded);
+                cx.notify();
+                rows.iter()
+                    .filter(|r| r.note.is_none())
+                    .map(|r| (r.entry.name.clone(), r.expanded))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let count =
+            |rows: &[(String, bool)], name: &str| rows.iter().filter(|r| r.0 == name).count();
+        let cell = |vcx: &mut VisualTestContext, what: &'static str| {
+            vcx.run_until_parked();
+            vcx.debug_bounds(what)
+                .unwrap_or_else(|| panic!("{what} was not drawn"))
+        };
+        let ten = gpui::size(px(10.), px(10.));
+
+        let rows = drawn(&app, &mut vcx);
+        assert_eq!(count(&rows, "src"), 1, "one `src` row: {rows:?}");
+        assert_eq!(count(&rows, "a.rs"), 1, "one `a.rs` row: {rows:?}");
+        assert_eq!(count(&rows, "ui"), 0, "`src` starts folded: {rows:?}");
+        assert_eq!(
+            cell(&mut vcx, "tree-chevron-src").size,
+            ten,
+            "folded chevron"
+        );
+        let file = cell(&mut vcx, "tree-chevron-a.rs");
+        assert_eq!(file.size.width, px(10.), "a file keeps the column");
+        assert!(
+            file.size.height < px(1.),
+            "and draws no mark in it: {file:?}"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_activate(&src, true, window, cx);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.update_in(&mut vcx, |app, _, _| {
+            app.file_tree.children.get(HostId::LOCAL, &src).is_none()
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "`src` was never listed"
+            );
+            vcx.background_executor.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        settle(&app, &mut vcx, &root);
+        let rows = drawn(&app, &mut vcx);
+        assert_eq!(
+            rows.iter().find(|r| r.0 == "src").map(|r| r.1),
+            Some(true),
+            "`src` open: {rows:?}"
+        );
+        assert_eq!(count(&rows, "ui"), 1, "one `ui` row: {rows:?}");
+        assert_eq!(
+            rows.iter().find(|r| r.0 == "ui").map(|r| r.1),
+            Some(false),
+            "`ui` folded"
+        );
+        assert_eq!(cell(&mut vcx, "tree-chevron-src").size, ten, "open chevron");
+        assert_eq!(
+            cell(&mut vcx, "tree-chevron-ui").size,
+            ten,
+            "folded chevron inside it"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

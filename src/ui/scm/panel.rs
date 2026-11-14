@@ -32,7 +32,8 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    META, META_MONO, ROW_INSET, SEARCH_H, action_strip, action_strip_reserve, git_badge, info_chip,
+    BADGE_W, DISCLOSURE_CHEVRON, META, META_MONO, ROW_INSET, SEARCH_H, action_strip,
+    action_strip_reserve, git_badge, info_chip,
 };
 use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
@@ -49,19 +50,12 @@ use crate::ui::text_elision::{ElidedLabel, Mode as ElideMode};
 /// directory rows of the same tree and the Files tab's 26px rows.
 pub(super) const ROW_H: f32 = 26.;
 
-/// The status letter's column, from `git_badge`. The group chevron sits in a
-/// box no wider than this, flush with its leading edge, so the arrow stands
-/// over the letters — its centre within a pixel of theirs.
-///
-/// This is `right_panel::BADGE_W` spelled out where the header can read it,
-/// and the test below pins the two together. They are one column, and a column
-/// drawn from two numbers is a column that will eventually be drawn from two
-/// different numbers.
-const BADGE_W: f32 = 10.;
-
-/// The group header's disclosure chevron: an 8px mark in an 8px box, so the
-/// label after it lands `8 + 6` = 14px past the text column.
-pub(crate) const GROUP_CHEVRON: f32 = 8.;
+/// The group header's disclosure chevron: the panel's one disclosure mark in a
+/// box of its own size, flush with the status letters' column (`git_badge`'s
+/// `BADGE_W` cell) and no wider, so the arrow stands over the letters — its
+/// centre within a pixel of theirs — and the label after it lands
+/// `10 + 6` = 16px past the text column.
+pub(crate) const GROUP_CHEVRON: f32 = DISCLOSURE_CHEVRON;
 const _: () = assert!(GROUP_CHEVRON <= BADGE_W && BADGE_W - GROUP_CHEVRON <= 2.);
 
 /// One level of the tree view, the file tree's step: the Files panel and this
@@ -114,11 +108,10 @@ const MSG_ROWS_MAX: usize = 6;
 /// The chevron half is a square cell of the same interior, so the divider falls
 /// where the eye expects it rather than a couple of pixels early.
 ///
-/// `COMMIT_GLYPH` is the group chevron's size: a caret is an affordance, not
-/// content — it says "there is more here", and it says it at the same size as
-/// every other small mark in the panel. Marks are px on purpose. The panel's
-/// *type* is on the interface font scale and grows with it; a caret is chrome,
-/// sized against the box it sits in.
+/// `COMMIT_GLYPH` is the split button's caret: a menu, not a fold, so a step
+/// over the panel's disclosure chevrons rather than one of them. Marks are px
+/// on purpose. The panel's *type* is on the interface font scale and grows
+/// with it; a caret is chrome, sized against the box it sits in.
 const COMMIT_H: f32 = ROW_H;
 const COMMIT_CHEVRON_W: f32 = COMMIT_H - 2.;
 const COMMIT_GLYPH: f32 = 11.;
@@ -1560,6 +1553,8 @@ impl Tty59App {
         let muted = cx.theme().muted_foreground;
         let id = SharedString::from(format!("scm-dir-{group:?}-{key}"));
         let selector = id.clone();
+        #[cfg(test)]
+        let chevron_selector = format!("scm-dir-chevron-{group:?}-{key}");
         let toggle = cx.listener({
             let key = key.clone();
             move |this, _, _window, cx| {
@@ -1589,8 +1584,8 @@ impl Tty59App {
             .tooltip(move |window, cx| {
                 gpui_component::tooltip::Tooltip::new(key.clone()).build(window, cx)
             })
-            .child(
-                div()
+            .child({
+                let cell = div()
                     .flex_none()
                     .w(px(BADGE_W))
                     .flex()
@@ -1602,9 +1597,12 @@ impl Tty59App {
                         } else {
                             IconName::ChevronDown
                         })
-                        .xsmall(),
-                    ),
-            )
+                        .size(px(DISCLOSURE_CHEVRON)),
+                    );
+                #[cfg(test)]
+                let cell = cell.debug_selector(move || chevron_selector);
+                cell
+            })
             .child(
                 div()
                     .flex_1()
@@ -1675,8 +1673,8 @@ impl Tty59App {
             // below it, in a box 2px narrower than their cell, so each arrow
             // stands over the `M`s and `U`s with its centre a pixel short of
             // theirs.
-            .child(
-                div()
+            .child({
+                let cell = div()
                     .flex_none()
                     .w(px(GROUP_CHEVRON))
                     .flex()
@@ -1689,20 +1687,26 @@ impl Tty59App {
                             IconName::ChevronDown
                         })
                         .size(px(GROUP_CHEVRON)),
-                    ),
-            )
+                    );
+                #[cfg(test)]
+                let cell = cell.debug_selector(move || format!("scm-group-chevron-{group:?}"));
+                cell
+            })
             // Sentence case, medium, muted: a band label over the rows rather
             // than a heading competing with them.
-            .child(
-                div()
+            .child({
+                let label = div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .text_size(rems(GROUP_HEADING))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(cx.theme().muted_foreground)
-                    .child(t(group_label(group))),
-            )
+                    .child(t(group_label(group)));
+                #[cfg(test)]
+                let label = label.debug_selector(move || format!("scm-group-label-{group:?}"));
+                label
+            })
             .child(
                 div()
                     .flex_none()
@@ -1747,6 +1751,8 @@ impl Tty59App {
         let hover_group = id.clone();
         #[cfg(test)]
         let dir_selector = id.clone();
+        #[cfg(test)]
+        let name_selector = format!("{id}-name");
         let strip_reserve = action_strip_reserve(row_verbs(group).len());
         h_flex()
             .id(id.clone())
@@ -1806,8 +1812,8 @@ impl Tty59App {
             // Names use the same resting/selected hierarchy as sidebar rows.
             // The name takes its own width first and only then shrinks, down
             // to a floor; the directory beside it gets whatever is left.
-            .child(
-                div()
+            .child({
+                let name = div()
                     .flex_shrink(1.)
                     .min_w(px(NAME_FLOOR))
                     .truncate()
@@ -1821,8 +1827,11 @@ impl Tty59App {
                     })
                     .when(selected, |s| s.font_weight(gpui::FontWeight::MEDIUM))
                     .when(deco == DecoStatus::Deleted, |s| s.line_through())
-                    .child(name.to_string()),
-            )
+                    .child(name.to_string());
+                #[cfg(test)]
+                let name = name.debug_selector(move || name_selector);
+                name
+            })
             // The directory is flush right and gives way from its *start*:
             // the folder nearest the file is the part that says where it is,
             // and `src/ui/…` cut from the end keeps the part that says least.
@@ -2847,21 +2856,6 @@ mod tests {
         }
     }
 
-    /// The group chevron's box and the status letter's cell are one column.
-    ///
-    /// This is the detail that makes the list look drawn rather than
-    /// assembled: every group arrow sits directly above the `M`s and `A`s of
-    /// the rows it heads. The two widths live in two files — `git_badge` owns
-    /// the letter's cell, this module owns the chevron's box — so nothing but
-    /// this assertion stops one of them from moving on its own. Both start on
-    /// the text column, so the centres agree to within a pixel as long as the
-    /// chevron's box is the cell's width or up to 2px narrower.
-    #[test]
-    fn the_group_chevron_stands_in_the_status_letters_column() {
-        assert_eq!(BADGE_W, crate::ui::right_panel::BADGE_W);
-        assert!(GROUP_CHEVRON <= BADGE_W && BADGE_W - GROUP_CHEVRON <= 2.);
-    }
-
     fn repo(root: &str) -> RepoKey {
         RepoKey {
             host: HostId::LOCAL,
@@ -3664,6 +3658,120 @@ mod render_idle_gpui_tests {
         assert!(drawn(&mut vcx, a));
         assert!(!drawn(&mut vcx, readme));
         assert!(!drawn(&mut vcx, src_ui));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Panels F20, measured on the drawn panel over a real repository: every
+    /// fold in the Changes list — the group headers, open and folded, and the
+    /// tree view's directories — is a 10px chevron, the status letters stand
+    /// in a 12px column, and each group arrow sits over those letters. The
+    /// expected offsets are written out from the finding (8px row inset, 12px
+    /// letter cell, 8px gap; 10px chevron, 6px gap), not read back from the
+    /// constants the panel draws with.
+    #[gpui::test]
+    fn disclosure_chevrons_are_10px_over_a_12px_status_column(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = scratch("chevrons");
+        git(&root, &["init", "--quiet"]);
+        std::fs::create_dir_all(root.join("src/ui")).unwrap();
+        std::fs::write(root.join("src/ui/a.rs"), "a\n").unwrap();
+        std::fs::write(root.join("notes.md"), "n\n").unwrap();
+        std::fs::write(root.join("staged.rs"), "s\n").unwrap();
+        git(&root, &["add", "staged.rs"]);
+
+        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
+                    .is_some_and(|s| s.untracked().count() == 2 && s.staged().count() == 1)
+            })
+        });
+        // `debug_bounds` takes `&'static str`, so every selector below is a literal.
+        let bounds = |vcx: &mut VisualTestContext, what: &'static str| {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+            vcx.debug_bounds(what)
+                .unwrap_or_else(|| panic!("{what} was not drawn"))
+        };
+        let eps = 0.01;
+        let ten = gpui::size(gpui::px(10.), gpui::px(10.));
+
+        let row = bounds(&mut vcx, "scm-row-Untracked-notes.md");
+        let name = bounds(&mut vcx, "scm-row-Untracked-notes.md-name");
+        assert!(
+            ((name.left() - row.left()).as_f32() - 28.).abs() < eps,
+            "a flat row's name starts 8 + 12 + 8 = 28px past its fill edge: row {row:?}, name {name:?}"
+        );
+        let staged = bounds(&mut vcx, "scm-row-Staged-staged.rs");
+        let staged_name = bounds(&mut vcx, "scm-row-Staged-staged.rs-name");
+        assert!(((staged_name.left() - staged.left()).as_f32() - 28.).abs() < eps);
+
+        for collapse in [false, true] {
+            if collapse {
+                app.update(&mut vcx, |app, cx| {
+                    app.scm_toggle_group(ScmGroup::Untracked, 2, cx);
+                });
+            }
+            for (group, chevron, label) in [
+                (
+                    "Staged",
+                    "scm-group-chevron-Staged",
+                    "scm-group-label-Staged",
+                ),
+                (
+                    "Untracked",
+                    "scm-group-chevron-Untracked",
+                    "scm-group-label-Untracked",
+                ),
+            ] {
+                let chevron = bounds(&mut vcx, chevron);
+                let label = bounds(&mut vcx, label);
+                assert_eq!(
+                    chevron.size, ten,
+                    "{group} chevron (collapsed={collapse}) is 10px"
+                );
+                assert!(
+                    ((chevron.left() - staged.left()).as_f32() - 8.).abs() < eps,
+                    "{group} chevron starts on the letters' column: {chevron:?} vs row {staged:?}"
+                );
+                let letter_centre = staged.left().as_f32() + 8. + 6.;
+                let arrow_centre = chevron.left().as_f32() + chevron.size.width.as_f32() / 2.;
+                assert!(
+                    (arrow_centre - letter_centre).abs() <= 1. + eps,
+                    "{group} arrow centre {arrow_centre} stands over the letters' {letter_centre}"
+                );
+                assert!(
+                    ((label.left() - chevron.left()).as_f32() - 16.).abs() < eps,
+                    "{group} label lands 10 + 6 = 16px past the chevron: {label:?}"
+                );
+            }
+        }
+        app.update(&mut vcx, |app, cx| {
+            app.scm_toggle_group(ScmGroup::Untracked, 2, cx);
+        });
+
+        // The tree view: a directory row's chevron is the same 10px mark,
+        // centred in the letters' 12px cell, open and folded.
+        app.update(&mut vcx, |app, cx| app.scm_toggle_changes_tree(cx));
+        let dir = "scm-dir-Untracked-src/ui";
+        let chevron = "scm-dir-chevron-Untracked-src/ui";
+        for fold in [false, true] {
+            if fold {
+                app.update(&mut vcx, |app, cx| {
+                    app.scm.toggle_dir(ScmGroup::Untracked, "src/ui".into());
+                    cx.notify();
+                });
+            }
+            let dir_row = bounds(&mut vcx, dir);
+            let cell = bounds(&mut vcx, chevron);
+            assert_eq!(
+                cell.size,
+                gpui::size(gpui::px(12.), gpui::px(10.)),
+                "a 10px chevron in the 12px letter cell (folded={fold})"
+            );
+            assert!(((cell.left() - dir_row.left()).as_f32() - 8.).abs() < eps);
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
