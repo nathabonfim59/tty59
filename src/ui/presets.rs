@@ -4384,9 +4384,12 @@ ansi:
                 // A text role that did have to move lands at the 4.6 target on every fill, so
                 // antialiasing cannot take it back under 4.5. Reported as exact cases, never
                 // excluded: an infeasible one shows up here with its ratio.
-                // A role with its own target reaches it on every fill where it moved. An infeasible
-                // case (a mid-grey selection) is printed with its ratio, never skipped.
-                if floor == AA_SELECTED_CAPTION && color != seed {
+                // Whether a correction was REQUIRED is decided by the seed missing the role's floor on
+                // some fill, never by the output differing from the seed: a role that returns its failing
+                // seed unchanged must be caught here, not skipped. A role with its own target then reaches
+                // it on every fill; an infeasible case (a mid-grey selection) is printed with its ratio.
+                let seed_misses = fills.iter().any(|&fill| contrast(seed, fill) < floor);
+                if floor == AA_SELECTED_CAPTION && seed_misses {
                     for &fill in &fills {
                         if contrast(color, fill) < AA_SELECTED_CAPTION {
                             misses.push(format!(
@@ -4397,7 +4400,7 @@ ansi:
                         }
                     }
                 }
-                if floor == AA_TEXT && color != seed {
+                if floor == AA_TEXT && seed_misses {
                     for &fill in &fills {
                         if contrast(color, fill) < AA_CORRECTED {
                             misses.push(format!(
