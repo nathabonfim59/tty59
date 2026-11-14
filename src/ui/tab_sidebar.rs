@@ -38,6 +38,24 @@ const GRAB_HANDLE_W: f32 = 48.;
 
 const ROW_GAP: f32 = 1.;
 
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+struct RenderedSidebarAgentRow {
+    key: PaneKey,
+    title: String,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static RENDERED_SIDEBAR_AGENT_ROWS: std::cell::RefCell<Vec<RenderedSidebarAgentRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_rendered_sidebar_agent_rows() -> Vec<RenderedSidebarAgentRow> {
+    RENDERED_SIDEBAR_AGENT_ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()))
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SidebarList {
     #[default]
@@ -425,8 +443,16 @@ impl Tty59App {
                     view.host_id() == key.host && view.pane_id == key.pane
                 });
         let status = row.status();
-        let title = row.summary.location.tab_title.clone();
+        let title = row.summary.title().to_string();
+        let exited = row.summary.state == State::Exited;
         let marker = row.marker();
+        #[cfg(test)]
+        RENDERED_SIDEBAR_AGENT_ROWS.with(|rows| {
+            rows.borrow_mut().push(RenderedSidebarAgentRow {
+                key,
+                title: title.clone(),
+            });
+        });
         let row = sidebar_row_chrome(("sidebar-agent-row", slot), selected, sf)
             .child(
                 canvas(
@@ -487,6 +513,7 @@ impl Tty59App {
                             .truncate()
                             .text_sm()
                             .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
+                            .when(exited, |d| d.text_color(cx.theme().muted_foreground))
                             .child(title),
                     )
                     .when_some(marker, |d, marker| {
@@ -5735,5 +5762,142 @@ mod agent_tests {
                 9
             );
         });
+    }
+
+    #[gpui::test]
+    fn sidebar_agent_row_keeps_exited_identity_without_dot(cx: &mut gpui::TestAppContext) {
+        use crate::core::cli_agent::AgentDetectionSession;
+        use crate::daemon::protocol::DaemonMsg;
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 2);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.select_sidebar_list(SidebarList::Agents, cx);
+        });
+        for (stream, (dir, agent, kind)) in streams.iter_mut().zip([
+            ("/tmp/billing-service", CLIAgent::Codex, "codex"),
+            ("/tmp/acme-web", CLIAgent::Claude, "claude"),
+        ]) {
+            DaemonMsg::Cwd(PathBuf::from(dir)).encode(stream).unwrap();
+            DaemonMsg::Agent(Some(agent)).encode(stream).unwrap();
+            DaemonMsg::AgentStatus(Some(AgentSessionState {
+                status: AgentStatus::Working,
+                since_ms: Some(crate::core::config::unix_now().saturating_sub(60) * 1000),
+                detection: Some(AgentDetectionSession {
+                    kind: kind.into(),
+                    epoch: 1,
+                    exited: false,
+                    source: None,
+                    rule: None,
+                }),
+                ..Default::default()
+            }))
+            .encode(stream)
+            .unwrap();
+        }
+        let mut ready = false;
+        for _ in 0..200 {
+            ready = app.read_with(&vcx, |app, cx| app.agent_pane_summaries(cx).len() == 2);
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready, "both live agent panes reached the collector");
+
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Idle,
+            since_ms: Some(crate::core::config::unix_now().saturating_sub(180) * 1000),
+            detection: Some(AgentDetectionSession {
+                kind: "codex".into(),
+                epoch: 2,
+                exited: true,
+                source: None,
+                rule: None,
+            }),
+            ..Default::default()
+        }))
+        .encode(&mut streams[0])
+        .unwrap();
+        DaemonMsg::Agent(None).encode(&mut streams[0]).unwrap();
+        let mut exited = false;
+        for _ in 0..200 {
+            exited = app.read_with(&vcx, |app, cx| {
+                app.agent_pane_summaries(cx)
+                    .iter()
+                    .any(|pane| pane.location.key.pane == 1 && pane.state == State::Exited)
+            });
+            if exited {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(exited, "daemon exit transition reached the collector");
+
+        let _ = take_rendered_sidebar_agent_rows();
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let rendered = take_rendered_sidebar_agent_rows();
+        let exited_row = rendered
+            .iter()
+            .rfind(|row| row.key.pane == 1)
+            .expect("exited sidebar agent row rendered");
+        assert_eq!(exited_row.title, CLIAgent::Codex.display_name());
+        assert!(
+            vcx.debug_bounds("row-status-circle-0").is_some(),
+            "live pane paints its status dot as positive control"
+        );
+
+        let live_row = rendered
+            .iter()
+            .rfind(|row| row.key.pane == 2)
+            .expect("live sidebar agent row rendered");
+        assert_eq!(live_row.title, CLIAgent::Claude.display_name());
+
+        // Once the remaining pane also exits, no status dot is painted in the agent rail.
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Idle,
+            since_ms: None,
+            detection: Some(AgentDetectionSession {
+                kind: "claude".into(),
+                epoch: 2,
+                exited: true,
+                source: None,
+                rule: None,
+            }),
+            ..Default::default()
+        }))
+        .encode(&mut streams[1])
+        .unwrap();
+        DaemonMsg::Agent(None).encode(&mut streams[1]).unwrap();
+        let mut all_exited = false;
+        for _ in 0..200 {
+            all_exited = app.read_with(&vcx, |app, cx| {
+                app.agent_pane_summaries(cx)
+                    .iter()
+                    .all(|pane| pane.state == State::Exited)
+            });
+            if all_exited {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(all_exited, "second daemon exit reached the collector");
+        let _ = take_rendered_sidebar_agent_rows();
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let rendered = take_rendered_sidebar_agent_rows();
+        let exited_p2 = rendered
+            .iter()
+            .rfind(|row| row.key.pane == 2)
+            .expect("second exited sidebar agent row rendered");
+        assert_eq!(exited_p2.title, CLIAgent::Claude.display_name());
+        assert!(vcx.debug_bounds("row-status-circle-0").is_none());
     }
 }

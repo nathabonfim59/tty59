@@ -2170,6 +2170,17 @@ impl TerminalView {
     fn ended_title(&self, name: &str) -> String {
         let key = if self.workspace().is_some() && !self.terminal.child_exited() {
             L10nKey::PaneTitleDisconnected
+        } else if self.ssh_spec.is_some() {
+            // `Connected` only reports once the far end granted a shell
+            // (daemon/ssh `run_session`), so it is the honest split between a
+            // session that was established and dropped and a connect that
+            // never became one (remote F13).
+            match self.terminal.ssh_phase() {
+                Some(crate::daemon::protocol::SshPhase::Connected) => {
+                    L10nKey::PaneTitleDisconnected
+                }
+                _ => L10nKey::PaneTitleNotConnected,
+            }
         } else {
             L10nKey::PaneTitleProcessExited
         };
@@ -15983,6 +15994,172 @@ mod gpui_tests {
                 view.set_workspace(None);
                 view.handle_event(VtEvent::Exit, cx);
                 assert_eq!(view.title, "tty59 — process exited");
+            })
+            .unwrap();
+    }
+
+    fn make_an_ssh_pane(view: &mut TerminalView) {
+        view.ssh_spec = Some(Box::new(
+            serde_json::from_str::<crate::daemon::protocol::NativeSshSpec>(
+                r#"{"host":"build-box","port":22,"user":"me","auth_mode":"auto"}"#,
+            )
+            .expect("a minimal NativeSshSpec decodes"),
+        ));
+    }
+
+    fn ssh_phase_ready(
+        window: &gpui::WindowHandle<TerminalView>,
+        cx: &mut TestAppContext,
+        daemon: &mut Stream,
+        phase: crate::daemon::protocol::SshPhase,
+    ) {
+        DaemonMsg::SshStatus {
+            phase: phase.clone(),
+        }
+        .encode(daemon)
+        .unwrap();
+        for _ in 0..200 {
+            if window
+                .update(cx, |view, _, _| view.ssh_phase().as_ref() == Some(&phase))
+                .unwrap()
+            {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the ssh status never reached the view");
+    }
+
+    /// Aborting the host-key or auth sheet kills the pane before a shell ever
+    /// ran — nothing connected, so the tab says "not connected", not
+    /// "process exited" (remote F13).
+    #[gpui::test]
+    fn an_ssh_pane_cut_off_before_a_shell_says_not_connected(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SshPhase;
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| make_an_ssh_pane(view))
+            .unwrap();
+        ssh_phase_ready(&window, cx, &mut daemon, SshPhase::Authenticating);
+        window
+            .update(cx, |view, _, cx| {
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59 — not connected");
+            })
+            .unwrap();
+    }
+
+    /// A pane torn down while the connect was still dialling reported no
+    /// phase at all — it never got a shell either.
+    #[gpui::test]
+    fn an_ssh_pane_that_died_mid_dial_says_not_connected(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                make_an_ssh_pane(view);
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59 — not connected");
+            })
+            .unwrap();
+    }
+
+    /// A refused or cancelled connect reports `Failed` the same way — still
+    /// no shell, still "not connected".
+    #[gpui::test]
+    fn an_ssh_pane_that_failed_to_connect_says_not_connected(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SshPhase;
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| make_an_ssh_pane(view))
+            .unwrap();
+        ssh_phase_ready(
+            &window,
+            cx,
+            &mut daemon,
+            SshPhase::Failed {
+                reason: "connection refused".into(),
+            },
+        );
+        window
+            .update(cx, |view, _, cx| {
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59 — not connected");
+            })
+            .unwrap();
+    }
+
+    /// The client rule, pinned: whatever happened earlier, only a pane whose
+    /// last word was `Connected` reads "disconnected". A `Failed` tail can no
+    /// longer follow `Connected` from the daemon — `Connected` moved to after
+    /// the granted shell — but the title still must not treat an earlier
+    /// `Connected` as proof a shell ran (remote F13).
+    #[gpui::test]
+    fn a_connected_then_failed_ssh_pane_never_got_a_shell(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SshPhase;
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| make_an_ssh_pane(view))
+            .unwrap();
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Connected,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        ssh_phase_ready(
+            &window,
+            cx,
+            &mut daemon,
+            SshPhase::Failed {
+                reason: "open shell channel failed".into(),
+            },
+        );
+        window
+            .update(cx, |view, _, cx| {
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59 — not connected");
+            })
+            .unwrap();
+    }
+
+    /// A saturated reused connection is redialled inside `run_session`, so the
+    /// pane hears the fresh link's `Authenticating` before its `Connected`.
+    /// The session that follows is established: dropped, it reads
+    /// "disconnected" (remote F13).
+    #[gpui::test]
+    fn an_ssh_pane_connected_through_a_redial_says_disconnected(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SshPhase;
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| make_an_ssh_pane(view))
+            .unwrap();
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Authenticating,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        ssh_phase_ready(&window, cx, &mut daemon, SshPhase::Connected);
+        window
+            .update(cx, |view, _, cx| {
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59 — disconnected");
+            })
+            .unwrap();
+    }
+
+    /// An established session that drops under the pane is the one case
+    /// "disconnected" names: the shell was there, and now the link is gone.
+    #[gpui::test]
+    fn an_ssh_pane_that_lost_an_established_session_says_disconnected(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SshPhase;
+        let (window, mut daemon) = harness(cx);
+        window
+            .update(cx, |view, _, _| make_an_ssh_pane(view))
+            .unwrap();
+        ssh_phase_ready(&window, cx, &mut daemon, SshPhase::Connected);
+        window
+            .update(cx, |view, _, cx| {
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59 — disconnected");
             })
             .unwrap();
     }

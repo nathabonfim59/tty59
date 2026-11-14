@@ -1128,6 +1128,9 @@ pub struct Tty59App {
     /// rectangle was not drawn — scrolled out of a full strip, filtered out of
     /// the sidebar — and takes no part in the reading.
     pub(crate) strip_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    /// What the strip's Agents pill measures at the current font and language.
+    /// Drawing only reads it; it is measured again when one of those changes.
+    pub(crate) strip_metrics: crate::ui::tab_strip::StripMetrics,
     pub(crate) sidebar_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     /// Where each pinned group's block was drawn last frame, so a tab held
     /// over one can be told which group it is over. Only pinned groups are
@@ -1599,9 +1602,11 @@ impl Tty59App {
                 cfg.scrollback_limit,
             )
         };
+        crate::ui::diff_overlay::refresh_diff_features(font_features.as_ref(), cx);
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
+        let strip_metrics = crate::ui::tab_strip::StripMetrics::new(window, cx);
         let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
@@ -1812,6 +1817,7 @@ impl Tty59App {
             tab_merge: Cell::new(None),
             pane_detach: Cell::new(None),
             strip_slots: Rc::new(RefCell::new(Vec::new())),
+            strip_metrics,
             sidebar_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_group_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_divider: Rc::new(Cell::new(None)),
@@ -3377,6 +3383,7 @@ impl Tty59App {
             .as_ref()
             .map(crate::core::config::gpui_font_features);
         self.font_features = gpui_features.clone();
+        crate::ui::diff_overlay::refresh_diff_features(gpui_features.as_ref(), cx);
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let features = gpui_features.clone();
@@ -6816,23 +6823,10 @@ impl Tty59App {
             }
             out.push(item);
         }
-        for agent in self.offered_agents(cx) {
-            out.push(
-                Item::new(
-                    t_fmt(
-                        L10nKey::AppCmdAgentLaunchTitle,
-                        &[("name", agent.display_name())],
-                    ),
-                    CommandKind::LaunchAgent(agent),
-                )
-                .with_subtitle(agent.launch_command(&cx.global::<Config>().agent_launch))
-                .with_avatar(Avatar {
-                    agent: Some(agent),
-                    ..Avatar::default()
-                })
-                .in_section(new_terminal.clone()),
-            );
-        }
+        out.extend(crate::ui::search::agent_launch_items(
+            &self.offered_agents(cx),
+            &cx.global::<Config>().agent_launch,
+        ));
         out
     }
 
@@ -8363,6 +8357,7 @@ impl Tty59App {
         }
         if font_features != self.font_features {
             self.font_features = font_features.clone();
+            crate::ui::diff_overlay::refresh_diff_features(font_features.as_ref(), cx);
             for tab in &self.tabs {
                 for leaf in tab.pane.terminals() {
                     let features = font_features.clone();
@@ -9856,15 +9851,7 @@ impl Render for Tty59App {
         } else {
             self.document_dock_px(window, cx)
         };
-        // Where the docked header sits. Everywhere but macOS the title bar
-        // spans the workspace and leaves the strip above the column empty, so
-        // the header goes up into it; on macOS the column already reaches the
-        // top of the window and its own first row lands there.
-        let document_chrome = if cfg!(target_os = "macos") {
-            crate::ui::document_column::DocumentChrome::Dock
-        } else {
-            crate::ui::document_column::DocumentChrome::DockHoisted
-        };
+        let document_chrome = self.docked_document_chrome(window, cx);
         let document_header = document_dock_px
             .is_some()
             .then(|| self.render_document_header(document_chrome, window, cx))
@@ -12810,12 +12797,23 @@ pub(crate) mod test_window {
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
     pub(crate) fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
+        harness_configured(cx, |_| {})
+    }
+
+    /// `harness` over a config edited before the window is built, for what
+    /// the app reads once at construction.
+    pub(crate) fn harness_configured(
+        cx: &mut TestAppContext,
+        edit: impl FnOnce(&mut Config),
+    ) -> (Entity<Tty59App>, VisualTestContext) {
         crate::core::config::pin_test_config_dir();
 
         cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
-            cx.set_global(Config::default());
+            let mut config = Config::default();
+            edit(&mut config);
+            cx.set_global(config);
             crate::ui::keymap::init(cx);
         });
         let window = cx.add_window(|window, cx| {
@@ -12849,10 +12847,22 @@ pub(crate) mod test_window {
         VisualTestContext,
         Vec<crate::daemon::transport::Stream>,
     ) {
+        harness_with_tabs_configured(cx, n, |_| {})
+    }
+
+    pub(crate) fn harness_with_tabs_configured(
+        cx: &mut TestAppContext,
+        n: usize,
+        edit: impl FnOnce(&mut Config),
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
         use crate::terminal::view::quiet_test_pane;
         use crate::ui::pane::{Pane, PaneSlot};
 
-        let (app, mut vcx) = harness(cx);
+        let (app, mut vcx) = harness_configured(cx, edit);
         vcx.update(|_, cx| {
             let mut cfg = cx.global::<Config>().clone();
             cfg.cursor_blink = false;

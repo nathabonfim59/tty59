@@ -377,6 +377,14 @@ pub(crate) struct EditorPanelState {
     problems: problems::ProblemsPane,
     /// The header's list of every open file, while it is open.
     strip_picker: Option<strip::StripPicker>,
+    /// Whether the docked header was last found not to fit the title bar's
+    /// share of the column, so it is kept inside it a little past the point
+    /// it would fit again. Written by `editor_header_latch_sync` alone.
+    header_inline: bool,
+    /// What the `+N` button's glyphs measure at the current font and size.
+    /// Drawing only reads it; `editor_header_latch_sync` re-measures when the
+    /// font or size it is for has changed.
+    overflow_glyphs: strip::OverflowMetrics,
     /// The focus of a panel with no file in it. Without one there is nothing
     /// in the panel to hold the focus, so closing the last file handed it to
     /// the terminal and the next ⌘W closed the terminal instead of the panel.
@@ -410,6 +418,22 @@ impl EditorPanelState {
             }
         })
         .detach();
+        cx.observe_window_bounds(window, |this, window, cx| {
+            this.editor_header_latch_sync(window, cx)
+        })
+        .detach();
+        cx.observe_in(&cx.entity(), window, |this, _, window, cx| {
+            this.editor_header_latch_sync(window, cx)
+        })
+        .detach();
+        cx.observe_global_in::<crate::core::config::Config>(window, |this, window, cx| {
+            this.editor_overflow_refresh(window, cx)
+        })
+        .detach();
+        cx.observe_global_in::<gpui_component::Theme>(window, |this, window, cx| {
+            this.editor_overflow_refresh(window, cx)
+        })
+        .detach();
         Self {
             buffers: Vec::new(),
             next_untitled: 1,
@@ -430,6 +454,8 @@ impl EditorPanelState {
             nav: nav::EditorNav::new(cx),
             problems: Default::default(),
             strip_picker: None,
+            header_inline: false,
+            overflow_glyphs: strip::OverflowMetrics::measure(window, cx),
             empty_focus: cx.focus_handle(),
             had_focus: None,
         }
@@ -3772,15 +3798,10 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        // `TITLE_BAR_LEAD` is the room macOS's traffic lights need. Only a
-        // header that starts at the left edge of the window has them to clear,
-        // and a docked column never does.
-        let lead = if self.left_panel_open(cx) || chrome.is_dock() {
-            crate::ui::app::CONTENT_INSET
-        } else {
-            crate::ui::app::TITLE_BAR_LEAD
-        };
-        let row = h_flex().id("editor-header");
+        let lead = self.editor_header_lead(chrome, cx);
+        let row = h_flex()
+            .id("editor-header")
+            .when(cfg!(test), |d| d.debug_selector(|| "editor-header".into()));
         let row = if chrome.header_is_title_strip() {
             crate::ui::app::title_bar_drag(row, "editor-header", window, cx)
         } else {
@@ -3793,7 +3814,7 @@ impl Tty59App {
             crate::ui::tab_strip::RAIL_TILE,
             crate::ui::tab_strip::RAIL_TILE_GLYPH,
         );
-        let cap = self.editor_strip_cap(chrome, cx);
+        let cap = self.editor_strip_cap(chrome, window, cx);
         let (shown, hidden) = self
             .tab_code()
             .map(|c| c.strip_split(cap))
@@ -3823,8 +3844,11 @@ impl Tty59App {
         } else {
             h_flex()
                 .id("editor-file-tabs")
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "editor-file-tabs".into())
+                })
                 .min_w_0()
-                .gap(px(2.))
+                .gap(px(strip::TAB_GAP))
                 .overflow_hidden()
                 .children(files.into_iter().map(|(pos, name, tip, active, dirty)| {
                     self.render_file_tab(pos, name, tip, active, dirty, cx)
@@ -3837,7 +3861,7 @@ impl Tty59App {
             // shows no rule, but its tiles sit in the band the traffic lights
             // hang over and have to keep the title bar's line.
             .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
-            .gap(px(2.))
+            .gap(px(strip::HEADER_GAP))
             // The whole reserve, not the reserve less the first control's own
             // inset. The filled editor leads with the back pill, whose 8pt of
             // inner padding is *inside* its hover box — carving it out of here
@@ -3849,31 +3873,37 @@ impl Tty59App {
             .pl(px(lead))
             // The glyph, not the tile, lands on `CONTENT_INSET`, the column
             // the file name starts on at the other end of the bar.
-            .pr(px(crate::ui::app::CONTENT_INSET - (tile - glyph) / 2.))
+            .pr(px(strip::HEADER_TRAIL))
             .children(back)
             .child(strip)
             .children(self.render_strip_overflow(&hidden, cap, cx))
             .child(
-                div().occlude().flex_none().child(
-                    crate::ui::tab_strip::chrome_tile_sized(
-                        Button::new("editor-new-file").icon(Icon::new(IconName::Plus)),
-                        tile,
-                        glyph,
-                        false,
-                        cx,
-                    )
-                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-                    .tooltip(t(L10nKey::EditorNewFile))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.editor_new_file(window, cx);
-                    })),
-                ),
+                div()
+                    .occlude()
+                    .flex_none()
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "editor-new-file".into())
+                    })
+                    .child(
+                        crate::ui::tab_strip::chrome_tile_sized(
+                            Button::new("editor-new-file").icon(Icon::new(IconName::Plus)),
+                            tile,
+                            glyph,
+                            false,
+                            cx,
+                        )
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                        .tooltip(t(L10nKey::EditorNewFile))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.editor_new_file(window, cx);
+                        })),
+                    ),
             )
             // Whatever is left of the bar stays a place to drag the window by.
             .child(div().flex_1().h_full())
             .child(self.document_layout_switch(chrome, cx))
             .child(
-                div().occlude().flex_none().ml(px(4.)).child(
+                div().occlude().flex_none().ml(px(strip::CLOSE_LEAD)).child(
                     crate::ui::tab_strip::chrome_tile_sized(
                         Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
                         tile,
@@ -3932,14 +3962,20 @@ impl Tty59App {
             .when(dirty, |d| {
                 d.child(
                     div()
+                        .when(cfg!(test), |d| {
+                            d.debug_selector(move || format!("editor-file-tab-dot-{pos}"))
+                        })
                         .group_hover(group.clone(), |s| s.invisible())
-                        .size(px(6.))
+                        .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
                         .rounded_full()
                         .bg(muted),
                 )
             });
         div()
             .id(("editor-file-tab", pos))
+            .when(cfg!(test), |d| {
+                d.debug_selector(move || format!("editor-file-tab-{pos}"))
+            })
             .role(gpui::Role::Tab)
             .aria_label(match dirty {
                 true => format!("{name}, {}", t(L10nKey::SettingsUnsaved)),
@@ -3948,8 +3984,7 @@ impl Tty59App {
             .aria_selected(active)
             .group(group.clone())
             .occlude()
-            .flex_none()
-            .min_w_0()
+            .min_w(px(strip::TAB_MIN_W))
             .max_w(px(strip::CELL_MAX_W))
             .h(px(strip::CELL_H))
             .flex()
@@ -4757,7 +4792,8 @@ mod zoom_gpui_tests {
     /// The full-screen diagram viewer in the real editor tree, where hit
     /// testing, the wheel-zoom wrapper and the scrolling preview all sit
     /// around it: Ctrl+wheel zooms the *diagram* (and not the text, whatever
-    /// `mouse_zoom_modifier` says), a drag and a plain wheel pan it, and
+    /// `mouse_zoom_modifier` says), a middle drag and a plain wheel pan it (a
+    /// left drag does not), and
     /// every change is in the frame the event asked for — nothing here
     /// draws by hand.
     #[gpui::test]
@@ -4826,12 +4862,12 @@ mod zoom_gpui_tests {
             "the text zoom and the terminal stay where they were"
         );
 
-        // A left drag pans it.
+        // Only a middle drag pans it.
         let from = zoomed.center();
         let to = gpui::point(from.x - px(30.), from.y - px(10.));
-        vcx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
-        vcx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
-        vcx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_down(from, gpui::MouseButton::Middle, gpui::Modifiers::none());
+        vcx.simulate_mouse_move(to, Some(gpui::MouseButton::Middle), gpui::Modifiers::none());
+        vcx.simulate_mouse_up(to, gpui::MouseButton::Middle, gpui::Modifiers::none());
         vcx.run_until_parked();
         let dragged = painted(&mut vcx);
         near(
@@ -4843,6 +4879,23 @@ mod zoom_gpui_tests {
             dragged.origin.y.as_f32(),
             zoomed.origin.y.as_f32() - 10.,
             "drag y",
+        );
+
+        // A left drag leaves the diagram where it was.
+        let left_from = dragged.center();
+        let left_to = gpui::point(left_from.x - px(30.), left_from.y - px(10.));
+        vcx.simulate_mouse_down(left_from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_move(
+            left_to,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::none(),
+        );
+        vcx.simulate_mouse_up(left_to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(
+            painted(&mut vcx).origin,
+            dragged.origin,
+            "a left drag leaves the diagram where it was"
         );
 
         // A plain wheel pans too, and leaves the scale alone.

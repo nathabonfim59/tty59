@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use gpui::{
     AnyElement, Background, FocusHandle, FontWeight, Hsla, KeyDownEvent, MouseButton,
@@ -678,6 +678,9 @@ impl Tty59App {
             // only gives back the half point the title bar spends, so this
             // header's tiles land on the traffic lights' line rather than below.
             .title_strip_row(HAIRLINE_W, hairline(cx))
+            // The header's sha and paths are identifiers, not prose: set the
+            // way the patch rows below are, by the Font ligatures setting.
+            .font_features(code_features(cx))
             .pl(px(lead))
             // The close tile is a notch smaller than the title bar's own, and
             // is pulled in by half the difference so its glyph stays on the
@@ -703,6 +706,7 @@ impl Tty59App {
                     .font_weight(FontWeight::MEDIUM)
                     .font_family(self.font_family.clone())
                     .child(subject.text)
+                    .painted("header-rev")
                     .into_any_element()
             } else {
                 // Docked, this is the name that gives: the header has a
@@ -814,7 +818,8 @@ impl Tty59App {
                                     .text_size(rems(META_MONO))
                                     .font_family(self.font_family.clone())
                                     .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
-                                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf)),
+                                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
+                                    .painted("header-path"),
                             ),
                     ),
                 )
@@ -1190,6 +1195,52 @@ pub(crate) mod row_probe {
     pub(crate) fn take() -> u64 {
         BUILT.replace(0)
     }
+
+    type Seen = (&'static str, gpui::FontFeatures);
+
+    thread_local! {
+        static PAINTED: std::cell::RefCell<Vec<Seen>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record_painted(label: &'static str, features: gpui::FontFeatures) {
+        PAINTED.with(|seen| seen.borrow_mut().push((label, features)));
+    }
+
+    /// What the probes saw since the last call, in paint order.
+    pub(crate) fn take_painted() -> Vec<Seen> {
+        PAINTED.take()
+    }
+}
+
+/// Test-only paint observer. Under `cfg(test)` it appends a zero-size,
+/// out-of-flow child that records the font features in force where it paints,
+/// so a test can read what the shaper would be handed rather than what a
+/// builder claims. Outside tests it is the identity.
+trait Painted: Sized {
+    fn painted(self, label: &'static str) -> Self;
+}
+
+#[cfg(test)]
+impl<E: gpui::ParentElement> Painted for E {
+    fn painted(self, label: &'static str) -> Self {
+        self.child(
+            gpui::canvas(
+                |_, _, _| (),
+                move |_, (), window, _| {
+                    row_probe::record_painted(label, window.text_style().font_features)
+                },
+            )
+            .absolute()
+            .size_0(),
+        )
+    }
+}
+
+#[cfg(not(test))]
+impl<E> Painted for E {
+    fn painted(self, _label: &'static str) -> Self {
+        self
+    }
 }
 
 /// What a row needs to take part in a drag, for the frame it is drawn in.
@@ -1391,6 +1442,74 @@ pub(crate) fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
+/// The font features the diff's own text is shaped with, resolved when the
+/// setting changes rather than on each row of each frame: a row is drawn every
+/// frame, so building the table there would re-allocate it per line of patch.
+struct DiffFeatures {
+    /// Code, paths and identifiers. The configured list as the user wrote it,
+    /// so an arbitrary tag survives; with none configured, the terminal's
+    /// grid set — `calt`, `liga` and `clig` all named off, since `calt: 0`
+    /// alone leaves the other two at the shaper's default-on — so `=>` and
+    /// `->` draw as the two glyphs the file holds.
+    code: gpui::FontFeatures,
+    /// The line-number gutters: the same list with `tnum` forced on, so the
+    /// digit column keeps its grid whichever way ligatures are set.
+    gutter: gpui::FontFeatures,
+}
+
+impl gpui::Global for DiffFeatures {}
+
+impl DiffFeatures {
+    fn resolve(configured: Option<&gpui::FontFeatures>) -> Self {
+        let code = match configured.filter(|f| !f.0.is_empty()) {
+            Some(configured) => configured.clone(),
+            None => gpui::FontFeatures(Arc::new(vec![
+                ("calt".to_string(), 0),
+                ("liga".to_string(), 0),
+                ("clig".to_string(), 0),
+            ])),
+        };
+        let mut gutter: Vec<_> = code
+            .0
+            .iter()
+            .filter(|(tag, _)| tag != "tnum")
+            .cloned()
+            .collect();
+        gutter.push(("tnum".to_string(), 1));
+        Self {
+            code,
+            gutter: gpui::FontFeatures(Arc::new(gutter)),
+        }
+    }
+}
+
+/// Resolves the diff's feature sets from the configured list. Called where
+/// the app already assigns its own copy of that list, so the two never
+/// disagree and nothing is read from the config while drawing.
+pub(crate) fn refresh_diff_features(configured: Option<&gpui::FontFeatures>, cx: &mut gpui::App) {
+    cx.set_global(DiffFeatures::resolve(configured));
+}
+
+/// Before the app has resolved anything (a bare window in a test) the diff
+/// reads as ligatures off.
+fn features_of<R>(cx: &gpui::App, pick: impl FnOnce(&DiffFeatures) -> R) -> R {
+    match cx.try_global::<DiffFeatures>() {
+        Some(resolved) => pick(resolved),
+        None => {
+            static OFF: LazyLock<DiffFeatures> = LazyLock::new(|| DiffFeatures::resolve(None));
+            pick(&*OFF)
+        }
+    }
+}
+
+fn code_features(cx: &gpui::App) -> gpui::FontFeatures {
+    features_of(cx, |f| f.code.clone())
+}
+
+fn gutter_features(cx: &gpui::App) -> gpui::FontFeatures {
+    features_of(cx, |f| f.gutter.clone())
+}
+
 /// The height of one line of a patch, in either view.
 ///
 /// Also what the list counts a row it has not laid out yet at. A list knows
@@ -1436,9 +1555,11 @@ fn diff_row_element(
                 })
                 .text_size(rems(META_MONO))
                 .font_family(font.clone())
+                .font_features(code_features(cx))
                 .text_color(cx.theme().muted_foreground)
                 .truncate()
                 .child(text.clone())
+                .painted("hunk")
                 .into_any_element(),
         ),
         // The lines run the full width of the list. A diff is read as a
@@ -1630,6 +1751,7 @@ fn diff_file_header(
         .h(FILE_ROW_H)
         .px(ROW_INSET)
         .rounded(ROW_RADIUS)
+        .font_features(code_features(cx))
         .when(head.expandable, |h| {
             let path = head.path.clone();
             let want = !head.expanded;
@@ -1673,7 +1795,8 @@ fn diff_file_header(
                 .text_size(rems(TEXT_MONO))
                 .font_family(font.clone())
                 .text_color(gpui::rgb(sf.text_resting))
-                .child(head.shown_path.clone()),
+                .child(head.shown_path.clone())
+                .painted("file-path"),
         );
     if head.binary {
         header = header.child(
@@ -1731,6 +1854,7 @@ fn diff_untracked_row(
         .h(FILE_ROW_H)
         .px(ROW_INSET)
         .rounded(ROW_RADIUS)
+        .font_features(code_features(cx))
         .cursor_pointer()
         .hover(|s| s.bg(hover))
         .on_click(move |_, window, cx| {
@@ -1761,7 +1885,8 @@ fn diff_untracked_row(
                 .text_size(rems(TEXT_MONO))
                 .font_family(font.clone())
                 .text_color(gpui::rgb(sf.text_resting))
-                .child(path.to_string()),
+                .child(path.to_string())
+                .painted("untracked-path"),
         )
         .into_any_element()
 }
@@ -1780,6 +1905,7 @@ fn diff_split_row(
         .items_stretch()
         .text_xs()
         .font_family(font.clone())
+        .font_features(code_features(cx))
         .child(diff_split_cell(
             row.left.as_ref(),
             Side::Old,
@@ -1842,15 +1968,18 @@ fn diff_split_cell(
                 .w(px(42.))
                 .justify_end()
                 .pr_1p5()
+                .font_features(gutter_features(cx))
                 .text_color(cx.theme().muted_foreground)
-                .child(cell.no.map(|n| n.to_string()).unwrap_or_default()),
+                .child(cell.no.map(|n| n.to_string()).unwrap_or_default())
+                .painted("gutter-split"),
         )
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .child(format!("{marker} {}", cell.text)),
+                .child(format!("{marker} {}", cell.text))
+                .painted("code-split"),
         )
         .into_any_element()
 }
@@ -1887,8 +2016,10 @@ fn diff_unified_row(
             .w(px(34.))
             .justify_end()
             .pr_1p5()
+            .font_features(gutter_features(cx))
             .text_color(cx.theme().muted_foreground)
             .child(no.map(|n| n.to_string()).unwrap_or_default())
+            .painted("gutter-unified")
     };
     let fill = match drag.covers(at, None) {
         true => Some(cx.theme().selection),
@@ -1900,6 +2031,7 @@ fn diff_unified_row(
         .items_center()
         .text_xs()
         .font_family(font.clone())
+        .font_features(code_features(cx))
         .when_some(fill, |line, bg| line.bg(bg))
         .child(gutter(row.old))
         .child(gutter(row.new))
@@ -1921,7 +2053,14 @@ fn diff_unified_row(
                 .text_color(marker_color)
                 .child(unified_marker(row.kind)),
         )
-        .child(div().flex_1().min_w_0().truncate().child(row.text.clone()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(row.text.clone())
+                .painted("code-unified"),
+        )
 }
 
 /// Which layout the overlay draws. One setting for the window, not one per
@@ -3058,6 +3197,396 @@ mod overlay_gpui_tests {
             // The card is what carries the rows, so open it.
             overlay.expanded.insert("a.rs".to_string(), true);
         });
+    }
+
+    /// By default (no features configured) the diff draws the file's own
+    /// characters: its code carries the terminal grid's set, naming all three
+    /// ligature features off because `calt: 0` alone leaves `liga`/`clig` at
+    /// the shaper's default (on). With Font ligatures on, the configured
+    /// features apply instead. The line-number gutters are set apart from the
+    /// code and keep `tnum` either way;
+    /// `diff_text_follows_the_ligature_setting_in_both_views` reads them
+    /// where they paint.
+    #[gpui::test]
+    fn diff_rows_name_every_ligature_feature_off(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |_app, _window, cx| {
+            let font = SharedString::from("Test Mono");
+            let drag = Drag {
+                sel: None,
+                selecting: false,
+            };
+            let weak = cx.entity().downgrade();
+            let at = RowAt {
+                path: SharedString::from("a.rs"),
+                id: crate::ui::diff_rows::RowId { hunk: 0, row: 0 },
+            };
+            let want = Some(gpui::FontFeatures(Arc::new(vec![
+                ("calt".to_string(), 0),
+                ("liga".to_string(), 0),
+                ("clig".to_string(), 0),
+            ])));
+
+            let unified = UnifiedRow {
+                old: Some(1),
+                new: None,
+                kind: LineKind::Removed,
+                text: "let f = () => browser -> api;".to_string(),
+                line: 0,
+            };
+            let mut row = diff_unified_row(&unified, &at, &drag, &font, &weak, cx);
+            assert_eq!(
+                row.style().text.font_features,
+                want,
+                "the unified row carries the literal set for its code"
+            );
+
+            let split = SplitRow {
+                left: Some(SplitCell {
+                    no: Some(1),
+                    text: "let f = () => browser -> api;".to_string(),
+                    changed: true,
+                    line: 0,
+                }),
+                right: None,
+            };
+            let mut row = diff_split_row(&split, &at, &drag, &font, &weak, cx);
+            assert_eq!(
+                row.style().text.font_features,
+                want,
+                "the split row carries it for both cells' code"
+            );
+        });
+    }
+
+    type Seen = (&'static str, gpui::FontFeatures);
+
+    fn features(pairs: &[(&str, u32)]) -> gpui::FontFeatures {
+        gpui::FontFeatures(Arc::new(
+            pairs.iter().map(|(t, v)| (t.to_string(), *v)).collect(),
+        ))
+    }
+
+    /// A patch with a `#`-numbered subject, so the header carries an
+    /// identifier, and no background probe that could replace the fixture.
+    fn arrows_source() -> DiffSource {
+        DiffSource::Patch {
+            id: "ligatures#7".into(),
+            label: None,
+        }
+    }
+
+    /// Opens `arrows_source` on a one-file patch whose only change is
+    /// `=>` becoming `->`, in a window big enough to lay the list out.
+    fn show_arrows(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        use crate::terminal::git_diff::DiffLine;
+
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        show(app, vcx, arrows_source());
+        app.update_in(vcx, |app, _, cx| {
+            let overlay = app.tabs[app.active].diff_overlay.as_mut().unwrap();
+            let mut snap = one_file_snapshot(arrows_source());
+            snap.files[0].hunks[0].lines = vec![
+                DiffLine {
+                    kind: LineKind::Context,
+                    old_no: Some(1),
+                    new_no: Some(1),
+                    text: "fn keep() {}".into(),
+                },
+                DiffLine {
+                    kind: LineKind::Removed,
+                    old_no: Some(2),
+                    new_no: None,
+                    text: "let f = |a| a => b;".into(),
+                },
+                DiffLine {
+                    kind: LineKind::Added,
+                    old_no: None,
+                    new_no: Some(2),
+                    text: "let f = |a| a -> b;".into(),
+                },
+            ];
+            overlay.load = DiffLoad::Ready(Arc::new(snap));
+            cx.notify();
+        });
+    }
+
+    fn set_view(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, mode: DiffViewMode) {
+        app.update_in(vcx, |app, _, cx| {
+            app.update_config(cx, |cfg| cfg.diff_view = mode)
+        });
+    }
+
+    /// What every probe saw in each of two real frames, with the overlay
+    /// focused on `focus` (or on the file list). Each frame is forced dirty
+    /// first, so the second is a genuine repaint of the settled list rather
+    /// than the first one counted twice.
+    fn paint(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        focus: Option<&str>,
+    ) -> [Vec<Seen>; 2] {
+        vcx.background_executor.run_until_parked();
+        app.update_in(vcx, |app, _, cx| {
+            let overlay = app.tabs[app.active].diff_overlay.as_mut().unwrap();
+            overlay.focus = focus.map(str::to_string);
+            cx.notify();
+        });
+        [(), ()].map(|()| {
+            row_probe::take_painted();
+            vcx.update(|window, cx| {
+                window.refresh();
+                let _ = window.draw(cx);
+            });
+            row_probe::take_painted()
+        })
+    }
+
+    /// Every sighting of `label`, in every frame, must carry `want`, and each
+    /// frame must have at least one: a probe that never painted proves
+    /// nothing, and one frame's sighting must not stand in for the other's.
+    fn assert_painted(
+        frames: &[Vec<Seen>; 2],
+        label: &str,
+        want: &gpui::FontFeatures,
+        state: &str,
+    ) {
+        for (n, seen) in frames.iter().enumerate() {
+            let mine: Vec<_> = seen.iter().filter(|(l, _)| *l == label).collect();
+            assert!(
+                !mine.is_empty(),
+                "{label} never painted in frame {n} ({state})"
+            );
+            for (_, got) in mine {
+                assert_eq!(got, want, "{label} in frame {n} ({state})");
+            }
+        }
+    }
+
+    /// Settings → Font ligatures decides how the diff's own text is drawn,
+    /// code rows and the header's identifiers alike; the line-number gutters
+    /// keep tabular figures whichever way it is set. Observed where the text
+    /// paints, after the setting changes under a live overlay, both
+    /// directions and both views.
+    ///
+    /// Off must read exactly as the terminal's grid does (`calt`, `liga` and
+    /// `clig` named off, `tnum` not part of it): the gutter alone adds `tnum`.
+    #[gpui::test]
+    fn diff_text_follows_the_ligature_setting_in_both_views(cx: &mut TestAppContext) {
+        let off = features(&[("calt", 0), ("liga", 0), ("clig", 0)]);
+        let off_gutter = features(&[("calt", 0), ("liga", 0), ("clig", 0), ("tnum", 1)]);
+        let on = features(&[("calt", 1), ("liga", 1)]);
+        let on_gutter = features(&[("calt", 1), ("liga", 1), ("tnum", 1)]);
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        show_arrows(&app, &mut vcx);
+
+        for (mode, view) in [
+            (DiffViewMode::Split, "split"),
+            (DiffViewMode::Unified, "unified"),
+        ] {
+            set_view(&app, &mut vcx, mode);
+            let code = format!("code-{view}");
+            let gutter = format!("gutter-{view}");
+            // Starts on, so the first assertion is the user's change (the
+            // face's ligatures reaching the diff). The `false` step is the
+            // off-set control and the last `true` proves it comes back.
+            for (ligatures, want, want_gutter) in [
+                (true, &on, &on_gutter),
+                (false, &off, &off_gutter),
+                (true, &on, &on_gutter),
+            ] {
+                app.update_in(&mut vcx, |app, _, cx| app.set_font_ligatures(ligatures, cx));
+                let state = format!("{view}, ligatures {ligatures}");
+                let list = paint(&app, &mut vcx, None);
+                assert_painted(&list, &code, want, &state);
+                assert_painted(&list, &gutter, want_gutter, &state);
+                for label in ["header-rev", "hunk", "file-path", "untracked-path"] {
+                    assert_painted(&list, label, want, &state);
+                }
+                let focused = paint(&app, &mut vcx, Some("a.rs"));
+                assert_painted(&focused, "header-path", want, &state);
+                assert_painted(&focused, &code, want, &state);
+            }
+        }
+    }
+
+    /// A configured list is the user's, tag for tag: the diff does not read
+    /// it as a yes/no. Only the gutter touches it, and only to keep `tnum` on.
+    /// Clearing the list afterwards returns to the off set.
+    #[gpui::test]
+    fn a_configured_feature_list_reaches_the_diff_tag_for_tag(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        show_arrows(&app, &mut vcx);
+        set_view(&app, &mut vcx, DiffViewMode::Unified);
+
+        let custom = crate::core::config::FontFeatures(Arc::new(vec![
+            ("ss01".to_string(), 1),
+            ("tnum".to_string(), 0),
+        ]));
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.update_config(cx, |cfg| cfg.font_features = Some(custom))
+        });
+        let seen = paint(&app, &mut vcx, None);
+        assert_painted(
+            &seen,
+            "code-unified",
+            &features(&[("ss01", 1), ("tnum", 0)]),
+            "custom list",
+        );
+        assert_painted(
+            &seen,
+            "hunk",
+            &features(&[("ss01", 1), ("tnum", 0)]),
+            "custom list",
+        );
+        assert_painted(
+            &seen,
+            "gutter-unified",
+            &features(&[("ss01", 1), ("tnum", 1)]),
+            "custom list",
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.update_config(cx, |cfg| cfg.font_features = None)
+        });
+        let seen = paint(&app, &mut vcx, None);
+        assert_painted(
+            &seen,
+            "code-unified",
+            &features(&[("calt", 0), ("liga", 0), ("clig", 0)]),
+            "list cleared",
+        );
+    }
+
+    /// What the window is built with counts too: a list already in the config
+    /// when the app starts reaches the diff the same way one edited later does.
+    #[gpui::test]
+    fn a_feature_list_present_at_startup_reaches_the_diff(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs_configured(cx, 1, |cfg| {
+            cfg.font_features = Some(crate::core::config::FontFeatures(Arc::new(vec![(
+                "ss01".to_string(),
+                1,
+            )])));
+        });
+        show_arrows(&app, &mut vcx);
+        set_view(&app, &mut vcx, DiffViewMode::Unified);
+
+        let seen = paint(&app, &mut vcx, None);
+        assert_painted(
+            &seen,
+            "code-unified",
+            &features(&[("ss01", 1)]),
+            "at startup",
+        );
+        assert_painted(
+            &seen,
+            "gutter-unified",
+            &features(&[("ss01", 1), ("tnum", 1)]),
+            "at startup",
+        );
+    }
+
+    /// The set a row is drawn with is resolved when the setting changes, not
+    /// rebuilt for each row or each frame: every row in a frame, and the
+    /// next frame's rows, hold the one shared table.
+    #[gpui::test]
+    fn the_resolved_feature_set_is_shared_across_rows_and_frames(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        show_arrows(&app, &mut vcx);
+        set_view(&app, &mut vcx, DiffViewMode::Split);
+        app.update_in(&mut vcx, |app, _, cx| app.set_font_ligatures(true, cx));
+
+        let frames = paint(&app, &mut vcx, None);
+        assert_painted(
+            &frames,
+            "code-split",
+            &features(&[("calt", 1), ("liga", 1)]),
+            "ligatures on",
+        );
+        let later = paint(&app, &mut vcx, None);
+
+        for group in ["code-split", "gutter-split"] {
+            let tables: Vec<_> = frames
+                .iter()
+                .chain(&later)
+                .flatten()
+                .filter(|(l, _)| *l == group)
+                .map(|(_, f)| f.0.clone())
+                .collect();
+            assert!(
+                tables.len() >= 8,
+                "{group}: two cells a row over four frames, got {}",
+                tables.len()
+            );
+            assert!(
+                tables.iter().all(|t| Arc::ptr_eq(t, &tables[0])),
+                "{group} was rebuilt rather than cloned from the cached set"
+            );
+        }
+    }
+
+    /// The comparable facts of every row the overlay holds: which line, which
+    /// side, its numbers and text, and whether it is a change.
+    fn row_facts(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<String> {
+        app.update_in(vcx, |app, _, _| {
+            let overlay = app.tabs[app.active].diff_overlay.as_ref().unwrap();
+            let mut facts = Vec::new();
+            for row in overlay.rows.iter() {
+                match row {
+                    DiffRow::Split { row, at } => {
+                        for (side, cell) in [("old", &row.left), ("new", &row.right)] {
+                            if let Some(c) = cell {
+                                facts.push(format!(
+                                    "{} {side} {:?} {:?} changed={} {:?}",
+                                    at.path, at.id.hunk, c.no, c.changed, c.text
+                                ));
+                            }
+                        }
+                    }
+                    DiffRow::Unified { row, at } => facts.push(format!(
+                        "{} {:?} {:?}/{:?} {:?}",
+                        at.path, row.kind as u8, row.old, row.new, row.text
+                    )),
+                    _ => {}
+                }
+            }
+            facts
+        })
+    }
+
+    /// CONTROL (passes on the unchanged code): the patch is diffed and its
+    /// changes classified by characters, so the rows — which line, which
+    /// side, which text, which are changes — are identical whatever the
+    /// ligature setting. `=>` against `->` is one removed and one added line
+    /// holding exactly the characters the file has.
+    #[gpui::test]
+    fn control_rows_and_changes_ignore_the_ligature_setting(cx: &mut TestAppContext) {
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        show_arrows(&app, &mut vcx);
+        for (mode, view) in [
+            (DiffViewMode::Split, "split"),
+            (DiffViewMode::Unified, "unified"),
+        ] {
+            set_view(&app, &mut vcx, mode);
+            paint(&app, &mut vcx, None);
+            let before = row_facts(&app, &mut vcx);
+            for on in [true, false] {
+                app.update_in(&mut vcx, |app, _, cx| app.set_font_ligatures(on, cx));
+                paint(&app, &mut vcx, None);
+                assert_eq!(
+                    row_facts(&app, &mut vcx),
+                    before,
+                    "{view} rows moved with ligatures {on}"
+                );
+            }
+            let joined = before.join("\n");
+            assert!(joined.contains("let f = |a| a => b;"), "{view}: {joined}");
+            assert!(joined.contains("let f = |a| a -> b;"), "{view}: {joined}");
+            assert!(
+                before.len() >= 3,
+                "{view}: the control saw no rows to compare: {joined}"
+            );
+        }
     }
 
     /// Returning to the terminal docks the current diff instead of closing or

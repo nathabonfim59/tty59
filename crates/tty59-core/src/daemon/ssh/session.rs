@@ -133,7 +133,7 @@ pub fn make_bridge() -> BridgeEnds {
     }
 }
 
-fn pixels(size: WinSize) -> (u32, u32) {
+pub(super) fn pixels(size: WinSize) -> (u32, u32) {
     (
         u32::from(size.cols).saturating_mul(u32::from(size.cell_w)),
         u32::from(size.rows).saturating_mul(u32::from(size.cell_h)),
