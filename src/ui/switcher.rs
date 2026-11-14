@@ -3410,7 +3410,7 @@ impl Tty59App {
                     .flex_shrink_0()
                     .items_end()
                     .gap(px(2.))
-                    .text_size(gpui::rems(11.5 / 16.))
+                    .text_size(gpui::rems(12. / 16.))
                     .text_color(secondary)
                     // In words, the way the tab column's header says it: a
                     // bare `1` here sat a few pixels from the slot number after
