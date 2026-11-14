@@ -14,7 +14,9 @@ mod score;
 mod sources;
 mod view;
 
-pub(crate) use command::{Avatar, ChromeState, CommandGroup, CommandKind, Item};
+pub(crate) use command::{
+    Avatar, ChromeState, CommandGroup, CommandKind, Item, agent_launch_items,
+};
 pub(crate) use files::{FileIndexStore, FileList};
 pub(crate) use score::fuzzy_score;
 pub(crate) use sources::{Catalog, LiveQuery, host_items};

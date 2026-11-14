@@ -37,11 +37,14 @@ pub enum CLIAgent {
 }
 
 impl CLIAgent {
+    /// Offer order: every list `installed_on` feeds — the palette's launch
+    /// rows, a fresh profile's New Tab menu — names these first, so the
+    /// agents someone is likeliest to have installed lead.
     pub const ALL: [CLIAgent; 28] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
-        CLIAgent::TraeCode,
         CLIAgent::Gemini,
+        CLIAgent::TraeCode,
         CLIAgent::Aider,
         CLIAgent::Amp,
         CLIAgent::OpenCode,
@@ -1659,6 +1662,16 @@ mod tests {
             None
         );
         assert_eq!(CLIAgent::detect_from_argv(&argv(&[])), None);
+    }
+
+    #[test]
+    fn the_agents_likeliest_installed_lead_the_offer_order() {
+        // `installed_on` and every fresh-profile list follow `ALL`: the
+        // agents someone is likeliest to have installed lead it.
+        assert_eq!(
+            &CLIAgent::ALL[..3],
+            &[CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Gemini]
+        );
     }
 
     #[test]
