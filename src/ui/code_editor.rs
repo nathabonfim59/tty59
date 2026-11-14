@@ -4792,7 +4792,8 @@ mod zoom_gpui_tests {
     /// The full-screen diagram viewer in the real editor tree, where hit
     /// testing, the wheel-zoom wrapper and the scrolling preview all sit
     /// around it: Ctrl+wheel zooms the *diagram* (and not the text, whatever
-    /// `mouse_zoom_modifier` says), a drag and a plain wheel pan it, and
+    /// `mouse_zoom_modifier` says), a middle drag and a plain wheel pan it (a
+    /// left drag does not), and
     /// every change is in the frame the event asked for — nothing here
     /// draws by hand.
     #[gpui::test]
@@ -4861,12 +4862,12 @@ mod zoom_gpui_tests {
             "the text zoom and the terminal stay where they were"
         );
 
-        // A left drag pans it.
+        // Only a middle drag pans it.
         let from = zoomed.center();
         let to = gpui::point(from.x - px(30.), from.y - px(10.));
-        vcx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
-        vcx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
-        vcx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_down(from, gpui::MouseButton::Middle, gpui::Modifiers::none());
+        vcx.simulate_mouse_move(to, Some(gpui::MouseButton::Middle), gpui::Modifiers::none());
+        vcx.simulate_mouse_up(to, gpui::MouseButton::Middle, gpui::Modifiers::none());
         vcx.run_until_parked();
         let dragged = painted(&mut vcx);
         near(
@@ -4878,6 +4879,23 @@ mod zoom_gpui_tests {
             dragged.origin.y.as_f32(),
             zoomed.origin.y.as_f32() - 10.,
             "drag y",
+        );
+
+        // A left drag leaves the diagram where it was.
+        let left_from = dragged.center();
+        let left_to = gpui::point(left_from.x - px(30.), left_from.y - px(10.));
+        vcx.simulate_mouse_down(left_from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_move(
+            left_to,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::none(),
+        );
+        vcx.simulate_mouse_up(left_to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(
+            painted(&mut vcx).origin,
+            dragged.origin,
+            "a left drag leaves the diagram where it was"
         );
 
         // A plain wheel pans too, and leaves the scale alone.
