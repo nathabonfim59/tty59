@@ -5004,7 +5004,9 @@ pub(crate) mod overflow_gpui_tests {
         for (language, width, tail) in [
             ("en", 700., " — process exited"),
             ("ru-RU", 700., ": процесс завершён"),
-            ("ja-JP", 600., " — プロセスが終了しました"),
+            // The smaller zero-count pill admits a second chip at 600px. At
+            // 640px this fixture again has room for the full tail and cut name.
+            ("ja-JP", 640., " — プロセスが終了しました"),
             ("zh-CN", 550., " — 进程已退出"),
         ] {
             crate::ui::i18n::set_locale(language);
