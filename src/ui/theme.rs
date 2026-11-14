@@ -714,6 +714,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
         image: theme.image.clone(),
     });
     cx.set_global(surfaces.clone());
+    cx.set_global(sem);
     cx.set_global(interaction);
     cx.set_global(presets::ActiveAccent(m.accent));
     // Same treatment as `Surfaces`: derived once here rather than recomputed
@@ -1017,6 +1018,21 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     if let Some(window) = window.as_deref_mut() {
         window.set_traffic_light_position(traffic_light_position());
     }
+}
+
+/// Reads the cached [`presets::Semantics`] global populated on theme change
+/// so renderers avoid recomputing contrast floors per frame.
+pub(crate) fn semantics(cx: &App) -> presets::Semantics {
+    *cx.global::<presets::Semantics>()
+}
+
+/// Resolves a theme-free [`crate::core::cli_agent::AgentStatus`] via cached
+/// theme semantics so callers read role colours without core UI dependencies.
+pub(crate) fn agent_status_semantic(
+    status: crate::core::cli_agent::AgentStatus,
+    cx: &App,
+) -> Option<presets::Semantic> {
+    semantics(cx).for_agent_status(status)
 }
 
 /// Shared opaque floating surface. In-window GPUI layers cannot blur the
@@ -1842,6 +1858,121 @@ mod tests {
                     "{name} text keeps the floor on its fill"
                 );
             }
+        });
+    }
+
+    #[gpui::test]
+    fn apply_theme_installs_semantics_global_and_agent_status_contract(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            for id in ["light", "dark"] {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: id.into(),
+                    ..Default::default()
+                }));
+                apply_theme(None, cx);
+
+                let expected = presets::by_id(cx, id).semantics();
+                let global_sem = *cx
+                    .try_global::<presets::Semantics>()
+                    .expect("apply_theme installs presets::Semantics global");
+                let sem = semantics(cx);
+
+                for (name, got_g, got_fn, exp) in [
+                    ("danger", global_sem.danger, sem.danger, expected.danger),
+                    ("warning", global_sem.warning, sem.warning, expected.warning),
+                    ("success", global_sem.success, sem.success, expected.success),
+                    ("info", global_sem.info, sem.info, expected.info),
+                    ("link", global_sem.link, sem.link, expected.link),
+                ] {
+                    assert_eq!(got_g.ink, exp.ink, "{id}/{name}: global ink");
+                    assert_eq!(got_g.fill, exp.fill, "{id}/{name}: global fill");
+                    assert_eq!(got_g.on_fill, exp.on_fill, "{id}/{name}: global on_fill");
+                    assert_eq!(got_fn.ink, exp.ink, "{id}/{name}: accessor ink");
+                    assert_eq!(got_fn.fill, exp.fill, "{id}/{name}: accessor fill");
+                    assert_eq!(got_fn.on_fill, exp.on_fill, "{id}/{name}: accessor on_fill");
+                }
+
+                let t = cx.theme();
+                assert_eq!(hsla24(t.danger), expected.danger.ink);
+                assert_eq!(hsla24(t.warning), expected.warning.ink);
+                assert_eq!(hsla24(t.success), expected.success.ink);
+                assert_eq!(hsla24(t.info), expected.info.ink);
+                assert_eq!(hsla24(t.link), expected.link.ink);
+
+                assert!(agent_status_semantic(AgentStatus::Idle, cx).is_none());
+                assert_eq!(
+                    agent_status_semantic(AgentStatus::Working, cx).map(|s| s.ink),
+                    Some(expected.info.ink)
+                );
+                assert_eq!(
+                    agent_status_semantic(AgentStatus::Waiting, cx).map(|s| s.ink),
+                    Some(expected.warning.ink)
+                );
+                assert_eq!(
+                    agent_status_semantic(AgentStatus::Done, cx).map(|s| s.ink),
+                    Some(expected.success.ink)
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn switching_theme_presets_updates_cached_semantics_global(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let light_expected = presets::by_id(cx, "light").semantics();
+            let mut prev_working_ink = None;
+
+            for id in ["light", "dracula", "catppuccin_latte", "light"] {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: id.into(),
+                    ..Default::default()
+                }));
+                apply_theme(None, cx);
+
+                let expected = presets::by_id(cx, id).semantics();
+                let sem = semantics(cx);
+                assert_eq!(sem.info.ink, expected.info.ink, "{id}: info ink");
+                assert_eq!(sem.info.fill, expected.info.fill, "{id}: info fill");
+                assert_eq!(
+                    sem.info.on_fill, expected.info.on_fill,
+                    "{id}: info on_fill"
+                );
+                assert_eq!(sem.warning.ink, expected.warning.ink, "{id}: warning ink");
+                assert_eq!(sem.success.ink, expected.success.ink, "{id}: success ink");
+
+                let working = agent_status_semantic(AgentStatus::Working, cx)
+                    .expect("Working maps to info role");
+                assert_eq!(working.ink, expected.info.ink);
+                assert_eq!(working.fill, expected.info.fill);
+                assert_eq!(working.on_fill, expected.info.on_fill);
+                assert_eq!(
+                    agent_status_semantic(AgentStatus::Waiting, cx).map(|s| (s.ink, s.fill)),
+                    Some((expected.warning.ink, expected.warning.fill))
+                );
+                assert_eq!(
+                    agent_status_semantic(AgentStatus::Done, cx).map(|s| (s.ink, s.fill)),
+                    Some((expected.success.ink, expected.success.fill))
+                );
+                assert!(agent_status_semantic(AgentStatus::Idle, cx).is_none());
+
+                if let Some(prev) = prev_working_ink {
+                    assert_ne!(
+                        working.ink, prev,
+                        "{id}: switching theme updates active status ink"
+                    );
+                }
+                prev_working_ink = Some(working.ink);
+            }
+
+            assert_eq!(semantics(cx).info.ink, light_expected.info.ink);
         });
     }
 }

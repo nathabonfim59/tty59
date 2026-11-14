@@ -76,13 +76,31 @@ pub struct Semantic {
     pub on_fill: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Semantics {
     pub danger: Semantic,
     pub warning: Semantic,
     pub success: Semantic,
     pub info: Semantic,
     pub link: Semantic,
+}
+
+impl Global for Semantics {}
+
+impl Semantics {
+    /// Maps core agent status onto the active theme's existing semantic roles
+    /// so `tty59-core` stays free of UI theme dependencies.
+    pub(crate) fn for_agent_status(
+        &self,
+        status: crate::core::cli_agent::AgentStatus,
+    ) -> Option<Semantic> {
+        match status {
+            crate::core::cli_agent::AgentStatus::Idle => None,
+            crate::core::cli_agent::AgentStatus::Working => Some(self.info),
+            crate::core::cli_agent::AgentStatus::Waiting => Some(self.warning),
+            crate::core::cli_agent::AgentStatus::Done => Some(self.success),
+        }
+    }
 }
 
 /// UI interaction roles. Terminal ANSI colours are deliberately independent.
@@ -217,9 +235,12 @@ impl Theme {
         };
         let border = hairline(0.16, BORDER_FLOOR);
         let divider = hairline(0.16, DIVIDER_FLOOR);
-        // This shared caption role is painted on all three opaque surfaces.
-        // Calibrating only against the window loses contrast on raised fills.
-        let muted_foreground = [bg, sidebar, rail, popover]
+        let (rail_hover, rail_selected) = panel_rungs(rail, fg);
+        // This shared caption role is painted on all three opaque surfaces plus
+        // the left rail's hover and selected fills. Calibrating only against
+        // resting surfaces leaves light-mode captions under 4.5:1 on hover,
+        // selected rows, and the rail's search well.
+        let muted_foreground = [bg, sidebar, rail, popover, rail_hover, rail_selected]
             .into_iter()
             .fold(dim(fg, bg, state::TEXT_RESTING), |ink, surface| {
                 legible_ink(surface, ink, TEXT_FLOOR)
@@ -298,10 +319,9 @@ impl Theme {
     /// tint out of a rung this faint, and the row reads as a grey patch on
     /// cream.
     fn panel_surface(&self, base: u32, text_resting: u32, fg: u32) -> Surface {
-        let shade = shade_of(base, fg);
-        let selected = raise(base, shade, state::PANEL_SELECTED);
+        let (hover, selected) = panel_rungs(base, fg);
         Surface {
-            hover: raise(base, shade, state::PANEL_HOVER),
+            hover,
             selected,
             text_resting,
             text_selected: stepped_ink(selected, base, fg, text_resting),
@@ -519,6 +539,14 @@ fn bisect_contrast(from: u32, toward: u32, against: u32, target: f32) -> u32 {
         if reached { hi = m } else { lo = m }
     }
     mix(from, toward, hi)
+}
+
+fn panel_rungs(base: u32, fg: u32) -> (u32, u32) {
+    let shade = shade_of(base, fg);
+    (
+        raise(base, shade, state::PANEL_HOVER),
+        raise(base, shade, state::PANEL_SELECTED),
+    )
 }
 
 fn raise(base: u32, toward: u32, target: f32) -> u32 {
@@ -743,7 +771,7 @@ pub(crate) fn wash(surface: u32, tint: u32, target: f32) -> u32 {
     mix(surface, tint, hi)
 }
 
-const TEXT_FLOOR: f32 = 4.5;
+pub(crate) const TEXT_FLOOR: f32 = 4.5;
 
 /// How far the left rail's fill steps off the window toward the ink.
 const RAIL_TINT: f32 = 0.03;
@@ -802,7 +830,7 @@ fn at_least(ink: u32, toward: u32, surface: u32, target: f32) -> u32 {
     legible_ink(surface, lifted, target)
 }
 
-fn legible_ink(bg: u32, seed: u32, floor: f32) -> u32 {
+pub(crate) fn legible_ink(bg: u32, seed: u32, floor: f32) -> u32 {
     if contrast(seed, bg) >= floor {
         return seed;
     }
@@ -2162,6 +2190,71 @@ mod tests {
     }
 
     #[test]
+    fn agent_status_semantics_clear_floors_on_rail_and_window() {
+        use crate::core::cli_agent::AgentStatus;
+        for t in builtins() {
+            let sem = t.semantics();
+            let sf = t.surfaces();
+            assert!(
+                sem.for_agent_status(AgentStatus::Idle).is_none(),
+                "{}: Idle should carry no status role",
+                t.id
+            );
+            for (label, status) in [
+                ("Working", AgentStatus::Working),
+                ("Waiting", AgentStatus::Waiting),
+                ("Done", AgentStatus::Done),
+            ] {
+                let role = sem
+                    .for_agent_status(status)
+                    .unwrap_or_else(|| panic!("{}: {label} missing semantic role", t.id));
+                for (surface_name, surface) in [
+                    ("rail.base", sf.rail.base),
+                    ("rail.hover", sf.rail.hover),
+                    ("rail.selected", sf.rail.selected),
+                    ("window.base", sf.window.base),
+                    ("window.hover", sf.window.hover),
+                    ("window.selected", sf.window.selected),
+                ] {
+                    let ink_ratio = contrast(role.ink, surface);
+                    assert!(
+                        ink_ratio >= ACCENT_FLOOR - 0.01,
+                        "{}/{label}: ink {:#08x} only {ink_ratio:.2}:1 on {surface_name} {surface:#08x}",
+                        t.id,
+                        role.ink
+                    );
+                }
+                for (surface_name, surface) in
+                    [("rail.base", sf.rail.base), ("window.base", sf.window.base)]
+                {
+                    let ink_ratio = contrast(role.ink, surface);
+                    assert!(
+                        ink_ratio >= TEXT_FLOOR - 0.01,
+                        "{}/{label}: text ink {:#08x} only {ink_ratio:.2}:1 on {surface_name} {surface:#08x}",
+                        t.id,
+                        role.ink
+                    );
+                    let fill_ratio = contrast(role.fill, surface);
+                    assert!(
+                        fill_ratio >= ACCENT_FLOOR - 0.01,
+                        "{}/{label}: fill {:#08x} only {fill_ratio:.2}:1 on {surface_name} {surface:#08x}",
+                        t.id,
+                        role.fill
+                    );
+                }
+                let on_fill_ratio = contrast(role.on_fill, role.fill);
+                assert!(
+                    on_fill_ratio >= TEXT_FLOOR - 0.01,
+                    "{}/{label}: on_fill {:#08x} only {on_fill_ratio:.2}:1 on fill {:#08x}",
+                    t.id,
+                    role.on_fill,
+                    role.fill
+                );
+            }
+        }
+    }
+
+    #[test]
     fn semantic_roles_are_independent_of_terminal_ansi() {
         let mut theme = builtins().into_iter().find(|t| t.id == "dracula").unwrap();
         let before = theme.semantics();
@@ -2206,7 +2299,15 @@ mod tests {
     fn captions_are_readable_on_every_surface_they_are_used_on() {
         for theme in builtins() {
             let m = theme.neutrals();
-            for surface in [m.background, m.sidebar, m.rail, m.popover] {
+            let s = theme.surfaces();
+            for surface in [
+                m.background,
+                m.sidebar,
+                m.rail,
+                m.popover,
+                s.rail.hover,
+                s.rail.selected,
+            ] {
                 assert!(
                     contrast(m.muted_foreground, surface) >= TEXT_FLOOR,
                     "{}: caption {:#08x} on {surface:#08x}",
