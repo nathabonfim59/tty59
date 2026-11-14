@@ -1602,6 +1602,7 @@ impl Tty59App {
                 cfg.scrollback_limit,
             )
         };
+        crate::ui::diff_overlay::refresh_diff_features(font_features.as_ref(), cx);
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
@@ -3382,6 +3383,7 @@ impl Tty59App {
             .as_ref()
             .map(crate::core::config::gpui_font_features);
         self.font_features = gpui_features.clone();
+        crate::ui::diff_overlay::refresh_diff_features(gpui_features.as_ref(), cx);
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let features = gpui_features.clone();
@@ -8355,6 +8357,7 @@ impl Tty59App {
         }
         if font_features != self.font_features {
             self.font_features = font_features.clone();
+            crate::ui::diff_overlay::refresh_diff_features(font_features.as_ref(), cx);
             for tab in &self.tabs {
                 for leaf in tab.pane.terminals() {
                     let features = font_features.clone();
@@ -12794,12 +12797,23 @@ pub(crate) mod test_window {
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
     pub(crate) fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
+        harness_configured(cx, |_| {})
+    }
+
+    /// `harness` over a config edited before the window is built, for what
+    /// the app reads once at construction.
+    pub(crate) fn harness_configured(
+        cx: &mut TestAppContext,
+        edit: impl FnOnce(&mut Config),
+    ) -> (Entity<Tty59App>, VisualTestContext) {
         crate::core::config::pin_test_config_dir();
 
         cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
-            cx.set_global(Config::default());
+            let mut config = Config::default();
+            edit(&mut config);
+            cx.set_global(config);
             crate::ui::keymap::init(cx);
         });
         let window = cx.add_window(|window, cx| {
@@ -12833,10 +12847,22 @@ pub(crate) mod test_window {
         VisualTestContext,
         Vec<crate::daemon::transport::Stream>,
     ) {
+        harness_with_tabs_configured(cx, n, |_| {})
+    }
+
+    pub(crate) fn harness_with_tabs_configured(
+        cx: &mut TestAppContext,
+        n: usize,
+        edit: impl FnOnce(&mut Config),
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
         use crate::terminal::view::quiet_test_pane;
         use crate::ui::pane::{Pane, PaneSlot};
 
-        let (app, mut vcx) = harness(cx);
+        let (app, mut vcx) = harness_configured(cx, edit);
         vcx.update(|_, cx| {
             let mut cfg = cx.global::<Config>().clone();
             cfg.cursor_blink = false;
