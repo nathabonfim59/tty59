@@ -3958,8 +3958,8 @@ impl Tty59App {
                 cx.stop_propagation();
                 this.editor_close_file(pos, window, cx);
             }));
-        // Unsaved is a state, not an alarm: the dot is in caption ink, the
-        // same as the `+N` button's, not the warning hue.
+        // Unsaved is the design system's 5px amber dot, the same mark as the
+        // `+N` button's and the picker's, in the theme's cached warning ink.
         let slot_el = div()
             .flex_none()
             .size(px(slot))
@@ -3967,16 +3967,21 @@ impl Tty59App {
             .items_center()
             .justify_center()
             .when(dirty, |d| {
-                d.child(
-                    div()
-                        .when(cfg!(test), |d| {
-                            d.debug_selector(move || format!("editor-file-tab-dot-{pos}"))
-                        })
-                        .group_hover(group.clone(), |s| s.invisible())
-                        .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
-                        .rounded_full()
-                        .bg(muted),
-                )
+                let dot = div()
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(move || format!("editor-file-tab-dot-{pos}"))
+                    })
+                    .group_hover(group.clone(), |s| s.invisible())
+                    .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
+                    .rounded_full()
+                    .bg(gpui::rgb(crate::ui::theme::semantics(cx).warning.ink));
+                #[cfg(test)]
+                let dot = {
+                    let mut dot = dot;
+                    crate::ui::paint_probe::note("editor-dirty-dot", &mut dot);
+                    dot
+                };
+                d.child(dot)
             });
         div()
             .id(("editor-file-tab", pos))

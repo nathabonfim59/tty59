@@ -529,6 +529,7 @@ impl Tty59App {
             return None;
         }
         let theme = cx.theme();
+        let unsaved = gpui::rgb(crate::ui::theme::semantics(cx).warning.ink);
         let open = self.editor.strip_picker.is_some();
         let hidden_dirty = hidden
             .iter()
@@ -551,15 +552,20 @@ impl Tty59App {
             .when(open, |d| d.bg(theme.sidebar_accent))
             .hover(|s| s.bg(theme.sidebar_accent).text_color(theme.foreground))
             .when(hidden_dirty, |d| {
-                d.child(
-                    div()
-                        .when(cfg!(test), |d| {
-                            d.debug_selector(|| "editor-strip-more-dot".into())
-                        })
-                        .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
-                        .rounded_full()
-                        .bg(theme.muted_foreground),
-                )
+                let dot = div()
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "editor-strip-more-dot".into())
+                    })
+                    .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
+                    .rounded_full()
+                    .bg(unsaved);
+                #[cfg(test)]
+                let dot = {
+                    let mut dot = dot;
+                    crate::ui::paint_probe::note("editor-dirty-dot", &mut dot);
+                    dot
+                };
+                d.child(dot)
             })
             .child(format!("+{}", hidden.len()))
             .child(
@@ -596,6 +602,7 @@ impl Tty59App {
         let hi = picker.hi.min(rows.len().saturating_sub(1));
         let theme = cx.theme();
         let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let unsaved = gpui::rgb(crate::ui::theme::semantics(cx).warning.ink);
         let row_hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().popover.hover);
 
         let heading = |label: SharedString| {
@@ -643,8 +650,8 @@ impl Tty59App {
                             .items_center()
                             .justify_center()
                             .group_hover(group.clone(), |s| s.invisible())
-                            .child(
-                                div()
+                            .child({
+                                let dot = div()
                                     .when(cfg!(test), |d| {
                                         d.debug_selector(move || {
                                             format!("editor-strip-row-dot-{i}")
@@ -652,8 +659,15 @@ impl Tty59App {
                                     })
                                     .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
                                     .rounded_full()
-                                    .bg(muted),
-                            ),
+                                    .bg(unsaved);
+                                #[cfg(test)]
+                                let dot = {
+                                    let mut dot = dot;
+                                    crate::ui::paint_probe::note("editor-dirty-dot", &mut dot);
+                                    dot
+                                };
+                                dot
+                            }),
                     )
                 })
                 .child(
@@ -1305,8 +1319,32 @@ mod gpui_tests {
         assert_header(&app, &mut vcx, "other group focused");
     }
 
+    /// The unsaved mark's paint, as the builders put it: every dirty dot
+    /// drawn since the last clear is filled with the theme's cached warning
+    /// ink (editor F3), none in the grey it used to be.
+    fn assert_dirty_dots_warning(vcx: &mut VisualTestContext, at: &str) {
+        let (warning, muted) = vcx.update(|_, cx| {
+            (
+                crate::ui::theme::semantics(cx).warning.ink,
+                crate::ui::paint_probe::hsla24(cx.theme().muted_foreground),
+            )
+        });
+        let dots = crate::ui::paint_probe::all("editor-dirty-dot");
+        assert!(!dots.is_empty(), "{at}: no unsaved dot was built");
+        for dot in &dots {
+            assert_eq!(
+                dot.fill,
+                Some(warning),
+                "{at}: the warning ink, not {muted:06x}"
+            );
+            assert_eq!(dot.fill_alpha, Some(1.), "{at}: an opaque mark");
+        }
+        crate::ui::paint_probe::clear();
+    }
+
     #[gpui::test]
     fn tab_and_picker_dirty_dots_are_5px(cx: &mut TestAppContext) {
+        let _probe = crate::ui::paint_probe::scope();
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
         crate::ui::i18n::set_locale("en");
         dock_config(&mut vcx, DocumentLayout::Dock);
@@ -1341,6 +1379,7 @@ mod gpui_tests {
             size(px(5.), px(5.)),
             "+N dirty dot must be 5px"
         );
+        assert_dirty_dots_warning(&mut vcx, "strip and +N");
 
         app.update_in(&mut vcx, |app, window, cx| {
             app.editor_toggle_strip_picker(window, cx);
@@ -1354,6 +1393,81 @@ mod gpui_tests {
             picker_dot.size,
             size(px(5.), px(5.)),
             "picker row dirty dot must be 5px"
+        );
+        assert_dirty_dots_warning(&mut vcx, "picker");
+    }
+
+    /// A clean file has no dot and a dirty one has one, and on either the
+    /// slot still turns into the close button under the pointer: clicking
+    /// it closes the clean file and asks about the dirty one.
+    #[gpui::test]
+    fn the_dirty_dot_marks_only_unsaved_files_and_yields_to_close_on_hover(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Dock);
+        resize(&mut vcx, 1440., 900.);
+        let ids: Vec<_> = (0..3)
+            .map(|i| open_rs(&app, &mut vcx, &format!("/dots/hover-file-{i}.rs")))
+            .collect();
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.buffer_mut(ids[1]).unwrap().dirty = true;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        let pos_of = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext, id: BufferId| {
+            app.read_with(&*vcx, |app, _| {
+                app.tab_code()
+                    .and_then(|code| code.files.iter().position(|f| *f == id))
+                    .expect("the file is in the strip")
+            })
+        };
+        let (clean, dirty) = (
+            pos_of(&app, &mut vcx, ids[0]),
+            pos_of(&app, &mut vcx, ids[1]),
+        );
+        assert!(
+            vcx.debug_bounds(TAB_DOT_SELECTORS[clean]).is_none(),
+            "clean: no dot"
+        );
+        assert!(
+            vcx.debug_bounds(TAB_DOT_SELECTORS[dirty]).is_some(),
+            "dirty: a dot"
+        );
+
+        // The slot is the tab's last 16px before its 6px end padding.
+        let slot_centre = |vcx: &mut VisualTestContext, pos: usize| {
+            let tab = vcx
+                .debug_bounds(TAB_SELECTORS[pos])
+                .expect("the tab is drawn");
+            gpui::point(tab.right() - px(6. + 8.), tab.center().y)
+        };
+        let hover_click = |vcx: &mut VisualTestContext, at: gpui::Point<Pixels>| {
+            vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.simulate_click(at, gpui::Modifiers::none());
+            vcx.run_until_parked();
+        };
+
+        let at = slot_centre(&mut vcx, dirty);
+        hover_click(&mut vcx, at);
+        assert!(
+            vcx.has_pending_prompt(),
+            "the dirty tab's dot gave way to close, which asks first"
+        );
+        vcx.simulate_prompt_answer(t(L10nKey::Cancel));
+        vcx.run_until_parked();
+
+        let at = slot_centre(&mut vcx, clean);
+        hover_click(&mut vcx, at);
+        assert!(
+            app.read_with(&vcx, |app, _| app
+                .tab_code()
+                .is_some_and(|code| !code.files.contains(&ids[0]))),
+            "the clean tab's close button closed it"
         );
     }
 
