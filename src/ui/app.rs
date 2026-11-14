@@ -9843,15 +9843,7 @@ impl Render for Tty59App {
         } else {
             self.document_dock_px(window, cx)
         };
-        // Where the docked header sits. Everywhere but macOS the title bar
-        // spans the workspace and leaves the strip above the column empty, so
-        // the header goes up into it; on macOS the column already reaches the
-        // top of the window and its own first row lands there.
-        let document_chrome = if cfg!(target_os = "macos") {
-            crate::ui::document_column::DocumentChrome::Dock
-        } else {
-            crate::ui::document_column::DocumentChrome::DockHoisted
-        };
+        let document_chrome = self.docked_document_chrome(window, cx);
         let document_header = document_dock_px
             .is_some()
             .then(|| self.render_document_header(document_chrome, window, cx))
