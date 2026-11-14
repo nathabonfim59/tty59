@@ -417,6 +417,8 @@ l10n_keys! {
     SettingsInheritedByEveryHost,
     SettingsNoSavedHosts,
     SettingsNothingMatches,
+    SettingsNoSettingsMatch,
+    SettingsClearSearch,
     SettingsInTty59,
     SettingsImportFromSshConfig,
     SettingsExpandAllGroups,

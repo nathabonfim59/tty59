@@ -405,6 +405,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsInheritedByEveryHost => "Inherited by every host",
         L10nKey::SettingsNoSavedHosts => "No saved hosts yet.",
         L10nKey::SettingsNothingMatches => "Nothing matches {query}.",
+        L10nKey::SettingsNoSettingsMatch => "No settings match “{query}”.",
+        L10nKey::SettingsClearSearch => "Clear search",
         L10nKey::SettingsInTty59 => "tty59 settings",
         L10nKey::SettingsImportFromSshConfig => "Import from ~/.ssh/config",
         L10nKey::SettingsExpandAllGroups => "Expand All Groups",

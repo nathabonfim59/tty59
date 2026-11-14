@@ -197,7 +197,7 @@ impl Tty59App {
                             div()
                                 .pl(px(12.))
                                 .text_size(fs(11.5))
-                                .text_color(tk.k4)
+                                .text_color(tk.sub)
                                 .child(text),
                         )
                     })
@@ -215,7 +215,7 @@ impl Tty59App {
                         .pb(px(6.))
                         .text_size(fs(11.5))
                         .line_height(px(16.))
-                        .text_color(tk.k45)
+                        .text_color(tk.sub)
                         .child(text),
                 ),
             };
@@ -312,7 +312,7 @@ impl Tty59App {
                         .px(px(8.))
                         .flex()
                         .items_center()
-                        .text_color(tk.k35)
+                        .text_color(tk.sub)
                         .child(t(L10nKey::SettingsNoMatchesShort)),
                 );
             }
@@ -371,7 +371,7 @@ impl Tty59App {
                                     .h(px(28.)),
                             ),
                         )
-                        .child(div().text_size(fs(11.)).text_color(tk.k35).child("↑↓ ↵")),
+                        .child(div().text_size(fs(11.)).text_color(tk.sub).child("↑↓ ↵")),
                 )
                 .child(list)
         });
@@ -494,29 +494,33 @@ impl Tty59App {
             .when(modified, |line| match resettable {
                 Some(entry) => {
                     let key = entry.title;
-                    line.child(
-                        div()
-                            .id(SharedString::from(format!("reset-setting-{key:?}")))
-                            .role(gpui::Role::Button)
-                            .aria_label(reset_name.clone())
-                            .flex_shrink_0()
-                            .text_size(fs(11.5))
-                            .text_color(tk.k4)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(tk.fg))
-                            .child(t(L10nKey::Reset))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.reset_settings_value(key, window, cx)
-                            })),
-                    )
-                }
-                None => line.child(
-                    div()
+                    let reset = div()
+                        .id(SharedString::from(format!("reset-setting-{key:?}")))
+                        .role(gpui::Role::Button)
+                        .aria_label(reset_name.clone())
                         .flex_shrink_0()
                         .text_size(fs(11.5))
-                        .text_color(tk.k4)
-                        .child(t(L10nKey::SettingsModified)),
-                ),
+                        .text_color(tk.sub)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(tk.fg))
+                        .child(t(L10nKey::Reset))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.reset_settings_value(key, window, cx)
+                        }));
+                    #[cfg(test)]
+                    let reset = kit::probe("settings.reset", reset);
+                    line.child(reset)
+                }
+                None => {
+                    let tag = div()
+                        .flex_shrink_0()
+                        .text_size(fs(11.5))
+                        .text_color(tk.sub)
+                        .child(t(L10nKey::SettingsModified));
+                    #[cfg(test)]
+                    let tag = kit::probe("settings.modified-tag", tag);
+                    line.child(tag)
+                }
             });
         // Tests find the row's pieces by stable selectors derived from the
         // row's own `settings-row-{key}` id. Both the selector strings and the
@@ -537,8 +541,10 @@ impl Tty59App {
                 let description = div()
                     .text_size(fs(12.))
                     .line_height(px(17.))
-                    .text_color(tk.k5)
+                    .text_color(tk.sub)
                     .child(desc);
+                #[cfg(test)]
+                let description = kit::probe("settings.row-desc", description);
                 #[cfg(test)]
                 let description = description.debug_selector(|| format!("{element_id}-desc"));
                 col.child(description)
@@ -740,7 +746,7 @@ impl Tty59App {
                         s.bg(tk.chip).shadow(tk.raised()).text_color(tk.fg)
                     })
                     .when(!active, |s| {
-                        s.text_color(tk.k5).hover(move |h| h.text_color(tk.fg))
+                        s.text_color(tk.sub).hover(move |h| h.text_color(tk.fg))
                     })
                     .child(label.to_string())
                     .cursor_pointer()
@@ -864,7 +870,7 @@ impl Tty59App {
                 .gap(px(4.))
                 .items_center()
                 .text_size(fs(12.))
-                .text_color(tk.k5)
+                .text_color(tk.sub)
                 .cursor_pointer()
                 .hover(move |s| s.text_color(tk.fg))
                 .child(Icon::empty().path("icons/settings/back.svg").size(px(10.)))
@@ -885,7 +891,12 @@ impl Tty59App {
                     .child(title),
             )
             .when_some(subtitle, |row, sub| {
-                row.child(div().text_size(fs(12.)).text_color(tk.k4).child(sub))
+                let subtitle = div().text_size(fs(12.)).text_color(tk.sub).child(sub);
+                #[cfg(test)]
+                let subtitle = kit::probe("settings.results-subtitle", subtitle);
+                #[cfg(test)]
+                let subtitle = subtitle.debug_selector(|| "settings-results-subtitle".to_string());
+                row.child(subtitle)
             });
 
         let notices = self.render_settings_notices(cx);
@@ -1019,7 +1030,7 @@ impl Tty59App {
                         Icon::empty()
                             .path("icons/settings/close.svg")
                             .size(px(10.))
-                            .text_color(tk.k45),
+                            .text_color(tk.sub),
                     )
                     .tooltip(|window, cx| {
                         gpui_component::tooltip::Tooltip::new(t(L10nKey::Close)).build(window, cx)
@@ -1206,12 +1217,13 @@ impl Tty59App {
                         .child(t(target.title())),
                 )
                 .when(count > 0, |r| {
-                    r.child(
-                        div()
-                            .text_size(fs(11.5))
-                            .text_color(tk.k4)
-                            .child(count.to_string()),
-                    )
+                    let badge = div()
+                        .text_size(fs(11.5))
+                        .text_color(tk.sub)
+                        .child(count.to_string());
+                    #[cfg(test)]
+                    let badge = kit::probe("settings.nav-count", badge);
+                    r.child(badge)
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.navigate_settings(target, None, window, cx)
@@ -1254,13 +1266,16 @@ impl Tty59App {
                                 ),
                             )
                             .when(!search_focused, |r| {
-                                r.child(div().text_size(fs(11.)).text_color(tk.k35).child(
+                                let hint = div().text_size(fs(11.)).text_color(tk.sub).child(
                                     if cfg!(target_os = "macos") {
                                         "⌘F"
                                     } else {
                                         "Ctrl F"
                                     },
-                                ))
+                                );
+                                #[cfg(test)]
+                                let hint = kit::probe("settings.search-hint", hint);
+                                r.child(hint)
                             }),
                     ),
             )
@@ -1290,14 +1305,14 @@ impl Tty59App {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_color(tk.k6)
+                                .text_color(tk.sub)
                                 .child(t(L10nKey::SettingsModifiedOnly)),
                         )
                         .when(total > 0, |r| {
                             r.child(
                                 div()
                                     .text_size(fs(11.5))
-                                    .text_color(tk.k4)
+                                    .text_color(tk.sub)
                                     .child(total.to_string()),
                             )
                         })
@@ -1379,6 +1394,17 @@ impl Tty59App {
             }
         }
         cx.stop_propagation();
+    }
+
+    /// Empties the search box and leaves the user typing in it, back on the
+    /// category they were reading before they searched.
+    fn clear_settings_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.active_settings().map(|s| s.search.clone()) else {
+            return;
+        };
+        search.update(cx, |input, cx| input.set_value("", window, cx));
+        window.focus(&search.read(cx).focus_handle(cx), cx);
+        self.autoselect_settings_search(cx);
     }
 
     /// Opens the shortcut editor filtered to one action.
@@ -1517,6 +1543,11 @@ impl Tty59App {
                     )
                     .child(row);
                 #[cfg(test)]
+                let wrapper = match selected {
+                    true => kit::probe("settings.search-row-selected", wrapper),
+                    false => wrapper,
+                };
+                #[cfg(test)]
                 let wrapper = wrapper.debug_selector(move || wrapper_debug_id.clone());
                 rows.push(wrapper.into_any_element());
                 index += 1;
@@ -1604,7 +1635,7 @@ impl Tty59App {
         } else {
             t(L10nKey::SettingsSearchResults).to_string()
         };
-        let subtitle = (!(modified_only && query.is_empty()))
+        let subtitle = (!(modified_only && query.is_empty()) && total > 0)
             .then(|| t_plural(L10nKey::SettingsMatchCount, total, &[]));
         if groups.is_empty() {
             let text = if modified_only && query.is_empty() {
@@ -1612,15 +1643,33 @@ impl Tty59App {
             } else if modified_only {
                 t(L10nKey::SettingsNoModified).to_string()
             } else {
-                t_fmt(L10nKey::SettingsNothingMatches, &[("query", &query)])
+                t_fmt(L10nKey::SettingsNoSettingsMatch, &[("query", &query)])
             };
-            groups.push(
-                div()
+            let empty =
+                v_flex()
                     .py(px(24.))
-                    .text_color(tk.k35)
+                    .gap(px(8.))
+                    .items_start()
+                    .text_color(tk.sub)
                     .child(text)
-                    .into_any_element(),
-            );
+                    .when(!query.is_empty(), |col| {
+                        col.child(
+                            kit::button(
+                                "settings-clear-search",
+                                t(L10nKey::SettingsClearSearch),
+                                BtnKind::Link,
+                            )
+                            .announced()
+                            .on_click(cx.listener(
+                                |this, _, window, cx| this.clear_settings_search(window, cx),
+                            )),
+                        )
+                    });
+            #[cfg(test)]
+            let empty = kit::probe("settings.search-empty", empty);
+            #[cfg(test)]
+            let empty = empty.debug_selector(|| "settings-search-empty".to_string());
+            groups.push(empty.into_any_element());
         }
         (title, subtitle, Self::settings_page(groups))
     }
@@ -1640,7 +1689,7 @@ impl Tty59App {
                         d.child(
                             div()
                                 .text_size(fs(11.))
-                                .text_color(tk.k4)
+                                .text_color(tk.sub)
                                 .child(t(L10nKey::SettingsKeyThen)),
                         )
                     })
@@ -1686,4 +1735,249 @@ pub(crate) fn search_result_actions(query: &str, modified_only: bool) -> Vec<Str
         .filter(|(action, _)| keybinding_matches_query(action, query))
         .map(|(action, _)| action.to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::presets::settings_wash;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, size};
+    use kit::test_support::harness;
+
+    fn set_query(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext, text: &str) {
+        app.update_in(vcx, |app, window, cx| {
+            let search = app.active_settings().unwrap().search.clone();
+            search.update(cx, |input, cx| {
+                input.set_value(text.to_string(), window, cx)
+            });
+            app.autoselect_settings_search(cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// F2: a search nothing matches says so once, in the quoted-query form,
+    /// with a way out, and the way out puts the page back; a search that
+    /// matches keeps its count. Drives the real settings render.
+    #[gpui::test]
+    fn a_search_with_no_matches_says_so_once_and_clear_search_restores_the_page(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        vcx.run_until_parked();
+
+        set_query(&app, &mut vcx, "zzzq");
+        assert!(
+            vcx.debug_bounds("settings-search-empty").is_some(),
+            "the empty state is drawn"
+        );
+        assert!(
+            vcx.debug_bounds("settings-results-subtitle").is_none(),
+            "no second 'No matches' line beside the empty state"
+        );
+        let clear = vcx
+            .debug_bounds("settings-clear-search")
+            .expect("the empty state offers Clear search");
+        vcx.simulate_click(clear.center(), Modifiers::default());
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, _, cx| {
+            let s = app.active_settings().unwrap();
+            assert!(s.search.read(cx).value().is_empty(), "the query is cleared");
+            assert!(!s.search_active, "the results page is left");
+            assert!(s.section == SettingsSection::General, "back on the page");
+        });
+        assert!(vcx.debug_bounds("settings-search-empty").is_none());
+
+        set_query(&app, &mut vcx, "font");
+        assert!(
+            vcx.debug_bounds("settings-results-subtitle").is_some(),
+            "a search that matches keeps its count"
+        );
+        assert!(vcx.debug_bounds("settings-search-empty").is_none());
+        assert!(vcx.debug_bounds("settings-clear-search").is_none());
+    }
+
+    /// F1/F4 on the real render: the secondary text each page builds carries
+    /// the cached `sub` ink, fully opaque and not faded by an ancestor, and an
+    /// off switch carries the cached track. Reads what each builder assigned
+    /// (`paint_probe`), so reverting any of those assignments fails here.
+    #[gpui::test]
+    fn secondary_text_and_off_switches_are_painted_in_the_cached_ink(cx: &mut TestAppContext) {
+        use crate::core::agent_hooks::{HookAgent, HooksState};
+        use crate::ui::paint_probe::{self, hsla24};
+
+        let _probe = paint_probe::scope();
+        let (app, mut vcx) = harness(cx);
+        let tk = vcx.update(|_, cx| Tk::of(cx));
+        let sub = hsla24(tk.sub);
+        let check_text = |keys: &[&'static str]| {
+            for &key in keys {
+                let painted = paint_probe::all(key);
+                assert!(!painted.is_empty(), "{key}: nothing was painted");
+                for p in painted {
+                    assert_eq!(p.text, Some(sub), "{key}: text ink");
+                    assert_eq!(p.text_alpha, Some(1.), "{key}: ink is opaque, not a ramp");
+                    assert_eq!(p.opacity, None, "{key}: not faded in place");
+                }
+            }
+        };
+        // Filled backgrounds: each wash is painted in the cached pole's colour
+        // at the shared strength the pole criterion floored the inks against.
+        let pole = vcx.update(|_, cx| hsla24(gpui::rgb(crate::ui::theme::fill_pole(cx)).into()));
+        let check_wash = |key: &'static str, wash: (f32, f32)| {
+            let strength = if tk.dark { wash.1 } else { wash.0 };
+            let painted = paint_probe::all(key);
+            assert!(!painted.is_empty(), "{key}: nothing was painted");
+            for p in painted {
+                assert_eq!(p.fill, Some(pole), "{key}: wash colour");
+                assert_eq!(p.fill_alpha, Some(strength), "{key}: wash strength");
+            }
+        };
+        let open =
+            |app: &gpui::Entity<Tty59App>,
+             vcx: &mut VisualTestContext,
+             section: SettingsSection,
+             prepare: &dyn Fn(&mut Tty59App, &mut Window, &mut Context<Tty59App>)| {
+                paint_probe::clear();
+                app.update_in(vcx, |app, window, cx| {
+                    app.open_settings_section(section, window, cx);
+                    prepare(app, window, cx);
+                });
+                vcx.simulate_resize(size(px(960.), px(700.)));
+                vcx.run_until_parked();
+            };
+
+        // General: descriptions, Reset links, nav counts, the search hint, and
+        // the nav rail's off switch.
+        // The "Ctrl F" hint is drawn only while the search box is not focused,
+        // so the page itself holds focus here.
+        open(
+            &app,
+            &mut vcx,
+            SettingsSection::General,
+            &|app, window, cx| {
+                app.set_notify_threshold(71, cx);
+                if let Some(page) = app.active_settings().map(|s| s.focus_handle.clone()) {
+                    window.focus(&page, cx);
+                }
+            },
+        );
+        check_text(&[
+            "settings.row-desc",
+            "settings.reset",
+            "settings.nav-count",
+            "settings.search-hint",
+        ]);
+        let glass = paint_probe::all("settings.search-glass");
+        assert!(!glass.is_empty(), "the search glass is drawn");
+        for p in glass {
+            assert_eq!(p.text, Some(hsla24(tk.glyph)), "search glass ink");
+            assert_eq!(p.text_alpha, Some(1.), "the glass ink is opaque");
+        }
+        let off = paint_probe::all("settings.switch-off");
+        assert!(!off.is_empty(), "the rail's modified-only switch is off");
+        for p in off {
+            assert_eq!(p.fill, Some(hsla24(tk.switch_off)), "off track");
+            assert_eq!(p.fill_alpha, Some(1.), "off track is opaque");
+        }
+
+        // Terminal: a group's intro sentence.
+        open(&app, &mut vcx, SettingsSection::Terminal, &|_, _, _| {});
+        check_text(&["settings.section-desc"]);
+
+        // SSH: a host's address and its "Never" line.
+        open(&app, &mut vcx, SettingsSection::Ssh, &|_, _, cx| {
+            cx.global_mut::<Config>().ssh_profiles = (0..3)
+                .map(|i| {
+                    let mut p = crate::core::ssh_profile::SshProfile::new(&format!("host-{i}"));
+                    p.host = format!("h{i}.example");
+                    p
+                })
+                .collect();
+        });
+        check_text(&["settings.host-address", "settings.host-meta"]);
+
+        // Agents: hook targets, status text and the Show all link.
+        open(&app, &mut vcx, SettingsSection::Agents, &|app, _, cx| {
+            let s = app.active_settings_mut().unwrap();
+            s.agent_hooks_seq += 1;
+            s.agent_show_all = true;
+            s.agent_hooks_states = AgentHooksView::Ready(
+                HookAgent::ALL
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &agent)| AgentHookRow {
+                        agent,
+                        state: if i == 0 {
+                            HooksState::Installed
+                        } else {
+                            HooksState::NotInstalled
+                        },
+                        target: format!("~/.agent-{i}/hooks.json"),
+                    })
+                    .collect(),
+            );
+            cx.notify();
+        });
+        check_text(&["settings.agent-target", "settings.agent-status"]);
+        let links = paint_probe::all("settings.btn-link");
+        assert!(!links.is_empty(), "the Show all link is drawn");
+        for p in links {
+            assert_eq!(p.text, Some(sub), "link ink");
+        }
+
+        // Keyboard shortcuts: the hint line and the keycaps.
+        open(&app, &mut vcx, SettingsSection::Keybindings, &|_, _, _| {});
+        check_text(&["settings.shortcut-hint"]);
+        let caps = paint_probe::all("settings.keycap");
+        assert!(!caps.is_empty(), "keycaps are drawn");
+        for p in caps {
+            assert_eq!(p.text, Some(sub), "keycap ink");
+        }
+        check_wash("settings.keycap", settings_wash::KEYCAP);
+
+        // Search: the empty state, then a matching query's count and the
+        // selected result's wash.
+        paint_probe::clear();
+        set_query(&app, &mut vcx, "zzzq");
+        check_text(&["settings.search-empty"]);
+        assert!(paint_probe::all("settings.results-subtitle").is_empty());
+        paint_probe::clear();
+        set_query(&app, &mut vcx, "font");
+        check_text(&["settings.results-subtitle"]);
+        check_wash("settings.search-row-selected", settings_wash::ROW);
+    }
+
+    /// The empty state and its link fit the window in every language, at the
+    /// narrowest width the settings window opens to.
+    #[gpui::test]
+    fn the_empty_search_state_fits_the_window_in_every_locale(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(480.)));
+        vcx.run_until_parked();
+        let width = vcx.update(|window, _| window.viewport_size().width);
+        for locale in ["en", "ru-RU", "zh-CN", "ja-JP"] {
+            crate::ui::i18n::set_locale(locale);
+            set_query(&app, &mut vcx, "zzzq");
+            for selector in ["settings-search-empty", "settings-clear-search"] {
+                let bounds = vcx
+                    .debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{locale}: {selector} is drawn"));
+                assert!(
+                    bounds.origin.x >= px(0.) && bounds.right() <= width,
+                    "{locale}: {selector} spans {:?}..{:?} in a {:?} window",
+                    bounds.origin.x,
+                    bounds.right(),
+                    width
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+    }
 }

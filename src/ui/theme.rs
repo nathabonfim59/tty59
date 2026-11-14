@@ -679,10 +679,13 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     if !follow {
         sync_native_appearance(Some(theme.dark));
     }
-    let m = theme.neutrals();
-    let surfaces = theme.surfaces();
-    let sem = theme.semantics();
-    let interaction = theme.interactions();
+    // The chrome derivation is resolved once here: one pole, one set of
+    // neutrals and surfaces, and every cached ink below is built from them.
+    let resolved = theme.resolve();
+    let m = resolved.m.clone();
+    let surfaces = resolved.sf.clone();
+    let sem = theme.semantics_with(&m);
+    let interaction = theme.interactions_with(&m);
     let active = theme.active_palette(config.theme_legible_palette);
 
     let backdrop = config.window_backdrop;
@@ -715,12 +718,15 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     });
     cx.set_global(surfaces.clone());
     cx.set_global(sem);
+    cx.set_global(presets::FillPole(resolved.pole));
+    cx.set_global(theme.settings_ink_from(&resolved));
+    cx.set_global(theme.chrome_ink_from(&resolved));
     cx.set_global(interaction);
     cx.set_global(presets::ActiveAccent(m.accent));
     // Same treatment as `Surfaces`: derived once here rather than recomputed
     // in `render`, because the graph reads it once per visible row per frame
     // and each entry costs a contrast bisection on three surfaces.
-    cx.set_global(presets::ActiveLanes(theme.lanes()));
+    cx.set_global(presets::ActiveLanes(theme.lanes_with(&m)));
 
     if !cx.has_global::<StockUiFont>() {
         let stock = Theme::global(cx).font_family.clone();
@@ -877,12 +883,12 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // Unset they hold gpui-component's stock ramp, one ramp for every dark
     // preset and one for every light one — so the line you were typing kept a
     // palette the output right above it had already left behind.
-    t.red = rgb(theme.ansi_ink(1)).into();
-    t.green = rgb(theme.ansi_ink(2)).into();
-    t.yellow = rgb(theme.ansi_ink(3)).into();
-    t.blue = rgb(theme.ansi_ink(4)).into();
-    t.magenta = rgb(theme.ansi_ink(5)).into();
-    t.cyan = rgb(theme.ansi_ink(6)).into();
+    t.red = rgb(theme.ansi_ink_with(&m, 1)).into();
+    t.green = rgb(theme.ansi_ink_with(&m, 2)).into();
+    t.yellow = rgb(theme.ansi_ink_with(&m, 3)).into();
+    t.blue = rgb(theme.ansi_ink_with(&m, 4)).into();
+    t.magenta = rgb(theme.ansi_ink_with(&m, 5)).into();
+    t.cyan = rgb(theme.ansi_ink_with(&m, 6)).into();
 
     t.link = rgb(sem.link.ink).into();
     t.link_hover = rgb(presets::mix(sem.link.ink, m.foreground, 0.25)).into();
@@ -1022,8 +1028,36 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
 
 /// Reads the cached [`presets::Semantics`] global populated on theme change
 /// so renderers avoid recomputing contrast floors per frame.
+///
+/// Like [`settings_ink`] and [`chrome_ink`], this panics if [`apply_theme`] has
+/// not run, and has no fallback: a window is only ever built after the theme
+/// is applied (`main` applies it before the first window, and
+/// `Tty59App::with_session` applies it before it builds a view).
 pub(crate) fn semantics(cx: &App) -> presets::Semantics {
     *cx.global::<presets::Semantics>()
+}
+
+/// Reads the settings page's cached secondary ink and off-switch track,
+/// derived once per theme change in [`apply_theme`]. Same required-global
+/// invariant as [`semantics`].
+pub(crate) fn settings_ink(cx: &App) -> presets::SettingsInk {
+    *cx.global::<presets::SettingsInk>()
+}
+
+/// The colour every step-toward-the-ink chrome fill moves toward (see
+/// `presets::Theme::resolve`), resolved once per theme change in
+/// [`apply_theme`]. Painters of fills that are not in `Surfaces` (the
+/// settings washes, a port chip's wash) read it. Same required-global
+/// invariant as [`semantics`].
+pub(crate) fn fill_pole(cx: &App) -> u32 {
+    cx.global::<presets::FillPole>().0
+}
+
+/// Reads the switcher, search overlay and pane-grip ink, derived once per
+/// theme change in [`apply_theme`]. Same required-global invariant as
+/// [`semantics`].
+pub(crate) fn chrome_ink(cx: &App) -> presets::ChromeInk {
+    *cx.global::<presets::ChromeInk>()
 }
 
 /// Resolves a theme-free [`crate::core::cli_agent::AgentStatus`] via cached
@@ -1862,65 +1896,6 @@ mod tests {
     }
 
     #[gpui::test]
-    fn apply_theme_installs_semantics_global_and_agent_status_contract(cx: &mut TestAppContext) {
-        use crate::core::cli_agent::AgentStatus;
-        crate::core::config::pin_test_config_dir();
-        cx.update(|cx| {
-            gpui_component::init(cx);
-            for id in ["light", "dark"] {
-                cx.set_global(Config(crate::core::config::CoreConfig {
-                    theme_follow_system: false,
-                    theme_preset: id.into(),
-                    ..Default::default()
-                }));
-                apply_theme(None, cx);
-
-                let expected = presets::by_id(cx, id).semantics();
-                let global_sem = *cx
-                    .try_global::<presets::Semantics>()
-                    .expect("apply_theme installs presets::Semantics global");
-                let sem = semantics(cx);
-
-                for (name, got_g, got_fn, exp) in [
-                    ("danger", global_sem.danger, sem.danger, expected.danger),
-                    ("warning", global_sem.warning, sem.warning, expected.warning),
-                    ("success", global_sem.success, sem.success, expected.success),
-                    ("info", global_sem.info, sem.info, expected.info),
-                    ("link", global_sem.link, sem.link, expected.link),
-                ] {
-                    assert_eq!(got_g.ink, exp.ink, "{id}/{name}: global ink");
-                    assert_eq!(got_g.fill, exp.fill, "{id}/{name}: global fill");
-                    assert_eq!(got_g.on_fill, exp.on_fill, "{id}/{name}: global on_fill");
-                    assert_eq!(got_fn.ink, exp.ink, "{id}/{name}: accessor ink");
-                    assert_eq!(got_fn.fill, exp.fill, "{id}/{name}: accessor fill");
-                    assert_eq!(got_fn.on_fill, exp.on_fill, "{id}/{name}: accessor on_fill");
-                }
-
-                let t = cx.theme();
-                assert_eq!(hsla24(t.danger), expected.danger.ink);
-                assert_eq!(hsla24(t.warning), expected.warning.ink);
-                assert_eq!(hsla24(t.success), expected.success.ink);
-                assert_eq!(hsla24(t.info), expected.info.ink);
-                assert_eq!(hsla24(t.link), expected.link.ink);
-
-                assert!(agent_status_semantic(AgentStatus::Idle, cx).is_none());
-                assert_eq!(
-                    agent_status_semantic(AgentStatus::Working, cx).map(|s| s.ink),
-                    Some(expected.info.ink)
-                );
-                assert_eq!(
-                    agent_status_semantic(AgentStatus::Waiting, cx).map(|s| s.ink),
-                    Some(expected.warning.ink)
-                );
-                assert_eq!(
-                    agent_status_semantic(AgentStatus::Done, cx).map(|s| s.ink),
-                    Some(expected.success.ink)
-                );
-            }
-        });
-    }
-
-    #[gpui::test]
     fn switching_theme_presets_updates_cached_semantics_global(cx: &mut TestAppContext) {
         use crate::core::cli_agent::AgentStatus;
         crate::core::config::pin_test_config_dir();
@@ -1973,6 +1948,100 @@ mod tests {
             }
 
             assert_eq!(semantics(cx).info.ink, light_expected.info.ink);
+        });
+    }
+
+    /// The fill pole and the settings and chrome ink are derived by
+    /// `apply_theme` and nowhere else: a theme change installs them, and a
+    /// later one replaces them.
+    /// Covers the built-ins and a spread of generated palettes, including the
+    /// weak ones whose rungs and inks the derivation has to correct.
+    #[gpui::test]
+    fn apply_theme_installs_and_replaces_the_cached_settings_and_chrome_ink(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut themes = presets::builtins();
+            let grid = presets::generated_theme_grid();
+            themes.extend(grid.iter().cloned().step_by(29));
+            // The crossover palettes, whose chrome fills invert.
+            themes.extend(
+                grid.into_iter()
+                    .filter(|t| t.background_color() == 0x777777)
+                    .step_by(11),
+            );
+            cx.set_global(presets::Themes(themes.clone()));
+            for theme in &themes {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: theme.id.clone(),
+                    ..Default::default()
+                }));
+                apply_theme(None, cx);
+
+                let pole = theme.resolve().pole;
+                assert_eq!(fill_pole(cx), pole, "{}: fill pole", theme.id);
+                if theme.background_color() == 0x777777 {
+                    assert_eq!(pole, 0xffffff, "{}: a crossover palette inverts", theme.id);
+                }
+                let settings = settings_ink(cx);
+                let expected = theme.settings_ink();
+                assert_eq!(settings.sub, expected.sub, "{}: sub", theme.id);
+                assert_eq!(settings.warn, expected.warn, "{}: warn", theme.id);
+                assert_eq!(
+                    settings.switch_off, expected.switch_off,
+                    "{}: switch_off",
+                    theme.id
+                );
+                let chrome = chrome_ink(cx);
+                let expected = theme.chrome_ink();
+                for (name, got, want) in [
+                    (
+                        "selected_meta",
+                        chrome.selected_meta,
+                        expected.selected_meta,
+                    ),
+                    ("quiet_name", chrome.quiet_name, expected.quiet_name),
+                    ("avatar_ink", chrome.avatar_ink, expected.avatar_ink),
+                    ("keycap_fill", chrome.keycap_fill, expected.keycap_fill),
+                    ("keycap_ink", chrome.keycap_ink, expected.keycap_ink),
+                    ("grip_idle", chrome.grip_idle, expected.grip_idle),
+                    ("search_title", chrome.search_title, expected.search_title),
+                    ("panel_title", chrome.panel_title, expected.panel_title),
+                    (
+                        "unpicked_title",
+                        chrome.unpicked_title,
+                        expected.unpicked_title,
+                    ),
+                    (
+                        "unpicked_meta",
+                        chrome.unpicked_meta,
+                        expected.unpicked_meta,
+                    ),
+                    (
+                        "port_chip_ink",
+                        chrome.port_chip_ink,
+                        expected.port_chip_ink,
+                    ),
+                    (
+                        "port_chip_hover_ink",
+                        chrome.port_chip_hover_ink,
+                        expected.port_chip_hover_ink,
+                    ),
+                ] {
+                    assert_eq!(got, want, "{}: {name}", theme.id);
+                }
+                // The painted rungs are the ones the roles were floored on.
+                let surfaces = theme.surfaces();
+                let installed = cx.global::<presets::Surfaces>();
+                assert_eq!(installed.popover.selected, surfaces.popover.selected);
+                assert_eq!(
+                    installed.window.text_selected,
+                    surfaces.window.text_selected
+                );
+            }
         });
     }
 }

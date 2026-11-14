@@ -118,7 +118,7 @@ impl Tty59App {
                     .child(
                         div()
                             .text_size(fs(12.))
-                            .text_color(if on { tk.fg } else { tk.k5 })
+                            .text_color(if on { tk.fg } else { tk.sub })
                             .when(on, |d| d.font_weight(FontWeight::MEDIUM))
                             .child(label),
                     )
@@ -175,7 +175,7 @@ impl Tty59App {
                                 div()
                                     .text_size(fs(12.))
                                     .line_height(px(17.))
-                                    .text_color(tk.k5)
+                                    .text_color(tk.sub)
                                     .child(desc),
                             ),
                     )
@@ -360,7 +360,7 @@ impl Tty59App {
                         r.child(
                             div()
                                 .text_size(fs(11.))
-                                .text_color(tk.k4)
+                                .text_color(tk.sub)
                                 .child(t(L10nKey::SettingsCustom)),
                         )
                     })
@@ -397,7 +397,7 @@ impl Tty59App {
                     .px(px(8.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(t(L10nKey::SettingsNoThemesMatch)),
             );
         }
@@ -421,7 +421,7 @@ impl Tty59App {
                 .children(rejected.into_iter().map(|(name, why)| {
                     v_flex()
                         .child(div().text_color(tk.danger).child(name))
-                        .child(div().text_color(tk.k45).child(why))
+                        .child(div().text_color(tk.sub).child(why))
                 }))
         });
         let fork_from = current_id.to_string();
@@ -484,7 +484,7 @@ impl Tty59App {
                                 .h(px(28.)),
                         ),
                     )
-                    .child(div().text_size(fs(11.)).text_color(tk.k35).child("↑↓ ↵")),
+                    .child(div().text_size(fs(11.)).text_color(tk.sub).child("↑↓ ↵")),
             )
             .child(list)
             .children(rejected_note)
@@ -601,7 +601,7 @@ impl Tty59App {
                         .max_w(px(160.))
                         .truncate()
                         .text_size(fs(12.))
-                        .text_color(tk.k5)
+                        .text_color(tk.sub)
                         .child(name),
                 )
                 .child(

@@ -414,6 +414,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInheritedByEveryHost => "Наследуется всеми хостами",
         L10nKey::SettingsNoSavedHosts => "Сохранённых хостов ещё нет.",
         L10nKey::SettingsNothingMatches => "Нет совпадений для {query}.",
+        L10nKey::SettingsNoSettingsMatch => "Нет настроек по запросу «{query}».",
+        L10nKey::SettingsClearSearch => "Сбросить поиск",
         L10nKey::SettingsInTty59 => "Настройки tty59",
         L10nKey::SettingsImportFromSshConfig => "Импорт из ~/.ssh/config",
         L10nKey::SettingsExpandAllGroups => "Развернуть все группы",
