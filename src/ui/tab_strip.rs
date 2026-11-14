@@ -786,8 +786,34 @@ pub(in crate::ui) fn titlebar_search_fill(cx: &App) -> gpui::Hsla {
     gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().rail.base).into()
 }
 
+/// The label is always a single glyph: counts past nine read "9", so the
+/// pills only ever carry one digit and their fixed geometry holds.
 fn unread_count_label(unread: usize) -> Option<String> {
     (unread > 1).then(|| unread.min(9).to_string())
+}
+
+/// The paints a status mark is drawn with: `mark` for the dot or ring and,
+/// when the badge can carry an unread count, the `(fill, ink)` pair its
+/// label sits on.
+struct StatusPaints {
+    mark: gpui::Hsla,
+    count: Option<(gpui::Hsla, gpui::Hsla)>,
+}
+
+/// Turns the status's semantic role into paint. `base` is what the dim beat
+/// of a blink blends against — the row's surface, or the badge's halo — and
+/// it reaches only the mark: the count's label must keep the contrast its
+/// `on_fill` was floored for, so a faded count fill under a fixed label is
+/// not allowed.
+fn status_paints(sem: crate::ui::presets::Semantic, base: gpui::Hsla, faded: bool) -> StatusPaints {
+    let ink: gpui::Hsla = gpui::rgb(sem.ink).into();
+    StatusPaints {
+        mark: match faded {
+            true => base.blend(ink.opacity(0.4)),
+            false => ink,
+        },
+        count: Some((gpui::rgb(sem.fill).into(), gpui::rgb(sem.on_fill).into())),
+    }
 }
 
 /// Air between the search box and the nearest chrome tile when the bar is too
@@ -1547,35 +1573,30 @@ impl Tty59App {
             .collect()
     }
 
+    /// The halo a status badge rings itself with: the surface on light
+    /// surfaces, white on dark — a dark halo read as a notch bitten out of
+    /// the avatar rather than a badge sitting on it.
+    fn status_badge_halo(ring: gpui::Hsla) -> gpui::Hsla {
+        match crate::ui::presets::surface_is_dark(ring) {
+            true => gpui::white(),
+            false => ring,
+        }
+    }
+
     /// Working and Done differ only in hue (blue vs green), and Waiting vs Done
     /// — the pair that actually decides whether you go and look — is amber vs
     /// green, the pair red-green colour vision separates worst. Give Waiting a
     /// hole so it is a different *shape*, not just a different colour.
     fn status_dot(
-        rgb: u32,
+        paints: StatusPaints,
         unread: usize,
         size: f32,
         ring: gpui::Hsla,
         hollow: bool,
-        faded: bool,
     ) -> gpui::AnyElement {
         let d = (size * 0.42).max(7.);
-        // The halo was the surface itself, which is only a ring while the
-        // surface is light — on a dark theme it went near-black and read as a
-        // notch bitten out of the avatar rather than a badge sitting on it.
-        // Light themes already ring the dot in white; give the dark ones the
-        // same white edge, and the hollow Waiting dot the same white hole.
-        let bg = match crate::ui::presets::surface_is_dark(ring) {
-            true => gpui::white(),
-            false => ring,
-        };
-        // The dim beat of a blink is a paler fill, still opaque: fading the
-        // whole badge let the avatar show through the dot and its ring.
-        let fill: gpui::Hsla = match faded {
-            true => bg.blend(gpui::Hsla::from(gpui::rgb(rgb)).opacity(0.4)),
-            false => gpui::rgb(rgb).into(),
-        };
-        if let Some(label) = unread_count_label(unread) {
+        let bg = Self::status_badge_halo(ring);
+        if let (Some((fill, on_fill)), Some(label)) = (paints.count, unread_count_label(unread)) {
             let nd = (size * 0.72).max(13.0);
             let pill = div()
                 .absolute()
@@ -1591,14 +1612,18 @@ impl Tty59App {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px((nd * 0.62).round()))
+                .text_size(px((nd * 0.62).round().max(10.)))
                 .line_height(px(nd))
                 .font_features(crate::ui::theme::tabular_figures())
                 .font_weight(FontWeight::BOLD)
-                .text_color(gpui::white())
+                .text_color(on_fill)
                 .child(label);
             #[cfg(test)]
-            let pill = pill.debug_selector(move || format!("avatar-status-count-{unread}"));
+            let pill = {
+                let mut pill = pill;
+                crate::ui::paint_probe::note("avatar-status-pill", &mut pill);
+                pill.debug_selector(move || format!("avatar-status-count-{unread}"))
+            };
             pill.into_any_element()
         } else {
             let dot = div()
@@ -1609,7 +1634,7 @@ impl Tty59App {
                 .rounded_full()
                 .border_2()
                 .border_color(bg)
-                .bg(fill)
+                .bg(paints.mark)
                 .when(hollow, |dot| {
                     dot.flex()
                         .items_center()
@@ -1617,7 +1642,11 @@ impl Tty59App {
                         .child(div().size(px((d * 0.36).max(2.5))).rounded_full().bg(bg))
                 });
             #[cfg(test)]
-            let dot = dot.debug_selector(move || format!("avatar-status-circle-{unread}"));
+            let dot = {
+                let mut dot = dot;
+                crate::ui::paint_probe::note("avatar-status-dot", &mut dot);
+                dot.debug_selector(move || format!("avatar-status-circle-{unread}"))
+            };
             dot.into_any_element()
         }
     }
@@ -1657,29 +1686,31 @@ impl Tty59App {
     /// while the agent waits on the user, blinking while it works — or the
     /// count in a wider pill only when more than one result is unread. `None`
     /// for a row with nothing to report.
+    ///
+    /// The colour is the active theme's semantic role for the status
+    /// ([`agent_status_semantic`](crate::ui::theme::agent_status_semantic)),
+    /// not a fixed hex — light themes get the darker steps they need for the
+    /// marks to clear contrast floors.
     pub(crate) fn row_status_dot(
         &self,
         status: Option<crate::core::cli_agent::AgentStatus>,
         unread: usize,
         surface: gpui::Hsla,
+        cx: &App,
     ) -> Option<gpui::AnyElement> {
-        let rgb = status.and_then(|s| s.dot_rgb())?;
+        let sem = status.and_then(|s| crate::ui::theme::agent_status_semantic(s, cx))?;
         let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
         let faded =
             status == Some(crate::core::cli_agent::AgentStatus::Working) && !self.working_dot_on;
-        let ink: gpui::Hsla = gpui::rgb(rgb).into();
-        let fill = match faded {
-            true => surface.blend(ink.opacity(0.4)),
-            false => ink,
-        };
+        let paints = status_paints(sem, surface, faded);
         let slot = div()
             .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
             .min_w(px(ROW_STATUS_SLOT));
-        let mark = match unread_count_label(unread) {
-            Some(label) => {
+        let mark = match (paints.count, unread_count_label(unread)) {
+            (Some((fill, on_fill)), Some(label)) => {
                 let pill = div()
                     .h(px(14.))
                     .min_w(px(18.))
@@ -1689,24 +1720,32 @@ impl Tty59App {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(9.))
+                    .text_size(px(10.))
                     .line_height(px(14.))
                     .font_features(crate::ui::theme::tabular_figures())
                     .font_weight(FontWeight::BOLD)
-                    .text_color(gpui::white())
+                    .text_color(on_fill)
                     .child(label);
                 #[cfg(test)]
-                let pill = pill.debug_selector(move || format!("row-status-count-{unread}"));
+                let pill = {
+                    let mut pill = pill;
+                    crate::ui::paint_probe::note("row-status-pill", &mut pill);
+                    pill.debug_selector(move || format!("row-status-count-{unread}"))
+                };
                 pill.into_any_element()
             }
-            None => {
+            _ => {
                 let dot = div()
                     .size(px(ROW_STATUS_DOT))
                     .rounded_full()
-                    .when(!hollow, |d| d.bg(fill))
-                    .when(hollow, |d| d.border_1().border_color(fill));
+                    .when(!hollow, |d| d.bg(paints.mark))
+                    .when(hollow, |d| d.border_1().border_color(paints.mark));
                 #[cfg(test)]
-                let dot = dot.debug_selector(move || format!("row-status-circle-{unread}"));
+                let dot = {
+                    let mut dot = dot;
+                    crate::ui::paint_probe::note("row-status-dot", &mut dot);
+                    dot.debug_selector(move || format!("row-status-circle-{unread}"))
+                };
                 dot.into_any_element()
             }
         };
@@ -2895,13 +2934,15 @@ fn avatar_disc(
             let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
             let dot = status
                 .filter(|_| badge)
-                .and_then(|s| s.dot_rgb())
-                .map(|rgb| {
+                .and_then(|s| crate::ui::theme::agent_status_semantic(s, cx))
+                .map(|sem| {
                     // A working agent's dot blinks, so a column of tabs
                     // says at a glance which ones are still going.
                     let faded =
                         status == Some(crate::core::cli_agent::AgentStatus::Working) && !blink_on;
-                    Tty59App::status_dot(rgb, unread, size, cx.theme().background, hollow, faded)
+                    let surface = cx.theme().background;
+                    let paints = status_paints(sem, Tty59App::status_badge_halo(surface), faded);
+                    Tty59App::status_dot(paints, unread, size, surface, hollow)
                 });
             // Which agent this is, and what it wants, were carried entirely
             // by a brand hue and a nine-pixel dot. Say it in words too.
@@ -2952,12 +2993,16 @@ fn avatar_disc(
                 ),
             )
             .when_some(ssh, |b, rgb| {
+                // A connection state, not an agent status: same badge shape,
+                // raw mark, and no count to pair a label ink with.
                 b.child(Tty59App::status_dot(
-                    rgb,
+                    StatusPaints {
+                        mark: gpui::rgb(rgb).into(),
+                        count: None,
+                    },
                     0,
                     size,
                     cx.theme().background,
-                    false,
                     false,
                 ))
             })
@@ -3150,27 +3195,34 @@ mod tests {
                 let app = self.0.read(cx);
                 let status = crate::core::cli_agent::AgentStatus::Done;
                 let surface = cx.theme().background;
-                div().flex().children((0..=2).flat_map(|unread| {
-                    [
-                        div()
-                            .relative()
-                            .size(px(32.))
-                            .children(app.row_status_dot(Some(status), unread, surface))
-                            .into_any_element(),
-                        div()
-                            .relative()
-                            .size(px(32.))
-                            .child(Tty59App::status_dot(
-                                status.dot_rgb().unwrap(),
-                                unread,
-                                18.,
-                                surface,
-                                false,
-                                false,
-                            ))
-                            .into_any_element(),
-                    ]
-                }))
+                div()
+                    .flex()
+                    .children([0usize, 1, 2, 12].into_iter().flat_map(|unread| {
+                        [
+                            div()
+                                .relative()
+                                .size(px(32.))
+                                .children(app.row_status_dot(Some(status), unread, surface, cx))
+                                .into_any_element(),
+                            div()
+                                .relative()
+                                .size(px(32.))
+                                .child(
+                                    crate::ui::theme::agent_status_semantic(status, cx)
+                                        .map(|sem| {
+                                            Tty59App::status_dot(
+                                                status_paints(sem, surface, false),
+                                                unread,
+                                                18.,
+                                                surface,
+                                                false,
+                                            )
+                                        })
+                                        .expect("a status with a mark resolves a semantic role"),
+                                )
+                                .into_any_element(),
+                        ]
+                    }))
             }
         }
         let (app, _app_window) = crate::ui::app::test_window::harness(cx);
@@ -3180,18 +3232,20 @@ mod tests {
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        for (circles, counts, two_circle, two_count) in [
+        for (circles, counts, two_circle, two_count, capped_count) in [
             (
                 ["row-status-circle-0", "row-status-circle-1"],
                 ["row-status-count-0", "row-status-count-1"],
                 "row-status-circle-2",
                 "row-status-count-2",
+                "row-status-count-12",
             ),
             (
                 ["avatar-status-circle-0", "avatar-status-circle-1"],
                 ["avatar-status-count-0", "avatar-status-count-1"],
                 "avatar-status-circle-2",
                 "avatar-status-count-2",
+                "avatar-status-count-12",
             ),
         ] {
             for circle in circles {
@@ -3209,6 +3263,170 @@ mod tests {
                 "the count has room on both sides"
             );
             assert!(pill.size.height >= px(13.));
+            let capped = vcx
+                .debug_bounds(capped_count)
+                .expect("a count past nine still paints its pill");
+            // Tabular figures give every digit the same advance, so the
+            // capped label keeps the identical pill box.
+            assert_eq!(
+                (capped.size.width, capped.size.height),
+                (pill.size.width, pill.size.height),
+                "the capped single-glyph label keeps the pill geometry"
+            );
+        }
+    }
+
+    /// Every status mark a row or avatar paints comes out of the active
+    /// theme's semantic roles — Working to `info`, Waiting to `warning`, Done
+    /// to `success` — read off the rendered elements themselves, so a
+    /// consumer wired back to a fixed hex fails here rather than compiling
+    /// away. The count pill is the role's `fill`/`on_fill` pair, and a
+    /// Working blink dims only the mark, never the count's fill out from
+    /// under its fixed label. The SSH badge is not an agent status: it keeps
+    /// its raw mark.
+    #[gpui::test]
+    fn status_marks_paint_the_active_themes_semantics(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+        use crate::ui::paint_probe;
+        use crate::ui::search::Avatar;
+        const SSH_DOT: u32 = 0x2477db;
+
+        struct StatusMarks(gpui::Entity<Tty59App>);
+        impl gpui::Render for StatusMarks {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let app = self.0.read(cx);
+                let surface = cx.theme().background;
+                let row = |status, unread| {
+                    app.row_status_dot(Some(status), unread, surface, cx)
+                        .expect("a status with a mark resolves one")
+                };
+                div().flex().children([
+                    row(AgentStatus::Working, 0),
+                    row(AgentStatus::Working, 2),
+                    row(AgentStatus::Waiting, 0),
+                    row(AgentStatus::Done, 0),
+                    row(AgentStatus::Done, 2),
+                    avatar_disc(
+                        "agent-badge",
+                        Avatar {
+                            agent: Some(crate::core::cli_agent::CLIAgent::Codex),
+                            status: Some(AgentStatus::Done),
+                            unread: 3,
+                            ssh: None,
+                        },
+                        22.,
+                        true,
+                        true,
+                        cx,
+                    ),
+                    avatar_disc(
+                        "ssh-badge",
+                        Avatar {
+                            agent: None,
+                            status: None,
+                            unread: 0,
+                            ssh: Some(SSH_DOT),
+                        },
+                        22.,
+                        true,
+                        true,
+                        cx,
+                    ),
+                ])
+            }
+        }
+
+        let (app, _app_window) = crate::ui::app::test_window::harness(cx);
+        let window = cx.add_window(|_, _| StatusMarks(app.clone()));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let _probe = paint_probe::scope();
+        for id in ["light", "dark"] {
+            cx.update(|cx| {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: id.into(),
+                    ..Default::default()
+                }));
+                crate::ui::theme::apply_theme(None, cx);
+            });
+            let expected = cx.update(|cx| crate::ui::presets::by_id(cx, id).semantics());
+            app.update(cx, |app, _| app.working_dot_on = true);
+            vcx.run_until_parked();
+            paint_probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+
+            let dots = paint_probe::all("row-status-dot");
+            assert_eq!(dots.len(), 3, "{id}: Working/Waiting/Done row dots");
+            assert_eq!(dots[0].fill, Some(expected.info.ink), "{id}: working mark");
+            assert_eq!(
+                dots[1].border,
+                Some(expected.warning.ink),
+                "{id}: waiting ring"
+            );
+            assert_eq!(dots[2].fill, Some(expected.success.ink), "{id}: done mark");
+            for dot in &dots {
+                let alpha = match dot.fill {
+                    Some(_) => dot.fill_alpha,
+                    None => dot.border_alpha,
+                };
+                assert_eq!(alpha, Some(1.0), "{id}: a mark must stay opaque");
+            }
+            let pills = paint_probe::all("row-status-pill");
+            assert_eq!(pills.len(), 2, "{id}: unread >1 draws a pill");
+            for (pill, role) in [(pills[0], expected.info), (pills[1], expected.success)] {
+                assert_eq!(
+                    (pill.fill, pill.text),
+                    (Some(role.fill), Some(role.on_fill)),
+                    "{id}: the count paints the role's fill/on_fill pair"
+                );
+                assert_eq!(
+                    (pill.fill_alpha, pill.text_alpha),
+                    (Some(1.0), Some(1.0)),
+                    "{id}: the count's pair must stay opaque"
+                );
+            }
+            let badge_pills = paint_probe::all("avatar-status-pill");
+            assert_eq!(badge_pills.len(), 1, "{id}: the avatar's count pill");
+            assert_eq!(
+                (badge_pills[0].fill, badge_pills[0].text),
+                (Some(expected.success.fill), Some(expected.success.on_fill)),
+                "{id}: the badge pairs the role's fill and ink"
+            );
+            assert_eq!(
+                (badge_pills[0].fill_alpha, badge_pills[0].text_alpha),
+                (Some(1.0), Some(1.0)),
+                "{id}: the badge count must stay opaque"
+            );
+            let badge_dots = paint_probe::all("avatar-status-dot");
+            assert_eq!(badge_dots.len(), 1, "{id}: only the ssh badge is a dot");
+            assert_eq!(
+                badge_dots[0].fill,
+                Some(SSH_DOT),
+                "{id}: the ssh badge keeps its raw mark, not a semantic role"
+            );
+
+            // The dim beat of a blink reaches the mark alone: the Working
+            // count's label keeps the contrast `on_fill` was floored for.
+            app.update(cx, |app, _| app.working_dot_on = false);
+            vcx.run_until_parked();
+            paint_probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let dots = paint_probe::all("row-status-dot");
+            assert_ne!(
+                dots[0].fill,
+                Some(expected.info.ink),
+                "{id}: a blink dims the mark"
+            );
+            let pills = paint_probe::all("row-status-pill");
+            assert_eq!(
+                (pills[0].fill, pills[0].text),
+                (Some(expected.info.fill), Some(expected.info.on_fill)),
+                "{id}: the count's pair does not blink"
+            );
         }
     }
 
@@ -3380,13 +3598,25 @@ mod tests {
         // Idle draws no dot, so it has nothing to name.
         assert_eq!(agent_status_label(None), None);
         assert_eq!(agent_status_label(Some(AgentStatus::Idle)), None);
-        // Every state that does draw a dot can be read out loud.
+        // Every state that draws a mark can be read out loud.
+        let role = crate::ui::presets::Semantic {
+            ink: 0,
+            fill: 0,
+            on_fill: 0,
+        };
+        let marks = crate::ui::presets::Semantics {
+            danger: role,
+            warning: role,
+            success: role,
+            info: role,
+            link: role,
+        };
         for status in [
             AgentStatus::Working,
             AgentStatus::Waiting,
             AgentStatus::Done,
         ] {
-            assert!(status.dot_rgb().is_some());
+            assert!(marks.for_agent_status(status).is_some());
             assert!(
                 agent_status_label(Some(status)).is_some_and(|s| !s.is_empty()),
                 "{status:?} paints a dot with no words behind it"

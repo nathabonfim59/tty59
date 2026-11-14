@@ -61,10 +61,10 @@ const GRIP_DOT_GAP: f32 = 3.;
 /// it. The rest of the target is reach, not mark.
 const GRIP_DOT_TOP: f32 = 2.;
 
-/// The dots with the pointer somewhere in the band, and with it on the grip
-/// itself. Nothing but the ink changes between the two: a grip that grew or
-/// moved as the pointer closed in would be aiming at where it used to be.
-const GRIP_IDLE: f32 = 0.3;
+/// The dots with the pointer on the grip itself; at rest they take the theme's
+/// cached `grip_idle` ink, floored for the window fill they sit on. Nothing but
+/// the ink changes between the two: a grip that grew or moved as the pointer
+/// closed in would be aiming at where it used to be.
 const GRIP_LIVE: f32 = 0.8;
 
 /// Long enough to read as the dots arriving rather than as a flicker, short
@@ -166,6 +166,7 @@ pub(crate) fn handle(
 ) -> gpui::AnyElement {
     let state = state.clone();
     let ink = cx.theme().foreground;
+    let idle: gpui::Hsla = gpui::rgb(crate::ui::theme::chrome_ink(cx).grip_idle).into();
     div()
         .absolute()
         .top_0()
@@ -196,7 +197,7 @@ pub(crate) fn handle(
                     begin(&state, pane);
                     cx.new(|_| DragPane)
                 })
-                .when(revealed, |d| d.child(dots(pane, ink))),
+                .when(revealed, |d| d.child(dots(pane, ink, idle))),
         )
         .into_any_element()
 }
@@ -207,16 +208,21 @@ pub(crate) fn handle(
 /// hover that had to settle a *size* would need the element state an id buys,
 /// because the record of the group being hovered has to survive from one
 /// frame's paint into the next frame's layout.
-fn dots(pane: EntityId, ink: gpui::Hsla) -> impl IntoElement {
+fn dots(pane: EntityId, ink: gpui::Hsla, idle: gpui::Hsla) -> impl IntoElement {
     div()
         .flex()
         .gap(px(GRIP_DOT_GAP))
         .children((0..GRIP_DOTS).map(move |_| {
-            div()
+            let dot = div()
                 .size(px(GRIP_DOT))
                 .rounded_full()
-                .bg(ink.opacity(GRIP_IDLE))
-                .group_hover(GRIP_GROUP, move |s| s.bg(ink.opacity(GRIP_LIVE)))
+                .bg(idle)
+                .group_hover(GRIP_GROUP, move |s| s.bg(ink.opacity(GRIP_LIVE)));
+            #[cfg(test)]
+            let mut dot = dot;
+            #[cfg(test)]
+            crate::ui::paint_probe::note("pane.grip", &mut dot);
+            dot
         }))
         .with_animation(
             ("pane-grip-fade", pane.as_u64() as usize),
@@ -877,5 +883,92 @@ mod tests {
         assert_eq!(got[0], rect(10., 20., 250., 600.));
         assert_eq!(got[1], rect(260., 20., 750., 300.));
         assert_eq!(got[2], rect(260., 320., 750., 300.));
+    }
+}
+
+/// Switcher F16 through the real app render: a tab is split, one pane's grip
+/// is revealed, a frame is drawn, and the dots the builder painted are read
+/// back from the scoped probe.
+#[cfg(test)]
+mod contrast_tests {
+    use gpui::TestAppContext;
+
+    use crate::terminal::view::quiet_test_pane;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, MARK_FLOOR, Misses};
+    use crate::ui::paint_probe as probe;
+    use crate::ui::pane::{Pane, PaneSlot};
+
+    #[gpui::test]
+    fn the_idle_grip_dots_hold_their_floor_on_the_window_fill(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let (first, second, _second_stream) = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = quiet_test_pane(2, window, cx);
+            let first = app.tabs[0].pane.first_leaf().expect("the tab has a pane");
+            let first_id = first.entity_id();
+            let second = PaneSlot::Ready(view);
+            let second_id = second.entity_id();
+            app.tabs[0].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::leaf(second),
+            );
+            cx.notify();
+            (first_id, second_id, stream)
+        });
+        vcx.run_until_parked();
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            let (ink, window_rung) = vcx.update(|_, cx| {
+                (
+                    crate::ui::theme::chrome_ink(cx),
+                    cx.global::<crate::ui::presets::Surfaces>().window,
+                )
+            });
+            for pane in [first, second] {
+                app.update_in(&mut vcx, |app, _, cx| {
+                    app.pane_hover.set(Some(pane));
+                    cx.notify();
+                });
+                probe::clear();
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+
+                let dots = probe::all("pane.grip");
+                assert_eq!(
+                    dots.len(),
+                    super::GRIP_DOTS,
+                    "{}: the revealed pane's grip drew its dots in the real render",
+                    theme.id
+                );
+                for (n, dot) in dots.iter().enumerate() {
+                    assert_eq!(
+                        dot.fill,
+                        Some(ink.grip_idle),
+                        "{}: dot {n} reads the cached idle role",
+                        theme.id
+                    );
+                    assert_eq!(
+                        dot.fill_alpha,
+                        Some(1.0),
+                        "{}: dot {n} is a solid ink, not a faded foreground",
+                        theme.id
+                    );
+                    misses.floor(
+                        &theme.id,
+                        &format!("idle dot {n} on the window fill"),
+                        ink.grip_idle,
+                        window_rung.base,
+                        MARK_FLOOR,
+                    );
+                }
+            }
+        }
+        misses.assert_none("idle pane grip");
     }
 }

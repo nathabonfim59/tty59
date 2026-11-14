@@ -418,6 +418,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInheritedByEveryHost => "すべてのホストに継承されます",
         L10nKey::SettingsNoSavedHosts => "保存済みホストはまだありません",
         L10nKey::SettingsNothingMatches => "「{query}」に一致する項目がありません",
+        L10nKey::SettingsNoSettingsMatch => "「{query}」に一致する設定はありません。",
+        L10nKey::SettingsClearSearch => "検索をクリア",
         L10nKey::SettingsInTty59 => "tty59 の設定",
         L10nKey::SettingsImportFromSshConfig => "~/.ssh/config からインポート",
         L10nKey::SettingsExpandAllGroups => "すべてのグループを展開",

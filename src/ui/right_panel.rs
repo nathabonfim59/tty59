@@ -1400,6 +1400,10 @@ impl Tty59App {
         }
 
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let (chrome_ink, chrome_fill_pole) = (
+            crate::ui::theme::chrome_ink(cx),
+            crate::ui::theme::fill_pole(cx),
+        );
         let mono = cx.theme().mono_font_family.clone();
         let openable = ctx.port_route != crate::terminal::view::PortRoute::Blocked;
         let mut list = v_flex().px(px(CONTENT_INSET)).py(px(1.));
@@ -1495,7 +1499,7 @@ impl Tty59App {
             list = list.child(
                 h_flex()
                     .id(id.clone())
-                    .group(id)
+                    .group(id.clone())
                     .relative()
                     .items_center()
                     .gap(px(8.))
@@ -1503,10 +1507,13 @@ impl Tty59App {
                     .px(px(ROW_INSET))
                     .rounded(ROW_FILL_RADIUS)
                     .hover(|s| s.bg(gpui::rgb(sf.hover)))
-                    .child(info_chip(
+                    .child(port_chip(
                         &p.port.to_string(),
-                        cx.theme().accent,
-                        cx.theme().foreground,
+                        gpui::Hsla::from(gpui::rgb(chrome_fill_pole))
+                            .opacity(crate::ui::presets::PORT_CHIP_WASH),
+                        gpui::rgb(chrome_ink.port_chip_ink).into(),
+                        gpui::rgb(chrome_ink.port_chip_hover_ink).into(),
+                        id,
                         &mono,
                     ))
                     .child(
@@ -2072,6 +2079,48 @@ pub(crate) fn info_chip(
     fg: gpui::Hsla,
     mono: &gpui::SharedString,
 ) -> AnyElement {
+    let pill = pill(text, bg, fg, mono);
+    #[cfg(test)]
+    let mut pill = pill;
+    #[cfg(test)]
+    crate::ui::paint_probe::note("ui.chip", &mut pill);
+    pill.into_any_element()
+}
+
+/// A port number: a neutral wash with the theme's floored inks. The ink turns
+/// to the link ink while the row it sits in (`row_group`) is hovered — the
+/// number is a fact that turns out to open something, so only the pointer
+/// asks for the accent.
+fn port_chip(
+    text: &str,
+    wash: gpui::Hsla,
+    ink: gpui::Hsla,
+    hover_ink: gpui::Hsla,
+    row_group: gpui::SharedString,
+    mono: &gpui::SharedString,
+) -> AnyElement {
+    // The id is what lets the hover ink show: a string child is shaped at
+    // layout, from the style the element has *then*, and an id-less element
+    // has no remembered group-hover state to give it. It nests under the
+    // row's own id, so it is unique per row.
+    let port = pill(text, wash, ink, mono)
+        .id("port-chip")
+        .group_hover(row_group, move |style| {
+            let style = style.text_color(hover_ink);
+            #[cfg(test)]
+            let mut style = style;
+            #[cfg(test)]
+            crate::ui::paint_probe::note("port.chip.hover", &mut style);
+            style
+        });
+    #[cfg(test)]
+    let mut port = port;
+    #[cfg(test)]
+    crate::ui::paint_probe::note("port.chip", &mut port);
+    port.into_any_element()
+}
+
+fn pill(text: &str, bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -> gpui::Div {
     div()
         .flex_none()
         .px(px(5.))
@@ -2082,7 +2131,6 @@ pub(crate) fn info_chip(
         .font_family(mono.clone())
         .text_color(fg)
         .child(text.to_string())
-        .into_any_element()
 }
 
 pub fn reveal_label() -> &'static str {
@@ -2254,5 +2302,158 @@ mod tests {
             None,
             "there is no sensible clipboard form of two coloured numbers"
         );
+    }
+}
+
+/// Seeds the Info tab of a `harness_with_tabs` window, whose first pane is
+/// pane 1, so the real app render draws its ports and forward rows.
+#[cfg(test)]
+pub(crate) mod test_panel {
+    use gpui::{Entity, VisualTestContext};
+
+    use crate::core::config::RightPanelTab;
+    use crate::daemon::protocol::{ManagedForward, PaneProcs, PortEntry};
+    use crate::ui::app::Tty59App;
+
+    pub(crate) fn port(port: u16, pid: u32, name: &str) -> PortEntry {
+        PortEntry {
+            port,
+            pid,
+            name: name.into(),
+            addr: "127.0.0.1".into(),
+        }
+    }
+
+    pub(crate) fn open_info(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        ports: Vec<PortEntry>,
+        managed: Vec<ManagedForward>,
+    ) {
+        app.update_in(vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Info;
+            // Naming the pane and marking a poll as in flight keeps the app's
+            // own per-frame sync from clearing what is seeded here or
+            // spawning a daemon query that nothing in a test window answers.
+            app.right_panel.procs_pane = Some(1);
+            app.right_panel.procs_loading = true;
+            app.right_panel.procs = Some(PaneProcs {
+                ports,
+                ..Default::default()
+            });
+            app.loopback_panel.managed = managed;
+            cx.notify();
+        });
+    }
+}
+
+/// Panels F14 through the real app render: the Info tab is drawn with two
+/// listening ports, and the chip paints the port builder assigned are read
+/// back from the scoped probe.
+#[cfg(test)]
+mod contrast_tests {
+    use gpui::TestAppContext;
+
+    use super::test_panel::{open_info, port};
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, Misses, TEXT_FLOOR};
+    use crate::ui::paint_probe as probe;
+    use crate::ui::presets::{self, PORT_CHIP_WASH};
+
+    #[gpui::test]
+    fn port_chips_paint_a_neutral_wash_with_floored_inks(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(
+            &app,
+            &mut vcx,
+            vec![port(3000, 42, "node"), port(8080, 43, "api")],
+            Vec::new(),
+        );
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            let (ink, pole, sidebar, window) = vcx.update(|_, cx| {
+                let surfaces = cx.global::<presets::Surfaces>();
+                (
+                    crate::ui::theme::chrome_ink(cx),
+                    crate::ui::theme::fill_pole(cx),
+                    surfaces.sidebar,
+                    surfaces.window,
+                )
+            });
+            probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let id = theme.id.as_str();
+
+            let chips = probe::all("port.chip");
+            assert_eq!(
+                chips.len(),
+                2,
+                "{id}: one chip per port row in the real render"
+            );
+            let hovers = probe::all("port.chip.hover");
+            assert_eq!(hovers.len(), 2, "{id}: every port chip carries a hover ink");
+            for (n, chip) in chips.iter().enumerate() {
+                assert_eq!(
+                    chip.fill,
+                    Some(pole),
+                    "{id}: chip {n} washes with the fill pole"
+                );
+                assert!(
+                    chip.fill_alpha
+                        .is_some_and(|a| (a - PORT_CHIP_WASH).abs() < 0.005),
+                    "{id}: chip {n} keeps the shared wash alpha, got {:?}",
+                    chip.fill_alpha
+                );
+                assert_eq!(
+                    chip.text,
+                    Some(ink.port_chip_ink),
+                    "{id}: chip {n} resting ink"
+                );
+                assert_eq!(chip.text_alpha, Some(1.0), "{id}: chip {n} ink is solid");
+                assert_eq!(
+                    hovers[n].text,
+                    Some(ink.port_chip_hover_ink),
+                    "{id}: chip {n} hover ink"
+                );
+                assert_eq!(
+                    hovers[n].text_alpha,
+                    Some(1.0),
+                    "{id}: chip {n} hover ink is solid"
+                );
+                for (row, under) in [
+                    ("sidebar resting", sidebar.base),
+                    ("sidebar hovered", sidebar.hover),
+                    ("window resting", window.base),
+                    ("window hovered", window.hover),
+                ] {
+                    // The composite the GPU draws: the wash laid over the row.
+                    let fill = probe::hsla24(
+                        gpui::Hsla::from(gpui::rgb(under))
+                            .blend(gpui::Hsla::from(gpui::rgb(pole)).opacity(PORT_CHIP_WASH)),
+                    );
+                    misses.floor(
+                        id,
+                        &format!("chip {n} resting ink on the {row} row"),
+                        ink.port_chip_ink,
+                        fill,
+                        TEXT_FLOOR,
+                    );
+                    misses.floor(
+                        id,
+                        &format!("chip {n} hover ink on the {row} row"),
+                        ink.port_chip_hover_ink,
+                        fill,
+                        TEXT_FLOOR,
+                    );
+                }
+            }
+        }
+        misses.assert_none("port chip inks");
     }
 }

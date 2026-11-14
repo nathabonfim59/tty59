@@ -19,9 +19,19 @@ use gpui::{
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, h_flex, v_flex};
 
+use crate::ui::presets::{lift, settings_wash};
+
 /// A size from the design, in pixels at the default 16px interface font.
 pub(crate) fn fs(px_at_16: f32) -> Rems {
     rems(px_at_16 / 16.)
+}
+
+/// Records an element's own paints for the tests that read them back
+/// (`paint_probe`); compiled only into those tests.
+#[cfg(test)]
+pub(crate) fn probe<E: gpui::Styled>(key: &'static str, mut element: E) -> E {
+    crate::ui::paint_probe::note(key, &mut element);
+    element
 }
 
 /// The page's ink at the strengths the design uses, plus the few surfaces it
@@ -37,11 +47,17 @@ pub(crate) struct Tk {
     pub k08: Hsla,
     pub k15: Hsla,
     pub k3: Hsla,
-    pub k35: Hsla,
-    pub k4: Hsla,
+    /// Decorative marks (the search glass): cached, held to 3:1 on the
+    /// settings fills they sit on. Text that says something uses `sub`.
+    pub glyph: Hsla,
     pub k45: Hsla,
-    pub k5: Hsla,
-    pub k6: Hsla,
+    /// Secondary text that carries information: descriptions, counts, Reset,
+    /// addresses, empty states. Cached per theme, floored on the page fills.
+    pub sub: Hsla,
+    /// An off switch's track. Light: floored at 3:1 on the page fills. Dark: the
+    /// faint 16% wash it always was, deliberately under 3:1; the knob carries
+    /// the state.
+    pub switch_off: Hsla,
     /// A group heading: quieter than a label, but still read at a glance.
     pub heading: Hsla,
     /// A nav item at rest.
@@ -56,15 +72,10 @@ pub(crate) struct Tk {
     pub chip: Hsla,
     pub warn: Hsla,
     pub warn_text: Hsla,
+    /// The Unsaved meta of a host row (the open host row it is painted on).
+    pub unsaved: Hsla,
     pub danger: Hsla,
     pub ok: Hsla,
-}
-
-fn lift(c: Hsla, by: f32) -> Hsla {
-    Hsla {
-        l: (c.l + by).clamp(0., 1.),
-        ..c
-    }
 }
 
 impl Tk {
@@ -74,38 +85,48 @@ impl Tk {
         let fg = theme.foreground;
         let page = theme.background;
         let a = |light: f32, dark_a: f32| fg.opacity(if dark { dark_a } else { light });
+        let ink = crate::ui::theme::settings_ink(cx);
+        let role = |c: u32| -> Hsla { gpui::rgb(c).into() };
+        // The washes step toward the cached shared pole (the foreground on
+        // every theme but the few where it cannot hold its own fills).
+        let pole = role(crate::ui::theme::fill_pole(cx));
+        let wash = |(light, dark_a): (f32, f32)| pole.opacity(if dark { dark_a } else { light });
         // Light controls sit a step above the page in the theme's own hue, so
         // a cream theme gets cream fields and a white one stays white. Opaque:
         // the page carries the window's opacity, a control should not.
         let raised = Hsla {
             a: 1.,
-            ..lift(page, 0.035)
+            ..lift(page, ink.raise)
         };
         Self {
             dark,
             fg,
             page,
-            k04: a(0.04, 0.055),
-            k05: a(0.05, 0.07),
-            k06: a(0.06, 0.08),
+            k04: wash(settings_wash::ROW),
+            k05: wash(settings_wash::KEYCAP),
+            k06: wash(settings_wash::MENU_ROW),
             k08: a(0.08, 0.08),
             k15: a(0.15, 0.16),
             k3: a(0.3, 0.3),
-            k35: a(0.35, 0.36),
-            k4: a(0.4, 0.45),
+            glyph: role(ink.glyph),
             k45: a(0.45, 0.5),
-            k5: a(0.5, 0.55),
-            k6: a(0.6, 0.65),
+            sub: role(ink.sub),
+            switch_off: role(ink.switch_off).opacity(ink.switch_off_alpha),
             heading: a(0.9, 0.9),
             nav: a(0.82, 0.8),
-            btn: if dark { fg.opacity(0.1) } else { raised },
-            menu: if dark { lift(page, 0.06) } else { raised },
+            btn: if dark { pole.opacity(0.1) } else { raised },
+            menu: if dark {
+                lift(page, ink.menu_lift)
+            } else {
+                raised
+            },
             knob: if dark { fg } else { raised },
-            chip: if dark { fg.opacity(0.16) } else { raised },
-            warn: gpui::rgb(0xe0a100).into(),
-            warn_text: gpui::rgb(0xb07d00).into(),
-            danger: gpui::rgb(0xd93025).into(),
-            ok: gpui::rgb(0x34a853).into(),
+            chip: if dark { pole.opacity(0.16) } else { raised },
+            warn: role(ink.warn),
+            warn_text: role(ink.warn_text),
+            unsaved: role(ink.unsaved),
+            danger: role(ink.danger),
+            ok: role(ink.ok),
         }
     }
 
@@ -251,7 +272,7 @@ impl RenderOnce for Switch {
             .w(px(w))
             .h(px(h))
             .rounded(px(h / 2.))
-            .bg(if on { tk.fg } else { tk.k15 })
+            .bg(if on { tk.fg } else { tk.switch_off })
             .when(self.disabled, |d| d.opacity(0.4))
             .child(
                 div()
@@ -267,6 +288,15 @@ impl RenderOnce for Switch {
                 d.cursor_pointer()
                     .on_click(move |_, window, cx| handler(&!on, window, cx))
             });
+        #[cfg(test)]
+        let switch = probe(
+            if on {
+                "settings.switch-on"
+            } else {
+                "settings.switch-off"
+            },
+            switch,
+        );
         #[cfg(test)]
         let switch = switch.debug_selector(move || debug_selector.clone());
         switch
@@ -294,6 +324,7 @@ pub(crate) struct Btn {
     dimmed: bool,
     icon: Option<SharedString>,
     size: Option<Rems>,
+    announced: bool,
     handler: Option<ClickHandler>,
 }
 
@@ -310,11 +341,18 @@ pub(crate) fn button(
         dimmed: false,
         icon: None,
         size: None,
+        announced: false,
         handler: None,
     }
 }
 
 impl Btn {
+    /// Report the button to assistive technology under its visible label. Off by
+    /// default so buttons that have not been audited keep the tree they had.
+    pub(crate) fn announced(mut self) -> Self {
+        self.announced = true;
+        self
+    }
     pub(crate) fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
@@ -350,6 +388,10 @@ impl RenderOnce for Btn {
         // Commit button and the dialogs' Create do. Faded to half opacity it
         // stayed a black button that still looked like the thing to press.
         let resting_primary = kind == BtnKind::Primary && (self.disabled || self.dimmed);
+        // Tests find a button by the id the caller already gave it, as with
+        // `Switch`; a production button builds the element it did before.
+        #[cfg(test)]
+        let debug_selector = self.id.to_string();
         let base = h_flex()
             .id(self.id)
             .flex_shrink_0()
@@ -377,7 +419,7 @@ impl RenderOnce for Btn {
                 .bg(if resting_primary { tk.k05 } else { tk.fg })
                 .text_size(self.size.unwrap_or(fs(12.5)))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(if resting_primary { tk.k45 } else { tk.page })
+                .text_color(if resting_primary { tk.sub } else { tk.page })
                 .when(!resting_primary, |b| b.hover(|s| s.opacity(0.88)))
                 .when(resting_primary && !self.disabled, |b| {
                     b.hover(move |s| s.bg(tk.k08))
@@ -387,7 +429,7 @@ impl RenderOnce for Btn {
                 .text_color(if kind == BtnKind::Danger {
                     tk.danger
                 } else {
-                    tk.k6
+                    tk.sub
                 })
                 .when(!self.disabled, |b| {
                     b.hover(move |s| {
@@ -400,22 +442,39 @@ impl RenderOnce for Btn {
                 }),
         };
         let fades = kind != BtnKind::Primary;
-        el.when(fades && self.disabled, |b| b.opacity(0.45))
+        let button = el
+            .when(self.announced, |b| {
+                b.role(gpui::Role::Button).aria_label(self.label.clone())
+            })
+            .when(fades && self.disabled, |b| b.opacity(0.45))
             .when(fades && self.dimmed && !self.disabled, |b| b.opacity(0.55))
             .when_some(self.icon, |b, path| {
-                b.child(Icon::empty().path(path).size(px(10.)).text_color(tk.k6))
+                b.child(Icon::empty().path(path).size(px(10.)).text_color(tk.sub))
             })
             .child(self.label)
             .when_some(self.handler.filter(|_| !self.disabled), |b, handler| {
                 b.cursor_pointer()
                     .on_click(move |ev, window, cx| handler(ev, window, cx))
-            })
+            });
+        #[cfg(test)]
+        let button = probe(
+            match kind {
+                BtnKind::Secondary => "settings.btn-secondary",
+                BtnKind::Primary => "settings.btn-primary",
+                BtnKind::Link => "settings.btn-link",
+                BtnKind::Danger => "settings.btn-danger",
+            },
+            button,
+        );
+        #[cfg(test)]
+        let button = button.debug_selector(move || debug_selector.clone());
+        button
     }
 }
 
 /// A key on a keycap: `⌘`, `T`, `Space`.
 pub(crate) fn keycap(key: impl Into<SharedString>, tk: &Tk) -> Div {
-    div()
+    let keycap = div()
         .flex_shrink_0()
         .min_w(px(20.))
         .h(px(20.))
@@ -433,16 +492,24 @@ pub(crate) fn keycap(key: impl Into<SharedString>, tk: &Tk) -> Div {
         .items_center()
         .justify_center()
         .text_size(fs(11.5))
-        .text_color(tk.k6)
-        .child(key.into())
+        .text_color(tk.sub)
+        .child(key.into());
+    #[cfg(test)]
+    let keycap = probe("settings.keycap", keycap);
+    keycap
 }
 
-/// A search glass the size the design draws it beside a field.
-pub(crate) fn search_glass(size: f32, tk: &Tk) -> Icon {
-    Icon::empty()
-        .path("icons/settings/search.svg")
+/// A search glass the size the design draws it beside a field: one SVG, painted
+/// in the cached decorative-mark ink.
+pub(crate) fn search_glass(size: f32, tk: &Tk) -> gpui::Svg {
+    let glass = gpui::svg()
+        .flex_none()
         .size(px(size))
-        .text_color(tk.k35)
+        .path("icons/settings/search.svg")
+        .text_color(tk.glyph);
+    #[cfg(test)]
+    let glass = probe("settings.search-glass", glass);
+    glass
 }
 
 /// A hairline: one device pixel. The design draws field edges at half a
@@ -571,13 +638,14 @@ pub(crate) fn section_head(title: &str, desc: Option<String>, tk: &Tk) -> Div {
                 .child(title.to_string()),
         )
         .when_some(desc.filter(|d| !d.is_empty()), |col, desc| {
-            col.child(
-                div()
-                    .text_size(fs(12.))
-                    .line_height(px(17.))
-                    .text_color(tk.k6)
-                    .child(desc),
-            )
+            let desc = div()
+                .text_size(fs(12.))
+                .line_height(px(17.))
+                .text_color(tk.sub)
+                .child(desc);
+            #[cfg(test)]
+            let desc = probe("settings.section-desc", desc);
+            col.child(desc)
         })
 }
 
@@ -624,7 +692,7 @@ pub(crate) fn chevron_down(tk: &Tk) -> Icon {
     Icon::empty()
         .path("icons/settings/chevron-down.svg")
         .size(px(10.))
-        .text_color(tk.k45)
+        .text_color(tk.sub)
 }
 
 pub(crate) fn check_mark(visible: bool, tk: &Tk) -> Div {
@@ -675,7 +743,7 @@ pub(crate) fn menu_heading(label: impl Into<SharedString>, tk: &Tk) -> Div {
         .items_center()
         .text_size(fs(11.))
         .font_weight(FontWeight::MEDIUM)
-        .text_color(tk.k45)
+        .text_color(tk.sub)
         .child(label.into())
 }
 
@@ -739,7 +807,7 @@ pub(crate) fn stepper(
             .items_center()
             .justify_center()
             .text_size(fs(13.))
-            .text_color(tk.k6)
+            .text_color(tk.sub)
             .when(!enabled, |d| d.opacity(0.35))
             .when(enabled, |d| {
                 d.cursor_pointer().active(move |s| s.bg(tk.k05))
@@ -768,7 +836,7 @@ pub(crate) fn stepper(
                 .text_size(fs(12.5))
                 .text_color(tk.fg)
                 .child(s.value)
-                .child(div().text_color(tk.k4).child(s.unit)),
+                .child(div().text_color(tk.sub).child(s.unit)),
         )
         .child(divider())
         .child(
@@ -897,8 +965,303 @@ pub(crate) fn slider(
                 .text_right()
                 .whitespace_nowrap()
                 .text_size(fs(12.5))
-                .text_color(tk.k6)
+                .text_color(tk.sub)
                 .child(readout),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
+
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::ui::app::Tty59App;
+
+    /// A real `Tty59App` in a test window, themed through `apply_theme` the
+    /// way the app is, for tests that drive the settings page's own render.
+    pub(crate) fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty59App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        cx.background_executor.run_until_parked();
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty59App>()
+                    .unwrap_or_else(|_| panic!("window root wraps a Tty59App"))
+            })
+            .unwrap();
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        (app, vcx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // `#[gpui::test]` expands a bare `drop(..)`; the glob above would bring in
+    // this module's own shadow-casting `drop` helper instead of std's.
+    use crate::core::config::{Config, CoreConfig};
+    use crate::ui::presets::{self, contrast};
+    use gpui::TestAppContext;
+    use std::mem::drop;
+
+    fn pack(c: Hsla) -> u32 {
+        let rgb = crate::terminal::palette::hsla_to_rgb(c);
+        (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32
+    }
+
+    /// `theme::semantics`, `settings_ink` and `chrome_ink` panic without a
+    /// theme and have no fallback, so a window must be built after
+    /// `apply_theme` has installed all three. Nothing is cached before the app
+    /// builds its view; every role is there once it has, and the settings page
+    /// draws from them on its first frame.
+    #[gpui::test]
+    fn a_window_is_built_after_the_theme_and_finds_every_cached_role(cx: &mut TestAppContext) {
+        use crate::core::session::Session;
+        use crate::ui::app::Tty59App;
+        use gpui::{AppContext as _, VisualTestContext};
+
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+            assert!(!cx.has_global::<presets::Semantics>());
+            assert!(!cx.has_global::<presets::SettingsInk>());
+            assert!(!cx.has_global::<presets::ChromeInk>());
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty59App::with_session(None, Some(Session::default()), window, cx));
+            assert!(cx.has_global::<presets::Semantics>());
+            assert!(cx.has_global::<presets::SettingsInk>());
+            assert!(cx.has_global::<presets::ChromeInk>());
+            gpui_component::Root::new(app, window, cx)
+        });
+        cx.background_executor.run_until_parked();
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty59App>()
+                    .unwrap_or_else(|_| panic!("window root wraps a Tty59App"))
+            })
+            .unwrap();
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(crate::ui::settings::SettingsSection::General, window, cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// `Tk` paints text, off tracks and status colours from what `apply_theme`
+    /// cached, and those colours clear their floors on the washes `Tk` itself
+    /// lays down: the page, hovered rows, keycaps, menu rows and the nav
+    /// rail's rungs. Measured on the painted values, not on the derivation's
+    /// own list, with each layer rounded to eight bits the way the derivation
+    /// rounds it, and no tolerance.
+    #[gpui::test]
+    fn tk_reads_the_cached_roles_and_they_clear_their_floors_on_the_painted_fills(
+        cx: &mut TestAppContext,
+    ) {
+        // WCAG AA for text; a light off track is a mark, held to 3:1 below.
+        // A dark one is the owner's faint wash; its knob, a non-text mark, is held to 3:1.
+        const TEXT_FLOOR: f32 = 4.5;
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            // A crossover palette too, whose washes and lifts invert.
+            let crossover = presets::generated_theme_grid()
+                .into_iter()
+                .find(|t| t.background_color() == 0x777777)
+                .unwrap();
+            let crossover_id = crossover.id.clone();
+            let mut themes = presets::builtins();
+            themes.push(crossover);
+            cx.set_global(presets::Themes(themes));
+            for id in [
+                "light",
+                "dark",
+                "catppuccin_latte",
+                "rose_pine_dawn",
+                "one_dark_pro",
+                crossover_id.as_str(),
+            ] {
+                cx.set_global(Config(CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: id.into(),
+                    ..Default::default()
+                }));
+                crate::ui::theme::apply_theme(None, cx);
+                let tk = Tk::of(cx);
+                let ink = crate::ui::theme::settings_ink(cx);
+                let rail = cx.global::<presets::Surfaces>().rail;
+
+                assert_eq!(pack(tk.sub), ink.sub, "{id}: sub is the cached role");
+                assert_eq!(pack(tk.switch_off), ink.switch_off, "{id}: switch_off");
+                assert_eq!(pack(tk.danger), ink.danger, "{id}: danger");
+                assert_eq!(pack(tk.warn_text), ink.warn_text, "{id}: warn_text");
+                assert_eq!(pack(tk.unsaved), ink.unsaved, "{id}: unsaved");
+                assert_eq!(pack(tk.warn), ink.warn, "{id}: warn");
+                assert_eq!(pack(tk.ok), ink.ok, "{id}: ok");
+                assert_eq!(pack(tk.glyph), ink.glyph, "{id}: glyph is the cached role");
+                // The washes step toward the cached pole, not the foreground.
+                let pole = crate::ui::theme::fill_pole(cx);
+                for (name, wash) in [("k04", tk.k04), ("k05", tk.k05), ("k06", tk.k06)] {
+                    assert_eq!(pack(wash), pole, "{id}: {name} steps toward the pole");
+                }
+                if id == crossover_id {
+                    assert_eq!(pole, 0xffffff, "{id}: the crossover pole is inverted");
+                }
+
+                // Each layer is quantized to eight bits before the next is drawn over it.
+                let over = |fill: u32, wash: Hsla| pack(Hsla::from(gpui::rgb(fill)).blend(wash));
+                let text_fills = [
+                    pack(tk.page),
+                    over(pack(tk.page), tk.k04),
+                    over(pack(tk.page), tk.k05),
+                    pack(tk.menu),
+                    over(pack(tk.menu), tk.k06),
+                    rail.base,
+                    rail.hover,
+                    rail.selected,
+                    over(rail.base, tk.k05),
+                ];
+                for fill in text_fills {
+                    assert!(
+                        contrast(pack(tk.sub), fill) >= TEXT_FLOOR,
+                        "{id}: sub {:#08x} is {:.2}:1 on {fill:#08x}",
+                        pack(tk.sub),
+                        contrast(pack(tk.sub), fill)
+                    );
+                }
+                let mark_fills = [
+                    pack(tk.page),
+                    over(pack(tk.page), tk.k04),
+                    over(pack(tk.page), tk.k05),
+                    rail.base,
+                    over(rail.base, tk.k05),
+                ];
+                // Error, Unsaved and Live text on the fills they are painted on:
+                // the page, a hovered or open row, a dropdown and its row.
+                let status_fills = [
+                    pack(tk.page),
+                    over(pack(tk.page), tk.k04),
+                    pack(tk.menu),
+                    over(pack(tk.menu), tk.k06),
+                ];
+                // Unsaved is painted only on the open host row (the page under the k04 wash) and is a
+                // small role: it holds the literal 5.0 there, and the 4.5 floor on it too.
+                let host_row = over(pack(tk.page), tk.k04);
+                assert!(
+                    contrast(pack(tk.unsaved), host_row) >= 5.0,
+                    "{id}: unsaved {:#08x} is {:.2}:1 on the open host row {host_row:#08x}, under 5.0",
+                    pack(tk.unsaved),
+                    contrast(pack(tk.unsaved), host_row)
+                );
+                // The general warning text (agent hooks Unavailable) is painted on the page.
+                assert!(
+                    contrast(pack(tk.warn_text), pack(tk.page)) >= TEXT_FLOOR,
+                    "{id}: warn_text {:#08x} is {:.2}:1 on the page",
+                    pack(tk.warn_text),
+                    contrast(pack(tk.warn_text), pack(tk.page))
+                );
+                for (what, text) in [("danger", tk.danger), ("ok", tk.ok)] {
+                    for fill in status_fills {
+                        assert!(
+                            contrast(pack(text), fill) >= TEXT_FLOOR,
+                            "{id}: {what} {:#08x} is {:.2}:1 on {fill:#08x}",
+                            pack(text),
+                            contrast(pack(text), fill)
+                        );
+                    }
+                }
+                // The search glass: the page, the nav rail's search well, and
+                // the open dropdown's own fill.
+                for fill in [
+                    pack(tk.page),
+                    over(pack(tk.page), tk.k04),
+                    rail.base,
+                    over(rail.base, tk.k04),
+                    pack(tk.menu),
+                ] {
+                    assert!(
+                        contrast(pack(tk.glyph), fill) >= 3.,
+                        "{id}: glyph {:#08x} is {:.2}:1 on {fill:#08x}",
+                        pack(tk.glyph),
+                        contrast(pack(tk.glyph), fill)
+                    );
+                }
+                // Dark fills step toward the pole: the button fill lifts off a
+                // dark page when the pole is light, and sinks into it when not.
+                if tk.dark {
+                    let page = pack(tk.page);
+                    assert_eq!(
+                        presets::is_lighter(over(pack(tk.page), tk.btn), page),
+                        presets::is_lighter(pole, page),
+                        "{id}: button fill follows the pole"
+                    );
+                }
+                if tk.dark {
+                    // Owner exception to the 3:1 mark floor: the dark off track is
+                    // exactly what `k15` always was, the foreground at 16%,
+                    // translucent over whatever it sits on. Not a pole wash, not
+                    // floored, not an opaque composite; the knob carries the state.
+                    assert_eq!(tk.switch_off.a, 0.16, "{id}: dark off track opacity");
+                    assert_eq!(tk.switch_off.a, tk.k15.a, "{id}: the old k15 opacity");
+                    assert_eq!(
+                        pack(tk.switch_off),
+                        pack(tk.k15),
+                        "{id}: the track's ink is the old k15's foreground"
+                    );
+                    assert_eq!(
+                        pack(tk.switch_off),
+                        pack(tk.fg),
+                        "{id}: the track's ink is the foreground"
+                    );
+                    // The painted knob is `tk.knob` (the foreground), a non-text mark
+                    // held to 3:1, seen against the page and against the track
+                    // composited over the page and over a hovered or open row.
+                    let page = pack(tk.page);
+                    let row = over(page, tk.k04);
+                    for (what, fill) in [
+                        ("page", page),
+                        ("track on the page", over(page, tk.switch_off)),
+                        ("track on a row", over(row, tk.switch_off)),
+                    ] {
+                        assert!(
+                            contrast(pack(tk.knob), fill) >= 3.,
+                            "{id}: dark off knob {:#08x} is {:.2}:1 on the {what} {fill:#08x}",
+                            pack(tk.knob),
+                            contrast(pack(tk.knob), fill)
+                        );
+                    }
+                } else {
+                    assert_eq!(tk.switch_off.a, 1., "{id}: the light off track is opaque");
+                    for fill in mark_fills {
+                        assert!(
+                            contrast(pack(tk.switch_off), fill) >= 3.,
+                            "{id}: off track {:#08x} is {:.2}:1 on {fill:#08x}",
+                            pack(tk.switch_off),
+                            contrast(pack(tk.switch_off), fill)
+                        );
+                    }
+                }
+            }
+        });
+    }
 }

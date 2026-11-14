@@ -897,7 +897,7 @@ impl Tty59App {
                 .pt(px(4.))
                 .text_size(fs(12.))
                 .line_height(px(17.))
-                .text_color(tk.k6)
+                .text_color(tk.sub)
                 .child(t(L10nKey::SettingsShellFooter))
                 .into_any_element(),
         );
@@ -1771,12 +1771,12 @@ impl Tty59App {
                 .gap(px(6.))
                 .text_size(fs(12.))
                 .line_height(px(17.))
-                .text_color(tk.k45)
+                .text_color(tk.sub)
                 .child(t(L10nKey::SettingsAboutDesc1))
                 .child(
                     Link::new("about-github")
                         .href("https://github.com/nathabonfim59/tty59")
-                        .text_color(tk.k6)
+                        .text_color(tk.sub)
                         .child("github.com/nathabonfim59/tty59"),
                 )
                 .into_any_element(),

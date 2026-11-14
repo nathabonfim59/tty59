@@ -76,13 +76,246 @@ pub struct Semantic {
     pub on_fill: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Semantics {
     pub danger: Semantic,
     pub warning: Semantic,
     pub success: Semantic,
     pub info: Semantic,
     pub link: Semantic,
+}
+
+impl Global for Semantics {}
+
+impl Semantics {
+    /// Maps core agent status onto the active theme's existing semantic roles
+    /// so `tty59-core` stays free of UI theme dependencies.
+    pub(crate) fn for_agent_status(
+        &self,
+        status: crate::core::cli_agent::AgentStatus,
+    ) -> Option<Semantic> {
+        match status {
+            crate::core::cli_agent::AgentStatus::Idle => None,
+            crate::core::cli_agent::AgentStatus::Working => Some(self.info),
+            crate::core::cli_agent::AgentStatus::Waiting => Some(self.warning),
+            crate::core::cli_agent::AgentStatus::Done => Some(self.success),
+        }
+    }
+}
+
+/// The settings page's secondary text and off-state switch track, cached per
+/// theme by `apply_theme`. The dark track is the authored foreground at a faint
+/// translucent opacity (owner decision, under the 3:1 mark floor: the knob
+/// carries the state); the light track is opaque and floored at 3:1.
+#[derive(Debug, Clone, Copy)]
+pub struct SettingsInk {
+    pub sub: u32,
+    pub switch_off: u32,
+    /// The opacity the off track is painted at over whatever it sits on: 1 in
+    /// light (an opaque, floored track); in dark the foreground at
+    /// `SWITCH_OFF_DARK_ALPHA`, translucent as it has always been.
+    pub switch_off_alpha: f32,
+    /// The search glass and its like: a small mark, held to
+    /// `SETTINGS_GLYPH_TARGET` on the settings fills it sits on, from a seed
+    /// at half the foreground's strength.
+    pub glyph: u32,
+    /// The semantic text inks (an error, Unsaved, Live) floored on the
+    /// settings fills they are painted on, which are lower-contrast than the
+    /// bases `Semantics` is floored on: a hovered row, a dropdown row.
+    pub danger: u32,
+    /// The general warning text drawn on the settings page itself (the agent hooks' Unavailable
+    /// line, 12.5px body text): floored on the page, 4.6:1 where it had to move.
+    pub warn_text: u32,
+    /// The Unsaved meta of a host row. Held to `SETTINGS_SMALL_TEXT_TARGET` on the open host row it
+    /// is painted on (shown only while a host is being edited, which opens it): it is drawn at 12px
+    /// or less. A separate role from `warn_text`, which is painted on the page.
+    pub unsaved: u32,
+    pub ok: u32,
+    /// The warning dot and ring, a mark: the semantic warning fill floored at
+    /// 3:1 on the page and on the row wash a shortcut conflict sits on.
+    pub warn: u32,
+    /// Signed lightness a light control sits off the page, and a dark
+    /// popover sits off it: the `settings_wash` amounts, in the direction
+    /// the shared pole puts them.
+    pub raise: f32,
+    pub menu_lift: f32,
+}
+
+impl Global for SettingsInk {}
+
+/// Switcher, search overlay and pane-grip ink, cached per theme by
+/// `apply_theme`; each floored on the fills it is painted on.
+#[derive(Debug, Clone, Copy)]
+pub struct ChromeInk {
+    /// Meta, badge and slot text on the selected popover row.
+    pub selected_meta: u32,
+    /// An unlit name on the popover's resting, hovered and selected rows.
+    pub quiet_name: u32,
+    /// An avatar's initial on `Neutrals::secondary`.
+    pub avatar_ink: u32,
+    /// A keycap's fill, a neutral step off the popover.
+    pub keycap_fill: u32,
+    /// A keycap's label on `keycap_fill`.
+    pub keycap_ink: u32,
+    /// An idle pane grip on the window (a mark: 3:1).
+    pub grip_idle: u32,
+    /// A search result's title on the popover's resting, hovered and selected
+    /// rows: the foreground at 92%, floored.
+    pub search_title: u32,
+    /// A panel row's title on the sidebar's and the rail's resting, hovered
+    /// and selected rows: the authored foreground, floored.
+    pub panel_title: u32,
+    /// A port chip's text on its translucent fill over a sidebar or window
+    /// row, resting and hovered: the authored foreground, floored.
+    pub port_chip_ink: u32,
+    /// The same chip's text while its row is hovered: the theme's link ink,
+    /// floored (`ThemeColor::accent` is a fill and cannot be text).
+    pub port_chip_hover_ink: u32,
+    /// An unpicked switcher row's title on the popover's resting and hovered
+    /// rows: the authored foreground, floored.
+    pub unpicked_title: u32,
+    /// An unpicked switcher row's meta and count (11.5-12px) on the same rows: the theme's muted
+    /// foreground, held to `CHROME_SMALL_META_TARGET` where it had to move.
+    pub unpicked_meta: u32,
+    /// An Inbox row's reason and meta lines while the row is SELECTED, on the
+    /// sidebar's and the rail's selected fills only: the shared caption ink
+    /// (`Neutrals::muted_foreground`), kept where it already holds
+    /// `SELECTED_CAPTION_TARGET` there and walked to it where it does not. The
+    /// unselected captions and the shared caption itself are unchanged.
+    pub selected_caption: u32,
+}
+
+/// Headroom by size, derived once in `apply_theme` and never at render time. Text painted at 12px or
+/// less in regular weight, and icons or glyphs of 12px or less, lose contrast to antialiasing, so the
+/// settings roles that are only ever drawn that small derive above the public floor: such text at
+/// `SETTINGS_SMALL_TEXT_TARGET` (5.0:1), such glyphs at `SETTINGS_GLYPH_TARGET` (3.2:1). Everything
+/// else keeps 4.6:1 for text and 3:1 for marks. A seed that already clears the target on every fill it
+/// is painted on stays as authored. Policy: the higher targets are assigned to small roles whose 1x
+/// captures missed the floor, chosen from offline capture evidence (nothing is measured at runtime);
+/// roles and seeds already verified above the 1x floor stay authored. The derivation itself is pure
+/// and only guarantees that a seed above its assigned target is returned unchanged. Scope today:
+/// `SettingsInk::unsaved` and `SettingsInk::glyph`.
+pub(crate) const SETTINGS_SMALL_TEXT_TARGET: f32 = 5.0;
+/// The same small-text target for the switcher's unpicked meta and count (11.5-12px regular text),
+/// whose 1x captures missed the floor. Chrome-side, derived once in `apply_theme`.
+pub(crate) const CHROME_SMALL_META_TARGET: f32 = 5.0;
+pub(crate) const SETTINGS_GLYPH_TARGET: f32 = 3.2;
+
+/// The contrast a caption keeps on a selected panel row: above the 4.5:1 text
+/// floor, because the selected fill is the lowest-contrast surface a caption
+/// is drawn on and the caption is not set in a heavier weight to make up for
+/// it. Where the fill cannot give it (a mid-grey selection) the best the
+/// derivation can reach is what the role holds.
+pub(crate) const SELECTED_CAPTION_TARGET: f32 = 5.0;
+
+/// How far a port chip's wash steps off the row it sits on, as a share of the
+/// foreground. The chip paints with it and `Theme::chrome_ink` floors against
+/// it.
+pub(crate) const PORT_CHIP_WASH: f32 = 0.06;
+
+impl Global for ChromeInk {}
+
+/// The colour every step-toward-the-ink chrome fill moves toward, cached per
+/// theme by `apply_theme` (see `Theme::resolve`). The painters of the fills
+/// that are not in `Surfaces` (the settings washes, a port chip) read it.
+#[derive(Debug, Clone, Copy)]
+pub struct FillPole(pub u32);
+
+impl Global for FillPole {}
+
+/// One theme change's worth of chrome derivation: the resolved pole, the
+/// neutrals and surfaces built from it, and the sets of fills each ink role
+/// is painted on, so the pole criterion, the cached inks and the sweeps all
+/// read the same fills.
+pub(crate) struct Resolved {
+    pub pole: u32,
+    pub m: Neutrals,
+    pub sf: Surfaces,
+    raise: f32,
+    menu_lift: f32,
+    caption: Vec<u32>,
+    resting: Vec<u32>,
+    every_rung: Vec<u32>,
+    settings_text: Vec<u32>,
+    settings_marks: Vec<u32>,
+    settings_glyph: Vec<u32>,
+    settings_status: Vec<u32>,
+    settings_warn: Vec<u32>,
+    /// The open host row: the page under the row's ROW wash. The only fill the Unsaved text is painted on.
+    settings_host_row: Vec<u32>,
+    /// The settings page itself: the fill the Unavailable warning line is painted on.
+    settings_page: Vec<u32>,
+    panel: Vec<u32>,
+    popover_rows: Vec<u32>,
+    port_chip: Vec<u32>,
+    selected: Vec<u32>,
+}
+
+impl Resolved {
+    /// Each set of fills with the floor its ink must clear on all of them.
+    fn lists(&self) -> [(&[u32], f32); 12] {
+        [
+            (&self.caption, TEXT_FLOOR),
+            (&self.resting, TEXT_FLOOR),
+            (&self.resting, ACCENT_FLOOR),
+            (&self.every_rung, ACCENT_FLOOR),
+            (&self.settings_text, TEXT_FLOOR),
+            (&self.settings_marks, ACCENT_FLOOR),
+            (&self.settings_glyph, ACCENT_FLOOR),
+            (&self.settings_status, TEXT_FLOOR),
+            (&self.panel, TEXT_FLOOR),
+            (&self.popover_rows, TEXT_FLOOR),
+            (&self.port_chip, TEXT_FLOOR),
+            (&self.selected, TEXT_FLOOR),
+        ]
+    }
+
+    /// Whether white or black clears every set's floor on every fill in it.
+    fn shares_one_ink(&self) -> bool {
+        self.lists().iter().all(|&(fills, floor)| {
+            [0xffffff, 0x000000]
+                .iter()
+                .any(|&ink| fills.iter().all(|&fill| contrast(ink, fill) >= floor))
+        })
+    }
+}
+
+/// How far each settings wash steps off what it sits on, as `(light, dark)`
+/// shares of the ink, and how far a raised control lifts off the page. The
+/// page paints with these and `Theme::settings_ink` floors against them.
+pub(crate) mod settings_wash {
+    /// A hovered or selected row.
+    pub const ROW: (f32, f32) = (0.04, 0.055);
+    /// A keycap, a segmented track, a pressed control.
+    pub const KEYCAP: (f32, f32) = (0.05, 0.07);
+    /// A highlighted menu row.
+    pub const MENU_ROW: (f32, f32) = (0.06, 0.08);
+    /// Lightness a light control sits above the page.
+    pub const RAISE: f32 = 0.035;
+    /// Lightness a dark popover sits above the page.
+    pub const MENU_LIFT_DARK: f32 = 0.06;
+}
+
+/// The opacity of the dark off-switch track: the authored foreground at 16%
+/// over whatever the switch sits on (the old `k15`). Deliberately faint, by
+/// owner decision, so the knob carries the state. Not a step toward the shared
+/// pole and not floored.
+const SWITCH_OFF_DARK_ALPHA: f32 = 0.16;
+
+/// A wash of `pole` at `share` laid over `surface`, composited and rounded the
+/// way the painters' `Hsla` washes are (blend, then eight bits), so the fills
+/// the floors are measured on are the fills that are drawn, to the channel.
+fn wash_over(surface: u32, pole: u32, share: f32) -> u32 {
+    let wash = Hsla::from(gpui::rgb(pole)).opacity(share);
+    pack(Hsla::from(gpui::rgb(surface)).blend(wash))
+}
+
+/// `c` moved `by` in lightness, in the colour's own hue.
+pub(crate) fn lift(c: Hsla, by: f32) -> Hsla {
+    Hsla {
+        l: (c.l + by).clamp(0., 1.),
+        ..c
+    }
 }
 
 /// UI interaction roles. Terminal ANSI colours are deliberately independent.
@@ -101,6 +334,12 @@ impl Global for Interactions {}
 pub mod state {
     pub const HOVER: f32 = 1.18;
     pub const SELECTED: f32 = 1.30;
+    /// The least CIE L* a rung must sit past the one before it (base, hover,
+    /// selected) to read as a separate state. Measured minima are 1.33 across
+    /// the built-ins and 1.02 across the generated grid (the left rail's
+    /// hover-to-selected step on a mid-grey base); this sits under both with
+    /// room for a rounded channel.
+    pub const RUNG_MIN_DELTA: f32 = 0.9;
     pub const PRESSED: f32 = 1.55;
     pub const CURSOR: f32 = 1.70;
     /// The side panels' own, lighter rungs (see `Theme::panel_surface`).
@@ -180,6 +419,12 @@ impl Theme {
     }
 
     pub fn neutrals(&self) -> Neutrals {
+        self.resolve().m
+    }
+
+    /// The neutral fills with every step-toward-the-ink derivation (the
+    /// rail's tint, a dark popover, the rungs' shade) moving toward `pole`.
+    fn neutrals_at(&self, pole: u32) -> Neutrals {
         let bg = self.background_color();
         let fg = legible_foreground(bg, self.foreground);
         // One continuous surface: the rails share the window's fill and are
@@ -189,10 +434,10 @@ impl Theme {
         // The left rail is the one tinted surface: 3% toward the ink, which
         // lands on #f5f5f3 / #1e1e20 for the default pair. Everything painted
         // on it is floored against it below, the same as the other fills.
-        let rail = mix(bg, fg, RAIL_TINT);
+        let rail = mix(bg, pole, RAIL_TINT);
         // Light overlays sit above the grey rail; dark overlays lift toward
         // the foreground. A light menu must not be darker than its backdrop.
-        let popover = if self.dark { mix(bg, fg, 0.06) } else { bg };
+        let popover = if self.dark { mix(bg, pole, 0.06) } else { bg };
         // Two weights, one derivation. Which one a line gets is decided by
         // whether it is the *only* thing separating what it sits between:
         //
@@ -217,13 +462,16 @@ impl Theme {
         };
         let border = hairline(0.16, BORDER_FLOOR);
         let divider = hairline(0.16, DIVIDER_FLOOR);
-        // This shared caption role is painted on all three opaque surfaces.
-        // Calibrating only against the window loses contrast on raised fills.
-        let muted_foreground = [bg, sidebar, rail, popover]
-            .into_iter()
-            .fold(dim(fg, bg, state::TEXT_RESTING), |ink, surface| {
-                legible_ink(surface, ink, TEXT_FLOOR)
-            });
+        let (rail_hover, rail_selected) = panel_rungs(rail, pole);
+        // This shared caption role is painted on all three opaque surfaces plus
+        // the left rail's hover and selected fills. Calibrating only against
+        // resting surfaces leaves light-mode captions under 4.5:1 on hover,
+        // selected rows, and the rail's search well.
+        let muted_foreground = legible_across(
+            &[bg, sidebar, rail, popover, rail_hover, rail_selected],
+            dim(fg, bg, state::TEXT_RESTING),
+            TEXT_FLOOR,
+        );
         let title_floor = TITLE_FLOOR.max(contrast(muted_foreground, sidebar) * state::TEXT_STEP);
         let rail_title_floor = TITLE_FLOOR.max(contrast(muted_foreground, rail) * state::TEXT_STEP);
         // Blended, not bisected, so a palette's own softness carries into the
@@ -252,12 +500,12 @@ impl Theme {
             foreground: fg,
             border,
             divider,
-            secondary: mix(bg, fg, 0.09),
-            muted: mix(bg, fg, 0.06),
+            secondary: mix(bg, pole, 0.09),
+            muted: mix(bg, pole, 0.06),
             muted_foreground,
             popover,
             caret: legible_ink(bg, self.caret.unwrap_or(self.accent), ACCENT_FLOOR),
-            selection: self.selection.unwrap_or_else(|| mix(bg, fg, 0.20)),
+            selection: self.selection.unwrap_or_else(|| mix(bg, pole, 0.20)),
             sidebar,
             // Blended, not bisected, so a palette's own softness carries into
             // the sidebar — but floored on the fill it is actually painted on
@@ -275,19 +523,26 @@ impl Theme {
         }
     }
 
-    pub fn surface(&self, base: u32) -> Surface {
+    fn surface_at(&self, base: u32, pole: u32) -> Surface {
         let bg = self.background_color();
         let fg = legible_foreground(bg, self.foreground);
-        let selected = raise(base, fg, state::SELECTED);
+        let hover = raise(base, pole, state::HOVER);
+        let selected = legible_rung(raise(base, pole, state::SELECTED), hover, base, fg);
         let text_resting = dim(fg, base, state::TEXT_RESTING);
+        // A palette too weak to hold its own text on a selection that still
+        // reads as a step keeps the step; the title takes the lift instead.
+        let text_selected = match contrast(fg, selected) < TEXT_FLOOR {
+            true => lift_lightness(fg, selected, text_resting),
+            false => stepped_ink(selected, base, fg, text_resting),
+        };
         Surface {
             base,
-            hover: raise(base, fg, state::HOVER),
+            hover,
             selected,
-            pressed: raise(base, fg, state::PRESSED),
-            cursor: raise(base, fg, state::CURSOR),
+            pressed: raise(base, pole, state::PRESSED),
+            cursor: raise(base, pole, state::CURSOR),
             text_resting,
-            text_selected: stepped_ink(selected, base, fg, text_resting),
+            text_selected,
         }
     }
 
@@ -297,25 +552,29 @@ impl Theme {
     /// cool foreground (the default light's #1c1c1e) bleaches a warm panel's
     /// tint out of a rung this faint, and the row reads as a grey patch on
     /// cream.
-    fn panel_surface(&self, base: u32, text_resting: u32, fg: u32) -> Surface {
-        let shade = shade_of(base, fg);
-        let selected = raise(base, shade, state::PANEL_SELECTED);
+    fn panel_surface(&self, base: u32, text_resting: u32, fg: u32, pole: u32) -> Surface {
+        let (hover, selected) = panel_rungs(base, pole);
         Surface {
-            hover: raise(base, shade, state::PANEL_HOVER),
+            hover,
             selected,
             text_resting,
             text_selected: stepped_ink(selected, base, fg, text_resting),
-            ..self.surface(base)
+            ..self.surface_at(base, pole)
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn interactions(&self) -> Interactions {
-        let m = self.neutrals();
+        self.interactions_with(&self.neutrals())
+    }
+
+    pub(crate) fn interactions_with(&self, m: &Neutrals) -> Interactions {
         // Menus use a blue wash; the switcher uses the solid companion fill.
         // Keep labels and shortcut hints readable on the shared menu surface.
         let choice = mix(m.popover, 0x2878df, if self.dark { 0.34 } else { 0.20 });
         let preferred_label = if self.dark { 0x121418 } else { 0xffffff };
         let fill = self.clear_ink(
+            m,
             legible_ink(preferred_label, m.accent, TEXT_FLOOR),
             ACCENT_FLOOR,
         );
@@ -325,7 +584,7 @@ impl Theme {
         let away = if is_dark(on_fill) { 0xffffff } else { 0x000000 };
         Interactions {
             primary: Semantic {
-                ink: self.clear_ink(m.accent, TEXT_FLOOR),
+                ink: self.clear_ink(m, m.accent, TEXT_FLOOR),
                 fill,
                 on_fill,
             },
@@ -348,11 +607,8 @@ impl Theme {
     /// window, and both of those fills sit a step toward the foreground. Clear
     /// the floor on every surface the ink can be painted on, not just on the
     /// darkest one.
-    fn clear_ink(&self, seed: u32, floor: f32) -> u32 {
-        let m = self.neutrals();
-        [m.background, m.sidebar, m.rail, m.popover]
-            .into_iter()
-            .fold(seed, |ink, surface| legible_ink(surface, ink, floor))
+    fn clear_ink(&self, m: &Neutrals, seed: u32, floor: f32) -> u32 {
+        legible_across(&[m.background, m.sidebar, m.rail, m.popover], seed, floor)
     }
 
     /// One entry of the theme's own ANSI ramp, legible as chrome text.
@@ -361,19 +617,32 @@ impl Theme {
     /// stand on the background. Chrome draws the same hues on the sidebar and
     /// popover fills too, so they go through the same floor the semantic inks
     /// do.
+    #[cfg(test)]
     pub fn ansi_ink(&self, index: usize) -> u32 {
-        self.clear_ink(self.ansi_seed(index), TEXT_FLOOR)
+        self.ansi_ink_with(&self.neutrals(), index)
     }
 
+    pub(crate) fn ansi_ink_with(&self, m: &Neutrals, index: usize) -> u32 {
+        self.clear_ink(m, self.ansi_seed(index), TEXT_FLOOR)
+    }
+
+    #[cfg(test)]
     pub fn semantics(&self) -> Semantics {
+        self.semantics_with(&self.neutrals())
+    }
+
+    pub(crate) fn semantics_with(&self, m: &Neutrals) -> Semantics {
         let bg = self.background_color();
         let fg = legible_foreground(bg, self.foreground);
         let build = |seed: u32| {
-            let fill = self.clear_ink(seed, ACCENT_FLOOR);
+            let fill = self.clear_ink(m, seed, ACCENT_FLOOR);
             Semantic {
-                ink: self.clear_ink(seed, TEXT_FLOOR),
+                ink: self.clear_ink(m, seed, TEXT_FLOOR),
                 fill,
-                on_fill: ink_on(fill, fg, TEXT_FLOOR),
+                // The badge ink on a status fill: the authored foreground where it already reads, otherwise
+                // the better of white and black. A walk from the foreground toward one end can stop short of
+                // what the other end gives (white 4.56:1 where black is 4.61:1 on a blue fill).
+                on_fill: legible_foreground(fill, fg),
             }
         };
         // Green and amber are the v4 Git inks (added / modified); the floors
@@ -392,6 +661,252 @@ impl Theme {
         }
     }
 
+    /// The one colour every step-toward-the-ink chrome fill (the rail's tint,
+    /// a dark popover, the state rungs, the settings washes, a port chip's
+    /// wash) moves toward, with everything derived from it. Resolved once per
+    /// theme change, in `apply_theme`; nothing else chooses a pole.
+    ///
+    /// The authored foreground is the pole, unless the fills it produces
+    /// cannot all be served by one ink at their floors (4.5:1 for text, 3:1
+    /// for marks): the palette sits where white and black serve equally, and
+    /// stepping toward the ink walks its fills out from under it. Then the
+    /// fills step the other way, away from the ink, which raises every ink's
+    /// contrast. The authored background, foreground and every terminal colour
+    /// come out unchanged; only the direction of the chrome's own fills moves.
+    /// Not steps toward the ink, and so not on the pole: borders, dividers and
+    /// rings (strokes floored on every chrome fill), the scrollbar thumb, the
+    /// switch knob, the scrim and the blue menu choice wash.
+    pub(crate) fn resolve(&self) -> Resolved {
+        let bg = self.background_color();
+        let fg = legible_foreground(bg, self.foreground);
+        let authored = self.derive(fg);
+        if authored.shares_one_ink() {
+            return authored;
+        }
+        let away = match relative_luminance(fg) > relative_luminance(bg) {
+            true => 0x000000,
+            false => 0xffffff,
+        };
+        self.derive(away)
+    }
+
+    /// Every chrome fill for `pole`, and the sets of fills each ink role is
+    /// painted on. The one place those sets are written down: the pole
+    /// criterion, the derived inks and the sweeps all read them.
+    fn derive(&self, pole: u32) -> Resolved {
+        let m = self.neutrals_at(pole);
+        let sf = self.surfaces_at(&m, pole);
+        let page = m.background;
+        let share = |(light, dark): (f32, f32)| if self.dark { dark } else { light };
+        let wash = |surface: u32, strength: (f32, f32)| wash_over(surface, pole, share(strength));
+        // Lifts follow the pole too: a dark surface lifts toward it, a light
+        // one away from it, which is what they already do toward the ink.
+        let toward = if relative_luminance(pole) >= relative_luminance(page) {
+            1.
+        } else {
+            -1.
+        };
+        let sign = if self.dark { toward } else { -toward };
+        let raise = settings_wash::RAISE * sign;
+        let menu_lift = settings_wash::MENU_LIFT_DARK * sign;
+        let menu = pack(lift(
+            gpui::rgb(page).into(),
+            if self.dark { menu_lift } else { raise },
+        ));
+        // The open host row: the page under the row's ROW wash. One source for the warning dot's second fill
+        // and for the Unsaved text, which is only ever painted there.
+        let host_row = wash(page, settings_wash::ROW);
+        Resolved {
+            pole,
+            raise,
+            menu_lift,
+            caption: vec![
+                m.background,
+                m.sidebar,
+                m.rail,
+                m.popover,
+                sf.rail.hover,
+                sf.rail.selected,
+            ],
+            resting: vec![m.background, m.sidebar, m.rail, m.popover],
+            every_rung: vec![
+                sf.rail.base,
+                sf.rail.hover,
+                sf.rail.selected,
+                sf.window.base,
+                sf.window.hover,
+                sf.window.selected,
+            ],
+            settings_text: vec![
+                page,
+                wash(page, settings_wash::ROW),
+                wash(page, settings_wash::KEYCAP),
+                menu,
+                wash(menu, settings_wash::MENU_ROW),
+                sf.rail.base,
+                sf.rail.hover,
+                sf.rail.selected,
+                wash(sf.rail.base, settings_wash::KEYCAP),
+            ],
+            settings_marks: vec![
+                page,
+                wash(page, settings_wash::ROW),
+                wash(page, settings_wash::KEYCAP),
+                sf.rail.base,
+                wash(sf.rail.base, settings_wash::KEYCAP),
+            ],
+            // The search glass: on the page, in the nav rail's search well,
+            // and on the open dropdown's own fill.
+            settings_glyph: vec![
+                page,
+                wash(page, settings_wash::ROW),
+                sf.rail.base,
+                wash(sf.rail.base, settings_wash::ROW),
+                menu,
+            ],
+            // Error, Unsaved and Live text: on the page, on a hovered or open
+            // host row and the shortcut conflict card, in a dropdown and on
+            // its highlighted row.
+            settings_status: vec![
+                page,
+                wash(page, settings_wash::ROW),
+                menu,
+                wash(menu, settings_wash::MENU_ROW),
+            ],
+            settings_warn: vec![page, host_row],
+            settings_host_row: vec![host_row],
+            settings_page: vec![page],
+            panel: vec![
+                sf.sidebar.base,
+                sf.sidebar.hover,
+                sf.sidebar.selected,
+                sf.rail.base,
+                sf.rail.hover,
+                sf.rail.selected,
+            ],
+            popover_rows: vec![sf.popover.base, sf.popover.hover, sf.popover.selected],
+            port_chip: [
+                sf.sidebar.base,
+                sf.sidebar.hover,
+                sf.window.base,
+                sf.window.hover,
+            ]
+            .map(|row| wash_over(row, pole, PORT_CHIP_WASH))
+            .to_vec(),
+            selected: vec![
+                sf.window.selected,
+                sf.popover.selected,
+                sf.sidebar.selected,
+                sf.rail.selected,
+            ],
+            m,
+            sf,
+        }
+    }
+
+    /// The settings page's secondary ink and off-switch track, floored on the
+    /// fills they are painted on. Derived once per theme change, in
+    /// `apply_theme`, so a page that draws hundreds of rows reads cached
+    /// colours instead of bisecting contrast per frame.
+    #[cfg(test)]
+    pub fn settings_ink(&self) -> SettingsInk {
+        self.settings_ink_from(&self.resolve())
+    }
+
+    pub(crate) fn settings_ink_from(&self, r: &Resolved) -> SettingsInk {
+        let sem = self.semantics_with(&r.m);
+        let sub_share = if self.dark { 0.55 } else { 0.65 };
+        SettingsInk {
+            sub: legible_across(
+                &r.settings_text,
+                mix(r.m.background, r.m.foreground, sub_share),
+                TEXT_FLOOR,
+            ),
+            // Dark keeps the track it has always had, by owner decision: the
+            // authored foreground, painted translucent (`switch_off_alpha`)
+            // over whatever the switch sits on, and not floored; the knob
+            // carries the state. Light is an opaque mid track floored at 3:1
+            // on the page fills.
+            switch_off: if self.dark {
+                r.m.foreground
+            } else {
+                legible_across(
+                    &r.settings_marks,
+                    mix(r.m.background, r.m.foreground, 0.50),
+                    ACCENT_FLOOR,
+                )
+            },
+            switch_off_alpha: if self.dark { SWITCH_OFF_DARK_ALPHA } else { 1. },
+            glyph: legible_across(
+                &r.settings_glyph,
+                mix(r.m.background, r.m.foreground, 0.5),
+                SETTINGS_GLYPH_TARGET,
+            ),
+            danger: legible_across(&r.settings_status, sem.danger.ink, TEXT_FLOOR),
+            warn_text: legible_across(&r.settings_page, sem.warning.ink, TEXT_FLOOR),
+            unsaved: legible_across(
+                &r.settings_host_row,
+                sem.warning.ink,
+                SETTINGS_SMALL_TEXT_TARGET,
+            ),
+            ok: legible_across(&r.settings_status, sem.success.ink, TEXT_FLOOR),
+            warn: legible_across(&r.settings_warn, sem.warning.fill, ACCENT_FLOOR),
+            raise: r.raise,
+            menu_lift: r.menu_lift,
+        }
+    }
+
+    /// Ink for the switcher, search overlay and pane grips, floored on the
+    /// popover and window rungs they are painted on (`Surfaces`, the same
+    /// fills the views read). Derived once per theme change, in `apply_theme`.
+    #[cfg(test)]
+    pub fn chrome_ink(&self) -> ChromeInk {
+        self.chrome_ink_from(&self.resolve())
+    }
+
+    pub(crate) fn chrome_ink_from(&self, r: &Resolved) -> ChromeInk {
+        let (m, sf) = (&r.m, &r.sf);
+        let fg = m.foreground;
+        let keycap_fill = mix(sf.popover.base, r.pole, 0.06);
+        // A row that is not the picked one is only ever resting or hovered.
+        let unpicked = [sf.popover.base, sf.popover.hover];
+        ChromeInk {
+            selected_meta: legible_across(
+                &[sf.popover.selected],
+                mix(sf.popover.selected, fg, 0.72),
+                TEXT_FLOOR,
+            ),
+            quiet_name: legible_across(&r.popover_rows, mix(sf.popover.base, fg, 0.65), TEXT_FLOOR),
+            avatar_ink: legible_across(&[m.secondary], mix(m.secondary, fg, 0.80), TEXT_FLOOR),
+            keycap_fill,
+            keycap_ink: legible_across(&[keycap_fill], mix(keycap_fill, fg, 0.70), TEXT_FLOOR),
+            grip_idle: legible_across(
+                &[sf.window.base],
+                mix(sf.window.base, fg, 0.50),
+                ACCENT_FLOOR,
+            ),
+            search_title: legible_across(
+                &r.popover_rows,
+                mix(sf.popover.base, fg, 0.92),
+                TEXT_FLOOR,
+            ),
+            panel_title: legible_across(&r.panel, fg, TEXT_FLOOR),
+            port_chip_ink: legible_across(&r.port_chip, fg, TEXT_FLOOR),
+            port_chip_hover_ink: legible_across(
+                &r.port_chip,
+                self.semantics_with(m).link.ink,
+                TEXT_FLOOR,
+            ),
+            unpicked_title: legible_across(&unpicked, fg, TEXT_FLOOR),
+            unpicked_meta: legible_across(&unpicked, m.muted_foreground, CHROME_SMALL_META_TARGET),
+            selected_caption: legible_across(
+                &[sf.sidebar.selected, sf.rail.selected],
+                m.muted_foreground,
+                SELECTED_CAPTION_TARGET,
+            ),
+        }
+    }
+
     /// Lane colours for the commit graph, derived the same way every other
     /// colour in this file is: seeded from the theme's own palette, then walked
     /// to a contrast floor on each surface it can be painted on.
@@ -407,7 +922,12 @@ impl Theme {
     /// and red is last because a panel three or four lanes wide never reaches
     /// it, so the one colour that also means "danger" everywhere else in the UI
     /// stays out of the common case.
+    #[cfg(test)]
     pub fn lanes(&self) -> Lanes {
+        self.lanes_with(&self.neutrals())
+    }
+
+    pub(crate) fn lanes_with(&self, m: &Neutrals) -> Lanes {
         const SEEDS: [usize; LANE_SLOTS] = [4, 3, 5, 2, 6, 1];
         let bg = self.background_color();
         let fg = legible_foreground(bg, self.foreground);
@@ -416,7 +936,7 @@ impl Theme {
         // when the panel is docked, and on a popover in the detail view.
         let mut ink = [0u32; LANE_SLOTS];
         for (slot, seed) in SEEDS.iter().enumerate() {
-            ink[slot] = self.clear_ink(self.ansi_seed(*seed), ACCENT_FLOOR);
+            ink[slot] = self.clear_ink(m, self.ansi_seed(*seed), ACCENT_FLOOR);
         }
         Lanes {
             ink,
@@ -424,20 +944,24 @@ impl Theme {
         }
     }
 
+    #[cfg(test)]
     pub fn surfaces(&self) -> Surfaces {
-        let m = self.neutrals();
+        self.resolve().sf
+    }
+
+    fn surfaces_at(&self, m: &Neutrals, pole: u32) -> Surfaces {
         let fg = legible_foreground(self.background_color(), self.foreground);
         // The panels once climbed a rung *above* the window (1.50), when a
         // regular-weight current tab was the faintest mark in its column. The
         // current title is SEMIBOLD now and carries that on its own; a heavy
         // fill on top of it read as a pressed button rather than as a place.
-        let sidebar = self.panel_surface(m.sidebar, m.sidebar_fg, fg);
-        let rail = self.panel_surface(m.rail, m.rail_fg, fg);
+        let sidebar = self.panel_surface(m.sidebar, m.sidebar_fg, fg, pole);
+        let rail = self.panel_surface(m.rail, m.rail_fg, fg, pole);
         Surfaces {
-            window: self.surface(m.background),
+            window: self.surface_at(m.background, pole),
             sidebar,
             rail,
-            popover: self.surface(m.popover),
+            popover: self.surface_at(m.popover, pole),
             // The v5 scrim: a dim, not a blackout. Dark lands on near-black at
             // 45%; light on a warm near-black at 14%, just enough to say the
             // window is waiting without turning the page grey.
@@ -521,16 +1045,87 @@ fn bisect_contrast(from: u32, toward: u32, against: u32, target: f32) -> u32 {
     mix(from, toward, hi)
 }
 
+fn panel_rungs(base: u32, pole: u32) -> (u32, u32) {
+    let shade = shade_of(base, pole);
+    (
+        raise(base, shade, state::PANEL_HOVER),
+        raise(base, shade, state::PANEL_SELECTED),
+    )
+}
+
 fn raise(base: u32, toward: u32, target: f32) -> u32 {
     bisect_contrast(base, toward, base, target)
+}
+
+/// A selected rung the surface's own text can still be read on. The full step
+/// off the base leaves a weak foreground under the text floor on some palettes
+/// (One Dark Pro's popover lands on 4.46:1), so the step is shortened to the
+/// last fill that holds the floor, as long as the selection still sits
+/// `state::RUNG_MIN_DELTA` past hover, on hover's far side from the base.
+/// Where the floor and the order cannot both hold, the order wins and
+/// `lift_lightness` carries the title.
+fn legible_rung(selected: u32, hover: u32, base: u32, fg: u32) -> u32 {
+    if contrast(fg, selected) >= TEXT_FLOOR || contrast(fg, base) < TEXT_FLOOR {
+        return selected;
+    }
+    let shortened = bisect_contrast(selected, base, fg, TEXT_FLOOR);
+    let past_hover = |rung: u32| {
+        (lightness(rung) - lightness(hover)) * (lightness(selected) - lightness(hover)).signum()
+    };
+    match past_hover(shortened) >= state::RUNG_MIN_DELTA {
+        true => shortened,
+        false => selected,
+    }
+}
+
+/// CIE L* of a packed sRGB colour: the perceptual lightness `RUNG_MIN_DELTA`
+/// is measured in.
+fn lightness(c: u32) -> f32 {
+    let y = relative_luminance(c);
+    let f = if y > 216. / 24389. {
+        y.cbrt()
+    } else {
+        (24389. / 27. * y + 16.) / 116.
+    };
+    116. * f - 16.
+}
+
+/// `ink` moved in HSL lightness alone, hue and saturation kept, until it holds
+/// the resting-text floor on `fill` and `TEXT_STEP` over the quieter `resting`
+/// ink. It rises away from the fill first; an ink with no room that way (black
+/// on a dark fill) crosses to the other side instead. Starts from the authored
+/// ink, so one that already passes is returned as it is.
+fn lift_lightness(ink: u32, fill: u32, resting: u32) -> u32 {
+    const STEPS: u32 = 64;
+    let hsla: Hsla = gpui::rgb(ink).into();
+    let at = |l: f32| pack(Hsla { l, ..hsla });
+    let holds = |l: f32| {
+        contrast(at(l), fill) >= state::TEXT_RESTING && contrast(at(l), resting) >= state::TEXT_STEP
+    };
+    if holds(hsla.l) {
+        return ink;
+    }
+    let away = if relative_luminance(ink) >= relative_luminance(fill) {
+        1.
+    } else {
+        0.
+    };
+    [away, 1. - away]
+        .into_iter()
+        .find_map(|end| {
+            (1..=STEPS)
+                .map(|step| hsla.l + (end - hsla.l) * step as f32 / STEPS as f32)
+                .find(|&l| holds(l))
+        })
+        .map_or_else(|| at(away), at)
 }
 
 /// The darkest (or, on a dark surface, lightest) colour that keeps every
 /// channel of `base` the same distance apart, so blending toward it only
 /// changes lightness: #f5f5f3 steps to #e8e8e6, never to #e8e8e8.
-fn shade_of(base: u32, fg: u32) -> u32 {
+fn shade_of(base: u32, pole: u32) -> u32 {
     let ch = [base >> 16 & 0xff, base >> 8 & 0xff, base & 0xff];
-    let shift = match relative_luminance(fg) < relative_luminance(base) {
+    let shift = match relative_luminance(pole) < relative_luminance(base) {
         true => ch.map(|c| c - ch.iter().min().unwrap()),
         false => ch.map(|c| c + (0xff - ch.iter().max().unwrap())),
     };
@@ -562,8 +1157,12 @@ fn ink_on(fill: u32, fg: u32, target: f32) -> u32 {
     } else {
         0xffffff
     };
-    let deepened = bisect_contrast(fg, near, fill, target);
-    if contrast(deepened, fill) >= target {
+    // The walk is accepted only where it reaches the headroom goal. A walk that stops short at
+    // the near end (white on a blue fill, 4.56:1) is no better than the better of white and
+    // black, so it falls through to that choice instead of being kept at the bare floor.
+    let goal = correction_target(target);
+    let deepened = bisect_contrast(fg, near, fill, goal);
+    if contrast(deepened, fill) >= goal {
         return deepened;
     }
     if contrast(fill, 0xffffff) >= contrast(fill, 0x000000) {
@@ -802,6 +1401,24 @@ fn at_least(ink: u32, toward: u32, surface: u32, target: f32) -> u32 {
     legible_ink(surface, lifted, target)
 }
 
+/// Where a cached TEXT correction lands: a hair above the floor it had to
+/// reach. A seed that already clears `TEXT_FLOOR` is never touched, but one
+/// that does not is walked to 4.6:1 rather than to 4.5 exactly, so
+/// antialiasing and 8-bit rounding on thin glyphs cannot take the painted ink
+/// back under the floor. Marks (3:1) keep their floor as the target. Only the
+/// derive-time helpers (`legible_across`, `ink_on`) use it: `legible_ink` and
+/// `at_least` also serve uncached styling and the terminal palette, which keep
+/// their exact floors.
+const TEXT_CORRECTED: f32 = 4.6;
+
+fn correction_target(floor: f32) -> f32 {
+    if floor == TEXT_FLOOR {
+        TEXT_CORRECTED
+    } else {
+        floor
+    }
+}
+
 fn legible_ink(bg: u32, seed: u32, floor: f32) -> u32 {
     if contrast(seed, bg) >= floor {
         return seed;
@@ -812,6 +1429,38 @@ fn legible_ink(bg: u32, seed: u32, floor: f32) -> u32 {
         0x000000
     };
     bisect_contrast(seed, away, bg, floor)
+}
+
+/// `seed` kept where it already clears `floor` on every fill, and otherwise
+/// walked toward whichever of white and black serves the weakest fill best.
+/// `legible_ink` picks its direction fill by fill, which on a mid-grey theme
+/// lets two fills pull one ink back and forth; the direction here is fixed
+/// once for the whole set, so a floor one ink can hold on all of them is held.
+fn legible_across(fills: &[u32], seed: u32, floor: f32) -> u32 {
+    let weakest = |ink: u32| {
+        fills
+            .iter()
+            .map(|&fill| contrast(ink, fill))
+            .fold(f32::MAX, f32::min)
+    };
+    let away = if weakest(0xffffff) >= weakest(0x000000) {
+        0xffffff
+    } else {
+        0x000000
+    };
+    // A seed that clears the floor on every fill is returned as authored. Once any fill
+    // misses, the correction aims every fill at the headroom target, so the
+    // corrected ink holds it on all of them and not only on the one that failed.
+    if fills.iter().all(|&fill| contrast(seed, fill) >= floor) {
+        return seed;
+    }
+    let target = correction_target(floor);
+    fills
+        .iter()
+        .fold(seed, |ink, &fill| match contrast(ink, fill) >= target {
+            true => ink,
+            false => bisect_contrast(ink, away, fill, target),
+        })
 }
 
 fn legible_accent(bg: u32, accent: u32) -> u32 {
@@ -1609,6 +2258,56 @@ static BUILTINS: [BuiltinSpec; 13] = [
     },
 ];
 
+/// A grid of user-style themes besides the built-ins, for the sweeps that
+/// hold a derivation to its floors on palettes nobody tuned: light and dark
+/// bases (plain, cream, blue, green and brown tints, and mid greys where no
+/// single ink can serve every fill), inks of every strength down to the
+/// weakest legible_foreground allows, tinted inks, and three accents.
+#[cfg(test)]
+pub(crate) fn generated_theme_grid() -> Vec<Theme> {
+    const LIGHT_BASES: [u32; 8] = [
+        0xffffff, 0xfcfcfb, 0xf5f0e6, 0xe8eef7, 0xdcdcdc, 0xc8d0c4, 0xfff8f0, 0xcccccc,
+    ];
+    const DARK_BASES: [u32; 10] = [
+        0x000000, 0x101014, 0x1e1e2e, 0x2b2b2b, 0x3a2f2f, 0x1a2a1a, 0x303846, 0x404040, 0x555555,
+        0x777777,
+    ];
+    const LIGHT_INKS: [u32; 4] = [0x000000, 0x1a2b4a, 0x4a2a1a, 0x4c4f69];
+    const DARK_INKS: [u32; 4] = [0xffffff, 0xd8f0ff, 0xfff0d8, 0xcdd6f4];
+    const STRENGTHS: [f32; 4] = [0.55, 0.7, 0.85, 1.0];
+    const ACCENTS: [u32; 3] = [0x1f6bf0, 0xe0457b, 0x2fa84f];
+    let mut themes = Vec::new();
+    for (bases, inks) in [
+        (&LIGHT_BASES[..], &LIGHT_INKS[..]),
+        (&DARK_BASES[..], &DARK_INKS[..]),
+    ] {
+        for &background in bases {
+            for &ink in inks {
+                for strength in STRENGTHS {
+                    for accent in ACCENTS {
+                        themes.push(Theme {
+                            id: format!("grid-{}", themes.len()),
+                            name: format!("Grid {background:06x} {ink:06x} {strength}"),
+                            dark: is_dark(background),
+                            background: Fill::Solid(background),
+                            foreground: mix(background, ink, strength),
+                            accent,
+                            caret: None,
+                            selection: None,
+                            opacity: None,
+                            blur: false,
+                            image: None,
+                            ansi16: BUILTINS[0].ansi16,
+                            path: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    themes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2162,6 +2861,71 @@ mod tests {
     }
 
     #[test]
+    fn agent_status_semantics_clear_floors_on_rail_and_window() {
+        use crate::core::cli_agent::AgentStatus;
+        for t in builtins() {
+            let sem = t.semantics();
+            let sf = t.surfaces();
+            assert!(
+                sem.for_agent_status(AgentStatus::Idle).is_none(),
+                "{}: Idle should carry no status role",
+                t.id
+            );
+            for (label, status) in [
+                ("Working", AgentStatus::Working),
+                ("Waiting", AgentStatus::Waiting),
+                ("Done", AgentStatus::Done),
+            ] {
+                let role = sem
+                    .for_agent_status(status)
+                    .unwrap_or_else(|| panic!("{}: {label} missing semantic role", t.id));
+                for (surface_name, surface) in [
+                    ("rail.base", sf.rail.base),
+                    ("rail.hover", sf.rail.hover),
+                    ("rail.selected", sf.rail.selected),
+                    ("window.base", sf.window.base),
+                    ("window.hover", sf.window.hover),
+                    ("window.selected", sf.window.selected),
+                ] {
+                    let ink_ratio = contrast(role.ink, surface);
+                    assert!(
+                        ink_ratio >= ACCENT_FLOOR - 0.01,
+                        "{}/{label}: ink {:#08x} only {ink_ratio:.2}:1 on {surface_name} {surface:#08x}",
+                        t.id,
+                        role.ink
+                    );
+                }
+                for (surface_name, surface) in
+                    [("rail.base", sf.rail.base), ("window.base", sf.window.base)]
+                {
+                    let ink_ratio = contrast(role.ink, surface);
+                    assert!(
+                        ink_ratio >= TEXT_FLOOR - 0.01,
+                        "{}/{label}: text ink {:#08x} only {ink_ratio:.2}:1 on {surface_name} {surface:#08x}",
+                        t.id,
+                        role.ink
+                    );
+                    let fill_ratio = contrast(role.fill, surface);
+                    assert!(
+                        fill_ratio >= ACCENT_FLOOR - 0.01,
+                        "{}/{label}: fill {:#08x} only {fill_ratio:.2}:1 on {surface_name} {surface:#08x}",
+                        t.id,
+                        role.fill
+                    );
+                }
+                let on_fill_ratio = contrast(role.on_fill, role.fill);
+                assert!(
+                    on_fill_ratio >= TEXT_FLOOR - 0.01,
+                    "{}/{label}: on_fill {:#08x} only {on_fill_ratio:.2}:1 on fill {:#08x}",
+                    t.id,
+                    role.on_fill,
+                    role.fill
+                );
+            }
+        }
+    }
+
+    #[test]
     fn semantic_roles_are_independent_of_terminal_ansi() {
         let mut theme = builtins().into_iter().find(|t| t.id == "dracula").unwrap();
         let before = theme.semantics();
@@ -2206,7 +2970,15 @@ mod tests {
     fn captions_are_readable_on_every_surface_they_are_used_on() {
         for theme in builtins() {
             let m = theme.neutrals();
-            for surface in [m.background, m.sidebar, m.rail, m.popover] {
+            let s = theme.surfaces();
+            for surface in [
+                m.background,
+                m.sidebar,
+                m.rail,
+                m.popover,
+                s.rail.hover,
+                s.rail.selected,
+            ] {
                 assert!(
                     contrast(m.muted_foreground, surface) >= TEXT_FLOOR,
                     "{}: caption {:#08x} on {surface:#08x}",
@@ -2638,5 +3410,1186 @@ ansi:
         assert_eq!(mix(0x000000, 0xffffff, 0.0), 0x000000);
         assert_eq!(mix(0x000000, 0xffffff, 1.0), 0xffffff);
         assert_eq!(mix(0x000000, 0xffffff, 0.5), 0x808080);
+    }
+
+    /// The external contract the sweeps hold the derivations to, written out
+    /// rather than read from the production constants: WCAG AA for text, and
+    /// 3:1 for marks and non-text UI.
+    const AA_TEXT: f32 = 4.5;
+    /// The headroom a corrected text role must land on, written out here on
+    /// purpose: asserting against the production constant would pass if that
+    /// constant were ever lowered.
+    const AA_CORRECTED: f32 = 4.6;
+    /// The selected-caption target, written out for the same reason.
+    const AA_SELECTED_CAPTION: f32 = 5.0;
+    /// The small-text and small-glyph targets of the settings roles, written out likewise.
+    const AA_SMALL_TEXT: f32 = 5.0;
+    const AA_GLYPH: f32 = 3.2;
+    const AA_MARK: f32 = 3.0;
+
+    fn sweep_themes() -> Vec<Theme> {
+        let mut themes = builtins();
+        themes.extend(generated_theme_grid());
+        themes
+    }
+
+    fn assert_no_misses(what: &str, misses: Vec<String>) {
+        assert!(
+            misses.is_empty(),
+            "{what}: {} misses, first 12:\n{}",
+            misses.len(),
+            misses
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    /// `ink` at `alpha` laid over `surface`, composited and rounded to eight
+    /// bits the way the painters' translucent fills are.
+    fn composite(surface: u32, ink: u32, alpha: f32) -> u32 {
+        pack(Hsla::from(gpui::rgb(surface)).blend(Hsla::from(gpui::rgb(ink)).opacity(alpha)))
+    }
+
+    /// One ink on one fill it is painted on, and the floor it must clear.
+    struct Check {
+        role: String,
+        fill: u32,
+        ink: u32,
+        floor: f32,
+    }
+
+    impl Check {
+        fn ratio(&self) -> f32 {
+            contrast(self.ink, self.fill)
+        }
+
+        fn holds(&self) -> bool {
+            self.ratio() >= self.floor
+        }
+    }
+
+    /// Every ink role the chrome derivations feed, measured on the fills it
+    /// is painted on. No role is skipped for any theme.
+    fn role_checks(t: &Theme) -> Vec<Check> {
+        let r = t.resolve();
+        let (m, s) = (&r.m, &r.sf);
+        let mut checks = Vec::new();
+        let mut add = |role: &str, ink: u32, fills: &[u32], floor: f32| {
+            checks.extend(fills.iter().map(|&fill| Check {
+                role: role.to_string(),
+                fill,
+                ink,
+                floor,
+            }));
+        };
+        add(
+            "caption",
+            m.muted_foreground,
+            &[
+                m.background,
+                m.sidebar,
+                m.rail,
+                m.popover,
+                s.rail.hover,
+                s.rail.selected,
+            ],
+            AA_TEXT,
+        );
+        // An Inbox row's reason and meta lines are muted_foreground on the sidebar
+        // rungs (the row is painted from `sf.sidebar`, not the window's rungs),
+        // which the caption set above (rail rungs only) does not cover.
+        add(
+            "inbox reason meta",
+            m.muted_foreground,
+            &[s.sidebar.base, s.sidebar.hover, s.sidebar.selected],
+            AA_TEXT,
+        );
+        let sem = t.semantics_with(m);
+        let resting = [m.background, m.sidebar, m.rail, m.popover];
+        let every_rung = [
+            s.rail.base,
+            s.rail.hover,
+            s.rail.selected,
+            s.window.base,
+            s.window.hover,
+            s.window.selected,
+        ];
+        for (label, role) in [
+            ("danger", sem.danger),
+            ("warning", sem.warning),
+            ("success", sem.success),
+            ("info", sem.info),
+        ] {
+            add(
+                &format!("status {label} ink text"),
+                role.ink,
+                &resting,
+                AA_TEXT,
+            );
+            add(
+                &format!("status {label} fill mark"),
+                role.fill,
+                &resting,
+                AA_MARK,
+            );
+            add(
+                &format!("status {label} ink mark"),
+                role.ink,
+                &every_rung,
+                AA_MARK,
+            );
+            add(
+                &format!("status {label} on_fill"),
+                role.on_fill,
+                &[role.fill],
+                AA_TEXT,
+            );
+        }
+        let settings = t.settings_ink_from(&r);
+        add("settings sub", settings.sub, &r.settings_text, AA_TEXT);
+        if t.dark {
+            // Owner exception to the 3:1 mark floor: the dark off track stays the
+            // faint translucent authored foreground (about 1.5:1 on the page), so
+            // it is not held to the mark floor; the knob carries the state and,
+            // being a non-text mark, is held to the 3:1 mark floor on the page
+            // and on the track as it composites over the page and over an open
+            // row.
+            let row = r.settings_host_row[0];
+            let track_over =
+                |surface: u32| composite(surface, settings.switch_off, settings.switch_off_alpha);
+            add(
+                "settings switch_off knob",
+                m.foreground,
+                &[m.background, track_over(m.background), track_over(row)],
+                AA_MARK,
+            );
+        } else {
+            add(
+                "settings switch_off",
+                settings.switch_off,
+                &r.settings_marks,
+                AA_MARK,
+            );
+        }
+        add("settings glyph", settings.glyph, &r.settings_glyph, AA_MARK);
+        add(
+            "settings warn_text text",
+            settings.warn_text,
+            &r.settings_page,
+            AA_TEXT,
+        );
+        add(
+            "settings unsaved text",
+            settings.unsaved,
+            &r.settings_host_row,
+            AA_TEXT,
+        );
+        for (what, ink) in [("danger", settings.danger), ("ok", settings.ok)] {
+            add(
+                &format!("settings {what} text"),
+                ink,
+                &r.settings_status,
+                AA_TEXT,
+            );
+        }
+        // The warning dot (agents status, shortcut conflict) and the conflict
+        // ring: on the page, and in a shortcut conflict on the k04 row wash
+        // behind the row and its note.
+        add(
+            "settings warn mark",
+            settings.warn,
+            &r.settings_warn,
+            AA_MARK,
+        );
+        let chrome = t.chrome_ink_from(&r);
+        let popover = [s.popover.base, s.popover.hover, s.popover.selected];
+        let panel = [
+            s.sidebar.base,
+            s.sidebar.hover,
+            s.sidebar.selected,
+            s.rail.base,
+            s.rail.hover,
+            s.rail.selected,
+        ];
+        add(
+            "chrome selected_meta",
+            chrome.selected_meta,
+            &[s.popover.selected],
+            AA_TEXT,
+        );
+        add("chrome quiet_name", chrome.quiet_name, &popover, AA_TEXT);
+        add(
+            "chrome selected_caption",
+            chrome.selected_caption,
+            &[s.sidebar.selected, s.rail.selected],
+            AA_TEXT,
+        );
+        let unpicked = [s.popover.base, s.popover.hover];
+        add(
+            "chrome unpicked_title",
+            chrome.unpicked_title,
+            &unpicked,
+            AA_TEXT,
+        );
+        add(
+            "chrome unpicked_meta",
+            chrome.unpicked_meta,
+            &unpicked,
+            AA_TEXT,
+        );
+        add(
+            "chrome avatar_ink",
+            chrome.avatar_ink,
+            &[m.secondary],
+            AA_TEXT,
+        );
+        add(
+            "chrome keycap_ink",
+            chrome.keycap_ink,
+            &[chrome.keycap_fill],
+            AA_TEXT,
+        );
+        add(
+            "chrome grip_idle",
+            chrome.grip_idle,
+            &[s.window.base],
+            AA_MARK,
+        );
+        add(
+            "chrome search_title",
+            chrome.search_title,
+            &popover,
+            AA_TEXT,
+        );
+        add("chrome panel_title", chrome.panel_title, &panel, AA_TEXT);
+        add(
+            "chrome port_chip_ink",
+            chrome.port_chip_ink,
+            &r.port_chip,
+            AA_TEXT,
+        );
+        add(
+            "chrome port_chip_hover_ink",
+            chrome.port_chip_hover_ink,
+            &r.port_chip,
+            AA_TEXT,
+        );
+        for (name, sf) in [
+            ("window", s.window),
+            ("popover", s.popover),
+            ("sidebar", s.sidebar),
+            ("rail", s.rail),
+        ] {
+            add(
+                &format!("title {name}"),
+                sf.text_selected,
+                &[sf.selected],
+                AA_TEXT,
+            );
+        }
+        checks
+    }
+
+    fn role_misses(t: &Theme) -> Vec<String> {
+        role_checks(t)
+            .into_iter()
+            .filter(|c| !c.holds())
+            .map(|c| {
+                format!(
+                    "{}: {} {:#08x} on {:#08x} is {:.2}:1 (floor {})",
+                    t.id,
+                    c.role,
+                    c.ink,
+                    c.fill,
+                    c.ratio(),
+                    c.floor
+                )
+            })
+            .collect()
+    }
+
+    /// Strict, with no theme and no role excluded: every ink clears its floor
+    /// on every fill it is painted on, in the built-ins and across the whole
+    /// generated grid, including the palettes whose chrome fills invert.
+    #[test]
+    fn every_role_holds_its_floor_in_every_builtin_and_generated_theme() {
+        let misses: Vec<String> = sweep_themes().iter().flat_map(role_misses).collect();
+        assert_no_misses("role floors", misses);
+    }
+
+    /// Owner exception to the 3:1 mark floor: a dark off-switch track is the
+    /// authored foreground at 16%, translucent over whatever the switch sits on
+    /// (the old `k15`; the default dark composites to #3a3a3c on #18181a,
+    /// 1.56:1), and the knob carries the state. It is not a step toward the
+    /// shared pole, so a pole-inverted palette keeps its foreground too. The
+    /// light track keeps colour and an alpha of 1. Expectations are written out
+    /// from the definition (foreground, 16%), not read from the derivation.
+    #[test]
+    fn dark_off_track_is_the_translucent_authored_foreground_by_owner_decision() {
+        let mut dark = 0;
+        for t in sweep_themes() {
+            let r = t.resolve();
+            let ink = t.settings_ink_from(&r);
+            if !t.dark {
+                assert_eq!(
+                    ink.switch_off_alpha, 1.,
+                    "{}: the light track is opaque",
+                    t.id
+                );
+                continue;
+            }
+            dark += 1;
+            assert_eq!(
+                ink.switch_off, r.m.foreground,
+                "{}: the dark track is the foreground, not a pole wash",
+                t.id
+            );
+            assert_eq!(ink.switch_off_alpha, 0.16, "{}: dark track opacity", t.id);
+            if builtins().iter().any(|b| b.id == t.id) {
+                assert_eq!(ink.switch_off, t.foreground, "{}: the authored fg", t.id);
+            }
+        }
+        assert!(dark >= 1, "no dark theme was checked");
+
+        let default_dark = builtins().into_iter().find(|t| t.id == "dark").unwrap();
+        let ink = default_dark.settings_ink();
+        let over_page = composite(0x18181a, ink.switch_off, ink.switch_off_alpha);
+        for (shift, want) in [(16, 0x3a), (8, 0x3a), (0, 0x3c)] {
+            let got = (over_page >> shift) & 0xff;
+            assert!(
+                got.abs_diff(want) <= 1,
+                "the default dark track over the page is {over_page:#08x}, not #3a3a3c"
+            );
+        }
+        // Informational only (the knob, not the track, identifies the switch): recorded, never asserted.
+        eprintln!(
+            "default dark off track {over_page:#08x} over the page: {:.2}:1 (informational)",
+            contrast(over_page, 0x18181a)
+        );
+    }
+
+    /// With the track left faint, the dark knob has to separate from the page
+    /// and from the translucent track composited over the page and over an open
+    /// row, at the non-text mark floor (3:1, literal), in every built-in and
+    /// generated dark theme. Misses are listed exactly, never excluded.
+    #[test]
+    fn dark_off_knob_separates_from_page_and_track_in_every_dark_theme() {
+        let misses: Vec<String> = sweep_themes()
+            .iter()
+            .filter(|t| t.dark)
+            .flat_map(|t| {
+                role_misses(t)
+                    .into_iter()
+                    .filter(|m| m.contains("settings switch_off knob"))
+            })
+            .collect();
+        assert_no_misses("dark knob separation", misses);
+    }
+
+    fn crossover_theme(background: u32, foreground: u32) -> Theme {
+        Theme {
+            id: format!("crossover-{background:06x}"),
+            name: "Crossover".into(),
+            dark: is_dark(background),
+            background: Fill::Solid(background),
+            foreground,
+            accent: 0x1f6bf0,
+            caret: None,
+            selection: None,
+            opacity: None,
+            blur: false,
+            image: None,
+            ansi16: BUILTINS[0].ansi16,
+            path: None,
+        }
+    }
+
+    /// The chrome pole is the authored foreground on every built-in, and
+    /// every fill derived from it is what the pre-pole formulas gave: the
+    /// built-ins are unchanged by the policy.
+    #[test]
+    fn builtin_chrome_is_derived_from_the_authored_foreground_as_before() {
+        for t in builtins() {
+            let bg = t.background_color();
+            let fg = legible_foreground(bg, t.foreground);
+            let r = t.resolve();
+            assert_eq!(r.pole, fg, "{}: pole", t.id);
+            assert_eq!(r.m.rail, mix(bg, fg, RAIL_TINT), "{}: rail", t.id);
+            assert_eq!(
+                r.m.popover,
+                if t.dark { mix(bg, fg, 0.06) } else { bg },
+                "{}: popover",
+                t.id
+            );
+            assert_eq!(
+                (r.sf.rail.hover, r.sf.rail.selected),
+                panel_rungs(r.m.rail, fg),
+                "{}: rail rungs",
+                t.id
+            );
+            assert_eq!(
+                (r.sf.sidebar.hover, r.sf.sidebar.selected),
+                panel_rungs(bg, fg),
+                "{}: sidebar rungs",
+                t.id
+            );
+            for (name, base, sf) in [
+                ("window", bg, r.sf.window),
+                ("popover", r.m.popover, r.sf.popover),
+            ] {
+                let hover = raise(base, fg, state::HOVER);
+                assert_eq!(sf.hover, hover, "{}/{name}: hover", t.id);
+                assert_eq!(
+                    sf.selected,
+                    legible_rung(raise(base, fg, state::SELECTED), hover, base, fg),
+                    "{}/{name}: selected",
+                    t.id
+                );
+                assert_eq!(
+                    sf.pressed,
+                    raise(base, fg, state::PRESSED),
+                    "{}/{name}: pressed",
+                    t.id
+                );
+                assert_eq!(
+                    sf.cursor,
+                    raise(base, fg, state::CURSOR),
+                    "{}/{name}: cursor",
+                    t.id
+                );
+            }
+            assert_eq!(r.m.secondary, mix(bg, fg, 0.09), "{}: secondary", t.id);
+            assert_eq!(r.m.muted, mix(bg, fg, 0.06), "{}: muted", t.id);
+            if t.selection.is_none() {
+                assert_eq!(r.m.selection, mix(bg, fg, 0.20), "{}: selection", t.id);
+            }
+            assert_eq!(
+                t.chrome_ink_from(&r).keycap_fill,
+                mix(r.m.popover, fg, 0.06),
+                "{}: keycap fill",
+                t.id
+            );
+            assert_eq!(r.raise, settings_wash::RAISE, "{}: raise", t.id);
+            assert_eq!(r.menu_lift, settings_wash::MENU_LIFT_DARK, "{}: lift", t.id);
+        }
+    }
+
+    /// A palette on the white/black crossover: stepping toward its ink walks
+    /// the chrome fills out from under every ink (black on #777777 is 4.68:1,
+    /// but the 3% rail tint is 4.43:1, a dark popover 4.24:1, the rungs and
+    /// washes lower still). The pole inverts, so every one of those fills
+    /// steps away from the ink, the authored base and terminal colours are
+    /// untouched, and every role holds.
+    #[test]
+    fn a_crossover_palette_inverts_every_chrome_fill_and_every_role_holds() {
+        let t = crossover_theme(0x777777, 0x000000);
+        assert!(
+            !t.derive(0x000000).shares_one_ink(),
+            "stepping toward the authored ink cannot serve this palette"
+        );
+        let r = t.resolve();
+        assert_eq!(r.pole, 0xffffff);
+        assert!(r.shares_one_ink());
+
+        assert_eq!(t.background_color(), 0x777777);
+        assert_eq!(r.m.background, 0x777777);
+        assert_eq!(r.m.foreground, 0x000000);
+        let sel_bg = t.active_palette(true).sel_bg;
+        assert_eq!(
+            (sel_bg.r as u32) << 16 | (sel_bg.g as u32) << 8 | sel_bg.b as u32,
+            mix(0x777777, 0x000000, 0.24),
+            "the terminal selection is still derived from the authored ink"
+        );
+
+        let base = lightness(0x777777);
+        let wash_fills = [r.settings_text[1], r.settings_text[2]];
+        for (name, fill) in [
+            ("rail", r.m.rail),
+            ("popover", r.m.popover),
+            ("rail.hover", r.sf.rail.hover),
+            ("rail.selected", r.sf.rail.selected),
+            ("sidebar.hover", r.sf.sidebar.hover),
+            ("sidebar.selected", r.sf.sidebar.selected),
+            ("window.hover", r.sf.window.hover),
+            ("window.selected", r.sf.window.selected),
+            ("popover.hover", r.sf.popover.hover),
+            ("popover.selected", r.sf.popover.selected),
+            ("secondary", r.m.secondary),
+            ("muted", r.m.muted),
+            ("keycap fill", t.chrome_ink_from(&r).keycap_fill),
+            ("row wash", wash_fills[0]),
+            ("keycap wash", wash_fills[1]),
+            ("port chip", r.port_chip[0]),
+        ] {
+            assert!(
+                lightness(fill) > base,
+                "{name} {fill:#08x} should step away from the black ink"
+            );
+        }
+
+        let checks = role_checks(&t);
+        let measured: Vec<&str> = checks.iter().map(|c| c.role.as_str()).collect();
+        for role in [
+            "caption",
+            "inbox reason meta",
+            "settings sub",
+            if t.dark {
+                "settings switch_off knob"
+            } else {
+                "settings switch_off"
+            },
+            "settings warn_text text",
+            "settings unsaved text",
+            "settings warn mark",
+            "chrome selected_meta",
+            "chrome quiet_name",
+            "chrome unpicked_title",
+            "chrome unpicked_meta",
+            "chrome selected_caption",
+            "chrome avatar_ink",
+            "chrome keycap_ink",
+            "chrome grip_idle",
+            "chrome search_title",
+            "chrome panel_title",
+            "chrome port_chip_ink",
+            "chrome port_chip_hover_ink",
+            "title window",
+            "title popover",
+            "title sidebar",
+            "title rail",
+        ]
+        .into_iter()
+        .map(String::from)
+        .chain(
+            ["danger", "warning", "success", "info"]
+                .into_iter()
+                .flat_map(|label| {
+                    ["ink text", "fill mark", "ink mark", "on_fill"]
+                        .into_iter()
+                        .map(move |what| format!("status {label} {what}"))
+                }),
+        ) {
+            assert!(measured.contains(&role.as_str()), "{role} was not measured");
+        }
+        assert_no_misses("crossover roles", role_misses(&t));
+    }
+
+    /// The criterion is the fills, not the colour name: a black ink a few
+    /// greys above the band keeps the authored pole, a white ink inside the
+    /// mirror band inverts to black, and both hold every role.
+    #[test]
+    fn the_pole_inverts_only_where_the_authored_ink_cannot_serve_its_fills() {
+        let above = crossover_theme(0x909090, 0x000000);
+        assert!(above.derive(0x000000).shares_one_ink());
+        assert_eq!(above.resolve().pole, 0x000000);
+        assert_no_misses("black ink above the band", role_misses(&above));
+
+        let mirrored = crossover_theme(0x686868, 0xffffff);
+        assert!(!mirrored.derive(0xffffff).shares_one_ink());
+        assert_eq!(mirrored.resolve().pole, 0x000000);
+        assert_no_misses("white ink in the band", role_misses(&mirrored));
+    }
+
+    /// `legible_ink` picks white or black fill by fill, so on fills either
+    /// side of the crossover one ink is walked back and forth and settles
+    /// under the floor (2.84:1 against 3:1 here); `legible_across` fixes one
+    /// direction for the whole set.
+    #[test]
+    fn legible_across_holds_a_floor_where_a_per_fill_direction_flips() {
+        let fills = [0x777777, 0x707070, 0x6e6e6e];
+        let per_fill = fills
+            .iter()
+            .fold(0x808080, |ink, &fill| legible_ink(fill, ink, AA_MARK));
+        assert!(
+            fills.iter().any(|&fill| contrast(per_fill, fill) < AA_MARK),
+            "the per-fill walk {per_fill:#08x} was the failing case"
+        );
+        let across = legible_across(&fills, 0x808080, AA_MARK);
+        for fill in fills {
+            assert!(
+                contrast(across, fill) >= AA_MARK,
+                "{across:#08x} is {:.2}:1 on {fill:#08x}",
+                contrast(across, fill)
+            );
+        }
+    }
+
+    /// The prescribed 65%/55% and 50%/40% seeds miss on these palettes; the
+    /// cached ink is what fixes them, with the ratios on the fill that
+    /// actually fails.
+    #[test]
+    fn settings_ink_corrects_the_prescribed_seed_on_latte_dawn_and_dark_menu_rows() {
+        let by_id = |id: &str| builtins().into_iter().find(|t| t.id == id).unwrap();
+        for id in ["catppuccin_latte", "rose_pine_dawn", "dark"] {
+            let t = by_id(id);
+            let m = t.neutrals();
+            let s = t.surfaces();
+            let ink = t.settings_ink();
+            let seed = mix(m.background, m.foreground, if t.dark { 0.55 } else { 0.65 });
+            let fail_fill = if t.dark {
+                let menu = pack(lift(
+                    gpui::rgb(m.background).into(),
+                    settings_wash::MENU_LIFT_DARK,
+                ));
+                mix(menu, m.foreground, settings_wash::MENU_ROW.1)
+            } else {
+                s.rail.selected
+            };
+            assert!(
+                contrast(seed, fail_fill) < AA_TEXT,
+                "{id}: the prescribed seed {seed:#08x} should miss on {fail_fill:#08x}"
+            );
+            assert!(
+                contrast(ink.sub, fail_fill) >= AA_TEXT,
+                "{id}: sub {:#08x} is {:.2}:1 on {fail_fill:#08x}",
+                ink.sub,
+                contrast(ink.sub, fail_fill)
+            );
+        }
+    }
+
+    #[test]
+    fn selected_rung_holds_full_text_on_every_builtin() {
+        for t in builtins() {
+            let s = t.surfaces();
+            let fg = legible_foreground(t.background_color(), t.foreground);
+            for (name, sf) in [("window", s.window), ("popover", s.popover)] {
+                assert!(
+                    contrast(fg, sf.selected) >= AA_TEXT,
+                    "{}/{name}: full foreground is only {:.2}:1 on the selected rung {:#08x}",
+                    t.id,
+                    contrast(fg, sf.selected),
+                    sf.selected
+                );
+            }
+        }
+        let t = builtins()
+            .into_iter()
+            .find(|t| t.id == "one_dark_pro")
+            .unwrap();
+        let fg = legible_foreground(t.background_color(), t.foreground);
+        let popover = t.neutrals().popover;
+        let full_step = raise(popover, fg, state::SELECTED);
+        assert!(
+            contrast(fg, full_step) < AA_TEXT,
+            "the uncorrected One Dark Pro popover rung {full_step:#08x} was the failing case"
+        );
+        assert_ne!(t.surfaces().popover.selected, full_step);
+    }
+
+    /// Every surface's three rungs stay perceptibly apart in every theme, and
+    /// a weak palette's selected title keeps its authored hue and saturation
+    /// when it is lifted in lightness. Run with `--nocapture` to read the
+    /// measured least rung delta.
+    #[test]
+    fn rungs_stay_ordered_and_weak_titles_keep_their_hue_in_every_theme() {
+        let mut misses = Vec::new();
+        let mut least = f32::MAX;
+        for t in sweep_themes() {
+            let s = t.surfaces();
+            let fg = legible_foreground(t.background_color(), t.foreground);
+            for (name, sf) in [
+                ("window", s.window),
+                ("popover", s.popover),
+                ("sidebar", s.sidebar),
+                ("rail", s.rail),
+            ] {
+                let hover_step = (lightness(sf.hover) - lightness(sf.base)).abs();
+                let selected_step = (lightness(sf.selected) - lightness(sf.hover))
+                    * (lightness(sf.hover) - lightness(sf.base)).signum();
+                least = least.min(hover_step).min(selected_step);
+                if hover_step < state::RUNG_MIN_DELTA || selected_step < state::RUNG_MIN_DELTA {
+                    misses.push(format!(
+                        "{}/{name}: rungs {:#08x} {:#08x} {:#08x} are {hover_step:.2} and {selected_step:.2} L* apart",
+                        t.id, sf.base, sf.hover, sf.selected
+                    ));
+                }
+                // The selected title is the ink actually painted on the selected
+                // rung, so it clears the text floor wherever the rung is drawn.
+                let on_fill = contrast(sf.text_selected, sf.selected);
+                if on_fill < AA_TEXT {
+                    misses.push(format!(
+                        "{}/{name}: selected title {:#08x} is only {on_fill:.2}:1 on the selected rung {:#08x}",
+                        t.id, sf.text_selected, sf.selected
+                    ));
+                }
+            }
+            let sf = s.window;
+            let authored: Hsla = gpui::rgb(fg).into();
+            let lifted: Hsla = gpui::rgb(sf.text_selected).into();
+            // Eight-bit channels round a pastel's hue by a few hundredths.
+            let hue_gap = (authored.h - lifted.h).abs();
+            if contrast(fg, sf.selected) < AA_TEXT
+                && authored.s > 0.15
+                && (hue_gap.min(1. - hue_gap) > 0.05 || (authored.s - lifted.s).abs() > 0.1)
+            {
+                misses.push(format!(
+                    "{}: lifted title {:#08x} left the hue or saturation of {fg:#08x}",
+                    t.id, sf.text_selected
+                ));
+            }
+        }
+        println!("least adjacent rung delta {least:.2} L*");
+        assert_no_misses("rung order and weak titles", misses);
+    }
+
+    /// The grid's inks are pastels, so its weak palettes never leave the hue
+    /// and saturation check above anything to do. A saturated foreground on a
+    /// dark base does: the selected rung is tinted toward the ink and leaves
+    /// it near 3.5:1, so the title takes the lift. Keeping the authored hue
+    /// and saturation (lightness only) is what separates `lift_lightness`
+    /// from walking the ink to grey, which drops these titles' saturation by
+    /// about half.
+    #[test]
+    fn weak_saturated_titles_keep_their_hue_and_saturation_on_the_window_selection() {
+        for (background, foreground) in [
+            (0x1e1e2e, 0x009b6b),
+            (0x000000, 0x01864e),
+            (0x2b2b2b, 0x00b027),
+            (0x1e1e2e, 0x0094b1),
+        ] {
+            let t = Theme {
+                id: format!("weak-saturated-{foreground:06x}"),
+                name: format!("Weak saturated {background:06x} {foreground:06x}"),
+                dark: true,
+                background: Fill::Solid(background),
+                foreground,
+                accent: 0x1f6bf0,
+                caret: None,
+                selection: None,
+                opacity: None,
+                blur: false,
+                image: None,
+                ansi16: BUILTINS[0].ansi16,
+                path: None,
+            };
+            let fg = legible_foreground(t.background_color(), t.foreground);
+            assert_eq!(
+                fg, foreground,
+                "{}: the witness foreground is legible as authored",
+                t.id
+            );
+            let sf = t.surfaces().window;
+            assert!(
+                contrast(fg, sf.selected) < AA_TEXT,
+                "{}: the foreground must be weak on the selected rung {:#08x} for the lift to run",
+                t.id,
+                sf.selected
+            );
+            let authored: Hsla = gpui::rgb(fg).into();
+            let lifted: Hsla = gpui::rgb(sf.text_selected).into();
+            let hue_gap = (authored.h - lifted.h).abs();
+            // One eight-bit channel step moves the hue of these inks (chroma
+            // above 0.5) by 1/(6*255*0.5), about 0.0013, and their saturation
+            // by about 0.004: the bounds allow three steps of each. Lightness
+            // alone moving the ink stays inside them; walking it to grey does
+            // not (saturation drops by about half).
+            assert!(
+                hue_gap.min(1. - hue_gap) <= 0.004 && (authored.s - lifted.s).abs() <= 0.012,
+                "{}: lifted title {:#08x} left the hue or saturation of {fg:#08x}",
+                t.id,
+                sf.text_selected
+            );
+            assert!(
+                contrast(sf.text_selected, sf.selected) >= AA_TEXT,
+                "{}: lifted title {:#08x} is only {:.2}:1 on {:#08x}",
+                t.id,
+                sf.text_selected,
+                contrast(sf.text_selected, sf.selected),
+                sf.selected
+            );
+        }
+    }
+
+    /// A status badge's ink (`Semantic::on_fill`) keeps the authored foreground
+    /// where that already clears 4.5:1 on the fill, and otherwise is whichever of
+    /// white and black contrasts more. Independent of the production helper: the
+    /// expectation is computed here from `contrast` alone.
+    #[test]
+    fn semantic_badge_ink_is_the_better_of_black_and_white_when_the_seed_fails() {
+        let mut misses = Vec::new();
+        for t in sweep_themes() {
+            let r = t.resolve();
+            let sem = t.semantics_with(&r.m);
+            let fg = r.m.foreground;
+            for (label, role) in [
+                ("danger", sem.danger),
+                ("success", sem.success),
+                ("warning", sem.warning),
+                ("info", sem.info),
+                ("link", sem.link),
+            ] {
+                let (white, black) = (contrast(0xffffff, role.fill), contrast(0x000000, role.fill));
+                if contrast(fg, role.fill) >= AA_TEXT {
+                    if role.on_fill != fg {
+                        misses.push(format!(
+                            "{}: {label} on_fill {:#08x} moved off a foreground that already passes ({fg:#08x})",
+                            t.id, role.on_fill
+                        ));
+                    }
+                } else {
+                    let got = contrast(role.on_fill, role.fill);
+                    let best = white.max(black);
+                    if !(role.on_fill == 0xffffff || role.on_fill == 0x000000) || got < best {
+                        misses.push(format!(
+                            "{}: corrected {label} on_fill {:#08x} is {got:.2}:1 on {:#08x}, best of white/black is {best:.2}:1",
+                            t.id, role.on_fill, role.fill
+                        ));
+                    }
+                }
+            }
+        }
+        assert_no_misses("semantic badge ink", misses);
+    }
+
+    /// The selected title of every surface sits at the corrected text floor on
+    /// its selected rung, in every built-in and generated theme.
+    #[test]
+    fn selected_titles_hold_the_corrected_floor_on_their_selected_rung() {
+        let mut misses = Vec::new();
+        for t in sweep_themes() {
+            let s = t.surfaces();
+            for (name, sf) in [
+                ("window", s.window),
+                ("popover", s.popover),
+                ("sidebar", s.sidebar),
+                ("rail", s.rail),
+            ] {
+                let ratio = contrast(sf.text_selected, sf.selected);
+                if ratio < AA_CORRECTED {
+                    misses.push(format!(
+                        "{}/{name}: selected title {:#08x} is {ratio:.2}:1 on {:#08x}, under 4.6",
+                        t.id, sf.text_selected, sf.selected
+                    ));
+                }
+            }
+        }
+        assert_no_misses("selected titles", misses);
+    }
+
+    /// A cached ink moves off its prescribed seed only where the seed misses
+    /// a floor on a fill it is painted on.
+    #[test]
+    fn cached_inks_keep_seeds_that_already_pass() {
+        let mut misses = Vec::new();
+        for t in sweep_themes() {
+            let r = t.resolve();
+            let (m, s) = (&r.m, &r.sf);
+            let fg = m.foreground;
+            let settings = t.settings_ink_from(&r);
+            let chrome = t.chrome_ink_from(&r);
+            let sub_share = if t.dark { 0.55 } else { 0.65 };
+            // The light off track's seed; the dark one is the translucent foreground, checked in
+            // `dark_off_track_is_the_translucent_authored_foreground_by_owner_decision`.
+            let off_share = 0.50;
+            let popover = [s.popover.base, s.popover.hover, s.popover.selected];
+            let panel = [
+                s.sidebar.base,
+                s.sidebar.hover,
+                s.sidebar.selected,
+                s.rail.base,
+                s.rail.hover,
+                s.rail.selected,
+            ];
+            assert_eq!(
+                chrome.keycap_fill,
+                mix(s.popover.base, r.pole, 0.06),
+                "{}: keycap fill",
+                t.id
+            );
+            // The text roles the cached-ink list below does not own: the shared caption, the
+            // semantic and primary inks, the ANSI ramp and the port chip. Seeds are the inputs
+            // `semantics_with`, `neutrals_at` and `interactions_with` start from.
+            let sem = t.semantics_with(m);
+            let inter = t.interactions_with(m);
+            let clear = vec![m.background, m.sidebar, m.rail, m.popover];
+            let (red, green, amber) = if t.dark {
+                (0xf07878, 0x4cc27a, 0xe0a345)
+            } else {
+                (0xc43c43, 0x2f8a52, 0xb7791f)
+            };
+            let preferred_label = if t.dark { 0x121418 } else { 0xffffff };
+            let mut extra: Vec<(String, u32, u32, Vec<u32>, f32)> = vec![
+                (
+                    "foreground".into(),
+                    m.foreground,
+                    t.foreground,
+                    vec![m.background],
+                    AA_TEXT,
+                ),
+                (
+                    "choice_ink".into(),
+                    inter.choice_ink,
+                    m.foreground,
+                    vec![inter.choice],
+                    AA_TEXT,
+                ),
+                (
+                    "primary on_fill".into(),
+                    inter.primary.on_fill,
+                    preferred_label,
+                    vec![inter.primary.fill],
+                    AA_TEXT,
+                ),
+                (
+                    "caption muted_foreground".into(),
+                    m.muted_foreground,
+                    dim(fg, m.background, state::TEXT_RESTING),
+                    r.caption.clone(),
+                    AA_TEXT,
+                ),
+                (
+                    "danger ink".into(),
+                    sem.danger.ink,
+                    red,
+                    clear.clone(),
+                    AA_TEXT,
+                ),
+                (
+                    "success ink".into(),
+                    sem.success.ink,
+                    green,
+                    clear.clone(),
+                    AA_TEXT,
+                ),
+                (
+                    "warning ink".into(),
+                    sem.warning.ink,
+                    amber,
+                    clear.clone(),
+                    AA_TEXT,
+                ),
+                (
+                    "info ink".into(),
+                    sem.info.ink,
+                    t.accent,
+                    clear.clone(),
+                    AA_TEXT,
+                ),
+                (
+                    "link ink".into(),
+                    sem.link.ink,
+                    t.accent,
+                    clear.clone(),
+                    AA_TEXT,
+                ),
+                (
+                    "primary ink".into(),
+                    inter.primary.ink,
+                    m.accent,
+                    clear.clone(),
+                    AA_TEXT,
+                ),
+                (
+                    "port_chip_ink".into(),
+                    chrome.port_chip_ink,
+                    fg,
+                    r.port_chip.clone(),
+                    AA_TEXT,
+                ),
+                (
+                    "port_chip_hover_ink".into(),
+                    chrome.port_chip_hover_ink,
+                    sem.link.ink,
+                    r.port_chip.clone(),
+                    AA_TEXT,
+                ),
+            ];
+            for (label, role) in [
+                ("danger", sem.danger),
+                ("success", sem.success),
+                ("warning", sem.warning),
+                ("info", sem.info),
+                ("link", sem.link),
+            ] {
+                extra.push((
+                    format!("{label} on_fill"),
+                    role.on_fill,
+                    fg,
+                    vec![role.fill],
+                    AA_TEXT,
+                ));
+            }
+            for i in 0..16 {
+                extra.push((
+                    format!("ansi {i} ink"),
+                    t.ansi_ink_with(m, i),
+                    t.ansi_seed(i),
+                    clear.clone(),
+                    AA_TEXT,
+                ));
+            }
+            for (what, color, seed, fills, floor) in [
+                (
+                    "sub",
+                    settings.sub,
+                    mix(m.background, fg, sub_share),
+                    &r.settings_text[..],
+                    AA_TEXT,
+                ),
+                (
+                    "switch_off",
+                    settings.switch_off,
+                    mix(m.background, fg, off_share),
+                    &r.settings_marks[..],
+                    AA_MARK,
+                ),
+                (
+                    "glyph",
+                    settings.glyph,
+                    mix(m.background, fg, 0.5),
+                    &r.settings_glyph[..],
+                    AA_GLYPH,
+                ),
+                (
+                    "danger text",
+                    settings.danger,
+                    t.semantics_with(m).danger.ink,
+                    &r.settings_status[..],
+                    AA_TEXT,
+                ),
+                (
+                    "warn_text",
+                    settings.warn_text,
+                    t.semantics_with(m).warning.ink,
+                    &r.settings_page[..],
+                    AA_TEXT,
+                ),
+                (
+                    "unsaved",
+                    settings.unsaved,
+                    t.semantics_with(m).warning.ink,
+                    &r.settings_host_row[..],
+                    AA_SMALL_TEXT,
+                ),
+                (
+                    "ok text",
+                    settings.ok,
+                    t.semantics_with(m).success.ink,
+                    &r.settings_status[..],
+                    AA_TEXT,
+                ),
+                (
+                    "warn mark",
+                    settings.warn,
+                    t.semantics_with(m).warning.fill,
+                    &r.settings_warn[..],
+                    AA_MARK,
+                ),
+                (
+                    "selected_meta",
+                    chrome.selected_meta,
+                    mix(s.popover.selected, fg, 0.72),
+                    &[s.popover.selected][..],
+                    AA_TEXT,
+                ),
+                (
+                    "quiet_name",
+                    chrome.quiet_name,
+                    mix(s.popover.base, fg, 0.65),
+                    &popover[..],
+                    AA_TEXT,
+                ),
+                (
+                    "avatar_ink",
+                    chrome.avatar_ink,
+                    mix(m.secondary, fg, 0.80),
+                    &[m.secondary][..],
+                    AA_TEXT,
+                ),
+                (
+                    "keycap_ink",
+                    chrome.keycap_ink,
+                    mix(chrome.keycap_fill, fg, 0.70),
+                    &[chrome.keycap_fill][..],
+                    AA_TEXT,
+                ),
+                (
+                    "grip_idle",
+                    chrome.grip_idle,
+                    mix(s.window.base, fg, 0.50),
+                    &[s.window.base][..],
+                    AA_MARK,
+                ),
+                (
+                    "search_title",
+                    chrome.search_title,
+                    mix(s.popover.base, fg, 0.92),
+                    &popover[..],
+                    AA_TEXT,
+                ),
+                ("panel_title", chrome.panel_title, fg, &panel[..], AA_TEXT),
+                (
+                    "unpicked_title",
+                    chrome.unpicked_title,
+                    fg,
+                    &[s.popover.base, s.popover.hover][..],
+                    AA_TEXT,
+                ),
+                (
+                    "unpicked_meta",
+                    chrome.unpicked_meta,
+                    m.muted_foreground,
+                    &[s.popover.base, s.popover.hover][..],
+                    AA_SMALL_TEXT,
+                ),
+                (
+                    "selected_caption",
+                    chrome.selected_caption,
+                    m.muted_foreground,
+                    &[s.sidebar.selected, s.rail.selected][..],
+                    AA_SELECTED_CAPTION,
+                ),
+            ]
+            .into_iter()
+            .map(|(what, color, seed, fills, floor)| {
+                (what.to_string(), color, seed, fills.to_vec(), floor)
+            })
+            // Dark off track: owner exception to the 3:1 mark floor, see above.
+            .filter(|(what, ..)| !(t.dark && what == "switch_off"))
+            .chain(extra)
+            {
+                if fills.iter().all(|&fill| contrast(seed, fill) >= floor) && color != seed {
+                    misses.push(format!(
+                        "{}: {what} moved off a seed {seed:#08x} that already passes",
+                        t.id
+                    ));
+                }
+                // A text role that did have to move lands at the 4.6 target on every fill, so
+                // antialiasing cannot take it back under 4.5. Reported as exact cases, never
+                // excluded: an infeasible one shows up here with its ratio.
+                // Whether a correction was REQUIRED is decided by the seed missing the role's floor on
+                // some fill, never by the output differing from the seed: a role that returns its failing
+                // seed unchanged must be caught here, not skipped. A role with its own target then reaches
+                // it on every fill; an infeasible case (a mid-grey selection) is printed with its ratio.
+                let seed_misses = fills.iter().any(|&fill| contrast(seed, fill) < floor);
+                if [AA_SELECTED_CAPTION, AA_SMALL_TEXT, AA_GLYPH].contains(&floor) && seed_misses {
+                    for &fill in &fills {
+                        if contrast(color, fill) < floor {
+                            misses.push(format!(
+                                "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the {floor} target",
+                                t.id,
+                                contrast(color, fill)
+                            ));
+                        }
+                    }
+                }
+                if floor == AA_TEXT && seed_misses {
+                    for &fill in &fills {
+                        if contrast(color, fill) < AA_CORRECTED {
+                            misses.push(format!(
+                                "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the 4.6 target",
+                                t.id,
+                                contrast(color, fill)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert_no_misses("seeds kept", misses);
     }
 }

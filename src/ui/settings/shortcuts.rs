@@ -75,12 +75,14 @@ impl Tty59App {
         let hint = div()
             .text_size(fs(12.))
             .line_height(px(17.))
-            .text_color(tk.k45)
+            .text_color(tk.sub)
             .child(if tmux {
                 t(L10nKey::SettingsShortcutsHintTmux)
             } else {
                 t(L10nKey::SettingsShortcutsHint)
             });
+        #[cfg(test)]
+        let hint = kit::probe("settings.shortcut-hint", hint);
         let prefix_row = tmux.then(|| {
             h_flex()
                 .gap(px(10.))
@@ -88,7 +90,7 @@ impl Tty59App {
                 .child(
                     div()
                         .text_size(fs(12.))
-                        .text_color(tk.k5)
+                        .text_color(tk.sub)
                         .child(t(L10nKey::SettingsPrefix)),
                 )
                 .child(self.settings_choice(
@@ -205,7 +207,7 @@ impl Tty59App {
                             div()
                                 .pr(px(2.))
                                 .text_size(fs(12.))
-                                .text_color(tk.k45)
+                                .text_color(tk.sub)
                                 .child(t(L10nKey::SettingsPressKeysShort)),
                         )
                     })
@@ -214,7 +216,7 @@ impl Tty59App {
                             .gap(px(5.))
                             .items_center()
                             .when(n > 0, |d| {
-                                d.child(div().text_size(fs(11.)).text_color(tk.k4).child("/"))
+                                d.child(div().text_size(fs(11.)).text_color(tk.sub).child("/"))
                             })
                             .child(Self::keycap_row(spec, &tk))
                     }))
@@ -263,7 +265,7 @@ impl Tty59App {
                                         .id(SharedString::from(format!("reset-{action}")))
                                         .flex_shrink_0()
                                         .text_size(fs(11.5))
-                                        .text_color(tk.k4)
+                                        .text_color(tk.sub)
                                         .cursor_pointer()
                                         .hover(move |s| s.text_color(tk.fg))
                                         .child(t(L10nKey::Reset))
@@ -291,7 +293,7 @@ impl Tty59App {
                         .gap(px(8.))
                         .items_center()
                         .text_size(fs(12.))
-                        .text_color(tk.k6)
+                        .text_color(tk.sub)
                         .child(
                             div()
                                 .size(px(6.))
@@ -340,7 +342,7 @@ impl Tty59App {
         if none {
             groups.push(
                 div()
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(t_fmt(L10nKey::SettingsNoActionsMatch, &[("query", &query)]))
                     .into_any_element(),
             );
