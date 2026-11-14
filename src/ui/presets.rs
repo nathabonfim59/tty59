@@ -1081,8 +1081,12 @@ fn ink_on(fill: u32, fg: u32, target: f32) -> u32 {
     } else {
         0xffffff
     };
-    let deepened = bisect_contrast(fg, near, fill, correction_target(target));
-    if contrast(deepened, fill) >= target {
+    // The walk is accepted only where it reaches the headroom goal. A walk that stops short at
+    // the near end (white on a blue fill, 4.56:1) is no better than the better of white and
+    // black, so it falls through to that choice instead of being kept at the bare floor.
+    let goal = correction_target(target);
+    let deepened = bisect_contrast(fg, near, fill, goal);
+    if contrast(deepened, fill) >= goal {
         return deepened;
     }
     if contrast(fill, 0xffffff) >= contrast(fill, 0x000000) {
