@@ -2731,11 +2731,11 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::ScmCommitHasConflicts, "few") => "Сначала разрешите {count} конфликта",
         (L10nKey::ScmCommitHasConflicts, "many") => "Сначала разрешите {count} конфликтов",
         (L10nKey::ScmCommitHasConflicts, "other") => "Сначала разрешите {count} конфликта",
-        (L10nKey::ScmConflictCount, "zero") => "Нет неразрешённых конфликтов",
-        (L10nKey::ScmConflictCount, "one") => "Неразрешён {count} конфликт",
-        (L10nKey::ScmConflictCount, "few") => "Неразрешено {count} конфликта",
-        (L10nKey::ScmConflictCount, "many") => "Неразрешено {count} конфликтов",
-        (L10nKey::ScmConflictCount, "other") => "Неразрешено {count} конфликта",
+        (L10nKey::ScmConflictCount, "zero") => "Нет конфликтов",
+        (L10nKey::ScmConflictCount, "one") => "{count} конфликт",
+        (L10nKey::ScmConflictCount, "few") => "{count} конфликта",
+        (L10nKey::ScmConflictCount, "many") => "{count} конфликтов",
+        (L10nKey::ScmConflictCount, "other") => "{count} конфликта",
         (L10nKey::PanelMoreChangedFiles, "zero") => "Других изменённых файлов нет.",
         (L10nKey::PanelMoreChangedFiles, "one") => {
             "…и ещё {count} изменённый файл. Посмотрите его командой git diff."
