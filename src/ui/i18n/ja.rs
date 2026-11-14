@@ -27,6 +27,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::VisionDone => "完了",
         L10nKey::VisionIdle => "待機中",
         L10nKey::VisionExited => "終了",
+        L10nKey::VisionExitedAge => "終了 · {age}",
         L10nKey::VisionPane => "ペイン {i}/{n}",
         L10nKey::VisionDefault => "新規ウィンドウをエージェントビューで開く",
         L10nKey::VisionDefaultDesc => {

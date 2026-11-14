@@ -27,6 +27,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::VisionDone => "Завершены",
         L10nKey::VisionIdle => "Бездействуют",
         L10nKey::VisionExited => "Завершили сеанс",
+        L10nKey::VisionExitedAge => "Завершён · {age}",
         L10nKey::VisionPane => "панель {i}/{n}",
         L10nKey::VisionDefault => "Открывать окна в режиме агентов",
         L10nKey::VisionDefaultDesc => {

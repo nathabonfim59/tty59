@@ -4,7 +4,7 @@ use gpui::App;
 use crate::core::group_key::{GroupKey, auto_names, pinned_names};
 use crate::ui::app::Tty59App;
 
-use super::{PaneKey, PaneLocation, PaneSummary, Project};
+use super::{PaneKey, PaneLocation, PaneSummary, Project, State};
 
 impl Tty59App {
     /// Agent panes in this window's current workspace, in tab/tree order.
@@ -45,7 +45,9 @@ impl Tty59App {
                     terminal.agent_result_unread(),
                 ) {
                     pane.pane_position = (count > 1).then_some((position + 1, count));
-                    pane.last_line = terminal.agent_preview();
+                    if pane.state != State::Exited {
+                        pane.last_line = terminal.agent_preview();
+                    }
                     panes.push(pane);
                 }
             }

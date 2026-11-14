@@ -101,6 +101,7 @@ l10n_keys! {
     VisionDone,
     VisionIdle,
     VisionExited,
+    VisionExitedAge,
     VisionPane,
     VisionDefault,
     VisionDefaultDesc,

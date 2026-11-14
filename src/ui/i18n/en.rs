@@ -27,6 +27,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::VisionDone => "Done",
         L10nKey::VisionIdle => "Idle",
         L10nKey::VisionExited => "Exited",
+        L10nKey::VisionExitedAge => "Exited · {age}",
         L10nKey::VisionPane => "pane {i}/{n}",
         L10nKey::VisionDefault => "Start windows in agent mode",
         L10nKey::VisionDefaultDesc => {
