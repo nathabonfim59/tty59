@@ -117,7 +117,8 @@ pub struct SettingsInk {
     /// settings fills they are painted on, which are lower-contrast than the
     /// bases `Semantics` is floored on: a hovered row, a dropdown row.
     pub danger: u32,
-    /// Held to `SETTINGS_SMALL_TEXT_TARGET`: it is drawn at 12px or less.
+    /// Held to `SETTINGS_SMALL_TEXT_TARGET` on the open host row it is painted on (the Unsaved
+    /// meta, shown only while a host is being edited, which opens it): it is drawn at 12px or less.
     pub warn_text: u32,
     pub ok: u32,
     /// The warning dot and ring, a mark: the semantic warning fill floored at
@@ -179,7 +180,11 @@ pub struct ChromeInk {
 /// settings roles that are only ever drawn that small derive above the public floor: such text at
 /// `SETTINGS_SMALL_TEXT_TARGET` (5.0:1), such glyphs at `SETTINGS_GLYPH_TARGET` (3.2:1). Everything
 /// else keeps 4.6:1 for text and 3:1 for marks. A seed that already clears the target on every fill it
-/// is painted on stays as authored. Scope today: `SettingsInk::warn_text` and `SettingsInk::glyph`.
+/// is painted on stays as authored. Policy: the higher targets are assigned to small roles whose 1x
+/// captures missed the floor, chosen from offline capture evidence (nothing is measured at runtime);
+/// roles and seeds already verified above the 1x floor stay authored. The derivation itself is pure
+/// and only guarantees that a seed above its assigned target is returned unchanged. Scope today:
+/// `SettingsInk::warn_text` and `SettingsInk::glyph`.
 pub(crate) const SETTINGS_SMALL_TEXT_TARGET: f32 = 5.0;
 pub(crate) const SETTINGS_GLYPH_TARGET: f32 = 3.2;
 
@@ -223,6 +228,8 @@ pub(crate) struct Resolved {
     settings_glyph: Vec<u32>,
     settings_status: Vec<u32>,
     settings_warn: Vec<u32>,
+    /// The open host row: the page under the row's ROW wash. The only fill the Unsaved text is painted on.
+    settings_host_row: Vec<u32>,
     panel: Vec<u32>,
     popover_rows: Vec<u32>,
     port_chip: Vec<u32>,
@@ -685,6 +692,9 @@ impl Theme {
             gpui::rgb(page).into(),
             if self.dark { menu_lift } else { raise },
         ));
+        // The open host row: the page under the row's ROW wash. One source for the warning dot's second fill
+        // and for the Unsaved text, which is only ever painted there.
+        let host_row = wash(page, settings_wash::ROW);
         Resolved {
             pole,
             raise,
@@ -742,7 +752,8 @@ impl Theme {
                 menu,
                 wash(menu, settings_wash::MENU_ROW),
             ],
-            settings_warn: vec![page, wash(page, settings_wash::ROW)],
+            settings_warn: vec![page, host_row],
+            settings_host_row: vec![host_row],
             panel: vec![
                 sf.sidebar.base,
                 sf.sidebar.hover,
@@ -805,7 +816,7 @@ impl Theme {
             ),
             danger: legible_across(&r.settings_status, sem.danger.ink, TEXT_FLOOR),
             warn_text: legible_across(
-                &r.settings_status,
+                &r.settings_host_row,
                 sem.warning.ink,
                 SETTINGS_SMALL_TEXT_TARGET,
             ),
@@ -3511,11 +3522,13 @@ ansi:
             AA_MARK,
         );
         add("settings glyph", settings.glyph, &r.settings_glyph, AA_MARK);
-        for (what, ink) in [
-            ("danger", settings.danger),
-            ("warn_text", settings.warn_text),
-            ("ok", settings.ok),
-        ] {
+        add(
+            "settings warn_text text",
+            settings.warn_text,
+            &r.settings_host_row,
+            AA_TEXT,
+        );
+        for (what, ink) in [("danger", settings.danger), ("ok", settings.ok)] {
             add(
                 &format!("settings {what} text"),
                 ink,
@@ -4305,7 +4318,7 @@ ansi:
                     "warn_text",
                     settings.warn_text,
                     t.semantics_with(m).warning.ink,
-                    &r.settings_status[..],
+                    &r.settings_host_row[..],
                     AA_SMALL_TEXT,
                 ),
                 (

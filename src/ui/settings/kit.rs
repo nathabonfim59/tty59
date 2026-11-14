@@ -1157,11 +1157,16 @@ mod tests {
                     pack(tk.menu),
                     over(pack(tk.menu), tk.k06),
                 ];
-                for (what, text) in [
-                    ("danger", tk.danger),
-                    ("warn_text", tk.warn_text),
-                    ("ok", tk.ok),
-                ] {
+                // Unsaved is painted only on the open host row (the page under the k04 wash) and is a
+                // small role: it holds the literal 5.0 there, and the 4.5 floor on it too.
+                let host_row = over(pack(tk.page), tk.k04);
+                assert!(
+                    contrast(pack(tk.warn_text), host_row) >= 5.0,
+                    "{id}: warn_text {:#08x} is {:.2}:1 on the open host row {host_row:#08x}, under 5.0",
+                    pack(tk.warn_text),
+                    contrast(pack(tk.warn_text), host_row)
+                );
+                for (what, text) in [("danger", tk.danger), ("ok", tk.ok)] {
                     for fill in status_fills {
                         assert!(
                             contrast(pack(text), fill) >= TEXT_FLOOR,
