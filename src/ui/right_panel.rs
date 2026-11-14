@@ -2099,14 +2099,20 @@ fn port_chip(
     row_group: gpui::SharedString,
     mono: &gpui::SharedString,
 ) -> AnyElement {
-    let port = pill(text, wash, ink, mono).group_hover(row_group, move |style| {
-        let style = style.text_color(hover_ink);
-        #[cfg(test)]
-        let mut style = style;
-        #[cfg(test)]
-        crate::ui::paint_probe::note("port.chip.hover", &mut style);
-        style
-    });
+    // The id is what lets the hover ink show: a string child is shaped at
+    // layout, from the style the element has *then*, and an id-less element
+    // has no remembered group-hover state to give it. It nests under the
+    // row's own id, so it is unique per row.
+    let port = pill(text, wash, ink, mono)
+        .id("port-chip")
+        .group_hover(row_group, move |style| {
+            let style = style.text_color(hover_ink);
+            #[cfg(test)]
+            let mut style = style;
+            #[cfg(test)]
+            crate::ui::paint_probe::note("port.chip.hover", &mut style);
+            style
+        });
     #[cfg(test)]
     let mut port = port;
     #[cfg(test)]
