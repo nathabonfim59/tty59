@@ -37,7 +37,7 @@ use crate::daemon::shell_integration::remote;
 
 use forward::RemoteForwardTable;
 use handler::ClientHandler;
-use session::drive_channel;
+use session::{drive_channel, pixels};
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -291,7 +291,7 @@ impl SshManager {
         size: WinSize,
         broker: &Arc<PromptBroker>,
         data_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
-        cmd_rx: tokio::sync::mpsc::UnboundedReceiver<ChannelCmd>,
+        mut cmd_rx: tokio::sync::mpsc::UnboundedReceiver<ChannelCmd>,
         conn_slot: &SharedConnection,
     ) -> Result<(), String> {
         broker.status(SshPhase::Connecting);
@@ -302,8 +302,6 @@ impl SshManager {
             .map_err(|e| format!("{e}"))?;
 
         *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
-
-        broker.status(SshPhase::Connected);
 
         let mut channel = conn.open_session_channel().await;
         let mut retries = 0;
@@ -316,7 +314,7 @@ impl SshManager {
             *conn_slot.lock().unwrap() = Arc::downgrade(&conn);
             channel = conn.open_session_channel().await;
         }
-        let channel = match channel {
+        let mut channel = match channel {
             Ok(channel) => channel,
             Err(e) if conn.is_saturated() => {
                 return Err(format!(
@@ -354,10 +352,7 @@ impl SshManager {
             self.forwards.establish(pane_id, conn.clone(), rule).await;
         }
 
-        let (pw, ph) = (
-            u32::from(size.cols).saturating_mul(u32::from(size.cell_w)),
-            u32::from(size.rows).saturating_mul(u32::from(size.cell_h)),
-        );
+        let (pw, ph) = pixels(size);
         channel
             .request_pty(
                 false,
@@ -393,6 +388,79 @@ impl SshManager {
                 .await
                 .map_err(|e| format!("shell request failed: {e}"))?,
         }
+
+        // `exec`/`request_shell` resolve once the request is on the wire; the
+        // far end's answer arrives later as CHANNEL_SUCCESS on this channel.
+        // `Connected` means the pane can be used, and everything a client
+        // keys on it — the tab's "disconnected" title, the forward route,
+        // the SFTP browser — needs a granted shell behind it, so it reports
+        // only once that answer lands (remote F13). Output sent before the
+        // grant is forwarded in order so nothing is lost; a refusal, a
+        // close, the pane going away, or the spec's own connect timeout all
+        // end the pane as `Failed` instead.
+        let grant_budget = spec
+            .connect_timeout_s
+            .filter(|v| *v > 0)
+            .map(|v| Duration::from_secs(u64::from(v)))
+            .unwrap_or(DEFAULT_CONNECT_TIMEOUT);
+        let granted = tokio::time::timeout(grant_budget, async {
+            loop {
+                tokio::select! {
+                    msg = channel.wait() => match msg {
+                        Some(ChannelMsg::Success) => break Ok(()),
+                        Some(ChannelMsg::Data { data })
+                        | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            if data_tx.send(data.to_vec()).await.is_err() {
+                                break Err("pane output went away before the shell was granted"
+                                    .to_string());
+                            }
+                        }
+                        Some(ChannelMsg::Failure) => {
+                            break Err("the server refused the shell request".to_string())
+                        }
+                        Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                            break Err(
+                                "the server closed the channel before granting the shell"
+                                    .to_string(),
+                            )
+                        }
+                        Some(_) => {}
+                    },
+                    cmd = cmd_rx.recv() => match cmd {
+                        Some(ChannelCmd::Data(bytes)) => {
+                            let _ = channel.data(&bytes[..]).await;
+                        }
+                        Some(ChannelCmd::Resize(size)) => {
+                            let (pw, ph) = pixels(size);
+                            let _ = channel
+                                .window_change(
+                                    u32::from(size.cols),
+                                    u32::from(size.rows),
+                                    pw,
+                                    ph,
+                                )
+                                .await;
+                        }
+                        Some(ChannelCmd::Close) | None => {
+                            break Err("pane closed before the shell was granted".to_string())
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        match granted {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let _ = channel.close().await;
+                return Err(e);
+            }
+            Err(_) => {
+                let _ = channel.close().await;
+                return Err("the server took too long to grant the shell".to_string());
+            }
+        }
+        broker.status(SshPhase::Connected);
 
         for line in &spec.login_script {
             let mut bytes = line.clone().into_bytes();
@@ -1250,5 +1318,321 @@ mod tests {
         let quiet = declining_broker(Arc::clone(&fresh));
         quiet.banner("welcome".into());
         assert_eq!(*fresh.lock().unwrap(), None);
+    }
+
+    /// A broker that records each phase `run_session` reports together with
+    /// what `probe` sees at that instant — the client's whole view of how the
+    /// connect went, pinned against the server's side of it.
+    fn phase_recorder(
+        probe: impl Fn() -> usize + Send + Sync + 'static,
+    ) -> (Arc<PromptBroker>, Arc<Mutex<Vec<(SshPhase, usize)>>>) {
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&phases);
+        let broker = PromptBroker::new(Box::new(move |msg| {
+            if let crate::daemon::protocol::DaemonMsg::SshStatus { phase } = msg {
+                seen.lock().unwrap().push((phase, probe()));
+            }
+            true
+        }));
+        (broker, phases)
+    }
+
+    /// A `run_session` on the manager's runtime, fed the pipes pane.rs hands
+    /// it. The returned receiver must outlive the session: `run_session`
+    /// reads a closed data channel as the pane being gone and ends itself.
+    fn spawn_test_session(
+        mgr: &'static SshManager,
+        spec: NativeSshSpec,
+        broker: Arc<PromptBroker>,
+    ) -> (
+        tokio::sync::mpsc::UnboundedSender<ChannelCmd>,
+        tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (data_tx, data_rx) = tokio::sync::mpsc::channel(16);
+        let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let conn_slot: SharedConnection = Arc::new(Mutex::new(Weak::new()));
+        mgr.spawn_native_session(
+            1,
+            Box::new(spec),
+            None,
+            WinSize {
+                cols: 80,
+                rows: 24,
+                cell_w: 8,
+                cell_h: 16,
+            },
+            broker,
+            data_tx,
+            cmd_rx,
+            conn_slot,
+        );
+        (cmd_tx, data_rx)
+    }
+
+    async fn wait_for_phases(phases: &Mutex<Vec<(SshPhase, usize)>>, n: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while phases.lock().unwrap().len() < n {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {:?} reported",
+                phases.lock().unwrap()
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// F13's promise at the source: `Connected` may only ever be reported once
+    /// the far end granted the shell — otherwise a pane that never got one
+    /// cannot be told apart from a session that dropped. An open refused
+    /// outright (the refused-open retry only retries saturation, not refusal)
+    /// must never see `Connected`.
+    #[test]
+    fn a_connect_that_never_reaches_a_shell_never_reports_connected() {
+        let mgr = &*Box::leak(Box::new(manager()));
+        mgr.runtime.block_on(async {
+            let sshd = test_support::FakeSshdListener::listen(Some(0)).await;
+            let mut spec = test_support::spec_for(sshd.port);
+            spec.shell_integration = false;
+            let (broker, phases) = phase_recorder(sshd.shell_probe());
+            let (cmd_tx, _data_rx) = spawn_test_session(mgr, spec, broker);
+            wait_for_phases(&phases, 3).await;
+            drop(cmd_tx);
+            let reported = phases.lock().unwrap().clone();
+            let phases_only: Vec<SshPhase> = reported.iter().map(|(p, _)| p.clone()).collect();
+            assert_eq!(
+                phases_only[..2],
+                [SshPhase::Connecting, SshPhase::Authenticating]
+            );
+            assert!(
+                matches!(phases_only[2], SshPhase::Failed { .. }),
+                "{reported:?}"
+            );
+            assert!(
+                !phases_only.iter().any(|p| matches!(p, SshPhase::Connected)),
+                "`Connected` reported for a session that never got a shell"
+            );
+            assert!(
+                reported.iter().all(|(_, shells)| *shells == 0),
+                "a shell granted on a server that refuses every session"
+            );
+        });
+    }
+
+    /// The reuse side of the same promise, folded into the ordering proof: a
+    /// session that lands on a pooled, already-authenticated connection still
+    /// reports `Connected` — and at the instant it reports it, the server has
+    /// already granted the shell. Reporting it early is exactly the F13 lie a
+    /// never-shelled pane cannot afford.
+    #[test]
+    fn a_reused_connection_reports_connected_after_its_shell() {
+        let mgr = &*Box::leak(Box::new(manager()));
+        mgr.runtime.block_on(async {
+            let sshd = test_support::FakeSshdListener::listen(None).await;
+            let mut spec = test_support::spec_for(sshd.port);
+            spec.shell_integration = false;
+            let sink = PromptBroker::new(Box::new(|_| true));
+            // A live, healthy link already pooled under this key is what reuse
+            // looks like to `run_session`.
+            let (_held, reused) = mgr.open_connection(&spec, &sink).await.expect("warm dial");
+            assert!(!reused);
+            let (broker, phases) = phase_recorder(sshd.shell_probe());
+            let (cmd_tx, _data_rx) = spawn_test_session(mgr, spec, broker);
+            wait_for_phases(&phases, 2).await;
+            drop(cmd_tx);
+            sshd.wait_for_closed(1).await;
+            let reported = phases.lock().unwrap().clone();
+            assert_eq!(
+                reported,
+                [(SshPhase::Connecting, 0), (SshPhase::Connected, 1)],
+                "`Connected` with no shell granted behind it is a lie the \
+                 client's title cannot un-tell"
+            );
+            assert_eq!(sshd.opened(), 1, "one session channel, on the reused link");
+            assert_eq!(sshd.refused(), 0);
+        });
+    }
+
+    /// Reuse finds every pooled link saturated: `run_session` redials a second
+    /// connection, so the client hears `Authenticating` for the fresh link and
+    /// then `Connected` — still only once the shell is up. The phase list is
+    /// also the replay a detached window inherits, so it has to read like the
+    /// truth, not like a log of attempts.
+    #[test]
+    fn a_saturated_reuse_redial_reports_connected_only_after_the_shell() {
+        let mgr = &*Box::leak(Box::new(manager()));
+        mgr.runtime.block_on(async {
+            let sshd = test_support::FakeSshdListener::listen(Some(1)).await;
+            let mut spec = test_support::spec_for(sshd.port);
+            spec.shell_integration = false;
+            let sink = PromptBroker::new(Box::new(|_| true));
+            let (held, _) = mgr.open_connection(&spec, &sink).await.expect("warm dial");
+            // conn A carries one session already: with `MaxSessions 1` the next
+            // open on it is refused for saturation.
+            let _filler = held.open_session_channel().await.expect("the one slot");
+            let (broker, phases) = phase_recorder(sshd.shell_probe());
+            let (cmd_tx, _data_rx) = spawn_test_session(mgr, spec, broker);
+            wait_for_phases(&phases, 3).await;
+            drop(cmd_tx);
+            sshd.wait_for_closed(1).await;
+            assert_eq!(
+                phases.lock().unwrap().as_slice(),
+                [
+                    (SshPhase::Connecting, 0),
+                    (SshPhase::Authenticating, 0),
+                    (SshPhase::Connected, 1)
+                ],
+                "the redial's auth is what the client must hear; `Connected` \
+                 still waits for the shell"
+            );
+            assert_eq!(
+                sshd.refused(),
+                1,
+                "conn A's full budget refused the first open"
+            );
+            assert_eq!(sshd.opened(), 2, "filler on conn A + session on conn B");
+            drop(held);
+        });
+    }
+
+    /// A far side can already be writing when its `shell` is granted — a
+    /// banner, a motd, first output, on stdout and stderr alike. `Connected`
+    /// waits for the grant, and what arrived before it is the pane's
+    /// scrollback, not a casualty of the wait: every byte, in order, once.
+    #[test]
+    fn a_shell_writing_before_its_grant_reports_connected_and_keeps_every_byte() {
+        let mgr = &*Box::leak(Box::new(manager()));
+        mgr.runtime.block_on(async {
+            let sshd =
+                test_support::FakeSshdListener::listen_with(test_support::Shell::EarlyData, None)
+                    .await;
+            let mut spec = test_support::spec_for(sshd.port);
+            spec.shell_integration = false;
+            let (broker, phases) = phase_recorder(sshd.shell_probe());
+            let (_cmd_tx, mut data_rx) = spawn_test_session(mgr, spec, broker);
+            wait_for_phases(&phases, 3).await;
+            // The server closes after the post-grant prompt; when the session
+            // task ends it drops the pane's end of the pipe, so `recv` seeing
+            // `None` is the whole stream — nothing before it lost, nothing
+            // after it missing.
+            let got = tokio::time::timeout(Duration::from_secs(10), async {
+                let mut got = Vec::new();
+                while let Some(chunk) = data_rx.recv().await {
+                    got.extend_from_slice(&chunk);
+                }
+                got
+            })
+            .await
+            .expect("the session's data stream never ended");
+            assert_eq!(
+                got, b"pre-grant-outpre-grant-err$ ",
+                "stdout, stderr and post-grant output, in wire order, once each"
+            );
+            sshd.wait_for_closed(1).await;
+            assert_eq!(
+                phases.lock().unwrap().as_slice(),
+                [
+                    (SshPhase::Connecting, 0),
+                    (SshPhase::Authenticating, 0),
+                    (SshPhase::Connected, 1)
+                ]
+            );
+        });
+    }
+
+    /// CHANNEL_FAILURE is the server declining the shell after the channel
+    /// was up: `Connected` must never report on top of it.
+    #[test]
+    fn a_refused_shell_request_reports_failed_not_connected() {
+        let mgr = &*Box::leak(Box::new(manager()));
+        mgr.runtime.block_on(async {
+            let sshd =
+                test_support::FakeSshdListener::listen_with(test_support::Shell::Refused, None)
+                    .await;
+            let mut spec = test_support::spec_for(sshd.port);
+            spec.shell_integration = false;
+            let (broker, phases) = phase_recorder(sshd.shell_probe());
+            let (cmd_tx, _data_rx) = spawn_test_session(mgr, spec, broker);
+            wait_for_phases(&phases, 3).await;
+            drop(cmd_tx);
+            let reported = phases.lock().unwrap().clone();
+            assert_eq!(
+                reported.iter().map(|(p, _)| p).take(2).collect::<Vec<_>>(),
+                [&SshPhase::Connecting, &SshPhase::Authenticating]
+            );
+            assert!(
+                matches!(reported[2].0, SshPhase::Failed { .. }),
+                "{reported:?}"
+            );
+            assert!(
+                reported.iter().all(|(_, shells)| *shells == 0),
+                "no shell was granted to report `Connected` on"
+            );
+        });
+    }
+
+    /// The channel dying mid-request — CHANNEL_CLOSE instead of an answer —
+    /// is the same not-connected outcome, not an established session.
+    #[test]
+    fn a_channel_closed_before_the_shell_grant_reports_failed() {
+        let mgr = &*Box::leak(Box::new(manager()));
+        mgr.runtime.block_on(async {
+            let sshd =
+                test_support::FakeSshdListener::listen_with(test_support::Shell::Closes, None)
+                    .await;
+            let mut spec = test_support::spec_for(sshd.port);
+            spec.shell_integration = false;
+            let (broker, phases) = phase_recorder(sshd.shell_probe());
+            let (cmd_tx, _data_rx) = spawn_test_session(mgr, spec, broker);
+            wait_for_phases(&phases, 3).await;
+            drop(cmd_tx);
+            let reported = phases.lock().unwrap().clone();
+            assert!(
+                matches!(
+                    reported.last().map(|(p, _)| p),
+                    Some(SshPhase::Failed { .. })
+                ),
+                "{reported:?}"
+            );
+            assert!(
+                !reported
+                    .iter()
+                    .any(|(p, _)| matches!(p, SshPhase::Connected)),
+                "`Connected` reported on a channel the server closed"
+            );
+        });
+    }
+
+    /// A server that holds the request forever must not hold the pane's
+    /// status with it: the spec's own connect timeout ends the wait, and
+    /// the pane ends "not connected".
+    #[test]
+    fn a_shell_grant_that_never_answers_reports_failed() {
+        let mgr = &*Box::leak(Box::new(manager()));
+        mgr.runtime.block_on(async {
+            let sshd =
+                test_support::FakeSshdListener::listen_with(test_support::Shell::Silent, None)
+                    .await;
+            let mut spec = test_support::spec_for(sshd.port);
+            spec.shell_integration = false;
+            spec.connect_timeout_s = Some(1);
+            let (broker, phases) = phase_recorder(sshd.shell_probe());
+            let (cmd_tx, _data_rx) = spawn_test_session(mgr, spec, broker);
+            wait_for_phases(&phases, 3).await;
+            drop(cmd_tx);
+            let reported = phases.lock().unwrap().clone();
+            assert!(
+                matches!(
+                    reported.last().map(|(p, _)| p),
+                    Some(SshPhase::Failed { .. })
+                ),
+                "{reported:?}"
+            );
+            assert!(
+                !reported
+                    .iter()
+                    .any(|(p, _)| matches!(p, SshPhase::Connected)),
+                "`Connected` reported on a grant that never came"
+            );
+        });
     }
 }
