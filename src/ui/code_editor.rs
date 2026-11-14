@@ -3820,16 +3820,23 @@ impl Tty59App {
             .map(|c| c.strip_split(cap))
             .unwrap_or_default();
         let active_id = self.tab_code().and_then(TabCode::active_id);
-        let files: Vec<(usize, SharedString, String, bool, bool)> = shown
+        let files: Vec<(usize, SharedString, Option<String>, bool, bool)> = shown
             .into_iter()
             .filter_map(|(pos, id)| {
                 let f = self.buffer(id)?;
+                let active = Some(id) == active_id;
+                // The breadcrumbs over the text spell out the focused group's
+                // active file (the strip lists that group's files only) and
+                // carry its full path on hover, so its tab does not repeat it.
+                // An untitled buffer has no path there, so it keeps its label.
                 let tip = if f.untitled.is_some() {
-                    f.label().to_string()
+                    Some(f.label().to_string())
+                } else if active {
+                    None
                 } else {
-                    f.path.display().to_string()
+                    Some(f.path.display().to_string())
                 };
-                Some((pos, f.label(), tip, Some(id) == active_id, f.dirty))
+                Some((pos, f.label(), tip, active, f.dirty))
             })
             .collect();
         let strip = if files.is_empty() {
@@ -3927,7 +3934,7 @@ impl Tty59App {
         &self,
         pos: usize,
         name: SharedString,
-        tip: String,
+        tip: Option<String>,
         active: bool,
         dirty: bool,
         cx: &mut Context<Self>,
@@ -4029,8 +4036,10 @@ impl Tty59App {
                             .child(close),
                     ),
             )
-            .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            .when_some(tip, |tab, tip| {
+                tab.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.editor_activate(pos, window, cx);

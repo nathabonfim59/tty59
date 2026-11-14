@@ -22,6 +22,7 @@ use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
+use crate::ui::text_elision::{ElidedLabel, Mode};
 
 mod machine_scope;
 pub(crate) use machine_scope::MachineScope;
@@ -79,10 +80,12 @@ const RUN_DOT: f32 = 5.0;
 /// The list rows' corner.
 const LIST_RADIUS: f32 = 8.0;
 
-/// How much of the left column the offline card's endpoint may take. The card
-/// lives in that column too, and an unbounded `user@host:port` beside the
-/// failure text squeezed the text to nothing.
-const ENDPOINT_MAX_W: f32 = 140.0;
+/// How many lines the offline card gives the failure that took a machine down
+/// before the tooltip has to carry the rest.
+const OFFLINE_REASON_LINES: usize = 2;
+
+/// What sits between the parts of a row's metadata line.
+const META_SEP: &str = "  ·  ";
 
 /// The create form's rows and the rename field keep the compact height.
 const ROW_H: f32 = 34.0;
@@ -658,11 +661,43 @@ fn create_preset_of(layout: &Layout) -> (String, Option<HostChoice>) {
     )
 }
 
-/// What the offline card's second line has to say: the failure that took the
-/// machine down (the row truncates it) and the endpoint it would dial. A group
-/// with no failure behind it only has the endpoint to show.
+/// What the offline card's second block has to say: the failure that took the
+/// machine down (it wraps, and the tooltip holds the rest) and the endpoint it
+/// would dial on a line of its own. A group with no failure behind it only has
+/// the endpoint to show.
 fn offline_card_detail(group: &Group) -> (Option<String>, String) {
     (group.error.clone(), group_endpoint(group))
+}
+
+/// The chord that steps the machine rail, spelled from the same specs
+/// `ui::keymap` binds it with, as (modifiers, arrows) so a glyph on macOS and a
+/// word elsewhere come out the way every other chord in the app spells them.
+fn machine_chord() -> (Vec<String>, Vec<String>) {
+    let mut left = crate::ui::keymap::key_tokens("alt-left");
+    let mut right = crate::ui::keymap::key_tokens("alt-right");
+    let arrows = [left.pop(), right.pop()].into_iter().flatten().collect();
+    (left, arrows)
+}
+
+/// Whether the machine chord has anywhere to go: a rail with this computer and
+/// one other machine. With a single machine All and that machine are the same
+/// list, and teaching a chord on every open would be noise.
+fn rail_steps(rail: &[RailEntry]) -> bool {
+    rail.iter()
+        .filter(|entry| matches!(entry.scope, MachineScope::Machine(_)))
+        .count()
+        > 1
+}
+
+/// A tab's diff counts as the sidebar words them (`+3 −2`), or `None` for a
+/// clean tree so no separator is left pointing at nothing.
+fn diff_counts(added: u32, removed: u32) -> Option<String> {
+    let parts = [
+        (added > 0).then(|| format!("+{added}")),
+        (removed > 0).then(|| format!("−{removed}")),
+    ];
+    let counts: Vec<String> = parts.into_iter().flatten().collect();
+    (!counts.is_empty()).then(|| counts.join(" "))
 }
 
 /// Orphan panes are this computer's; under a remote scope they are not
@@ -683,22 +718,22 @@ fn empty_list_text(scope: &MachineScope, groups: &[Group]) -> String {
     }
 }
 
-/// The sub-line under a workspace's name: its path, led by the machine only in
-/// the blended All list. A scoped row lives on the one machine the list is
-/// about, so repeating its name there is noise.
-fn row_meta(group: &Group, row: &Row, show_machine: bool) -> Vec<String> {
-    let mut meta: Vec<String> = Vec::new();
-    if show_machine {
-        meta.push(if group.target.is_some() {
-            group.label.clone()
-        } else {
-            t(L10nKey::SwitcherLocalHost).to_string()
-        });
-    }
-    if !row.path.is_empty() {
-        meta.push(row.path.clone());
-    }
-    meta
+/// The machine a workspace's sub-line leads with, only in the blended All
+/// list. A scoped row lives on the one machine the list is about, so repeating
+/// its name there is noise.
+fn row_machine(group: &Group, show_machine: bool) -> Option<String> {
+    show_machine.then(|| match group.target.is_some() {
+        true => group.label.clone(),
+        false => t(L10nKey::SwitcherLocalHost).to_string(),
+    })
+}
+
+/// Which separators the sub-line draws, for the parts it has: one after the
+/// machine when a path follows it, one before the time when anything precedes
+/// it. Each belongs to the part after it, so no dot is left pointing at
+/// nothing.
+fn meta_separators(machine: bool, path: bool, when: bool) -> (bool, bool) {
+    (machine && path, when && (machine || path))
 }
 
 /// One of the scoped list's section headings.
@@ -2379,7 +2414,8 @@ impl Tty59App {
         chips.push(
             h_flex()
                 .id("switcher-rail-add")
-                .flex_shrink_0()
+                .flex_none()
+                .whitespace_nowrap()
                 .items_center()
                 .gap(px(6.))
                 .h(px(RAIL_CHIP_H))
@@ -2398,17 +2434,19 @@ impl Tty59App {
                 .into_any_element(),
         );
 
+        // The chord that steps the chips used to sit pinned beside them and
+        // took the room "Add machine" needs; it is the rail's tooltip now, and
+        // the footer teaches it as keycaps.
+        let steps = rail_steps(&layout.rail);
         h_flex()
             .items_center()
-            .gap(px(8.))
             .h(px(RAIL_H))
             .px(px(COLUMN_PAD))
             .border_b_1()
             .border_color(border)
             .child(
                 // The chips scroll once the configured machines outrun the
-                // card; the hint stays pinned past them so it is always where
-                // the eye left it.
+                // card.
                 h_flex()
                     .id("switcher-rail")
                     .track_scroll(&rail_scroll)
@@ -2417,27 +2455,18 @@ impl Tty59App {
                     .items_center()
                     .gap(px(6.))
                     .overflow_x_scroll()
+                    .when(steps, |rail| {
+                        rail.tooltip(|window, cx| {
+                            // Built on hover, not per frame.
+                            let (modifiers, _) = machine_chord();
+                            gpui_component::tooltip::Tooltip::new(t_fmt(
+                                L10nKey::SwitcherMachineHint,
+                                &[("modifier", &modifiers.join("+"))],
+                            ))
+                            .build(window, cx)
+                        })
+                    })
                     .children(chips),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(gpui::rems(12.5 / 16.))
-                    .text_color(muted)
-                    // The modifier names itself the way the footer's
-                    // shortcuts do — a glyph on macOS, a word elsewhere —
-                    // and the localized template places it.
-                    .child(t_fmt(
-                        L10nKey::SwitcherMachineHint,
-                        &[(
-                            "modifier",
-                            if cfg!(target_os = "macos") {
-                                "⌥"
-                            } else {
-                                "Alt"
-                            },
-                        )],
-                    )),
             )
             .into_any_element()
     }
@@ -2636,6 +2665,17 @@ impl Tty59App {
                 ],
                 t(L10nKey::SwitcherHintNewWindow).to_string(),
             ));
+            if rail_steps(&layout.rail) {
+                let (modifiers, arrows) = machine_chord();
+                hints.push(hint(
+                    modifiers
+                        .into_iter()
+                        .chain(arrows)
+                        .map(|key| keycap(key, cx))
+                        .collect(),
+                    t(L10nKey::SwitcherHintMachine).to_string(),
+                ));
+            }
         }
         h_flex()
             .items_center()
@@ -2918,33 +2958,47 @@ impl Tty59App {
             return div().into_any_element();
         };
         let muted_text = gpui::rems(11. / 16.);
-        // The failure truncates first and the endpoint is capped at
-        // ENDPOINT_MAX_W, truncating as well: the two share the column, so
-        // neither string can push the other out of the card.
-        let detail: AnyElement = match offline_card_detail(group) {
-            (Some(error), endpoint) => h_flex()
-                .items_center()
-                .gap(px(6.))
-                .min_w_0()
-                .text_size(muted_text)
-                .text_color(muted)
-                .child(div().flex_1().min_w_0().truncate().child(error))
-                .child(
-                    div()
-                        .flex_shrink_1()
-                        .min_w_0()
-                        .max_w(px(ENDPOINT_MAX_W))
-                        .truncate()
-                        .child(endpoint),
-                )
-                .into_any_element(),
-            (None, endpoint) => div()
-                .truncate()
-                .text_size(muted_text)
-                .text_color(muted)
-                .child(endpoint)
-                .into_any_element(),
-        };
+        // The failure is the one thing here worth reading in full, so it
+        // wraps (two lines, the tooltip has the rest) and the endpoint sits on
+        // a line of its own, cut in the middle so the port stays visible.
+        let (error, endpoint) = offline_card_detail(group);
+        let endpoint = gpui::SharedString::from(endpoint);
+        let detail: AnyElement = v_flex()
+            .gap(px(2.))
+            .min_w_0()
+            .text_size(muted_text)
+            .text_color(muted)
+            .children(error.map(|error| {
+                let error = gpui::SharedString::from(error);
+                div()
+                    .id("switcher-offline-reason")
+                    .line_clamp(OFFLINE_REASON_LINES)
+                    .tooltip({
+                        let error = error.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(error.clone()).build(window, cx)
+                        }
+                    })
+                    .child(error)
+            }))
+            .child(
+                div()
+                    .id("switcher-offline-endpoint")
+                    .min_w_0()
+                    .tooltip({
+                        let endpoint = endpoint.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(endpoint.clone())
+                                .build(window, cx)
+                        }
+                    })
+                    .child(ElidedLabel::new(
+                        "switcher-offline-endpoint-label",
+                        endpoint,
+                        Mode::Middle,
+                    )),
+            )
+            .into_any_element();
         v_flex()
             .gap(px(4.))
             .mx(px(4.))
@@ -3266,7 +3320,6 @@ impl Tty59App {
             Link::Failed => Some(theme.danger),
             Link::Local | Link::Connected | Link::Offline => None,
         };
-        let meta = row_meta(group, row, show_machine);
         let row_fill = if picked {
             picked_bg
         } else {
@@ -3377,22 +3430,54 @@ impl Tty59App {
                             })),
                     )
                     .child({
+                        // The path gives way first, from its middle so the last
+                        // segment (the one that tells two workspaces apart)
+                        // survives, and the timestamp never does: with all of
+                        // it in one truncating string the row ended in
+                        // `~/repo/025/tty59 · …` every time. Each separator
+                        // belongs to the part after it, so a row missing a part
+                        // has no dot pointing at nothing.
+                        let machine = row_machine(group, show_machine);
+                        let path = gpui::SharedString::from(row.path.clone());
+                        let (has_path, has_when) = (!path.is_empty(), !row.when.is_empty());
+                        let (after_machine, before_when) =
+                            meta_separators(machine.is_some(), has_path, has_when);
                         let meta_line = h_flex()
+                            .id(("switcher-row-meta", key))
                             .items_center()
                             .min_w_0()
                             .text_size(gpui::rems(11.5 / 16.))
                             .text_color(secondary)
-                            // The path gives way first and the timestamp
-                            // never does: with both in one truncating string
-                            // the row ended in `~/repo/025/tty59 · …` every
-                            // time, a dangling dot where the time had been.
-                            .child(div().min_w_0().truncate().child(meta.join("  ·  ")))
-                            .when(!row.when.is_empty(), |line| {
+                            .when(has_path, |line| {
+                                line.tooltip({
+                                    let path = path.clone();
+                                    move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(path.clone())
+                                            .build(window, cx)
+                                    }
+                                })
+                            })
+                            .children(machine.map(|machine| {
+                                h_flex()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .child(machine)
+                                    .when(after_machine, |m| m.child(META_SEP))
+                            }))
+                            .when(has_path, |line| {
+                                line.child(ElidedLabel::new(
+                                    ("switcher-row-path", key),
+                                    path,
+                                    Mode::Path,
+                                ))
+                            })
+                            .when(has_when, |line| {
                                 line.child(
-                                    div()
-                                        .flex_shrink_0()
+                                    h_flex()
+                                        .flex_none()
                                         .whitespace_nowrap()
-                                        .child(format!("  ·  {}", row.when)),
+                                        .when(before_when, |w| w.child(META_SEP))
+                                        .child(row.when.clone()),
                                 )
                             });
                         #[cfg(test)]
@@ -3873,22 +3958,17 @@ impl Tty59App {
             // The second line is what tells two tabs on the same repo apart —
             // the branch, then the diff counts, the same words the tab sidebar
             // uses, all secondary. A named tab off any repo shows its path.
+            // The counts are a child of their own: only the branch shrinks, so
+            // a long one cannot take them (or their separator) with it.
             let meta = match tab.git.as_ref() {
-                Some(g) => {
-                    let mut parts = vec![g.branch.clone()];
-                    let counts = [
-                        (g.added > 0).then(|| format!("+{}", g.added)),
-                        (g.removed > 0).then(|| format!("−{}", g.removed)),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-                    if !counts.is_empty() {
-                        parts.push(counts.join(" "));
-                    }
-                    Some(parts.join("  ·  "))
+                Some(g) => Some((
+                    gpui::SharedString::from(g.branch.clone()),
+                    diff_counts(g.added, g.removed),
+                    Mode::Middle,
+                )),
+                None if tab.named && !tab.path.is_empty() => {
+                    Some((gpui::SharedString::from(tab.path.clone()), None, Mode::Path))
                 }
-                None if tab.named && !tab.path.is_empty() => Some(tab.path.clone()),
                 None => None,
             };
             let running = tab.status == Some(crate::core::cli_agent::AgentStatus::Working);
@@ -3930,12 +4010,32 @@ impl Tty59App {
                                     .text_color(fg)
                                     .child(tab.label.clone()),
                             )
-                            .children(meta.map(|meta| {
-                                div()
-                                    .truncate()
+                            .children(meta.map(|(text, counts, mode)| {
+                                h_flex()
+                                    .id(("switcher-tab-meta", index))
+                                    .items_center()
+                                    .min_w_0()
                                     .text_size(gpui::rems(11.5 / 16.))
                                     .text_color(muted)
-                                    .child(meta)
+                                    .tooltip({
+                                        let text = text.clone();
+                                        move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(text.clone())
+                                                .build(window, cx)
+                                        }
+                                    })
+                                    .child(ElidedLabel::new(
+                                        ("switcher-tab-meta-label", index),
+                                        text,
+                                        mode,
+                                    ))
+                                    .children(counts.map(|counts| {
+                                        h_flex()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .child(META_SEP)
+                                            .child(counts)
+                                    }))
                             })),
                     )
                     .children(tab.waited.clone().map(|waited| {
@@ -5023,25 +5123,82 @@ mod tests {
 
     #[test]
     fn a_scoped_row_drops_the_machine_from_its_metadata_line() {
-        let api = row("api", vec![]);
         let devbox = named_group("devbox", vec![]);
         assert_eq!(
-            row_meta(&devbox, &api, true),
-            vec!["devbox".to_string(), "~/code".to_string()]
+            row_machine(&devbox, true).as_deref(),
+            Some("devbox"),
+            "the blended list leads with the machine's name"
         );
         assert_eq!(
-            row_meta(&devbox, &api, false),
-            vec!["~/code".to_string()],
+            row_machine(&devbox, false),
+            None,
             "the scope already says which machine these rows are on"
         );
         let local = group(vec![]);
         assert_eq!(
-            row_meta(&local, &api, true),
-            vec![
-                t(L10nKey::SwitcherLocalHost).to_string(),
-                "~/code".to_string()
-            ]
+            row_machine(&local, true),
+            Some(t(L10nKey::SwitcherLocalHost).to_string())
         );
+    }
+
+    /// Machine, path and time in that order, a separator only where something
+    /// precedes the part it leads into.
+    #[test]
+    fn the_metadata_line_draws_a_separator_only_between_parts() {
+        // (machine, path, when) -> (after the machine, before the time)
+        let cases = [
+            ((true, true, true), (true, true)),
+            ((true, true, false), (true, false)),
+            ((true, false, true), (false, true)),
+            ((true, false, false), (false, false)),
+            ((false, true, true), (false, true)),
+            ((false, true, false), (false, false)),
+            ((false, false, true), (false, false)),
+            ((false, false, false), (false, false)),
+        ];
+        for ((machine, path, when), expected) in cases {
+            assert_eq!(
+                meta_separators(machine, path, when),
+                expected,
+                "machine {machine}, path {path}, when {when}"
+            );
+        }
+    }
+
+    /// The chord is only worth teaching when there is a second machine to step
+    /// to. All is not a machine, so this computer alone and this computer with
+    /// nothing else configured both leave the rail with one stop.
+    #[test]
+    fn the_machine_chord_is_offered_from_the_second_machine_on() {
+        let rail = |groups: Vec<Group>| machine_scope::rail_entries(&groups, "All");
+        assert!(!rail_steps(&rail(vec![])), "no machine at all");
+        assert!(
+            !rail_steps(&rail(vec![group(vec![])])),
+            "this computer alone"
+        );
+        assert!(
+            !rail_steps(&rail(vec![named_group("devbox", vec![])])),
+            "one machine is the whole list"
+        );
+        assert!(
+            rail_steps(&rail(vec![group(vec![]), named_group("devbox", vec![])])),
+            "this computer and a remote one"
+        );
+    }
+
+    #[test]
+    fn the_machine_chord_is_the_alt_arrow_pair_the_keymap_binds() {
+        let (modifiers, arrows) = machine_chord();
+        assert_eq!(arrows, ["←", "→"]);
+        assert_eq!(modifiers, crate::ui::keymap::key_tokens("alt-left")[..1]);
+    }
+
+    #[test]
+    fn diff_counts_say_nothing_for_a_clean_tree() {
+        assert_eq!(diff_counts(0, 0), None, "no separator for nothing");
+        assert_eq!(diff_counts(3, 0).as_deref(), Some("+3"));
+        assert_eq!(diff_counts(0, 2).as_deref(), Some("−2"));
+        assert_eq!(diff_counts(3, 2).as_deref(), Some("+3 −2"));
     }
 
     #[test]
@@ -5276,6 +5433,38 @@ mod gpui_tests {
     use super::MachineScope;
     use crate::ui::app::Tty59App;
     use crate::ui::app::test_window::harness_with_tabs;
+
+    /// The picker lists the SSH aliases of the config the loaders read, and under
+    /// test that is the thread's own throwaway home: the three planted hosts
+    /// appear as machines, and nothing from a developer's real `~/.ssh/config`
+    /// does. Every other test of the picker rides on the same isolation.
+    #[gpui::test]
+    fn the_picker_lists_the_planted_ssh_hosts_and_no_others(cx: &mut TestAppContext) {
+        let ssh = crate::core::ssh_config::test_home().join(".ssh");
+        std::fs::create_dir_all(&ssh).expect("a .ssh dir in the test home");
+        std::fs::write(
+            ssh.join("config"),
+            "Host build-runner-eu-west-1\n  HostName 10.255.255.1\n  User ci\n\
+             Host edge-gw\n  HostName 127.0.0.1\n  Port 1\n  User ops\n\
+             Host staging-db\n  HostName staging-db.example.test\n  User deploy\n",
+        )
+        .expect("the planted config");
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let mut machines: Vec<String> = app.update(&mut vcx, |app, cx| {
+            app.switcher_groups(cx)
+                .into_iter()
+                .filter(|g| !g.key.is_empty())
+                .map(|g| g.label)
+                .collect()
+        });
+        machines.sort();
+        assert_eq!(
+            machines,
+            ["build-runner-eu-west-1", "edge-gw", "staging-db"],
+            "the planted hosts are the picker's machines, and the only ones"
+        );
+    }
 
     /// Deleting a remote workspace has to take the listing snapshot's row with
     /// it. The snapshot every window keeps for the switcher is merged into the

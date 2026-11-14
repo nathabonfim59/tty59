@@ -706,6 +706,23 @@ const GIT_RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(10);
 /// wait for it is still what the reader is doing.
 const TITLE_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
 
+/// The placeholder the pane-ended titles ([`L10nKey::PaneTitleDisconnected`]
+/// and its siblings) put the name in, spelled as the `t_fmt` argument.
+const ENDED_TITLE_NAME: &str = "title";
+
+/// [`ENDED_TITLE_NAME`] as the templates spell it.
+const ENDED_TITLE_PLACEHOLDER: &str = "{title}";
+
+/// What a pane-ended template says after its name: the template taken
+/// structurally, from the end of the `{title}` placeholder, never from any
+/// wording. A locale that puts words before the name, or a second placeholder
+/// after it, has no fixed tail to keep whole and yields `None`, which the
+/// surfaces answer by eliding the whole title as before.
+fn ended_tail_of(template: &'static str) -> Option<&'static str> {
+    let tail = template.strip_prefix(ENDED_TITLE_PLACEHOLDER)?;
+    (!tail.is_empty() && !tail.contains('{')).then_some(tail)
+}
+
 /// How long a turn has to stay finished before it is announced. Long enough
 /// for a queued message or a `Stop` hook to start the next turn, short enough
 /// that the notification still reads as the moment the agent stopped.
@@ -2166,9 +2183,9 @@ impl TerminalView {
         stated_title(&self.title)
     }
 
-    /// `name` with the suffix that says how this pane ended.
-    fn ended_title(&self, name: &str) -> String {
-        let key = if self.workspace().is_some() && !self.terminal.child_exited() {
+    /// Which localized sentence says how this pane ended.
+    fn ended_key(&self) -> L10nKey {
+        if self.workspace().is_some() && !self.terminal.child_exited() {
             L10nKey::PaneTitleDisconnected
         } else if self.ssh_spec.is_some() {
             // `Connected` only reports once the far end granted a shell
@@ -2183,8 +2200,35 @@ impl TerminalView {
             }
         } else {
             L10nKey::PaneTitleProcessExited
-        };
-        t_fmt(key, &[("title", name)])
+        }
+    }
+
+    /// `name` with the suffix that says how this pane ended.
+    fn ended_title(&self, name: &str) -> String {
+        t_fmt(self.ended_key(), &[(ENDED_TITLE_NAME, name)])
+    }
+
+    /// The words that follow the name in the title [`Self::ended_title`] wrote,
+    /// or `None` while this pane has not ended or its title is not that one.
+    ///
+    /// Stateless: nothing is stored when the pane ends and no other writer of
+    /// `title` has to remember to invalidate anything. The ended state picks
+    /// the sentence ([`Self::ended_key`]), and the title answers for itself: the
+    /// tail is the structural remainder of that sentence's template after the
+    /// name, taken as the current locale words it and then as each other shipped
+    /// locale does (a title written in one language keeps its words if the UI
+    /// language changed afterwards), and counts only when the title really ends
+    /// with it. The catalog's own `&'static str`, so nothing allocates.
+    ///
+    /// A title that merely ends with the same words, set after the exit by a
+    /// shell, is indistinguishable here; the surfaces that use this accept that.
+    pub(crate) fn ended_tail(&self) -> Option<&'static str> {
+        if !self.terminal.exited {
+            return None;
+        }
+        crate::ui::i18n::texts_current_first(self.ended_key())
+            .filter_map(ended_tail_of)
+            .find(|tail| self.title.len() > tail.len() && self.title.ends_with(tail))
     }
 
     /// Sets how opaque the pane wants this terminal painted; the pane leaf
@@ -2434,6 +2478,15 @@ impl TerminalView {
             return false;
         };
         cache.retry_due(self.host_id, cwd, GIT_RETRY_GAP)
+    }
+
+    /// Ends the pane as the daemon's exit would, named `name`, so a surface's
+    /// test can read the title and tail the real exit path writes. Calling it
+    /// again after a locale change rewrites both, as a second exit would.
+    #[cfg(test)]
+    pub(crate) fn end_for_test(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.default_title = name.to_string();
+        self.handle_event(VtEvent::Exit, cx);
     }
 
     /// Plant the cwd the git-status poll would have found. For tests that
@@ -15994,6 +16047,197 @@ mod gpui_tests {
                 view.set_workspace(None);
                 view.handle_event(VtEvent::Exit, cx);
                 assert_eq!(view.title, "tty59 — process exited");
+            })
+            .unwrap();
+    }
+
+    /// What an ended pane's title and tail read in each shipped language, as
+    /// literals: `(catalog code, whole title, tail)` for a pane named `tty59`.
+    /// The catalog's own codes: an alias such as `ru` is not one and silently
+    /// falls back to English.
+    type EndedWords = [(&'static str, &'static str, &'static str); 4];
+
+    const PROCESS_EXITED: EndedWords = [
+        ("en", "tty59 — process exited", " — process exited"),
+        ("ru-RU", "tty59: процесс завершён", ": процесс завершён"),
+        (
+            "ja-JP",
+            "tty59 — プロセスが終了しました",
+            " — プロセスが終了しました",
+        ),
+        ("zh-CN", "tty59 — 进程已退出", " — 进程已退出"),
+    ];
+    const DISCONNECTED: EndedWords = [
+        ("en", "tty59 — disconnected", " — disconnected"),
+        ("ru-RU", "tty59: нет соединения", ": нет соединения"),
+        ("ja-JP", "tty59 — 切断されました", " — 切断されました"),
+        ("zh-CN", "tty59 — 已断开", " — 已断开"),
+    ];
+    const NOT_CONNECTED: EndedWords = [
+        ("en", "tty59 — not connected", " — not connected"),
+        ("ru-RU", "tty59: не подключено", ": не подключено"),
+        ("ja-JP", "tty59 — 未接続", " — 未接続"),
+        ("zh-CN", "tty59 — 未连接", " — 未连接"),
+    ];
+
+    /// Ends the pane in every shipped language and checks the title it wrote
+    /// and the tail it hands over, against the literals above.
+    fn assert_ended_tail(
+        view: &mut TerminalView,
+        cx: &mut Context<TerminalView>,
+        words: &EndedWords,
+    ) {
+        for (language, title, tail) in words {
+            crate::ui::i18n::set_locale(language);
+            assert_eq!(
+                crate::ui::i18n::find_language(language).map(|l| l.code),
+                Some(*language),
+                "{language} is a catalog code"
+            );
+            view.handle_event(VtEvent::Exit, cx);
+            assert_eq!(view.title, *title, "{language}: the title");
+            assert_eq!(view.ended_tail(), Some(*tail), "{language}: the tail");
+            assert!(
+                view.title.ends_with(tail),
+                "{language}: the tail ends the title"
+            );
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    #[gpui::test]
+    fn an_exited_process_hands_over_its_localized_tail(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                assert_ended_tail(view, cx, &PROCESS_EXITED)
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_dropped_link_hands_over_its_localized_tail(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                bind_to_a_disconnected_remote_workspace(view, cx);
+                assert_ended_tail(view, cx, &DISCONNECTED);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_connect_that_never_became_a_shell_hands_over_its_localized_tail(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                make_an_ssh_pane(view);
+                assert_ended_tail(view, cx, &NOT_CONNECTED);
+            })
+            .unwrap();
+    }
+
+    /// The title keeps the words it was written in. Ended under English and
+    /// shown under Russian, the title still ends with the English words, so
+    /// they are the tail: the current language's words do not match it, and the
+    /// other shipped languages are tried after them. Ended under Russian it
+    /// matches the current language at once.
+    #[gpui::test]
+    fn a_title_keeps_its_tail_after_the_ui_language_changes(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                crate::ui::i18n::set_locale("en");
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59 — process exited");
+
+                crate::ui::i18n::set_locale("ru-RU");
+                assert_eq!(
+                    view.title, "tty59 — process exited",
+                    "the title stays English: nothing rewrites it"
+                );
+                assert_eq!(
+                    view.ended_tail(),
+                    Some(" — process exited"),
+                    "the English words are found among the other languages"
+                );
+
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59: процесс завершён");
+                assert_eq!(view.ended_tail(), Some(": процесс завершён"));
+                crate::ui::i18n::set_locale("en");
+            })
+            .unwrap();
+    }
+
+    /// An ended pane whose title is no sentence of the ended state's (a shell
+    /// retitled it, or it is a different state's words) matches none, and a
+    /// live pane that merely carries the same words is not ended at all.
+    #[gpui::test]
+    fn a_title_that_is_not_the_ended_states_sentence_gets_no_tail(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.handle_event(VtEvent::Title("deploy — process exited".into()), cx);
+            })
+            .unwrap();
+        settle(cx);
+        window
+            .update(cx, |view, _, cx| {
+                assert_eq!(view.title, "deploy — process exited");
+                assert_eq!(view.ended_tail(), None, "the pane has not ended");
+
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "tty59 — process exited");
+                view.handle_event(VtEvent::Title("something else".into()), cx);
+            })
+            .unwrap();
+        settle(cx);
+        window
+            .update(cx, |view, _, _| {
+                assert_eq!(view.title, "something else");
+                assert_eq!(view.ended_tail(), None, "its title ends with no sentence");
+            })
+            .unwrap();
+    }
+
+    /// A relinked pane is alive again and answers to its own name. Here that
+    /// name itself ends with the ended words, so after the relink the title
+    /// still matches the text of the sentence: only the pane being alive says
+    /// it has not ended, which is what this holds the accessor to.
+    #[gpui::test]
+    fn a_relinked_pane_whose_name_matches_the_ended_words_has_no_tail(cx: &mut TestAppContext) {
+        let (window, _daemon) = harness(cx);
+        window
+            .update(cx, |view, _, cx| {
+                view.default_title = "deploy — process exited".into();
+                view.handle_event(VtEvent::Exit, cx);
+                assert_eq!(view.title, "deploy — process exited — process exited");
+                assert_eq!(view.ended_tail(), Some(" — process exited"));
+            })
+            .unwrap();
+        let (new_client, _new_daemon) = super::test_stream_pair();
+        window
+            .update(cx, |view, _, cx| {
+                view.adopt_relink(
+                    new_client,
+                    Vec::new(),
+                    &crate::terminal::PaneRoute::Local,
+                    TermSize::new(80, 24),
+                    8,
+                    17,
+                    cx,
+                )
+                .expect("the swap itself cannot fail");
+                assert_eq!(
+                    view.title, "deploy — process exited",
+                    "the relinked pane answers to its name, which ends in the same words"
+                );
+                assert_eq!(
+                    view.ended_tail(),
+                    None,
+                    "a live pane has not ended, whatever its title ends with"
+                );
             })
             .unwrap();
     }

@@ -14,9 +14,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Weak};
 
-use gpui::Entity;
+use gpui::{Entity, SharedString};
 use gpui_component::input::InputState;
-use tty59_core::core::git::log::{Commit, CommitFile, CommitPage, GraphScope};
+use tty59_core::core::git::log::{Commit, CommitFile, CommitPage, GraphScope, RefKind};
 use tty59_core::core::git::status::HeadState;
 
 use crate::ui::host_ops::HostId;
@@ -206,7 +206,13 @@ pub(crate) struct GraphState {
     /// query produced it. `Arc` because paint reads it while the next page is
     /// being laid out on a worker, and the key so a repository switch shows an
     /// empty graph rather than the previous repository's history.
-    pub(crate) page: Option<Arc<CommitPage>>,
+    ///
+    /// Private, with `ref_labels` beside it: the two are only ever replaced
+    /// and cleared together, by [`GraphState::install_page`] and
+    /// [`GraphState::clear_page`], so a drawn commit can never lack its chip.
+    page: Option<Arc<CommitPage>>,
+    /// The ref chip text of every commit in `page`, by commit index.
+    ref_labels: Vec<Option<RefLabel>>,
     pub(crate) page_key: Option<(RepoKey, u64, GraphScope)>,
     /// The key of a load that came back empty-handed. Without it a failing
     /// `git log` — a scope pinned to a since-deleted branch, a vanished
@@ -246,6 +252,86 @@ pub(crate) struct GraphState {
     /// the same drag code works on the other axis.
     pub(crate) height: std::rc::Rc<std::cell::Cell<f32>>,
     pub(crate) dragging: std::rc::Rc<std::cell::Cell<bool>>,
+}
+
+impl GraphState {
+    /// A graph with nothing loaded, folded or unfolded as the config says.
+    pub(crate) fn new(expanded: bool) -> Self {
+        Self {
+            expanded,
+            ..Default::default()
+        }
+    }
+
+    /// The page being drawn, if one has landed for the current repository.
+    pub(crate) fn page(&self) -> Option<&Arc<CommitPage>> {
+        self.page.as_ref()
+    }
+
+    /// Show a freshly loaded page and the chips prepared for it, together.
+    pub(crate) fn install_page(&mut self, prepared: PreparedPage, key: (RepoKey, u64, GraphScope)) {
+        self.page = Some(Arc::new(prepared.page));
+        self.ref_labels = prepared.labels;
+        self.page_key = Some(key);
+    }
+
+    /// Forget the page, its chips and the key it answered.
+    pub(crate) fn clear_page(&mut self) {
+        self.page = None;
+        self.ref_labels = Vec::new();
+        self.page_key = None;
+    }
+
+    /// The chip of commit `index` of the page, `None` for a commit that
+    /// carries no ref. A page is only ever installed with its chips, so a
+    /// commit with a ref always has one.
+    pub(crate) fn ref_label(&self, index: usize) -> Option<&RefLabel> {
+        self.ref_labels.get(index).and_then(Option::as_ref)
+    }
+}
+
+/// What a commit's ref chip says, made once when its page lands so a frame
+/// only clones what is already built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RefLabel {
+    /// What the ref is, which is what colours the chip.
+    pub(crate) kind: RefKind,
+    /// The full short name of the commit's first ref. Never cut here: how much
+    /// of it fits is decided where its width is known.
+    pub(crate) head: SharedString,
+    /// ` +N` for the refs after the first; `None` when there are none.
+    pub(crate) tail: Option<SharedString>,
+}
+
+/// A loaded page together with the chips of its commits. The only way to
+/// build one is [`PreparedPage::new`], which is what keeps the chips and the
+/// commits in step.
+pub(crate) struct PreparedPage {
+    page: CommitPage,
+    labels: Vec<Option<RefLabel>>,
+}
+
+impl PreparedPage {
+    /// Prepare the chips of every commit of `page`. Runs where the page is
+    /// loaded, off the UI thread.
+    pub(crate) fn new(page: CommitPage) -> Self {
+        let labels = page
+            .commits
+            .iter()
+            .map(|commit| {
+                let first = commit.refs.first()?;
+                Some(RefLabel {
+                    kind: first.kind,
+                    head: SharedString::from(first.short.clone()),
+                    tail: match commit.refs.len() - 1 {
+                        0 => None,
+                        more => Some(SharedString::from(format!(" +{more}"))),
+                    },
+                })
+            })
+            .collect();
+        Self { page, labels }
+    }
 }
 
 /// The panel's second-level view: one commit's metadata and the files it

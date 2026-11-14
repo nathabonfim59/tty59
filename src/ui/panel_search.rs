@@ -25,7 +25,8 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
 };
-use tty59_core::host::{ContentHit, ContentLimits, ContentQuery};
+use tty59_core::host::content_search::ELLIPSIS;
+use tty59_core::host::{ContentHit, ContentLimits, ContentQuery, ContentRange, ContentResults};
 
 use crate::ui::app::Tty59App;
 use crate::ui::host_ops::HostOps;
@@ -47,6 +48,76 @@ const ROW_GAP: f32 = 6.;
 /// Where a hit's excerpt starts: under its file's name, past the chevron and
 /// the icon.
 const HIT_LEAD: f32 = ROW_INSET + CHEVRON_W + ROW_GAP + ROW_GLYPH + ROW_GAP;
+
+/// How much of the line before its first match a hit keeps, in bytes. A row is
+/// start-anchored, so a match further in than the panel is wide would be cut
+/// off the end of it; this much context is enough to read what the match is
+/// part of.
+const HIT_LEAD_BYTES: usize = 16;
+
+/// Scroll a hit's excerpt so its first match is near the start of the row.
+///
+/// `text` and `ranges` come from the host as the line is meant to be shown:
+/// `ranges` are byte ranges into `text`, in order and not overlapping. The cut
+/// is a grapheme-cluster boundary, never inside a character or between a base
+/// and its combining marks or an emoji sequence, and what is left starts with
+/// one `…` so the row says it is a part. The ranges move by what was removed
+/// and what was added. `line` and `column` are untouched: they say where the
+/// match is in the file, which is not what the excerpt shows.
+fn window_hit(hit: &mut ContentHit) {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    // The first match worth windowing around is the first the row would draw.
+    let Some(first) = hit
+        .ranges
+        .iter()
+        .find(|r| usable(&hit.text, r))
+        .map(|r| r.start as usize)
+    else {
+        return;
+    };
+    let want = first.saturating_sub(HIT_LEAD_BYTES);
+    let cut = hit
+        .text
+        .grapheme_indices(true)
+        .map(|(at, _)| at)
+        .take_while(|&at| at <= want)
+        .last()
+        .unwrap_or(0);
+    let (Ok(cut_by), Ok(lead)) = (u32::try_from(cut), u32::try_from(ELLIPSIS.len())) else {
+        return;
+    };
+    if cut == 0 {
+        return;
+    }
+    hit.ranges = hit
+        .ranges
+        .iter()
+        .filter(|r| usable(&hit.text, r) && r.start >= cut_by)
+        .filter_map(|r| {
+            Some(ContentRange {
+                start: r.start.checked_sub(cut_by)?.checked_add(lead)?,
+                end: r.end.checked_sub(cut_by)?.checked_add(lead)?,
+            })
+        })
+        .collect();
+    hit.text = format!("{ELLIPSIS}{}", &hit.text[cut..]);
+}
+
+/// Whether `range` is a match the row can highlight in `text`: a non-empty
+/// span inside it, on character boundaries. A host's answer is data from
+/// another machine, so a range that is not is dropped, never trusted.
+fn usable(text: &str, range: &ContentRange) -> bool {
+    let (start, end) = (range.start as usize, range.end as usize);
+    start < end && end <= text.len() && text.is_char_boundary(start) && text.is_char_boundary(end)
+}
+
+/// A search result as the panel draws it: every hit windowed once, here,
+/// instead of on each frame the list is drawn.
+fn windowed(mut found: ContentResults) -> ContentResults {
+    found.hits.iter_mut().for_each(window_hit);
+    found
+}
 
 pub(crate) struct PanelSearchState {
     pub(crate) input: Entity<InputState>,
@@ -168,11 +239,10 @@ impl Tty59App {
                     host,
                     cx,
                     move |h| {
-                        Outcome::from_result(h.search_content(
-                            &roots,
-                            &query,
-                            &ContentLimits::default(),
-                        ))
+                        Outcome::from_result(
+                            h.search_content(&roots, &query, &ContentLimits::default())
+                                .map(windowed),
+                        )
                     },
                     move |app, outcome, cx| {
                         if app.panel_search.run.accept(generation, outcome) {
@@ -579,12 +649,7 @@ impl Tty59App {
         let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = hit
             .ranges
             .iter()
-            .filter(|r| {
-                (r.end as usize) <= hit.text.len()
-                    && hit.text.is_char_boundary(r.start as usize)
-                    && hit.text.is_char_boundary(r.end as usize)
-                    && r.start < r.end
-            })
+            .filter(|r| usable(&hit.text, r))
             .map(|r| (r.start as usize..r.end as usize, mark))
             .collect();
         let text =
@@ -839,6 +904,52 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn a_match_far_along_a_long_line_lands_windowed_around_itself(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("windowed");
+        // Unicode before the match, so a cut by byte count could land inside a
+        // character; the match itself is past column 60.
+        let line = format!("{}needle and the rest of it\n", "針e\u{301}".repeat(18));
+        std::fs::write(root.join("long.txt"), &line).unwrap();
+        let (app, mut vcx, _pane) = search_panel_on(cx, &root);
+
+        type_query(&app, &mut vcx, "needle");
+        let Outcome::Found(found) = landed(&app, &mut vcx) else {
+            panic!("the search did not find the line");
+        };
+        let hit = found.hits.first().expect("one hit");
+        assert!(
+            hit.text.starts_with(ELLIPSIS),
+            "a match this far in must not be left past the row's end: {:?}",
+            hit.text
+        );
+        let marked: Vec<&str> = hit
+            .ranges
+            .iter()
+            .map(|r| &hit.text[r.start as usize..r.end as usize])
+            .collect();
+        assert_eq!(marked, vec!["needle"], "the highlight follows the cut");
+        assert!(
+            hit.text.len() < line.len(),
+            "the head of the line was cut away"
+        );
+        let grouped = app.update_in(&mut vcx, |app, _, _| {
+            app.panel_search.run.landed().map(|l| {
+                l.groups
+                    .iter()
+                    .flat_map(|g| g.hits.iter().map(|h| h.text.clone()))
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(
+            grouped,
+            Some(vec![hit.text.clone()]),
+            "the grouped rows the panel draws carry the windowed text"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
     fn a_settled_search_panel_reaches_render_idle(cx: &mut TestAppContext) {
         let _serial = serial();
         let root = scratch("idle");
@@ -861,5 +972,171 @@ mod gpui_tests {
         vcx.background_executor.run_until_parked();
         assert_eq!(render_probe::draws(), 0, "a finished search kept drawing");
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn hit(text: &str, needle: &str) -> ContentHit {
+        let ranges = text
+            .match_indices(needle)
+            .map(|(at, m)| ContentRange {
+                start: at as u32,
+                end: (at + m.len()) as u32,
+            })
+            .collect();
+        ContentHit {
+            path: PathBuf::from("a.rs"),
+            line: 7,
+            column: 61,
+            text: text.to_string(),
+            ranges,
+        }
+    }
+
+    fn shown(hit: &ContentHit) -> Vec<&str> {
+        hit.ranges
+            .iter()
+            .map(|r| &hit.text[r.start as usize..r.end as usize])
+            .collect()
+    }
+
+    #[test]
+    fn a_match_near_the_start_is_left_where_it_is() {
+        let mut h = hit("return new Intl.NumberFormat(locale)", "NumberFormat");
+        let before = h.clone();
+        window_hit(&mut h);
+        assert_eq!(h, before, "16 bytes in is exactly the lead that is kept");
+    }
+
+    #[test]
+    fn a_late_match_starts_sixteen_bytes_before_it() {
+        let line = format!("{}needle and the rest of the line", "x".repeat(60));
+        let mut h = hit(&line, "needle");
+        window_hit(&mut h);
+        assert_eq!(
+            h.text,
+            format!("…{}needle and the rest of the line", "x".repeat(16))
+        );
+        assert_eq!(shown(&h), vec!["needle"]);
+        assert_eq!(
+            (h.line, h.column),
+            (7, 61),
+            "where the match is in the file does not move with the excerpt"
+        );
+    }
+
+    #[test]
+    fn every_range_moves_by_the_same_amount() {
+        let line = format!("{}needle, needle and a third needle", "x".repeat(40));
+        let mut h = hit(&line, "needle");
+        window_hit(&mut h);
+        assert_eq!(h.ranges.len(), 3);
+        assert_eq!(shown(&h), vec!["needle"; 3]);
+        assert!(h.text.starts_with('…'));
+    }
+
+    #[test]
+    fn a_cut_never_lands_inside_a_character() {
+        // Each `針` is three bytes, so sixteen bytes back from the match falls
+        // inside one for most prefix lengths.
+        for chars in 7..14 {
+            let line = format!("{}needle", "針".repeat(chars));
+            let mut h = hit(&line, "needle");
+            window_hit(&mut h);
+            assert_eq!(shown(&h), vec!["needle"], "{chars} wide characters before");
+            assert!(h.text.starts_with('…'), "{chars}");
+            assert!(h.text.chars().filter(|c| *c == '針').count() <= 6);
+        }
+    }
+
+    #[test]
+    fn a_cut_never_separates_a_base_from_its_mark_or_an_emoji_sequence() {
+        // `e` + U+0301 is two chars and one cluster; a family emoji is seven
+        // chars and one cluster.
+        let combining = format!("{}needle", "e\u{301}".repeat(20));
+        let family = format!("{}needle", "👨‍👩‍👧".repeat(4));
+        for line in [combining, family] {
+            let mut h = hit(&line, "needle");
+            window_hit(&mut h);
+            let kept = h.text.trim_start_matches('…');
+            assert!(
+                !kept.starts_with('\u{301}') && !kept.starts_with('\u{200d}'),
+                "the excerpt opens on half a cluster: {:?}",
+                h.text
+            );
+            assert_eq!(shown(&h), vec!["needle"]);
+        }
+    }
+
+    #[test]
+    fn a_line_the_host_already_cut_does_not_gain_a_second_ellipsis() {
+        let line = format!("…{}needle", "x".repeat(50));
+        let mut h = hit(&line, "needle");
+        window_hit(&mut h);
+        assert_eq!(h.text.matches('…').count(), 1);
+        assert!(h.text.starts_with('…'));
+        assert_eq!(shown(&h), vec!["needle"]);
+    }
+
+    #[test]
+    fn a_hit_without_usable_ranges_is_left_alone() {
+        let mut none = hit("some line", "zzz");
+        let before = none.clone();
+        window_hit(&mut none);
+        assert_eq!(none, before);
+
+        let mut wrong = hit("short", "short");
+        wrong.ranges = vec![ContentRange {
+            start: 900,
+            end: 906,
+        }];
+        let before = wrong.clone();
+        window_hit(&mut wrong);
+        assert_eq!(
+            wrong, before,
+            "a range outside the text is the row's to drop"
+        );
+    }
+
+    #[test]
+    fn malformed_ranges_are_dropped_as_the_row_would_and_never_panic() {
+        // `é` is two bytes, so 61 is inside it. The real match is past the
+        // lead, so the line is windowed, and each bad range sits ahead of it
+        // where blind arithmetic would have underflowed or sliced inside a
+        // character.
+        let line = format!("{}é needle and the rest", "x".repeat(60));
+        let bad = [
+            ContentRange { start: 50, end: 10 },
+            ContentRange { start: 30, end: 30 },
+            ContentRange { start: 61, end: 70 },
+            ContentRange { start: 40, end: 61 },
+            ContentRange {
+                start: u32::MAX - 1,
+                end: u32::MAX,
+            },
+            ContentRange {
+                start: 70,
+                end: 9_000,
+            },
+            ContentRange {
+                start: u32::MAX,
+                end: u32::MAX,
+            },
+        ];
+        for bad in bad {
+            let mut h = hit(&line, "needle");
+            h.ranges.insert(0, bad);
+            window_hit(&mut h);
+            assert!(
+                h.text.starts_with('…'),
+                "{bad:?}: a bad range stopped the window"
+            );
+            assert_eq!(h.ranges.len(), 1, "{bad:?}: only a usable range survives");
+            assert_eq!(shown(&h), vec!["needle"]);
+        }
     }
 }

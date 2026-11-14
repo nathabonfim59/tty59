@@ -54,18 +54,18 @@ use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, Po
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use tty59_core::core::git::log::{
-    Commit, CommitPage, Edge, GRAPH_PAGE, GraphRow, GraphScope, Lane, MAX_GRAPH_COMMITS, RefDeco,
-    RefKind,
+    Commit, CommitPage, Edge, GRAPH_PAGE, GraphRow, GraphScope, Lane, MAX_GRAPH_COMMITS, RefKind,
 };
 use tty59_core::core::git::ops::{GitOp, ResetMode};
 
 use crate::ui::app::{CONTENT_INSET, Tty59App};
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::presets::{ActiveLanes, LANE_SLOTS, Lanes};
-use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, TEXT_INSET, info_chip};
+use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, TEXT_INSET, pill_shell};
 use crate::ui::scm::panel::GROUP_CHEVRON;
-use crate::ui::scm::path::{elide_middle, relative_time};
-use crate::ui::scm::state::RepoKey;
+use crate::ui::scm::path::relative_time;
+use crate::ui::scm::state::{PreparedPage, RefLabel, RepoKey};
+use crate::ui::text_elision::{ElidedLabel, Mode as ElideMode};
 
 /// One commit per row. 24px rather than the file list's 26: a graph row has no
 /// icon column, and the vertical pitch wants to stay close to the lane pitch or
@@ -216,8 +216,39 @@ const GRAPH_H_MAX_RATIO: f32 = 0.65;
 const GRAPH_HANDLE_H: f32 = 6.;
 
 /// Ref chips are the widest optional thing on a row, so they get a hard cap
-/// and lose their middle rather than the message losing its column.
-const GRAPH_REF_CHARS: usize = 14;
+/// and lose their middle rather than the message losing its column. The cap is
+/// two numbers that agree: characters of the name (10 at the default width) and
+/// the chip's pixel box around them, padding included (10 × 6.3 of 10.5px mono
+/// plus 10 of padding is 73, under 76). From a panel of [`GRAPH_REF_WIDE_FROM`]
+/// the chip may take 18 characters in 124.
+const GRAPH_REF_CHARS: usize = 10;
+const GRAPH_REF_W: f32 = 76.;
+const GRAPH_REF_CHARS_WIDE: usize = 18;
+const GRAPH_REF_W_WIDE: f32 = 124.;
+const GRAPH_REF_WIDE_FROM: f32 = 380.;
+
+/// How much of a ref name a chip may show, and how wide its box may be.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RefCap {
+    chars: usize,
+    px: f32,
+}
+
+impl RefCap {
+    /// The cap for a panel `panel_w` wide, as it is actually drawn.
+    fn for_panel(panel_w: f32) -> Self {
+        match panel_w >= GRAPH_REF_WIDE_FROM {
+            true => Self {
+                chars: GRAPH_REF_CHARS_WIDE,
+                px: GRAPH_REF_W_WIDE,
+            },
+            false => Self {
+                chars: GRAPH_REF_CHARS,
+                px: GRAPH_REF_W,
+            },
+        }
+    }
+}
 
 /// How many lanes fit, given the panel's width.
 ///
@@ -643,7 +674,7 @@ impl Tty59App {
         let ceiling = (window.viewport_size().height.as_f32() * GRAPH_H_MAX_RATIO).max(GRAPH_H_MIN);
         let height = self.scm.graph.height.get().clamp(GRAPH_H_MIN, ceiling);
 
-        let page = self.scm.graph.page.clone();
+        let page = self.scm.graph.page().cloned();
         let header = self.graph_header(repo, page.as_deref(), GRAPH_HEADER_H, cx);
         let search = self.graph_search(cx);
         let naming = self.graph_naming_row(repo, cx);
@@ -653,7 +684,10 @@ impl Tty59App {
             Some(page) if page.commits.is_empty() => {
                 self.panel_empty(t(L10nKey::ScmGraphEmpty), None, cx)
             }
-            Some(page) => self.graph_body(repo, &page, query.as_deref(), height, cx),
+            Some(page) => {
+                let panel_w = self.right_panel_px(window, cx);
+                self.graph_body(repo, &page, query.as_deref(), height, panel_w, cx)
+            }
         };
         let (backing, handle) = self.graph_resize(ceiling, cx);
 
@@ -701,8 +735,7 @@ impl Tty59App {
             .as_ref()
             .is_some_and(|(r, _, _)| r != repo)
         {
-            self.scm.graph.page = None;
-            self.scm.graph.page_key = None;
+            self.scm.graph.clear_page();
             self.scm.graph.requested = 0;
         }
         // `try_global`, never `default_global`: this runs from `render`, and
@@ -722,12 +755,7 @@ impl Tty59App {
             .clamp(GRAPH_PAGE, MAX_GRAPH_COMMITS);
         let key = (repo.clone(), epoch, scope.clone());
         let fresh = self.scm.graph.page_key.as_ref() == Some(&key)
-            && self
-                .scm
-                .graph
-                .page
-                .as_ref()
-                .is_some_and(|p| p.requested >= want);
+            && self.scm.graph.page().is_some_and(|p| p.requested >= want);
         // A load that failed is not retried until its key changes — an epoch
         // bump, a new scope, a new repository. Retrying from render would
         // spawn git processes in a tight loop for as long as the cause holds.
@@ -743,14 +771,15 @@ impl Tty59App {
         crate::ui::host_ops::HostOps::run(
             host,
             cx,
-            move |h| tty59_core::core::git::log::load_page(h, &root, &query, want),
+            move |h| {
+                tty59_core::core::git::log::load_page(h, &root, &query, want).map(PreparedPage::new)
+            },
             move |this, page, cx| {
                 this.scm.graph.loading = false;
                 match page {
                     Some(page) => {
                         this.scm.graph.failed_key = None;
-                        this.scm.graph.page = Some(Arc::new(page));
-                        this.scm.graph.page_key = Some(key);
+                        this.scm.graph.install_page(page, key);
                     }
                     None => this.scm.graph.failed_key = Some(key),
                 }
@@ -856,10 +885,11 @@ impl Tty59App {
         page: &Arc<CommitPage>,
         query: Option<&str>,
         height: f32,
+        panel_w: f32,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let panel_w = cx.global::<crate::core::config::Config>().right_panel_width;
         let cap = max_lanes(panel_w);
+        let ref_cap = RefCap::for_panel(panel_w);
         // One string of beads needs one bead's column, not the budget for the
         // widest history this width could draw.
         let gutter = match page.max_lanes <= 1 {
@@ -899,7 +929,7 @@ impl Tty59App {
         let list = v_flex().pt(px(first as f32 * GRAPH_ROW_H)).children(
             rows[first..last]
                 .iter()
-                .map(|i| self.graph_row(repo, page, *i, indent, now, cx)),
+                .map(|i| self.graph_row(repo, page, *i, indent, now, ref_cap, cx)),
         );
         let mut stack = div()
             .relative()
@@ -974,6 +1004,7 @@ impl Tty59App {
         i: usize,
         gutter: f32,
         now: i64,
+        ref_cap: RefCap,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let commit = &page.commits[i];
@@ -982,8 +1013,6 @@ impl Tty59App {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let selected = self.scm.graph.selected.as_deref() == Some(commit.oid.as_str());
         let (prefix, subject) = split_conventional(&commit.summary);
-        let deco = commit.refs.first();
-        let extra = commit.refs.len().saturating_sub(1);
         let oid = commit.oid.clone();
 
         h_flex()
@@ -1027,7 +1056,12 @@ impl Tty59App {
                             .child(SharedString::from(subject.to_string())),
                     ),
             )
-            .children(deco.map(|r| self.graph_ref_chip(r, extra, &mono, cx)))
+            .children(
+                self.scm
+                    .graph
+                    .ref_label(i)
+                    .map(|label| self.graph_ref_chip(i, label, ref_cap, &mono, cx)),
+            )
             // The age is a mono token, so its column is measured in characters:
             // the widest it ever prints is four (`12mo`), and four of the mono
             // face's advances at `META_MONO` is `4 × 11 × 0.6` = 26.4, rounded
@@ -1189,13 +1223,15 @@ impl Tty59App {
     /// first one is the one worth the width.
     fn graph_ref_chip(
         &self,
-        deco: &RefDeco,
-        extra: usize,
+        i: usize,
+        label: &RefLabel,
+        cap: RefCap,
         mono: &SharedString,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let RefLabel { kind, head, tail } = label;
         let theme = cx.theme();
-        let (bg, fg, weight) = match deco.kind {
+        let (bg, fg, weight) = match kind {
             // Where you are is the one thing on this row worth a heavier
             // weight; everything else is context. The fill is grey, not brand:
             // `theme.accent` is a neutral surface tint here, and the only
@@ -1226,22 +1262,29 @@ impl Tty59App {
                 gpui::FontWeight::NORMAL,
             ),
         };
-        let label = match extra {
-            0 => elide_middle(&deco.short, GRAPH_REF_CHARS).into_owned(),
-            n => format!("{} +{n}", elide_middle(&deco.short, GRAPH_REF_CHARS)),
-        };
-        // A hard cap, because the chip is the one part of the row whose width
-        // comes from a branch name someone else chose. `GRAPH_REF_CHARS` elides
-        // the middle first; this is the backstop for the widths that survive
-        // it — fourteen characters of `info_chip`'s 10.5px mono plus its
-        // padding, which is about 72.
-        div()
+        // The cap is a backstop for the one part of the row whose width comes
+        // from a branch name someone else chose. The label cuts the name to
+        // `cap.chars` and to the box's measured width in one pass, keeping the
+        // `+N` whole; the wrapper's width is that of the cut name, so a short
+        // ref does not hold the cap's width.
+        let mut name = ElidedLabel::new(("scm-graph-ref", i), head.clone(), ElideMode::Middle)
+            .max_chars(cap.chars);
+        if let Some(tail) = tail {
+            name = name.tail(tail.clone());
+        }
+        let chip = div()
             .flex_none()
-            .max_w(px(72.))
-            .truncate()
+            .max_w(px(cap.px))
             .font_weight(weight)
-            .child(info_chip(&label, bg, fg, mono))
-            .into_any_element()
+            .child(
+                pill_shell(bg, fg, mono)
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .child(name),
+            );
+        #[cfg(test)]
+        let chip = chip.debug_selector(move || format!("scm-graph-ref-{i}"));
+        chip.into_any_element()
     }
 
     /// The band under the last row that asks for the next page.
@@ -1463,8 +1506,7 @@ impl Tty59App {
         }
         self.scm.graph.scope = scope;
         self.scm.graph.requested = GRAPH_PAGE;
-        self.scm.graph.page = None;
-        self.scm.graph.page_key = None;
+        self.scm.graph.clear_page();
         cx.notify();
     }
 }
@@ -1771,6 +1813,7 @@ mod tests {
     use gpui::TestAppContext;
     use smallvec::smallvec;
     use std::path::PathBuf;
+    use tty59_core::core::git::log::RefDeco;
 
     fn repo() -> RepoKey {
         RepoKey {
@@ -2103,24 +2146,29 @@ mod tests {
 
         app.update(&mut vcx, |app, cx| {
             app.scm.graph.requested = GRAPH_PAGE * 3;
-            app.scm.graph.page = Some(Arc::new(empty_page()));
-            app.scm.graph.page_key = Some((repo(), 7, GraphScope::HeadAndUpstream));
+            app.scm.graph.install_page(
+                PreparedPage::new(empty_page()),
+                (repo(), 7, GraphScope::HeadAndUpstream),
+            );
             app.graph_set_scope(GraphScope::All, cx);
         });
         app.read_with(&vcx, |app, _| {
             assert_eq!(app.scm.graph.scope, GraphScope::All);
             assert_eq!(app.scm.graph.requested, GRAPH_PAGE);
-            assert!(app.scm.graph.page.is_none());
+            assert!(app.scm.graph.page().is_none());
             assert!(app.scm.graph.page_key.is_none());
         });
 
         // Picking the scope that is already showing must not throw the page
         // away, or every menu open would cost a `git log`.
         app.update(&mut vcx, |app, cx| {
-            app.scm.graph.page = Some(Arc::new(empty_page()));
+            app.scm.graph.install_page(
+                PreparedPage::new(empty_page()),
+                (repo(), 7, GraphScope::HeadAndUpstream),
+            );
             app.graph_set_scope(GraphScope::All, cx);
         });
-        assert!(app.read_with(&vcx, |app, _| app.scm.graph.page.is_some()));
+        assert!(app.read_with(&vcx, |app, _| app.scm.graph.page().is_some()));
     }
 
     /// One click at the cap used to loop: `requested` grew past what
@@ -2156,12 +2204,14 @@ mod tests {
         };
         app.update(&mut vcx, |app, cx| {
             app.scm.graph.requested = GRAPH_PAGE * 3;
-            app.scm.graph.page = Some(Arc::new(empty_page()));
-            app.scm.graph.page_key = Some((repo(), 7, GraphScope::HeadAndUpstream));
+            app.scm.graph.install_page(
+                PreparedPage::new(empty_page()),
+                (repo(), 7, GraphScope::HeadAndUpstream),
+            );
             app.scm_load_graph(&other, cx);
         });
         app.read_with(&vcx, |app, _| {
-            assert!(app.scm.graph.page.is_none(), "the old history is gone");
+            assert!(app.scm.graph.page().is_none(), "the old history is gone");
             assert!(app.scm.graph.page_key.is_none());
             assert_eq!(
                 app.scm.graph.requested, 0,
@@ -2172,11 +2222,13 @@ mod tests {
         // The same repository keeps its page — this must not turn every
         // render into a reload.
         app.update(&mut vcx, |app, cx| {
-            app.scm.graph.page = Some(Arc::new(empty_page()));
-            app.scm.graph.page_key = Some((repo(), 7, GraphScope::HeadAndUpstream));
+            app.scm.graph.install_page(
+                PreparedPage::new(empty_page()),
+                (repo(), 7, GraphScope::HeadAndUpstream),
+            );
             app.scm_load_graph(&repo(), cx);
         });
-        assert!(app.read_with(&vcx, |app, _| app.scm.graph.page.is_some()));
+        assert!(app.read_with(&vcx, |app, _| app.scm.graph.page().is_some()));
     }
 
     #[test]
@@ -2330,6 +2382,113 @@ mod tests {
             open_lanes: Vec::new(),
         }
     }
+
+    fn deco(kind: RefKind, short: &str) -> RefDeco {
+        RefDeco {
+            kind,
+            full: format!("refs/heads/{short}"),
+            short: short.to_string(),
+            is_head: kind == RefKind::Head,
+            upstream: None,
+        }
+    }
+
+    /// Commits with no ref, one, and three; the long names are the ones a
+    /// chip has to cut, so they must reach the label whole.
+    fn page_with_refs() -> CommitPage {
+        let long = "feature/checkout-flow-with-saved-payment-methods-and-more";
+        let mut page = empty_page();
+        page.commits = (0..4)
+            .map(|i| commit_named("feat: x", "Ada", &format!("{i:040}")))
+            .collect();
+        page.commits[1].refs = vec![deco(RefKind::Head, long)];
+        page.commits[2].refs = vec![
+            deco(
+                RefKind::LocalBranch,
+                "針針針針針針針針針針針針針針針針針針針針",
+            ),
+            deco(RefKind::Tag, "v1"),
+            deco(RefKind::RemoteBranch, "origin/main"),
+        ];
+        page
+    }
+
+    #[test]
+    fn the_cap_is_ten_and_seventy_six_until_the_panel_reaches_380() {
+        // The finding's literal numbers, on both sides of its cutoff.
+        for (panel, chars, px) in [
+            (216., 10, 76.),
+            (280., 10, 76.),
+            (379.5, 10, 76.),
+            (380., 18, 124.),
+            (420., 18, 124.),
+        ] {
+            assert_eq!(
+                RefCap::for_panel(panel),
+                RefCap { chars, px },
+                "panel {panel}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_commit_with_a_ref_has_its_whole_chip_prepared() {
+        let page = page_with_refs();
+        let refs: Vec<usize> = page.commits.iter().map(|c| c.refs.len()).collect();
+        let mut graph = crate::ui::scm::GraphState::default();
+        graph.install_page(
+            PreparedPage::new(page),
+            (repo(), 1, GraphScope::HeadAndUpstream),
+        );
+        let installed = graph.page().expect("installed").clone();
+        assert_eq!(refs, vec![0, 1, 3, 0]);
+        for (i, commit) in installed.commits.iter().enumerate() {
+            let label = graph.ref_label(i);
+            assert_eq!(
+                label.is_some(),
+                !commit.refs.is_empty(),
+                "commit {i}: a chip iff it has a ref"
+            );
+            let Some(label) = label else { continue };
+            assert_eq!(label.kind, commit.refs[0].kind, "commit {i}: the colour");
+            assert_eq!(
+                label.head.as_ref(),
+                commit.refs[0].short,
+                "commit {i}: the name reaches the label uncut"
+            );
+            assert_eq!(
+                label.tail.as_ref().map(|t| t.as_ref().to_string()),
+                match commit.refs.len() - 1 {
+                    0 => None,
+                    more => Some(format!(" +{more}")),
+                },
+                "commit {i}: the rest are counted, not named"
+            );
+        }
+        assert_eq!(graph.ref_label(99), None, "past the page there is no chip");
+    }
+
+    #[test]
+    fn the_page_and_its_chips_are_replaced_and_cleared_together() {
+        let mut graph = crate::ui::scm::GraphState::default();
+        let key = || (repo(), 1, GraphScope::HeadAndUpstream);
+        graph.install_page(PreparedPage::new(page_with_refs()), key());
+        assert!(graph.ref_label(2).is_some());
+
+        // A shorter page must not inherit the longer one's chips.
+        let mut shorter = empty_page();
+        shorter.commits = vec![commit_named("feat: x", "Ada", &format!("{:040}", 0))];
+        graph.install_page(PreparedPage::new(shorter), key());
+        assert_eq!(graph.page().map(|p| p.commits.len()), Some(1));
+        assert_eq!(graph.ref_label(0), None);
+        assert_eq!(graph.ref_label(2), None, "the old page's chip is gone");
+
+        graph.install_page(PreparedPage::new(page_with_refs()), key());
+        graph.clear_page();
+        assert!(graph.page().is_none());
+        assert!(graph.page_key.is_none());
+        assert_eq!(graph.ref_label(2), None, "cleared with the page");
+    }
 }
 
 /// The one test that has to run against a real repository and a real pane.
@@ -2412,7 +2571,7 @@ mod render_idle_gpui_tests {
         loop {
             app.update_in(vcx, |_, _, cx| cx.notify());
             vcx.background_executor.run_until_parked();
-            let page = app.update_in(vcx, |app, _, _| app.scm.graph.page.clone());
+            let page = app.update_in(vcx, |app, _, _| app.scm.graph.page().cloned());
             if page.is_some() {
                 vcx.background_executor.run_until_parked();
                 test_window::quiesce(vcx, None);
@@ -2423,6 +2582,180 @@ mod render_idle_gpui_tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// The whole path, over a real repository: the page lands with its chips,
+    /// every commit that has a ref has one, and the chip the row draws stays
+    /// inside the cap for the panel width it is drawn at.
+    #[gpui::test]
+    fn a_landed_page_carries_a_chip_for_every_ref_and_draws_it_within_its_cap(
+        cx: &mut TestAppContext,
+    ) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = scratch("chips");
+        assert!(
+            git(&root, &["init", "--quiet"]),
+            "this test needs `git` to build its repository"
+        );
+        for n in 0..3 {
+            std::fs::write(root.join(format!("f{n}.txt")), format!("{n}\n")).unwrap();
+            assert!(git(&root, &["add", "-A"]));
+            assert!(git(
+                &root,
+                &["commit", "--quiet", "-m", &format!("feat: c{n}")]
+            ));
+        }
+        assert!(git(
+            &root,
+            &[
+                "checkout",
+                "--quiet",
+                "-b",
+                "feature/checkout-flow-with-saved-payment-methods"
+            ]
+        ));
+        assert!(git(&root, &["tag", "v2026.11.0-release-candidate-1"]));
+
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        crate::daemon::protocol::DaemonMsg::Cwd(root.clone())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Scm;
+            app.scm.graph.expanded = true;
+            cx.notify();
+        });
+        let page = settle_graph(&app, &mut vcx).unwrap_or_else(|| {
+            panic!(
+                "no page landed for {} within the deadline: the pane never reported its cwd \
+                 or the history query failed",
+                root.display()
+            )
+        });
+
+        let head = &page.commits[0];
+        assert!(
+            head.refs.len() >= 2,
+            "the fixture has a branch and a tag on the newest commit: {:?}",
+            head.refs
+        );
+        let label = app
+            .update_in(&mut vcx, |app, _, _| app.scm.graph.ref_label(0).cloned())
+            .expect("a commit with refs has its chip prepared");
+        assert_eq!(label.head.as_ref(), head.refs[0].short, "uncut");
+        assert_eq!(
+            label.tail.as_ref().map(|t| t.as_ref().to_string()),
+            Some(format!(" +{}", head.refs.len() - 1))
+        );
+        for (i, commit) in page.commits.iter().enumerate() {
+            let has = app.update_in(&mut vcx, |app, _, _| app.scm.graph.ref_label(i).is_some());
+            assert_eq!(has, !commit.refs.is_empty(), "commit {i}");
+        }
+
+        // The chip is drawn, once per ref-carrying commit, and its box is the
+        // finding's: 76px in a default panel, 124px from 380. The width comes
+        // from the live panel (the `Rc<Cell>` the divider drags), not from the
+        // saved config, so this moves it and watches the box follow.
+        let chip_width = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+            vcx.debug_bounds("scm-graph-ref-0")
+                .map(|b| b.size.width.as_f32())
+        };
+        let set_panel = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext, w: f32| {
+            app.update_in(vcx, |app, window, cx| {
+                app.right_panel_width.set(w);
+                cx.notify();
+                app.right_panel_px(window, cx)
+            })
+        };
+        vcx.simulate_resize(gpui::size(px(1800.), px(1000.)));
+        let narrow = set_panel(&app, &mut vcx, 280.);
+        assert!(narrow < GRAPH_REF_WIDE_FROM, "panel is {narrow}");
+        let w = chip_width(&app, &mut vcx).expect("the newest commit's row draws its chip");
+        assert!(
+            (w - 76.).abs() < 0.5,
+            "a long ref fills the default cap: {w}px at panel {narrow}px"
+        );
+        let wide = set_panel(&app, &mut vcx, 420.);
+        assert!(wide >= GRAPH_REF_WIDE_FROM, "panel is {wide}");
+        let w = chip_width(&app, &mut vcx).expect("and the wide panel draws it too");
+        assert!(
+            (w - 124.).abs() < 0.5,
+            "from 380px the chip may take 124px: {w}px at panel {wide}px"
+        );
+
+        // A filter keeps the chips: the rows it shows are the same commits.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.graph_toggle_search(window, cx);
+            let input = app.scm.graph.search.clone().expect("the filter opened");
+            input.update(cx, |state, cx| state.set_value("feat: c2", window, cx));
+            cx.notify();
+        });
+        assert!(
+            chip_width(&app, &mut vcx).is_some(),
+            "the filtered list lost the chip of the commit it matches"
+        );
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.graph_toggle_search(window, cx)
+        });
+
+        // A reload replaces page and chips together: ask for a longer page,
+        // wait for a different page, and the chips are on it.
+        let wait_for_new_page =
+            |app: &Entity<Tty59App>, vcx: &mut VisualTestContext, old: Option<&Arc<CommitPage>>| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    app.update_in(vcx, |_, _, cx| cx.notify());
+                    vcx.background_executor.run_until_parked();
+                    let now = app.update_in(vcx, |app, _, _| app.scm.graph.page().cloned());
+                    if let Some(now) = now
+                        && old.is_none_or(|old| !Arc::ptr_eq(old, &now))
+                    {
+                        return now;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "no page landed after the reload"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            };
+        let before = app.update_in(&mut vcx, |app, _, _| app.scm.graph.page().cloned());
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.scm.graph.requested = GRAPH_PAGE * 2;
+            cx.notify();
+        });
+        let reloaded = wait_for_new_page(&app, &mut vcx, before.as_ref());
+        assert!(!reloaded.commits[0].refs.is_empty());
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app.scm.graph.ref_label(0).is_some()),
+            "the reloaded page came without its chips"
+        );
+        assert!(chip_width(&app, &mut vcx).is_some(), "and drew none");
+
+        // A scope switch drops page and chips at once, and the page that
+        // replaces them brings its own.
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.graph_set_scope(GraphScope::All, cx)
+        });
+        app.update_in(&mut vcx, |app, _, _| {
+            assert!(app.scm.graph.page().is_none());
+            assert!(
+                app.scm.graph.ref_label(0).is_none(),
+                "the old scope's chip outlived its page"
+            );
+        });
+        let all = wait_for_new_page(&app, &mut vcx, None);
+        assert_eq!(all.scope, GraphScope::All);
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app.scm.graph.ref_label(0).is_some()),
+            "the new scope's page came without its chips"
+        );
+        assert!(chip_width(&app, &mut vcx).is_some());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[gpui::test]
@@ -2474,7 +2807,7 @@ mod render_idle_gpui_tests {
         // zero above is idleness and not the section having quietly vanished.
         app.update_in(&mut vcx, |app, _, _| {
             assert!(app.scm.graph.expanded);
-            assert!(app.scm.graph.page.is_some());
+            assert!(app.scm.graph.page().is_some());
             assert!(!app.scm.graph.loading);
         });
         let _ = std::fs::remove_dir_all(&root);

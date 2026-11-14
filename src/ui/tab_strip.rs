@@ -28,6 +28,9 @@ use crate::ui::hints::tab_badge_label;
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::search::SearchTab;
+use crate::ui::text_elision::{ElidedLabel, Mode, join_segments, path_separator};
+
+pub(crate) use crate::ui::text_elision::measure_text;
 
 /// One duration and one curve for every transition the app runs, so a fade and
 /// a slide read as the same hand. Long enough to be seen as movement, short
@@ -75,18 +78,6 @@ pub(crate) fn abbreviate_home<'a>(
     // pane whose cwd spells itself `C:/Users/…` shortens under a
     // `C:\Users\…` home too (#544).
     crate::ui::path_display::abbreviate_home(path, home)
-}
-
-/// The separator a path spells itself with. A path carrying a single `\` is
-/// a Windows path and has to be put back together with `\`: rejoining it with
-/// `/` would make one tab spell its location two ways, `C:\Users\dev\app`
-/// while it fits and `C:/…/app` once it has to be elided.
-fn path_separator(path: &str) -> char {
-    if path.contains('\\') { '\\' } else { '/' }
-}
-
-fn join_segments(segments: &[&str], sep: char) -> String {
-    segments.join(sep.encode_utf8(&mut [0u8; 4]) as &str)
 }
 
 pub(crate) fn short_title(raw: &str, home: Option<&std::path::Path>) -> String {
@@ -207,151 +198,30 @@ pub(crate) fn label_of(
     }
 }
 
-/// What a row can add on hover: the name behind the one [`label_of`] cut down,
-/// or `None` when it cut nothing and the tooltip would only repeat the row.
+/// A tab's whole label, and the words an ended pane wrote after its name.
 ///
-/// The comparison has to happen on the *same* spelling, which is the whole
-/// trick here. `label_of` abbreviates a path under the home before it elides
-/// it, and this returns the abbreviated form too, so a raw `/Users/x/repo`
-/// measured against a label of `~/repo` looks like a difference that isn't
-/// one — and every tab named after a directory inside the home would hang a
-/// tooltip saying exactly what it already says. Abbreviate first, compare
-/// after.
-fn tooltip_of(
-    view: &crate::ui::machine_mirror::TabView,
-    index: usize,
-    home: Option<&std::path::Path>,
-) -> Option<SharedString> {
-    use crate::ui::machine_mirror::TabLabel;
-
-    // The other rungs are never shortened: a given name and a process name are
-    // printed whole, and an agent's is a word.
-    let raw = match view.label() {
-        TabLabel::Osc(title) => title,
-        TabLabel::Cwd(cwd) => cwd,
-        _ => return None,
-    };
-    let full = abbreviate_home(raw.trim(), home);
-    if full.trim().is_empty() || full.as_ref() == label_of(view, index, home).as_str() {
-        return None;
-    }
-    Some(SharedString::from(full.into_owned()))
+/// `ended_tail` is a CANDIDATE, `Some` only for the pane's own title as its exit
+/// wrote it (never a custom name, an agent, a directory or a process name): the
+/// producer already checked it against the pane's actual title. The label may
+/// have been transformed in front of those words (home shortening, a host
+/// prefix), which cannot touch the end; whether the display text really ends
+/// with the tail is validated once by the [`ElidedLabel`] (`tail_included`),
+/// which falls back to ordinary elision on a mismatch. A surface hands the WHOLE text
+/// to the label together with the candidate, builds no head string, and keeps
+/// the whole text for the hover.
+pub(crate) struct FullLabel {
+    pub(crate) text: SharedString,
+    pub(crate) ended_tail: Option<&'static str>,
 }
 
-/// Width of `text` shaped in `font` at `size`, in pixels.
-///
-/// The window's text system caches shaped runs, so measuring the same labels
-/// across frames is cheap. The sidebar elides against real glyph widths
-/// instead of guessing at character counts — that is the only way a mixed
-/// CJK/Latin label can be squeezed without tearing mid-token.
-pub(crate) fn measure_text(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-) -> f32 {
-    text_system
-        .shape_line(
-            SharedString::from(text),
-            px(size),
-            &[gpui::TextRun {
-                len: text.len(),
-                font: font.clone(),
-                color: gpui::Hsla::default(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        )
-        .width
-        .as_f32()
-}
-
-/// Elides a path from the front when it cannot fit `max_width`, keeping the
-/// root marker (drive letter, `~`, or the leading slash) and every trailing
-/// segment that fits.
-///
-/// The tail is what a user identifies a tab by — the file or directory they
-/// are actually working on — so it is never torn: whole segments drop off the
-/// front first (a half-eaten directory name reads as noise), and when even
-/// the last segment is too wide, only that segment is elided character by
-/// character, still tail-first.
-pub(crate) fn elide_path_keep_tail(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    path: &str,
-    max_width: f32,
-) -> SharedString {
-    let path = path.trim();
-    if path.is_empty() || measure_text(text_system, font, size, path) <= max_width {
-        return SharedString::from(path);
-    }
-    let sep = path_separator(path);
-    let segments: Vec<&str> = path.split(['/', '\\']).collect();
-    // A leading slash splits into an empty first segment; `~` and drive
-    // letters (`E:`) carry the same "where this tree lives" weight, and a
-    // leading `…` means `short_title` already elided once — that marker is
-    // replaced by the new elision instead of stacking two ellipses. Keep
-    // whichever marker there is so the result never reads as a bare
-    // relative path.
-    let root: &str = match segments.first() {
-        Some(&"") => "/",
-        Some(&"~") => "~",
-        Some(&"…") => "",
-        Some(head) if head.ends_with(':') => head,
-        _ => "",
-    };
-    let root_kept = segments
-        .first()
-        .is_some_and(|s| s.is_empty() || *s == "~" || *s == "…" || s.ends_with(':'));
-    let prefix = if root.is_empty() {
-        format!("…{sep}")
-    } else if root == "/" {
-        // The absolute-path root is already the slash itself.
-        format!("/…{sep}")
-    } else {
-        format!("{root}{sep}…{sep}")
-    };
-    // Drop whole segments from the front until the remaining tail fits. The
-    // width only shrinks as segments leave, so the first fit is the widest
-    // one — greedy is optimal here.
-    //
-    // With a root marker, `head = 1` would spell the root, the ellipsis, and
-    // then every remaining segment — strictly wider than the original that
-    // already failed to fit — so that candidate is skipped rather than
-    // measured.
-    let mut head = if root_kept { 2 } else { 0 };
-    while head < segments.len() {
-        let candidate = if head == 0 {
-            join_segments(&segments, sep)
-        } else {
-            format!("{prefix}{}", join_segments(&segments[head..], sep))
-        };
-        if measure_text(text_system, font, size, &candidate) <= max_width {
-            return SharedString::from(candidate);
+impl FullLabel {
+    fn whole(text: String) -> Self {
+        Self {
+            text: SharedString::from(text),
+            ended_tail: None,
         }
-        if head + 1 >= segments.len() {
-            break;
-        }
-        head += 1;
     }
-    // Even the last segment alone is too wide: keep its tail after the
-    // ellipsis, with no slash so the reader sees the segment was torn.
-    elide_tail_clusters(
-        text_system,
-        font,
-        size,
-        segments[segments.len() - 1],
-        max_width,
-    )
 }
-
-/// Characters a token is allowed to break on. Space is in the set because
-/// this also elides labels a human typed — `Backend server logs` — not just
-/// branch names, and a word boundary is the cut a reader forgives.
-const TOKEN_BREAKS: [char; 5] = ['-', '_', '/', '.', ' '];
 
 /// Splits `text` into grapheme clusters — what a reader counts as one
 /// character, and the only place a label may be cut.
@@ -363,190 +233,6 @@ const TOKEN_BREAKS: [char; 5] = ['-', '_', '/', '.', ' '];
 /// as a bare letter.
 fn clusters(text: &str) -> Vec<&str> {
     text.graphemes(true).collect()
-}
-
-/// The head this token would rather keep: six clusters, extended to just past
-/// the next break so the cut lands on a boundary (`window-…` rather than
-/// `window…`). When no break is within reach the plain six is kept — running
-/// on to the cap would spend the whole budget on a prefix and leave the tail,
-/// which is what identifies the token, with nothing.
-fn preferred_head(clusters: &[&str]) -> usize {
-    let base = clusters.len().min(6);
-    let cap = clusters.len().min(12);
-    if base >= cap {
-        return base;
-    }
-    match clusters[base..cap]
-        .iter()
-        .position(|c| c.chars().next().is_some_and(|c| TOKEN_BREAKS.contains(&c)))
-    {
-        Some(offset) => base + offset + 1,
-        None => base,
-    }
-}
-
-/// Elides the middle of a single token (a branch name, a shell name, a label
-/// the user typed) so both its head and its identifying tail survive:
-/// `window-transparency-backdrop` reads `window-…backdrop` in a narrow
-/// sidebar instead of losing its tail to a trailing ellipsis.
-///
-/// A head that fits but leaves no room for a tail is worse than no head at
-/// all, so the preferred head is given up for a shorter one when that is what
-/// it takes to keep a few trailing clusters; only when even a three-cluster
-/// head cannot buy a tail does this fall back to a tail-only elision.
-pub(crate) fn elide_keep_edges(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-    max_width: f32,
-) -> SharedString {
-    let text = text.trim();
-    if text.is_empty() || measure_text(text_system, font, size, text) <= max_width {
-        return SharedString::from(text);
-    }
-    let cells = clusters(text);
-    let shaped = |head_n: usize, tail_n: usize| -> f32 {
-        let mut s = cells[..head_n].concat();
-        s.push('…');
-        s.push_str(&cells[cells.len() - tail_n..].concat());
-        measure_text(text_system, font, size, &s)
-    };
-    // Width is monotone in the tail length, so a binary search finds the
-    // longest tail that still fits behind a given head.
-    let longest_tail = |head_n: usize| -> usize {
-        let (mut lo, mut hi) = (0usize, cells.len() - head_n);
-        while lo < hi {
-            let mid = (lo + hi + 1) / 2;
-            if shaped(head_n, mid) <= max_width {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        lo
-    };
-    /// Enough trailing clusters to tell two sibling branches apart.
-    const MIN_TAIL: usize = 3;
-    let preferred = preferred_head(&cells);
-    let mut candidates = vec![preferred, 6, 3];
-    candidates.retain(|&h| h > 0 && h <= cells.len());
-    candidates.dedup();
-    let mut best: Option<(usize, usize)> = None;
-    for head_n in candidates {
-        if shaped(head_n, 0) > max_width {
-            continue;
-        }
-        let tail = longest_tail(head_n);
-        if tail >= MIN_TAIL.min(cells.len() - head_n) {
-            best = Some((head_n, tail));
-            break;
-        }
-        if best.is_none_or(|(_, best_tail)| tail > best_tail) {
-            best = Some((head_n, tail));
-        }
-    }
-    let Some((head, tail)) = best.filter(|&(_, tail)| tail > 0) else {
-        // No head buys a tail worth showing; a bare tail says more.
-        return elide_tail_clusters(text_system, font, size, text, max_width);
-    };
-    let mut out = cells[..head].concat();
-    out.push('…');
-    out.push_str(&cells[cells.len() - tail..].concat());
-    SharedString::from(out)
-}
-
-/// Elides a row label. A path keeps its tail — the file or directory being
-/// worked on — while anything else keeps both edges.
-///
-/// A shell title is not always a path: `npm run dev`, `man git-log`, or a name
-/// the user typed into the rename box. Running those through the path rule
-/// drops their head, which is the part that names them, and `… server logs`
-/// says less than the CSS truncation this replaced.
-pub(crate) fn elide_label(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-    max_width: f32,
-) -> SharedString {
-    if text.contains('/') || text.contains('\\') {
-        elide_path_keep_tail(text_system, font, size, text, max_width)
-    } else {
-        elide_keep_edges(text_system, font, size, text, max_width)
-    }
-}
-
-/// Keeps the longest head of `text` that fits before a trailing ellipsis —
-/// the plain cut a reader expects, for a string read left to right like a
-/// branch name.
-pub(crate) fn elide_end_clusters(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-    max_width: f32,
-) -> SharedString {
-    if measure_text(text_system, font, size, text) <= max_width {
-        return SharedString::from(text.to_string());
-    }
-    let budget = max_width - measure_text(text_system, font, size, "…");
-    if budget <= 0. {
-        return SharedString::from("…");
-    }
-    let cells = clusters(text);
-    let (mut lo, mut hi) = (0usize, cells.len());
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        if measure_text(text_system, font, size, &cells[..mid].concat()) <= budget {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    let mut out = cells[..lo].concat();
-    out.push('…');
-    SharedString::from(out)
-}
-
-/// Keeps the longest tail of `text` that fits after a bare ellipsis. Shared
-/// by the path and token elisions as their last resort.
-pub(crate) fn elide_tail_clusters(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-    max_width: f32,
-) -> SharedString {
-    // Nothing to cut. The search below is bounded by the budget *after* the
-    // ellipsis, so without this a branch that fit came back as "…" plus the
-    // whole of itself — the rail's group header printed `…feat/v4-redesign`
-    // with room to spare.
-    if measure_text(text_system, font, size, text) <= max_width {
-        return SharedString::from(text.to_string());
-    }
-    let budget = max_width - measure_text(text_system, font, size, "…");
-    if budget <= 0. {
-        return SharedString::from("…");
-    }
-    let cells = clusters(text);
-    let (mut lo, mut hi) = (0usize, cells.len());
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        let s = cells[cells.len() - mid..].concat();
-        if measure_text(text_system, font, size, &s) <= budget {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    if lo == 0 {
-        return SharedString::from("…");
-    }
-    let mut out = String::with_capacity(1 + text.len());
-    out.push('…');
-    out.push_str(&cells[cells.len() - lo..].concat());
-    SharedString::from(out)
 }
 
 #[derive(Clone)]
@@ -2001,29 +1687,6 @@ impl Tty59App {
             .into_any_element()
     }
 
-    /// The full title behind a shortened one, for the row to name on hover.
-    ///
-    /// `tab_label` hands back a path elided to its last three segments and then
-    /// capped, and the chip truncates whatever is left over — so a tab could
-    /// read `…/a/b/c` with no way to find out which `a` that was. `None` when
-    /// nothing was dropped, so tabs that already show their whole name stay
-    /// quiet under the pointer.
-    ///
-    /// It has to unshorten whatever the label was *made of*, which is why it
-    /// reads the same [`TabView`](crate::ui::machine_mirror::TabView) the label
-    /// did: a tab named after its directory wants that directory spelled out,
-    /// not the title it never had. See [`tooltip_of`].
-    pub(crate) fn tab_title_tooltip(
-        &self,
-        tab: &Tab,
-        index: usize,
-        window: Option<&Window>,
-        cx: &App,
-    ) -> Option<SharedString> {
-        let (view, home) = tab.label_view(window, cx);
-        tooltip_of(&view, index, home.as_deref())
-    }
-
     /// What this window puts on a tab of its own — the same ladder, through the
     /// same renderer, as the switcher uses for a tab of somebody else's window.
     /// See [`label_of`].
@@ -2050,23 +1713,43 @@ impl Tty59App {
         tab: &Tab,
         window: Option<&Window>,
         cx: &App,
-    ) -> Option<String> {
+    ) -> Option<FullLabel> {
         use crate::ui::machine_mirror::TabLabel;
 
         if let Some(name) = tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
-            return Some(name.trim().to_string());
+            return Some(FullLabel::whole(name.trim().to_string()));
         }
         let (view, home) = tab.label_view(window, cx);
-        let raw = match view.label() {
-            TabLabel::Osc(title) | TabLabel::Cwd(title) => {
-                abbreviate_home(strip_host_prefix(title.trim()), home.as_deref()).into_owned()
+        let label = match view.label() {
+            TabLabel::Osc(title) => {
+                let text =
+                    abbreviate_home(strip_host_prefix(title.trim()), home.as_deref()).into_owned();
+                // Only the pane's own title can be the label its exit wrote, only
+                // for a pane that has ended, and never for a sleeping tab (its
+                // title is the one it went to sleep with). `view.live` is that
+                // pane's own `!exited`, read once by `label_view` from the very
+                // leaf the label comes from, so a live tab never looks again.
+                let ended_tail = match tab.is_asleep() || view.live {
+                    true => None,
+                    // The leaf the label ladder itself reads, not a second choice.
+                    false => tab
+                        .title_leaf(window, cx)
+                        .and_then(|leaf| leaf.read(cx).ended_tail()),
+                };
+                FullLabel {
+                    text: SharedString::from(text),
+                    ended_tail,
+                }
             }
-            TabLabel::Agent(agent) => agent.display_name().to_string(),
-            TabLabel::Named(name) => name.to_string(),
-            TabLabel::Process(title) => title.to_string(),
-            TabLabel::Unknown => String::new(),
+            TabLabel::Cwd(title) => FullLabel::whole(
+                abbreviate_home(strip_host_prefix(title.trim()), home.as_deref()).into_owned(),
+            ),
+            TabLabel::Agent(agent) => FullLabel::whole(agent.display_name().to_string()),
+            TabLabel::Named(name) => FullLabel::whole(name.to_string()),
+            TabLabel::Process(title) => FullLabel::whole(title.to_string()),
+            TabLabel::Unknown => FullLabel::whole(String::new()),
         };
-        (!raw.trim().is_empty()).then_some(raw)
+        (!label.text.trim().is_empty()).then_some(label)
     }
 
     /// The New Tab control: one `+` that drops the list of everything it could
@@ -2635,8 +2318,14 @@ impl Tty59App {
             let badge_pos = badge_positions.as_ref().and_then(|positions| positions[i]);
             let tab = &self.tabs[i];
             let is_active = i == active;
-            let label = self.tab_label(tab, i, Some(window), cx);
-            let full_title = self.tab_title_tooltip(tab, i, Some(window), cx);
+            // The whole title, not the three-segment short form the switcher
+            // uses: a cut made before the chip's width is known would throw
+            // away text the measured label could have kept. Nothing to say
+            // falls back to the ladder's own placeholder.
+            let label = match self.full_tab_label(tab, Some(window), cx) {
+                Some(full) => full,
+                None => FullLabel::whole(self.tab_label(tab, i, Some(window), cx)),
+            };
             let ssh_dot = self.tab_ssh_dot(tab, cx);
             let asleep = tab.is_asleep();
             let agent = tab.agent(cx).or_else(|| tab.asleep_agent());
@@ -2669,15 +2358,25 @@ impl Tty59App {
                     .id(("tab-label", i))
                     .flex_1()
                     .min_w_0()
-                    .truncate()
                     .text_sm()
                     .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                    .when_some(full_title, |d, title| {
-                        d.tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
-                        })
+                    .tooltip({
+                        let whole = label.text.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(whole.clone()).build(window, cx)
+                        }
                     })
-                    .child(label)
+                    .child({
+                        let elided = ElidedLabel::new(
+                            ("tab-chip-label", i),
+                            label.text.clone(),
+                            Mode::Label,
+                        );
+                        match label.ended_tail {
+                            Some(tail) => elided.tail_included(tail),
+                            None => elided,
+                        }
+                    })
                     .into_any_element(),
             };
 
@@ -3977,242 +3676,6 @@ mod tests {
         assert!(out.ends_with('…'));
     }
 
-    /// `TestAppContext` shapes through gpui's `NoopTextSystem`, where every
-    /// glyph is exactly one em — weight-agnostic and, more to the point,
-    /// CJK-agnostic. That keeps these tests identical on all three CI targets,
-    /// but it also means they cannot speak to the proportional and mixed-script
-    /// widths the elision exists for: what they pin is the contract — which
-    /// parts of a label must survive, and that the result fits its budget.
-    fn elide_setup(cx: &mut TestAppContext) -> (gpui::WindowTextSystem, gpui::Font, f32) {
-        let size = 14.;
-        (
-            gpui::WindowTextSystem::new(cx.text_system().clone()),
-            gpui::Font::default(),
-            size,
-        )
-    }
-
-    #[gpui::test]
-    fn elide_path_fits_shallow_paths_untouched(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = "~/tty59";
-        let max = measure_text(&ts, &font, size, path) + 1.;
-        assert_eq!(elide_path_keep_tail(&ts, &font, size, path, max), "~/tty59");
-    }
-
-    #[gpui::test]
-    fn elide_path_shows_the_whole_deep_path_when_the_budget_allows(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        // A wide sidebar must not elide a deep path: only the width may
-        // decide, never a fixed segment cap.
-        let path = "E:/work/toolbox/crates/tty59-core/src/client";
-        let max = measure_text(&ts, &font, size, path) + 1.;
-        assert_eq!(elide_path_keep_tail(&ts, &font, size, path, max), path);
-    }
-
-    #[gpui::test]
-    fn elide_path_keeps_drive_tail_and_budget(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = "E:/work/toolbox/src/ui/tab_sidebar.rs";
-        let max = 200.;
-        assert!(
-            measure_text(&ts, &font, size, path) > max,
-            "the fixture has to be wider than the budget to exercise elision"
-        );
-        let out = elide_path_keep_tail(&ts, &font, size, path, max);
-        assert!(out.starts_with("E:/…/"), "drive letter survives: {out}");
-        assert!(
-            out.ends_with("tab_sidebar.rs"),
-            "the file name always survives: {out}"
-        );
-        assert!(
-            measure_text(&ts, &font, size, &out) <= max,
-            "the elided label fits the budget"
-        );
-    }
-
-    #[gpui::test]
-    fn elide_path_keeps_tilde_and_leading_slash(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let home = "~/projects/toolbox/src/ui/tab_sidebar.rs";
-        assert!(
-            measure_text(&ts, &font, size, home) > 200.,
-            "the fixture has to be wider than the budget to exercise elision"
-        );
-        let out = elide_path_keep_tail(&ts, &font, size, home, 200.);
-        assert!(out.starts_with("~/…/"), "tilde root survives: {out}");
-        assert!(out.ends_with("tab_sidebar.rs"));
-
-        let abs = "/usr/local/share/man/man1/git.1";
-        assert!(
-            measure_text(&ts, &font, size, abs) > 120.,
-            "the fixture has to be wider than the budget to exercise elision"
-        );
-        let out = elide_path_keep_tail(&ts, &font, size, abs, 120.);
-        assert!(out.starts_with("/…/"), "absolute root survives: {out}");
-        assert!(out.ends_with("git.1"));
-    }
-
-    #[gpui::test]
-    fn elide_path_tears_only_the_last_segment_as_a_last_resort(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = "E:/supercalifragilisticexpialidocious";
-        let max = 60.;
-        assert!(measure_text(&ts, &font, size, path) > max);
-        let out = elide_path_keep_tail(&ts, &font, size, path, max);
-        assert!(out.starts_with('…'), "a torn segment reads as torn: {out}");
-        assert!(
-            out.chars().nth(1) != Some('/'),
-            "no slash after a torn segment: {out}"
-        );
-        assert!(out.ends_with('s'), "the word's tail survives: {out}");
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-    }
-
-    #[gpui::test]
-    fn elide_edges_keeps_both_ends_of_a_branch(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "window-transparency-backdrop";
-        let max = 140.;
-        assert!(measure_text(&ts, &font, size, branch) > max);
-        let out = elide_keep_edges(&ts, &font, size, branch, max);
-        assert!(out.starts_with("window-"), "head survives: {out}");
-        assert!(out.ends_with("backdrop"), "tail survives: {out}");
-        assert!(out.contains('…'));
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-        assert!(out.chars().count() < branch.chars().count());
-    }
-
-    #[gpui::test]
-    fn elide_end_keeps_the_head_of_a_branch(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "fix/rpc-proxy-and-error-classification";
-        let max = 140.;
-        let out = elide_end_clusters(&ts, &font, size, branch, max);
-        assert!(out.starts_with("fix/rpc-"), "head survives: {out}");
-        assert!(out.ends_with('…') && out.matches('…').count() == 1, "{out}");
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-        let fits = measure_text(&ts, &font, size, branch);
-        assert_eq!(elide_end_clusters(&ts, &font, size, branch, fits), branch);
-    }
-
-    #[gpui::test]
-    fn elide_edges_leaves_short_branches_alone(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "main";
-        let max = measure_text(&ts, &font, size, branch) + 1.;
-        assert_eq!(elide_keep_edges(&ts, &font, size, branch, max), "main");
-    }
-
-    #[gpui::test]
-    fn elide_edges_falls_back_to_a_tail_sliver_when_the_head_cannot_fit(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "window-transparency-backdrop";
-        let out = elide_keep_edges(&ts, &font, size, branch, 30.);
-        assert!(out.starts_with('…'));
-        assert!(measure_text(&ts, &font, size, &out) <= 30.);
-    }
-
-    #[gpui::test]
-    fn elide_path_cuts_windows_backslash_paths_on_segments(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = r"C:\Users\dev\AppData\Local\Temp\verify-build";
-        let max = 200.;
-        assert!(measure_text(&ts, &font, size, path) > max);
-        let out = elide_path_keep_tail(&ts, &font, size, path, max);
-        assert!(out.starts_with(r"C:\…\"), "drive letter survives: {out}");
-        assert!(
-            out.ends_with("verify-build"),
-            "the leaf segment survives: {out}"
-        );
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-    }
-
-    /// One tab must not spell its location two ways depending on how wide the
-    /// sidebar happens to be.
-    #[gpui::test]
-    fn elide_path_keeps_the_separator_the_path_arrived_with(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let windows = r"C:\Users\dev\projects\toolbox\src\ui\app.rs";
-        let wide = measure_text(&ts, &font, size, windows) + 1.;
-        assert_eq!(
-            elide_path_keep_tail(&ts, &font, size, windows, wide),
-            windows,
-            "a path that fits is left exactly as it arrived"
-        );
-        let out = elide_path_keep_tail(&ts, &font, size, windows, 120.);
-        assert!(!out.contains('/'), "no forward slash creeps in: {out}");
-
-        let unix = "/home/dev/projects/toolbox/src/ui/app.rs";
-        let out = elide_path_keep_tail(&ts, &font, size, unix, 120.);
-        assert!(!out.contains('\\'), "no backslash creeps in: {out}");
-    }
-
-    /// A branch with no `-`, `_`, `/` or `.` in reach used to lose its head
-    /// entirely, which is the one thing this function promises not to do.
-    #[gpui::test]
-    fn elide_edges_keeps_a_head_on_a_separatorless_token(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "verylongbranchnamewithoutseps";
-        for max in [60., 80., 100., 120.] {
-            let out = elide_keep_edges(&ts, &font, size, branch, max);
-            assert!(
-                out.starts_with('v'),
-                "head survives at {max}px: {out}",
-                max = max
-            );
-            assert!(out.ends_with('s'), "tail survives at {max}px: {out}");
-            assert!(measure_text(&ts, &font, size, &out) <= max);
-        }
-    }
-
-    /// A head that fits but leaves nothing behind the ellipsis says less than
-    /// a shorter head that keeps the identifying tail.
-    #[gpui::test]
-    fn elide_edges_gives_up_head_room_to_keep_a_tail(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "feature/some-really-long-thing";
-        let max = 80.;
-        assert!(measure_text(&ts, &font, size, branch) > max);
-        let out = elide_keep_edges(&ts, &font, size, branch, max);
-        assert!(
-            !out.ends_with('…'),
-            "the tail is never traded away for a longer head: {out}"
-        );
-        assert!(out.ends_with('g'), "the identifying tail survives: {out}");
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-    }
-
-    /// The sidebar title is not always a path. `elide_label` has to notice,
-    /// because the path rule drops the head — and for a command line or a name
-    /// the user typed, the head is the part that names it.
-    #[gpui::test]
-    fn elide_label_keeps_the_head_of_a_non_path(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        for text in ["Backend server logs", "npm run dev -- --watch"] {
-            let max = 90.;
-            assert!(measure_text(&ts, &font, size, text) > max);
-            let out = elide_label(&ts, &font, size, text, max);
-            let first = text.chars().next().unwrap();
-            assert!(
-                out.starts_with(first),
-                "a non-path keeps its head: {out} (from {text})"
-            );
-            assert!(measure_text(&ts, &font, size, &out) <= max);
-        }
-    }
-
-    /// …while a path still gets the tail-first treatment through the same
-    /// entry point.
-    #[gpui::test]
-    fn elide_label_still_keeps_the_tail_of_a_path(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = "~/projects/toolbox/src/ui/tab_sidebar.rs";
-        let out = elide_label(&ts, &font, size, path, 200.);
-        assert!(out.starts_with("~/…/"), "root survives: {out}");
-        assert!(out.ends_with("tab_sidebar.rs"), "leaf survives: {out}");
-    }
-
     #[test]
     fn short_title_cuts_windows_paths_on_backslashes() {
         assert_eq!(
@@ -4233,88 +3696,6 @@ mod tests {
         (0..=clusters.len())
             .map(|n| clusters[..n].concat())
             .collect()
-    }
-
-    fn cluster_suffixes(text: &str) -> Vec<String> {
-        let clusters: Vec<&str> = text.graphemes(true).collect();
-        (0..=clusters.len())
-            .map(|n| clusters[clusters.len() - n..].concat())
-            .collect()
-    }
-
-    /// An elision may only drop whole grapheme clusters, so whatever survives
-    /// on either side of the ellipsis has to be a cluster-aligned prefix and
-    /// suffix of what went in. Slicing by `char` instead passes every width
-    /// check and still tears `👨‍👩‍👧` into a dangling joiner, strips the
-    /// variation selector off `❤️`, or leaves half of `🇨🇳` to render as a
-    /// bare letter.
-    #[track_caller]
-    fn assert_cut_on_cluster_boundaries(input: &str, out: &str, max: f32) {
-        let Some((head, tail)) = out.split_once('…') else {
-            assert_eq!(out, input, "an unelided label comes back verbatim");
-            return;
-        };
-        assert!(
-            cluster_prefixes(input).iter().any(|p| p == head),
-            "head {head:?} is not a cluster-aligned prefix of {input:?} (@{max}px)"
-        );
-        assert!(
-            cluster_suffixes(input).iter().any(|s| s == tail),
-            "tail {tail:?} is not a cluster-aligned suffix of {input:?} (@{max}px)"
-        );
-    }
-
-    /// Fixtures whose clusters are wider than one `char`, placed so that a
-    /// `char`-indexed cut lands inside one at some width.
-    const CLUSTER_FIXTURES: [&str; 7] = [
-        "ab\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467}cdefghijklmnop",
-        "release-notes-final-ab\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467}",
-        "abcdef\u{2764}\u{fe0f}ghijklmnopqr",
-        "long-branch-name-x\u{2764}\u{fe0f}",
-        "abcdef\u{1F1E8}\u{1F1F3}ghijklmnopqr",
-        "abcde\u{301}fghijklmnopqrst",
-        "review-\u{1F44D}\u{1F3FD}-approved-changes",
-    ];
-
-    #[gpui::test]
-    fn elide_edges_cuts_only_on_cluster_boundaries(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        for text in CLUSTER_FIXTURES {
-            let mut max = 30.;
-            while max <= 200. {
-                let out = elide_keep_edges(&ts, &font, size, text, max);
-                assert_cut_on_cluster_boundaries(text, &out, max);
-                assert!(
-                    measure_text(&ts, &font, size, &out) <= max,
-                    "{out:?} still has to fit its budget (@{max}px)"
-                );
-                max += 2.;
-            }
-        }
-    }
-
-    /// The path elision tears its last segment character by character as a
-    /// last resort; that resort has to respect clusters too.
-    #[gpui::test]
-    fn elide_path_tears_its_last_segment_on_cluster_boundaries(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        for leaf in CLUSTER_FIXTURES {
-            let path = format!("~/projects/toolbox/{leaf}");
-            let mut max = 30.;
-            while max <= 120. {
-                let out = elide_path_keep_tail(&ts, &font, size, &path, max);
-                // Whatever it settled on, the tail after the ellipsis has to
-                // be cluster-aligned against the path it came from.
-                if let Some((_, tail)) = out.split_once('…') {
-                    let tail = tail.trim_start_matches('/');
-                    assert!(
-                        cluster_suffixes(&path).iter().any(|s| s == tail),
-                        "tail {tail:?} is not a cluster-aligned suffix of {path:?} (@{max}px)"
-                    );
-                }
-                max += 2.;
-            }
-        }
     }
 
     /// `short_title`'s 40-glyph clamp is the other `char`-indexed cut.
@@ -4466,45 +3847,18 @@ mod tests {
         );
     }
 
-    /// A tooltip exists to say what the row had to leave out. One that repeats
-    /// the row is worse than none, and the label and the raw string it came
-    /// from are not comparable until both have been abbreviated: `~/repo` and
-    /// `/Users/x/repo` are the same name spelled two ways, and reading them as
-    /// a difference hung a tooltip on every tab named after a directory under
-    /// the home — which, after this change, is most of them.
+    /// The label and the raw string it came from are not comparable until both
+    /// have been abbreviated: `~/repo` and `/Users/x/repo` are the same name
+    /// spelled two ways. A directory under the home is labelled with its `~`
+    /// and whole; one that was cut keeps its last three segments.
     #[test]
-    fn a_tab_named_after_a_directory_says_nothing_more_on_hover_unless_it_was_cut() {
+    fn a_tab_named_after_a_directory_is_labelled_whole_unless_it_was_cut() {
         let mut tab = strip_tab();
         tab.cwd = Some("/Users/x/repo".into());
-
         assert_eq!(label_of(&tab, 0, Some(home())), "~/repo");
-        assert_eq!(
-            tooltip_of(&tab, 0, Some(home())),
-            None,
-            "the row is already showing the whole directory"
-        );
 
-        // Cut down to its last three segments, so the head is worth having.
         tab.cwd = Some("/Users/x/repo/crates/tty59-core/src".into());
         assert_eq!(label_of(&tab, 0, Some(home())), "…/crates/tty59-core/src");
-        assert_eq!(
-            tooltip_of(&tab, 0, Some(home())).as_deref(),
-            Some("~/repo/crates/tty59-core/src")
-        );
-
-        // The same holds for a title that happens to be a path — the rung this
-        // guard was already getting wrong before a directory could reach it.
-        let mut titled = strip_tab();
-        titled.osc_title = Some("/Users/x/repo".into());
-        assert_eq!(tooltip_of(&titled, 0, Some(home())), None);
-
-        // A shell integration's `user@host:` head is not in the label, so it
-        // is still worth spelling out.
-        titled.osc_title = Some("me@box:/Users/x/repo".into());
-        assert_eq!(
-            tooltip_of(&titled, 0, Some(home())).as_deref(),
-            Some("me@box:/Users/x/repo")
-        );
     }
 
     /// The one test that fails if any of the wiring is put back: a real tab,
@@ -4565,12 +3919,6 @@ mod tests {
                 strip,
                 label_of(&from_tree, index, home.as_deref()),
                 "the two columns name the same tab the same way"
-            );
-
-            assert_eq!(
-                app.tab_title_tooltip(tab, index, Some(window), cx),
-                None,
-                "and the row is showing the whole path, so it stays quiet"
             );
         });
     }
@@ -4647,11 +3995,10 @@ mod tests {
         );
 
         // The root of a filesystem is a directory like any other: a tab
-        // sitting in it says so, and says nothing more on hover.
+        // sitting in it says so.
         let mut root = strip_tab();
         root.cwd = Some("/".into());
         assert_eq!(label_of(&root, 0, Some(home())), "/");
-        assert_eq!(tooltip_of(&root, 0, Some(home())), None);
     }
 
     fn inventory(labels: &[&str]) -> Vec<DetectedShell> {
@@ -5354,6 +4701,100 @@ mod overflow_gpui_tests {
         app.update(&mut vcx, |app, _| {
             assert!(app.switcher.is_none());
             assert_eq!(app.active, 5, "releasing commits the previously used tab");
+        });
+    }
+
+    /// A pane name far longer than any chip, so the chip has to elide it.
+    const LONG_NAME: &str = "a-pane-with-a-very-long-name-that-no-chip-can-hold-whole-and-then-some-more-words-after-it-to-be-sure";
+
+    /// Ends the pane of tab `i` named `name`, the way the daemon's exit does.
+    fn end_pane(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, i: usize, name: &str) {
+        app.update(vcx, |app, cx| {
+            let leaf = app.tabs[i].pane.first_leaf().expect("a tab has a pane");
+            leaf.terminal()
+                .expect("a terminal pane")
+                .update(cx, |view, cx| view.end_for_test(name, cx));
+            cx.notify();
+        });
+    }
+
+    /// An ended pane's chip keeps the words its exit wrote, whole, in every
+    /// shipped language, and elides only the name in front of them. The
+    /// observer reads what the label actually prepared and painted.
+    #[gpui::test]
+    fn an_ended_chip_keeps_its_localized_tail_whole(cx: &mut TestAppContext) {
+        use crate::ui::text_elision::observe;
+
+        let (app, mut vcx, _streams) = strip_window(cx, 2, 1000.);
+        let chip = gpui::ElementId::from(("tab-chip-label", 0usize));
+        // The strip width per language is MEASURED, not computed: at each one the chip is
+        // too narrow for the name AND for an ordinary label to keep the status whole
+        // (the same label with its whole text and no included tail cuts the status),
+        // yet wide enough for the included tail plus a cut name.
+        for (language, width, tail) in [
+            ("en", 700., " — process exited"),
+            ("ru-RU", 700., ": процесс завершён"),
+            ("ja-JP", 600., " — プロセスが終了しました"),
+            ("zh-CN", 550., " — 进程已退出"),
+        ] {
+            crate::ui::i18n::set_locale(language);
+            end_pane(&app, &mut vcx, 0, LONG_NAME);
+            resize(&mut vcx, width);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let label = observe::label(&chip)
+                .unwrap_or_else(|| panic!("{language}: the chip label was not drawn"));
+            assert!(label.painted, "{language}: {label:?}");
+            assert!(
+                label.text.ends_with(tail),
+                "{language}: the tail was cut: {:?}",
+                label.text
+            );
+            assert!(
+                label.text.contains('…') && label.text.len() < LONG_NAME.len() + tail.len(),
+                "{language}: the name did not elide: {:?}",
+                label.text
+            );
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// A name the user gave the tab is theirs: the pane ending behind it adds
+    /// no tail to it, and a live pane has none to offer either.
+    #[gpui::test]
+    fn only_the_panes_own_ended_title_carries_a_tail(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = strip_window(cx, 3, 1000.);
+        app.update(&mut vcx, |app, cx| {
+            app.tabs[0].name = Some("my deploy — process exited".into());
+            cx.notify();
+        });
+        end_pane(&app, &mut vcx, 0, "tty59");
+        end_pane(&app, &mut vcx, 1, "tty59");
+        app.update_in(&mut vcx, |app, window, cx| {
+            let named = app
+                .full_tab_label(&app.tabs[0], Some(window), cx)
+                .expect("a named tab has a label");
+            assert_eq!(named.text.as_str(), "my deploy — process exited");
+            assert!(
+                named.ended_tail.is_none(),
+                "a custom name is untouched, even one that ends in the ended words"
+            );
+
+            let ended = app
+                .full_tab_label(&app.tabs[1], Some(window), cx)
+                .expect("an ended pane has a title");
+            assert_eq!(ended.text.as_str(), "tty59 — process exited");
+            assert_eq!(ended.ended_tail, Some(" — process exited"));
+
+            // Whatever a live pane's label is (it may have nothing to say),
+            // it carries no tail.
+            let live = app.full_tab_label(&app.tabs[2], Some(window), cx);
+            assert!(
+                live.is_none_or(|label| label.ended_tail.is_none()),
+                "a pane that has not ended has no tail"
+            );
         });
     }
 }
