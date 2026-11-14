@@ -105,6 +105,9 @@ impl State {
     }
 }
 
+/// The pill's group, so its count can follow the pill's pressed state.
+const PILL_GROUP: &str = "agent-mode-pill";
+
 impl Tty59App {
     /// The Agents pill. `count` is what the strip already counted this frame,
     /// so the number it says and the width the strip budgeted for it are one
@@ -143,11 +146,30 @@ impl Tty59App {
         #[cfg(test)]
         let word = word.debug_selector(|| "agent-mode-label".into());
         let tally = shown.map(|count| {
+            // Muted at rest and hovered; the pressed fill reduces the muted
+            // ink's contrast below the text floor, so it takes the foreground
+            // the word beside it already has.
+            let foreground = cx.theme().foreground;
             let count = run()
+                .id("agent-mode-count")
+                // gpui only listens for a press on an element that has a
+                // hitbox, and `group_active` alone does not give it one; the
+                // pill's own cursor does, and changes nothing on screen.
+                .cursor_default()
                 .text_color(cx.theme().muted_foreground)
+                .group_active(PILL_GROUP, move |style| style.text_color(foreground))
                 .child(count.to_string());
             #[cfg(test)]
-            let count = count.debug_selector(|| "agent-mode-count".into());
+            let count = count.debug_selector(|| "agent-mode-count".into()).child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    |_, _, window, _| {
+                        crate::ui::tab_strip::record_pill_count_ink(window.text_style().color)
+                    },
+                )
+                .absolute()
+                .size_0(),
+            );
             count
         });
         let text = h_flex()
@@ -157,6 +179,7 @@ impl Tty59App {
             .child(word)
             .children(tally);
         let pill = Button::new("agent-mode-toggle")
+            .group(PILL_GROUP)
             .accessible_label(accessible)
             .child(text)
             .small()

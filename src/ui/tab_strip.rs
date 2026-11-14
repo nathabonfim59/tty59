@@ -386,6 +386,24 @@ pub(crate) const PILL_PAD_X: f32 = 10.;
 /// The gap between the pill's word and its count, drawn and budgeted as this.
 pub(crate) const PILL_COUNT_GAP: f32 = 6.;
 
+#[cfg(test)]
+std::thread_local! {
+    static PILL_COUNT_INK: std::cell::Cell<Option<gpui::Hsla>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// What the Agents pill's count glyphs inherit as their ink as they are
+/// painted: the test platform has no renderer to read pixels back from.
+#[cfg(test)]
+pub(crate) fn record_pill_count_ink(ink: gpui::Hsla) {
+    PILL_COUNT_INK.with(|cell| cell.set(Some(ink)));
+}
+
+#[cfg(test)]
+fn take_pill_count_ink() -> Option<gpui::Hsla> {
+    PILL_COUNT_INK.with(|cell| cell.take())
+}
+
 /// What the Agents pill's label measures at the current font, size and
 /// language: its words, and the width of one digit. The strip budgets the
 /// pill from these without shaping any text while it is laid out; drawing only
@@ -5242,6 +5260,56 @@ mod overflow_gpui_tests {
         }
         use_locale(&app, &mut vcx, "en", "Agents");
         set_ui_font_size(&app, &mut vcx, UI_FONT_SIZE_DEFAULT);
+    }
+
+    /// The count is muted text on the pill's fill, and at rest and hovered its
+    /// contrast clears 4.5:1. While the pill is pressed its fill reduces the
+    /// muted ink's contrast to 3.3:1, so the count takes the full
+    /// foreground then, as the word beside it already does. Real mouse events
+    /// on the real pill, and the ink the count's glyphs inherit read where
+    /// they are painted.
+    #[gpui::test]
+    fn the_agents_pill_count_takes_the_foreground_while_pressed(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = strip_window(cx, 3, 1440.);
+        agents_wait(&app, &mut vcx, &mut streams, 2);
+        let (muted, foreground) =
+            vcx.update(|_, cx| (cx.theme().muted_foreground, cx.theme().foreground));
+        assert_ne!(
+            muted, foreground,
+            "the two inks must differ to tell them apart"
+        );
+        let ink = |vcx: &mut VisualTestContext| {
+            redraw(vcx);
+            super::take_pill_count_ink().expect("the count's ink was painted")
+        };
+
+        assert_eq!(ink(&mut vcx), muted, "at rest the count is muted");
+
+        let pill = vcx
+            .debug_bounds("agent-mode-pill")
+            .expect("the pill is drawn");
+        vcx.simulate_mouse_move(pill.center(), None::<gpui::MouseButton>, Modifiers::none());
+        assert_eq!(
+            ink(&mut vcx),
+            muted,
+            "hovering the pill leaves the count muted"
+        );
+
+        vcx.simulate_mouse_down(pill.center(), gpui::MouseButton::Left, Modifiers::none());
+        assert_eq!(
+            ink(&mut vcx),
+            foreground,
+            "while the pill is pressed the count takes the foreground"
+        );
+
+        let away = gpui::point(px(5.), px(400.));
+        vcx.simulate_mouse_move(away, None::<gpui::MouseButton>, Modifiers::none());
+        vcx.simulate_mouse_up(away, gpui::MouseButton::Left, Modifiers::none());
+        assert_eq!(ink(&mut vcx), muted, "released, the count is muted again");
+        assert!(
+            !app.update(&mut vcx, |app, _| app.agent_mode_active()),
+            "a press released elsewhere is not a click"
+        );
     }
 }
 
