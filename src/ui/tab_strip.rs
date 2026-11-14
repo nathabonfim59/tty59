@@ -1,7 +1,7 @@
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Axis, Bounds, Context, Edges, FontWeight,
     MouseButton, Pixels, SharedString, Window, canvas, deferred, div, ease_out_quint,
-    linear_color_stop, linear_gradient, prelude::*, px,
+    linear_color_stop, linear_gradient, prelude::*, px, rems,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -25,7 +25,7 @@ use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty59App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::search::SearchTab;
 
@@ -35,6 +35,11 @@ use crate::ui::search::SearchTab;
 pub(crate) const TRANSITION_MS: u64 = 140;
 pub(crate) const REORDER_SLIDE_MS: u64 = TRANSITION_MS;
 const CHIP_GAP: f32 = 6.;
+
+/// The gap between the strip row's own children, as a share of the rem: what
+/// `gap_1p5` has always been, 6px at the default size, and it grows with the
+/// interface font. The row is drawn with it and budgeted with it.
+const STRIP_GAP_REM: f32 = 0.375;
 
 pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
@@ -647,6 +652,174 @@ fn strip_width(viewport_w: Pixels, pad: Edges<Pixels>, reserved: f32, floor: f32
     (viewport_w - pad.left - pad.right - px(reserved)).max(px(floor))
 }
 
+/// How many chips `avail` points hold at their narrowest. At least one, so the
+/// active tab always has a place.
+fn chips_fit(avail: f32) -> usize {
+    ((avail / (CHIP_MIN_W + CHIP_GAP)).floor() as usize).max(1)
+}
+
+/// The hidden-tab count, `+14`: a 28px tile, its type size (a share of the
+/// rem), the slot every drawn glyph sits in, and the inset kept on each side
+/// of the slots.
+///
+/// Each glyph, the `+` and every digit, is centred in a slot of exactly
+/// [`count_slot`], and the tile is as wide as its slots plus the inset, never
+/// narrower than [`COUNT_MIN_W`]. The budget that reserves the tile and the
+/// boxes that are drawn therefore come from the same number, and nothing is
+/// shaped or measured while the strip is laid out.
+const COUNT_H: f32 = 28.;
+const COUNT_MIN_W: f32 = 28.;
+const COUNT_TEXT: f32 = 12. / 16.;
+const COUNT_SLOT_EM: f32 = 0.75;
+const COUNT_INSET: f32 = 2.;
+
+fn count_digits(n: usize) -> usize {
+    n.checked_ilog10().map_or(1, |d| d as usize + 1)
+}
+
+/// The room one glyph of the count takes at `rem` pixels.
+fn count_slot(rem: f32) -> f32 {
+    COUNT_SLOT_EM * COUNT_TEXT * rem
+}
+
+/// Width of the count tile for a count of `digits` digits at `rem` pixels:
+/// one slot for the `+` and one for each digit, widening the tile only once
+/// they outgrow [`COUNT_MIN_W`].
+fn count_w(digits: usize, rem: f32) -> f32 {
+    (2. * COUNT_INSET + (1 + digits) as f32 * count_slot(rem)).max(COUNT_MIN_W)
+}
+
+const COUNT_DIGIT_GLYPHS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+/// The Agents pill at the end of the strip: its text size (a share of the rem,
+/// what the pill has always been drawn at) and the padding either side of its
+/// label. The label is drawn as our own child at exactly this size and with
+/// [`StripMetrics`]' features, so what is measured is what is on screen.
+pub(crate) const PILL_TEXT: f32 = 0.875;
+pub(crate) const PILL_PAD_X: f32 = 10.;
+
+/// What the Agents pill's label measures at the current font, size and
+/// language: its fixed words, and the width of one digit. The strip budgets the
+/// pill from these without shaping any text while it is laid out; drawing only
+/// reads them, and they are measured again when the font, the size or the
+/// language they are for has changed.
+#[derive(Clone)]
+pub(crate) struct StripMetrics {
+    rem: f32,
+    family: SharedString,
+    agents: &'static str,
+    workbench: &'static str,
+    /// The tabular figures the label is drawn with, built once: the measured
+    /// font, the pill and the count tile all take their features from here.
+    features: gpui::FontFeatures,
+    /// "Agents ()" — the label less its digits.
+    agents_fixed: f32,
+    /// One tabular digit, which is every digit's width.
+    digit: f32,
+    workbench_w: f32,
+}
+
+impl StripMetrics {
+    /// Measures now and keeps itself current: the configured size and the
+    /// theme's font are what a change can come through, and a language change
+    /// reaches the app as a notify. Each of them only compares what was
+    /// measured against what is now, and measures again when they differ.
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty59App>) -> Self {
+        cx.observe_in(&cx.entity(), window, |this, _, window, cx| {
+            this.strip_metrics_refresh(window, cx)
+        })
+        .detach();
+        cx.observe_global_in::<Config>(window, |this, window, cx| {
+            this.strip_metrics_refresh(window, cx)
+        })
+        .detach();
+        cx.observe_global_in::<gpui_component::Theme>(window, |this, window, cx| {
+            this.strip_metrics_refresh(window, cx)
+        })
+        .detach();
+        Self::measure(window, cx)
+    }
+
+    fn measure(window: &Window, cx: &App) -> Self {
+        let rem = cx.global::<Config>().ui_font_size;
+        let features = crate::ui::theme::tabular_figures();
+        let font = gpui::Font {
+            family: cx.theme().font_family.clone(),
+            features: features.clone(),
+            fallbacks: None,
+            weight: FontWeight::NORMAL,
+            style: gpui::FontStyle::Normal,
+        };
+        let size = rem * PILL_TEXT;
+        let width = |text: &str| measure_text(window.text_system(), &font, size, text).ceil();
+        let (agents, workbench) = (t(L10nKey::VisionAgents), t(L10nKey::VisionWorkbench));
+        Self {
+            rem,
+            family: font.family.clone(),
+            agents,
+            workbench,
+            features,
+            agents_fixed: width(&format!("{agents} ()")),
+            digit: width("0"),
+            workbench_w: width(workbench),
+        }
+    }
+
+    fn is_for(&self, cx: &App) -> bool {
+        self.rem == cx.global::<Config>().ui_font_size
+            && self.family == cx.theme().font_family
+            && self.agents == t(L10nKey::VisionAgents)
+            && self.workbench == t(L10nKey::VisionWorkbench)
+    }
+
+    pub(crate) fn features(&self) -> gpui::FontFeatures {
+        self.features.clone()
+    }
+
+    /// The pill's width with `count` agents needing attention (`Agents (3)`),
+    /// or with the Workbench label while the agent view is up.
+    pub(crate) fn pill_w(&self, workbench: bool, count: usize) -> f32 {
+        2. * PILL_PAD_X
+            + match workbench {
+                true => self.workbench_w,
+                false => self.agents_fixed + count_digits(count) as f32 * self.digit,
+            }
+    }
+}
+
+impl Tty59App {
+    fn strip_metrics_refresh(&mut self, window: &Window, cx: &App) {
+        if !self.strip_metrics.is_for(cx) {
+            self.strip_metrics = StripMetrics::measure(window, cx);
+        }
+    }
+}
+
+/// What the count tile takes out of the chips' `avail` when `total` chips do
+/// not all fit: the tile and the strip row's gap before it, or nothing when
+/// they fit.
+///
+/// The count's width depends on its digits and the digits on how many chips
+/// the rest of the room holds, so settle on the fewest digits it can have:
+/// start from one and widen while the count it leaves needs more. Widening
+/// only ever takes chips away, so the digits it stops at are exactly the ones
+/// the count that is drawn has, and more room never hides more tabs.
+fn count_reserve(avail: f32, total: usize, rem: f32) -> f32 {
+    if total <= chips_fit(avail) {
+        return 0.;
+    }
+    let reserve = |digits| STRIP_GAP_REM * rem + count_w(digits, rem);
+    let mut digits = 1;
+    loop {
+        let kept = chips_fit(avail - reserve(digits)).min(total - 1);
+        let needed = count_digits(total - kept);
+        if needed <= digits {
+            return reserve(digits);
+        }
+        digits = needed;
+    }
+}
+
 /// The run of chips to draw when they cannot all fit.
 ///
 /// The row clips what overflows, so past a certain tab count the chips at the
@@ -655,7 +828,7 @@ fn strip_width(viewport_w: Pixels, pad: Edges<Pixels>, reserved: f32, floor: f32
 /// first tab until the active one would fall off the right edge, then move it
 /// by as little as it takes to hold the active chip.
 fn visible_chips(order: &[usize], active: usize, avail: f32) -> Vec<usize> {
-    let fits = ((avail / (CHIP_MIN_W + CHIP_GAP)).floor() as usize).max(1);
+    let fits = chips_fit(avail);
     if order.len() <= fits {
         return order.to_vec();
     }
@@ -944,12 +1117,11 @@ struct NewTabMenu {
     /// Saved host, its display name, and the `user@host:port` beside it —
     /// empty when the name already says it.
     hosts: Vec<(uuid::Uuid, SharedString, SharedString)>,
-    /// Agents the menu names — at most [`MENU_AGENTS`], and only ones that
-    /// have actually been run.
+    /// Agents the menu names — at most [`MENU_AGENTS`]: the ones actually
+    /// run, or the first offered while nothing has run yet.
     agents: Vec<CLIAgent>,
     /// The window can offer agents the menu does not name, so the section
-    /// closes with a row into the palette. Also the reason the section exists
-    /// when nothing has been run yet: the installed agents are all in there.
+    /// closes with a row into the palette.
     more_agents: bool,
 }
 
@@ -1076,8 +1248,9 @@ impl NewTabMenu {
 
         // A peer of Local and SSH, and absent when this machine has no agent
         // to offer — an empty heading would be a section about nothing. The
-        // rows are the ones actually run; the seam holds the rest, already
-        // filtered, the way Other Shells does.
+        // rows are the ones actually run — or the first few offered, while
+        // nothing has run yet; the seam holds the rest, already filtered,
+        // the way Other Shells does.
         if !self.agents.is_empty() || self.more_agents {
             menu = menu
                 .item(PopupMenuItem::separator())
@@ -1173,24 +1346,30 @@ fn menu_shells<'a>(
 }
 
 /// The agents the menu names, off the front of the frecency-ordered list
-/// quick launch already built: only those that have actually been run, at
-/// most [`MENU_AGENTS`].
+/// quick launch already built: those that have actually been run, at most
+/// [`MENU_AGENTS`].
 ///
-/// An agent nobody has run is not named just because it is installed and
-/// there is room. A zero count is not a use either — launching stamps
-/// recency before the pane reports the agent, and the count is what says it
-/// really ran. `offered` is already most-used-first; this does not reorder.
+/// A zero count is not a use — launching stamps recency before the pane
+/// reports the agent, and the count is what says it really ran. But when
+/// nothing offered has run yet the first [`MENU_AGENTS`] are named anyway:
+/// a fresh profile's menu that is only a heading and the seam makes the
+/// first launch take a menu, a search scope and a pick. `offered` is
+/// already most-used-first; this does not reorder.
 fn menu_agents(
     offered: &[CLIAgent],
     usage: &std::collections::HashMap<String, crate::core::config::ProfileUsage>,
     now: u64,
 ) -> Vec<CLIAgent> {
-    offered
+    let named: Vec<CLIAgent> = offered
         .iter()
         .copied()
         .filter(|agent| usage.get(agent.slug()).is_some_and(|u| u.score(now) > 0.0))
         .take(MENU_AGENTS)
-        .collect()
+        .collect();
+    match named.is_empty() {
+        true => offered.iter().copied().take(MENU_AGENTS).collect(),
+        false => named,
+    }
 }
 
 /// The hosts the menu names, in the order they were handed over — frecency,
@@ -2355,8 +2534,29 @@ impl Tty59App {
         } else {
             document_w
         };
-        let fixed_w = 3. * CHIP_GAP + crate::ui::app::TILE_SIZE + corner_w;
+        // One scan of the panes a frame: the pill's width, which the strip
+        // budgets, and the number the pill says come from the same count.
+        let attention = self
+            .agent_vision
+            .state
+            .attention_count(&self.agent_vision.panes, &self.agent_vision.reads)
+            .total();
+        let pill_w = self.strip_metrics.pill_w(agent_mode, attention);
+        let rem = window.rem_size().as_f32();
+        // The row's gaps: chips to New Tab, New Tab to the spacer, the spacer
+        // to the pill, and the pill to the trailing chrome.
+        let fixed_w = 4. * STRIP_GAP_REM * rem + crate::ui::app::TILE_SIZE + pill_w + corner_w;
         let chips_avail = (strip_w - px(fixed_w + GRAB_HANDLE_W)).max(px(80.));
+        // The hidden-tab count sits beside the chips, so what it takes comes
+        // off their room before anything is drawn. Never below one chip.
+        let count_room = match show_chips {
+            true => count_reserve(f32::from(chips_avail), self.tabs.len(), rem),
+            false => 0.,
+        };
+        let chips_avail = match count_room > 0. {
+            true => (chips_avail - px(count_room)).max(px(CHIP_MIN_W)),
+            false => chips_avail,
+        };
         let mut chips = h_flex()
             .items_center()
             .gap(px(CHIP_GAP))
@@ -2384,7 +2584,9 @@ impl Tty59App {
             }
             None => (0..self.tabs.len()).collect(),
         };
-        let display = visible_chips(&display, active, f32::from(chips_avail));
+        let shown = visible_chips(&display, active, f32::from(chips_avail));
+        let hidden = display.len() - shown.len();
+        let display = shown;
 
         for i in display {
             if !show_chips {
@@ -2639,6 +2841,64 @@ impl Tty59App {
             .occlude()
             .flex_shrink_0()
             .child(self.new_tab_button("tab-add", cx));
+        #[cfg(test)]
+        let add_button = add_button.debug_selector(|| "tab-strip-new".into());
+
+        // What the chips leave out, said on screen. It opens the same recent
+        // tabs list Ctrl+Tab raises, so the hidden tabs are one click away.
+        let count_tile = (show_chips && hidden > 0).then(|| {
+            let theme = cx.theme();
+            let label = SharedString::from(t_plural(L10nKey::TabStripHiddenTabs, hidden, &[]));
+            let slot = px(count_slot(rem));
+            let glyph = move |index: usize, text: &'static str| {
+                let cell = div()
+                    .flex_none()
+                    .w(slot)
+                    .flex()
+                    .justify_center()
+                    .child(text);
+                #[cfg(test)]
+                let cell = cell.debug_selector(move || format!("tab-strip-overflow-glyph-{index}"));
+                #[cfg(not(test))]
+                let _ = index;
+                cell
+            };
+            let tile = div()
+                .id("tab-strip-overflow")
+                .role(gpui::Role::Button)
+                .aria_label(label.clone())
+                .occlude()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(count_w(count_digits(hidden), rem)))
+                .h(px(COUNT_H))
+                .rounded_lg()
+                .text_size(rems(COUNT_TEXT))
+                .font_features(self.strip_metrics.features())
+                .text_color(theme.muted_foreground)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                // The press is kept from the title bar under it, like the
+                // chips', so a click here is never the start of a window drag.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.tab_switch(true, window, cx);
+                    // A click may land while a modifier is down; that
+                    // modifier coming up must not commit the list.
+                    this.switcher_release_hold(cx);
+                }))
+                .child(glyph(0, "+"))
+                .children(hidden.to_string().bytes().enumerate().map(|(at, digit)| {
+                    glyph(at + 1, COUNT_DIGIT_GLYPHS[usize::from(digit - b'0')])
+                }));
+            #[cfg(test)]
+            let tile = tile.debug_selector(move || format!("tab-strip-overflow-{hidden}"));
+            tile
+        });
 
         // Same bargain the rail's own tiles keep when the Appearance switch is
         // on: present in the layout, painted only while the pointer is on the
@@ -2807,7 +3067,7 @@ impl Tty59App {
             .id("tab-strip")
             .relative()
             .items_center()
-            .gap_1p5()
+            .gap(rems(STRIP_GAP_REM))
             .when(show_chips, |this| this.w(strip_w))
             .when(!show_chips, |this| this.w_full())
             .pl_0()
@@ -2818,9 +3078,10 @@ impl Tty59App {
                 this.child(self.agent_view_switch(cx))
             })
             .child(chips)
+            .when_some(count_tile, |this, tile| this.child(tile))
             .when(show_chips, move |this| this.child(add_button))
             .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
-            .child(self.agent_mode_button(cx))
+            .child(self.agent_mode_button(attention, cx))
             .when_some(right_chrome, |this, chrome| match chrome_band_w {
                 Some(w) => this.child(
                     h_flex()
@@ -4319,20 +4580,550 @@ mod tests {
         );
         assert!(named.len() < offered.len(), "the rest are the seam row's");
 
+        // Nothing has run yet: the menu still leads with the first agents
+        // the machine offers, and the seam covers the rest — a heading above
+        // a single "Other Agents…" makes launching the first agent take a
+        // menu, a search scope and a pick.
         let none = used(&[]);
         let named = menu_agents(&offered, &none, now);
-        assert!(named.is_empty(), "installed but never run is not named");
+        assert_eq!(
+            named,
+            vec![CLIAgent::Claude, CLIAgent::Amp, CLIAgent::Codex],
+            "a fresh profile names the first offered agents, in offered order"
+        );
         assert!(
             named.len() < offered.len(),
-            "so the section is only the seam"
+            "the rest remain the seam row's"
         );
+        // A record for an agent this machine does not offer is no use either.
+        let stale = used(&[("goose", 9, now)]);
+        assert_eq!(menu_agents(&offered, &stale, now), named);
+
+        // Offered fewer than the cap, every one is named — no seam row.
+        let few = [CLIAgent::Claude, CLIAgent::Codex];
+        let named = menu_agents(&few, &none, now);
+        assert_eq!(named, few);
+        assert_eq!(named.len(), few.len());
+
+        assert!(menu_agents(&[], &none, now).is_empty());
         assert!(menu_agents(&[], &usage, now).is_empty());
 
         // Every offered agent has been run and they fit: no seam row.
-        let few = [CLIAgent::Claude, CLIAgent::Codex];
         let two = used(&[("claude", 4, now), ("codex", 1, now)]);
         let named = menu_agents(&few, &two, now);
         assert_eq!(named, vec![CLIAgent::Claude, CLIAgent::Codex]);
         assert_eq!(named.len(), few.len());
+    }
+}
+
+/// The top strip through the real window: a harness app with the tab bar on
+/// top, resized, drawn, and read back from what was painted (`strip_slots` is
+/// written from paint, so a chip that is not drawn leaves nothing in it).
+#[cfg(test)]
+mod overflow_gpui_tests {
+    use crate::core::config::{Config, TabBarPosition, UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX};
+    use crate::ui::app::{Tty59App, test_window::harness_with_tabs};
+    use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext, px, size};
+    use gpui_component::ActiveTheme as _;
+
+    /// `windows::MIN_SIZE.0`: the narrowest window the app lets anyone drag to.
+    const NARROWEST_WINDOW: f32 = 720.;
+
+    /// The control carries the count it draws in its selector, so a test can
+    /// compare what is on screen against the chips that were actually left out.
+    /// `debug_bounds` wants a `&'static str`, so the supported counts are listed
+    /// once instead of leaking a string per lookup.
+    const COUNT_SELECTORS: [&str; 24] = [
+        "tab-strip-overflow-1",
+        "tab-strip-overflow-2",
+        "tab-strip-overflow-3",
+        "tab-strip-overflow-4",
+        "tab-strip-overflow-5",
+        "tab-strip-overflow-6",
+        "tab-strip-overflow-7",
+        "tab-strip-overflow-8",
+        "tab-strip-overflow-9",
+        "tab-strip-overflow-10",
+        "tab-strip-overflow-11",
+        "tab-strip-overflow-12",
+        "tab-strip-overflow-13",
+        "tab-strip-overflow-14",
+        "tab-strip-overflow-15",
+        "tab-strip-overflow-16",
+        "tab-strip-overflow-17",
+        "tab-strip-overflow-18",
+        "tab-strip-overflow-19",
+        "tab-strip-overflow-20",
+        "tab-strip-overflow-21",
+        "tab-strip-overflow-22",
+        "tab-strip-overflow-23",
+        "tab-strip-overflow-24",
+    ];
+
+    fn count_selector(hidden: usize) -> &'static str {
+        COUNT_SELECTORS[hidden - 1]
+    }
+
+    /// The painted slot of each glyph of the count (`+`, then each digit), by
+    /// position. `debug_bounds` wants `&'static str`, so they are listed once.
+    const GLYPH_SELECTORS: [&str; 3] = [
+        "tab-strip-overflow-glyph-0",
+        "tab-strip-overflow-glyph-1",
+        "tab-strip-overflow-glyph-2",
+    ];
+
+    /// The count's type is 12px at the default 16px rem.
+    const COUNT_TEXT_OF_REM: f32 = 12. / 16.;
+
+    /// Every glyph of the count sits inside its own painted slot, in the tile,
+    /// and the widest glyph the font can put there, shaped by the real text
+    /// system, fits that slot: no digit clips or runs into its neighbour at
+    /// this interface font size.
+    fn assert_glyphs_fit_their_slots(
+        vcx: &mut VisualTestContext,
+        tile: Bounds<Pixels>,
+        counted: usize,
+        ui_font_size: f32,
+        what: &str,
+    ) {
+        let glyphs = 1 + counted.to_string().len();
+        let slots: Vec<Bounds<Pixels>> = (0..glyphs)
+            .map(|at| {
+                vcx.debug_bounds(GLYPH_SELECTORS[at])
+                    .unwrap_or_else(|| panic!("{what}: glyph {at} of +{counted} was not painted"))
+            })
+            .collect();
+        let same = |a: Pixels, b: Pixels| f32::from(a - b).abs() < 0.01;
+        for (at, slot) in slots.iter().enumerate() {
+            assert!(
+                same(slot.size.width, slots[0].size.width),
+                "{what}: +{counted} glyph {at} has its own width: {:?} vs {:?}",
+                slot.size.width,
+                slots[0].size.width
+            );
+            assert!(
+                slot.left() >= tile.left() && slot.right() <= tile.right(),
+                "{what}: +{counted} glyph {at} sticks out of its tile"
+            );
+            if at > 0 {
+                assert!(
+                    slots[at - 1].right() <= slot.left() + px(0.01),
+                    "{what}: +{counted} glyphs {} and {at} overlap",
+                    at - 1
+                );
+            }
+        }
+        let widest = vcx.update(|window, cx| {
+            let font = gpui::Font {
+                family: cx.theme().font_family.clone(),
+                features: crate::ui::theme::tabular_figures(),
+                fallbacks: None,
+                weight: gpui::FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+            };
+            let size = ui_font_size * COUNT_TEXT_OF_REM;
+            ["+", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+                .into_iter()
+                .map(|glyph| {
+                    crate::ui::tab_strip::measure_text(window.text_system(), &font, size, glyph)
+                })
+                .fold(0., f32::max)
+        });
+        assert!(
+            widest <= f32::from(slots[0].size.width),
+            "{what}: +{counted} has glyphs {widest}px wide in {:?} slots at {ui_font_size}px",
+            slots[0].size.width
+        );
+    }
+
+    /// The two languages the strip is drawn in here, by registry code, with
+    /// what each calls the Agents pill: its label, and so its width, is the one
+    /// thing in the row that changes with them.
+    const LOCALES: [(&str, &str); 2] = [("en", "Agents"), ("ru-RU", "Агенты")];
+
+    /// `set_locale` falls back to English for a code it does not know, so the
+    /// language is checked by what it says, not by what was asked for.
+    fn use_locale(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, locale: &str, agents: &str) {
+        assert!(
+            crate::ui::i18n::find_language(locale).is_some(),
+            "{locale} is not a supported language code"
+        );
+        crate::ui::i18n::set_locale(locale);
+        assert_eq!(
+            crate::ui::i18n::t(crate::ui::i18n::L10nKey::VisionAgents),
+            agents,
+            "the strip is not drawn in {locale}"
+        );
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        redraw(vcx);
+    }
+
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn resize(vcx: &mut VisualTestContext, width: f32) {
+        vcx.simulate_resize(size(px(width), px(700.)));
+        redraw(vcx);
+    }
+
+    fn set_ui_font_size(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, ui_font_size: f32) {
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.ui_font_size = ui_font_size;
+            cx.set_global(cfg);
+        });
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        redraw(vcx);
+    }
+
+    fn strip_window(
+        cx: &mut TestAppContext,
+        tabs: usize,
+        width: f32,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, tabs);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.tab_bar_position = TabBarPosition::Top;
+            cx.set_global(cfg);
+        });
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        resize(&mut vcx, width);
+        (app, vcx, streams)
+    }
+
+    /// Indices of the chips the strip actually painted.
+    fn drawn(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<usize> {
+        app.update(vcx, |app, _| {
+            app.strip_slots
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter(|(_, bounds)| bounds.size.width > px(0.))
+                .map(|(i, _)| i)
+                .collect()
+        })
+    }
+
+    /// The overflow control, whatever count it carries.
+    fn find_tile(vcx: &mut VisualTestContext, tabs: usize) -> Option<(usize, Bounds<Pixels>)> {
+        (1..=tabs).find_map(|n| vcx.debug_bounds(count_selector(n)).map(|b| (n, b)))
+    }
+
+    /// Right edge of the last painted chip.
+    fn last_chip_right(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        shown: &[usize],
+    ) -> Pixels {
+        app.update(vcx, |app, _| {
+            let slots = app.strip_slots.borrow();
+            let right = shown
+                .iter()
+                .map(|&i| slots[i].right())
+                .fold(px(0.), |a, b| if b > a { b } else { a });
+            right
+        })
+    }
+
+    /// Where the strip's own controls sit beside the chips: the whole row is
+    /// the chips, the count when there is one, New Tab, then the Agents pill,
+    /// and none of them may stand on another or on the window's edge. The
+    /// pill is not budgeted by the chips' own arithmetic, so a strip that
+    /// forgets it shrinks the chips' row until the last chip overlaps what
+    /// follows it.
+    fn assert_row_does_not_overlap(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        shown: &[usize],
+        width: f32,
+        what: &str,
+    ) {
+        let new_tab = vcx
+            .debug_bounds("tab-strip-new")
+            .expect("the New Tab button is drawn");
+        let pill = vcx
+            .debug_bounds("agent-mode-pill")
+            .expect("the Agents pill is drawn");
+        let last_chip = last_chip_right(app, vcx, shown);
+        assert!(
+            last_chip <= new_tab.left(),
+            "{what}: the last chip overlaps New Tab at {width}px: chip ends {last_chip:?}, \
+             New Tab starts {:?}",
+            new_tab.left()
+        );
+        assert!(
+            new_tab.right() <= pill.left(),
+            "{what}: New Tab overlaps the Agents pill at {width}px"
+        );
+        assert!(
+            pill.right() <= px(width),
+            "{what}: the Agents pill is pushed out of the window at {width}px"
+        );
+    }
+
+    /// Whatever the strip drew, the count is exact and sits between the last
+    /// chip and the New Tab button, which stays inside the window.
+    fn assert_count_is_exact_and_paid_for(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        tabs: usize,
+        width: f32,
+        what: &str,
+    ) -> Option<(usize, Bounds<Pixels>)> {
+        let shown = drawn(app, vcx);
+        let hidden = tabs - shown.len();
+        let tile = find_tile(vcx, tabs);
+        assert_row_does_not_overlap(app, vcx, &shown, width, what);
+        if hidden == 0 {
+            assert_eq!(tile, None, "{what}: everything fits at {width}px, no count");
+            return None;
+        }
+        let (counted, bounds) =
+            tile.unwrap_or_else(|| panic!("{what}: {hidden} tabs hidden at {width}px, no count"));
+        assert_eq!(counted, hidden, "{what}: the count is off at {width}px");
+        let last_chip = last_chip_right(app, vcx, &shown);
+        assert!(
+            last_chip <= bounds.left(),
+            "{what}: the count overlaps the last chip at {width}px: chip ends {last_chip:?}, \
+             count starts {:?}",
+            bounds.left()
+        );
+        let new_tab = vcx
+            .debug_bounds("tab-strip-new")
+            .expect("the New Tab button is drawn");
+        assert!(
+            bounds.right() <= new_tab.left(),
+            "{what}: the count overlaps the New Tab button at {width}px"
+        );
+        assert!(
+            new_tab.right() <= px(width),
+            "{what}: the New Tab button was pushed out of the window at {width}px"
+        );
+        Some((counted, bounds))
+    }
+
+    /// The reported bug: 24 tabs in a 1000px window, a run of them drawn and
+    /// nothing on screen saying how many were left out. The same strip with
+    /// three tabs is the control: everything fits, so there is no count.
+    #[gpui::test]
+    fn tabs_that_do_not_fit_are_counted_on_screen(cx: &mut TestAppContext) {
+        let (few, mut few_vcx, _few_streams) = strip_window(cx, 3, 1000.);
+        assert_eq!(drawn(&few, &mut few_vcx), vec![0, 1, 2]);
+        assert_eq!(find_tile(&mut few_vcx, 3), None, "three tabs need no count");
+        assert!(few_vcx.debug_bounds("tab-strip-new").is_some());
+
+        let (app, mut vcx, _streams) = strip_window(cx, 24, 1000.);
+        let shown = drawn(&app, &mut vcx);
+        assert!(
+            !shown.is_empty() && shown.len() < 24,
+            "the window has to be narrow enough to clip some tabs: drew {shown:?}"
+        );
+        let hidden = 24 - shown.len();
+        assert!(
+            vcx.debug_bounds(count_selector(hidden)).is_some(),
+            "{hidden} tabs are not drawn and nothing carries that count \
+             (found {:?})",
+            find_tile(&mut vcx, 24).map(|(n, _)| n)
+        );
+    }
+
+    /// Thresholds, from the narrowest supported window to one that holds every
+    /// chip, at the default and at the largest interface font. The count is
+    /// exact, never grows with more room, and the control is paid for out of
+    /// the chips' width instead of pushing `+` out; the control itself grows
+    /// with the interface font and with a second digit.
+    #[gpui::test]
+    fn the_count_is_exact_and_paid_for_at_every_width(cx: &mut TestAppContext) {
+        const TABS: usize = 20;
+        let (app, mut vcx, _streams) = strip_window(cx, TABS, NARROWEST_WINDOW);
+
+        // tile width by [font size, digits - 1]
+        let mut tile_w = [[None::<f32>; 2]; 2];
+        // each locale x font x digit count is proved once, not at every width
+        let mut glyphs_checked = [[[false; 2]; 2]; 2];
+        for (locale_at, (locale, agents)) in LOCALES.into_iter().enumerate() {
+            use_locale(&app, &mut vcx, locale, agents);
+            for (font, ui_font_size) in [UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX]
+                .into_iter()
+                .enumerate()
+            {
+                set_ui_font_size(&app, &mut vcx, ui_font_size);
+                let (mut saw_all_fit, mut saw_hidden) = (false, false);
+                let mut previous_hidden = usize::MAX;
+                let mut width = NARROWEST_WINDOW;
+                while width <= 2700. {
+                    resize(&mut vcx, width);
+                    let hidden = TABS - drawn(&app, &mut vcx).len();
+                    assert!(
+                        hidden <= previous_hidden,
+                        "{locale} {ui_font_size}px font: more room hid more tabs at {width}px: \
+                         {hidden} after {previous_hidden}"
+                    );
+                    previous_hidden = hidden;
+                    let what = format!("{locale} {ui_font_size}px font");
+                    match assert_count_is_exact_and_paid_for(&app, &mut vcx, TABS, width, &what) {
+                        None => saw_all_fit = true,
+                        Some((counted, bounds)) => {
+                            saw_hidden = true;
+                            let digits = counted.to_string().len() - 1;
+                            tile_w[font][digits] = Some(f32::from(bounds.size.width));
+                            if !std::mem::replace(
+                                &mut glyphs_checked[locale_at][font][digits],
+                                true,
+                            ) {
+                                assert_glyphs_fit_their_slots(
+                                    &mut vcx,
+                                    bounds,
+                                    counted,
+                                    ui_font_size,
+                                    &what,
+                                );
+                            }
+                        }
+                    }
+                    width += 13.;
+                }
+                assert!(
+                    saw_all_fit && saw_hidden,
+                    "{locale} {ui_font_size}px font: the sweep has to cross the point where \
+                     everything fits"
+                );
+            }
+        }
+        use_locale(&app, &mut vcx, "en", "Agents");
+
+        let w = |font: usize, digits: usize| {
+            tile_w[font][digits].unwrap_or_else(|| panic!("no tile with {} digits", digits + 1))
+        };
+        for digits in 0..2 {
+            assert!(
+                w(1, digits) > w(0, digits),
+                "the tile ignores the interface font: {} vs {} px with {} digit(s)",
+                w(1, digits),
+                w(0, digits),
+                digits + 1
+            );
+        }
+        assert!(
+            w(0, 1) >= w(0, 0) && w(1, 1) > w(1, 0),
+            "a second digit has no room: {:?}",
+            tile_w
+        );
+    }
+
+    /// The active tab is one of the drawn chips beside the count, wherever it
+    /// sits, including after the strip is reordered under it and at the
+    /// narrowest supported window.
+    #[gpui::test]
+    fn the_active_tab_stays_drawn_beside_the_count(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = strip_window(cx, 24, 1000.);
+
+        for (locale, agents) in LOCALES {
+            use_locale(&app, &mut vcx, locale, agents);
+            for (width, target) in [
+                (1440., 23usize),
+                (1000., 23),
+                (1000., 11),
+                (1000., 0),
+                (NARROWEST_WINDOW, 17),
+            ] {
+                resize(&mut vcx, width);
+                app.update_in(&mut vcx, |app, window, cx| app.activate(target, window, cx));
+                redraw(&mut vcx);
+                let shown = drawn(&app, &mut vcx);
+                assert!(
+                    shown.contains(&target),
+                    "{locale}: tab {target} is not drawn at {width}px: {shown:?}"
+                );
+                assert_count_is_exact_and_paid_for(&app, &mut vcx, 24, width, locale)
+                    .expect("24 tabs overflow");
+            }
+
+            app.update_in(&mut vcx, |app, _, cx| {
+                let order: Vec<usize> = (0..app.tabs.len()).rev().collect();
+                app.apply_tab_order(&order, cx);
+            });
+            redraw(&mut vcx);
+            let shown = drawn(&app, &mut vcx);
+            let active = app.update(&mut vcx, |app, _| app.active);
+            assert!(
+                shown.contains(&active),
+                "{locale} reordered: {active} not in {shown:?}"
+            );
+            assert_count_is_exact_and_paid_for(&app, &mut vcx, 24, NARROWEST_WINDOW, locale)
+                .expect("24 tabs overflow");
+        }
+        use_locale(&app, &mut vcx, "en", "Agents");
+    }
+
+    /// A real click on the count raises the existing recent-tabs list, the
+    /// way the keyboard does but with no modifier held, so the list stays up
+    /// for the pointer. Escape backs out with the active tab untouched, Enter
+    /// lands on the tab used before this one, and Ctrl+Tab keeps walking the
+    /// same list afterwards.
+    #[gpui::test]
+    fn clicking_the_count_opens_the_recent_tabs_list(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = strip_window(cx, 24, 1000.);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate(20, window, cx);
+            app.activate(5, window, cx);
+        });
+        redraw(&mut vcx);
+
+        let (_, tile) = find_tile(&mut vcx, 24).expect("24 tabs overflow a 1000px strip");
+        vcx.simulate_click(tile.center(), Modifiers::none());
+        redraw(&mut vcx);
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_some(), "the click opens the list");
+        });
+
+        vcx.simulate_modifiers_change(Modifiers::control());
+        vcx.simulate_modifiers_change(Modifiers::none());
+        app.update(&mut vcx, |app, _| {
+            assert!(
+                app.switcher.is_some(),
+                "a modifier going up must not commit a list the mouse opened"
+            );
+        });
+
+        vcx.simulate_keystrokes("escape");
+        redraw(&mut vcx);
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_none(), "Escape closes the list");
+            assert_eq!(app.active, 5, "backing out leaves the active tab alone");
+        });
+
+        let (_, tile) = find_tile(&mut vcx, 24).expect("the count is still there");
+        vcx.simulate_click(tile.center(), Modifiers::none());
+        redraw(&mut vcx);
+        vcx.simulate_keystrokes("enter");
+        redraw(&mut vcx);
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_none(), "Enter picks a tab and closes it");
+            assert_eq!(
+                app.active, 20,
+                "the recent-tabs list leads with the last tab used"
+            );
+        });
+
+        vcx.simulate_modifiers_change(Modifiers::control());
+        app.update_in(&mut vcx, |app, window, cx| app.tab_switch(true, window, cx));
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_some(), "Ctrl+Tab raises the list");
+        });
+        vcx.simulate_modifiers_change(Modifiers::none());
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_none());
+            assert_eq!(app.active, 5, "releasing commits the previously used tab");
+        });
     }
 }

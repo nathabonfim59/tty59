@@ -112,6 +112,33 @@ const SWITCH_LEAD: f32 = 8.;
 const SWITCH_CELL_RADIUS: f32 = 5.;
 const SWITCH_TRACK_RADIUS: f32 = 7.;
 
+/// What a two-cell switch takes in a header row: its lead, the track's edge on
+/// both sides, the two cells and the gap between them.
+pub(crate) const fn layout_switch_w() -> f32 {
+    SWITCH_LEAD + 2. * SWITCH_EDGE + 2. * SWITCH_CELL_W + SWITCH_GAP
+}
+
+/// The filled editor's terminal pill: its padding, its badge, the gap between
+/// badge and name, and the divider that follows it.
+const TERMINAL_PILL_PAD_L: f32 = 8.;
+const TERMINAL_PILL_PAD_R: f32 = 10.;
+const TERMINAL_PILL_BADGE: f32 = 16.;
+const TERMINAL_PILL_GAP: f32 = 7.;
+const TERMINAL_DIVIDER_MX: f32 = 6.;
+
+/// The pill and its divider with the name at [`HEADER_CELL_MAX_W`], the most
+/// they take. The name is as wide as the terminal's title, so a header
+/// budgeting for it has to assume the longest.
+pub(crate) fn terminal_button_max_w(window: &Window) -> f32 {
+    TERMINAL_PILL_PAD_L
+        + TERMINAL_PILL_BADGE
+        + TERMINAL_PILL_GAP
+        + HEADER_CELL_MAX_W
+        + TERMINAL_PILL_PAD_R
+        + 2. * TERMINAL_DIVIDER_MX
+        + crate::ui::theme::hairline(window).as_f32()
+}
+
 /// Which cell a document's layout switch raises: the box the surface is
 /// actually in, which a window too narrow to seat a column decides rather than
 /// the config does. A switch that raised what was *asked* would have the raised
@@ -226,6 +253,7 @@ pub(crate) fn switch_track(
     let sf = cx.global::<crate::ui::presets::Surfaces>().window;
     h_flex()
         .id(id)
+        .when(cfg!(test), |d| d.debug_selector(move || id.into()))
         .occlude()
         .flex_none()
         .ml(px(SWITCH_LEAD))
@@ -321,9 +349,9 @@ impl Tty59App {
                         .aria_label(format!("{}: {name}", t(L10nKey::DocumentDock)))
                         .occlude()
                         .h(px(HEADER_CELL_H))
-                        .pl(px(8.))
-                        .pr(px(10.))
-                        .gap(px(7.))
+                        .pl(px(TERMINAL_PILL_PAD_L))
+                        .pr(px(TERMINAL_PILL_PAD_R))
+                        .gap(px(TERMINAL_PILL_GAP))
                         .items_center()
                         .rounded(px(HEADER_CELL_RADIUS))
                         .text_size(rems(HEADER_CELL_TEXT))
@@ -332,7 +360,7 @@ impl Tty59App {
                         .child(
                             div()
                                 .flex_none()
-                                .size(px(16.))
+                                .size(px(TERMINAL_PILL_BADGE))
                                 .rounded_full()
                                 .flex()
                                 .items_center()
@@ -364,7 +392,7 @@ impl Tty59App {
                         .flex_none()
                         .w(crate::ui::theme::hairline(window))
                         .h(px(16.))
-                        .mx(px(6.))
+                        .mx(px(TERMINAL_DIVIDER_MX))
                         .bg(theme.border),
                 )
                 .into_any_element(),
@@ -382,6 +410,20 @@ impl Tty59App {
             .get(self.active)
             .and_then(|t| t.document_layout)
             .unwrap_or_else(|| cx.global::<Config>().document_layout)
+    }
+
+    /// Where the docked header sits. Everywhere but macOS the title bar spans
+    /// the workspace and leaves the strip above the column empty, so the
+    /// header goes up into it; on macOS the column already reaches the top of
+    /// the window and its own first row lands there. A code editor whose
+    /// share of that strip cannot hold its controls and the front file keeps
+    /// its header in the column instead, for as long as that is so. Nothing
+    /// is saved: the layout asked for stays the one asked for.
+    pub(crate) fn docked_document_chrome(&self, window: &Window, cx: &gpui::App) -> DocumentChrome {
+        match cfg!(target_os = "macos") || self.editor_header_inline(window, cx) {
+            true => DocumentChrome::Dock,
+            false => DocumentChrome::DockHoisted,
+        }
     }
 
     /// Which of the two surfaces the docked column shows.
@@ -613,12 +655,14 @@ impl Tty59App {
                 let container = container.clone();
                 let ratio_cell = self.document_ratio.clone();
                 let dragging = self.document_dragging.clone();
+                let app = cx.entity().downgrade();
                 move |_bounds, _state, window, _cx| {
                     window.on_mouse_event({
                         let container = container.clone();
                         let ratio_cell = ratio_cell.clone();
                         let dragging = dragging.clone();
-                        move |ev: &MouseMoveEvent, _phase, window, _cx| {
+                        let app = app.clone();
+                        move |ev: &MouseMoveEvent, _phase, window, cx| {
                             if !dragging.get() || body <= 0. {
                                 return;
                             }
@@ -627,7 +671,12 @@ impl Tty59App {
                             };
                             let right = b.origin.x + b.size.width;
                             let raw = (right - ev.position.x).as_f32();
-                            ratio_cell.set(dragged_ratio(body, raw));
+                            let ratio = dragged_ratio(body, raw);
+                            // The editor header's fit follows the column's
+                            // width; telling the app is what lets it re-judge.
+                            if ratio_cell.replace(ratio) != ratio {
+                                app.update(cx, |_, cx| cx.notify()).ok();
+                            }
                             window.refresh();
                         }
                     });

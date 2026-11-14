@@ -549,6 +549,33 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_profile_is_offered_the_common_agents_first() {
+        // `installed_on` scans in `CLIAgent::ALL` order, and everything a
+        // fresh profile sees — the New Tab menu's named rows, the palette's
+        // Agents section — shows them in that order. A machine with the
+        // usual suspects installed should meet them before the niche ones.
+        let dir = tempfile::TempDir::new().unwrap();
+        for name in ["claude", "codex", "gemini", "traecli"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "#!/bin/sh\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        assert_eq!(
+            installed_on(dir.path().as_os_str(), &HashMap::new()),
+            vec![
+                CLIAgent::Claude,
+                CLIAgent::Codex,
+                CLIAgent::Gemini,
+                CLIAgent::TraeCode,
+            ]
+        );
+    }
+
+    #[test]
     fn a_resume_carries_the_configured_launch_flags() {
         let none = HashMap::new();
         assert_eq!(

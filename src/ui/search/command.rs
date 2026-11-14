@@ -944,6 +944,36 @@ impl Item {
     }
 }
 
+/// The Terminals tab's agent launch rows: one per agent the window's quick
+/// launch offers, in that order, each `Agent: {name}` titled the same way in
+/// every language so a menu row can land on exactly these with one typed
+/// word. Filed under Agents rather than New Terminal — under that heading a
+/// launch row reads as a shell.
+pub(crate) fn agent_launch_items(
+    offered: &[CLIAgent],
+    launch: &std::collections::HashMap<String, String>,
+) -> Vec<Item> {
+    let agents: SharedString = t(L10nKey::CmdGroupAgents).into();
+    offered
+        .iter()
+        .map(|agent| {
+            Item::new(
+                t_fmt(
+                    L10nKey::AppCmdAgentLaunchTitle,
+                    &[("name", agent.display_name())],
+                ),
+                CommandKind::LaunchAgent(*agent),
+            )
+            .with_subtitle(agent.launch_command(launch))
+            .with_avatar(Avatar {
+                agent: Some(*agent),
+                ..Avatar::default()
+            })
+            .in_section(agents.clone())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

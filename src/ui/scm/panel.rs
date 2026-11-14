@@ -26,7 +26,7 @@ use tty59_core::core::git::status::{
     ChangeCode, DecoStatus, HeadState, RepoOperation, RepoPath, StatusEntry, WorkingTreeStatus,
 };
 
-use crate::terminal::git_data::status_of;
+use crate::terminal::git_data::{index_of, status_of};
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::host_ops::{HostId, SharedHost};
@@ -993,7 +993,16 @@ impl Tty59App {
         status: &WorkingTreeStatus,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let plan = commit_plan(status, self.scm.amend, self.scm.draft(repo));
+        // The index's count is the refresh's own bookkeeping, so this frame
+        // costs a hash probe rather than a walk over every entry. `None`
+        // means the index has not landed — the button stays disabled rather
+        // than guess zero conflicts.
+        let plan = commit_plan_with_conflicts(
+            status,
+            self.scm.amend,
+            self.scm.draft(repo),
+            index_of(cx, repo.host, &repo.root).map(|index| index.conflict_count),
+        );
         let repo_for_button = repo.clone();
         let live = plan.enabled;
         let staged = status.staged().count();
@@ -1016,7 +1025,14 @@ impl Tty59App {
                     .truncate()
                     .text_size(rems(META))
                     .text_color(muted)
-                    .child(t_plural(L10nKey::ScmStagedFileCount, staged, &[])),
+                    // With `U` paths in the way, what the user needs counted
+                    // is those — the staged tally comes back once they are
+                    // resolved.
+                    .child(if plan.conflicts > 0 {
+                        t_plural(L10nKey::ScmConflictCount, plan.conflicts, &[])
+                    } else {
+                        t_plural(L10nKey::ScmStagedFileCount, staged, &[])
+                    }),
             )
             .child(
                 // Filled, not outlined, and for the same reason the message box
@@ -1072,7 +1088,11 @@ impl Tty59App {
                             // does.
                             .text_color(if live { paint.ink } else { muted })
                             .disabled(!live)
-                            .when(!live, |b| b.tooltip(t(plan.reason)))
+                            .when(!live, |b| b.tooltip(plan.reason_text()))
+                            // The button's own test handle, so a click test
+                            // aims at the real control rather than a guess
+                            // about where in the frame it ended up.
+                            .when(cfg!(test), |b| b.debug_selector(|| "scm-commit".into()))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.scm_commit(
                                     repo_for_button.clone(),
@@ -2335,6 +2355,20 @@ pub(crate) struct CommitPlan {
     /// a message" call for opposite actions, and one tooltip for both sends
     /// the user staging files they already staged.
     pub(crate) reason: L10nKey,
+    /// The unresolved `U` paths — the blocker the conflict reason names and
+    /// the count line under the box reports, so the two never disagree.
+    pub(crate) conflicts: usize,
+}
+
+impl CommitPlan {
+    /// The reason with its count filled in where it carries one.
+    pub(crate) fn reason_text(&self) -> String {
+        if self.conflicts > 0 {
+            t_plural(self.reason, self.conflicts, &[])
+        } else {
+            t(self.reason).to_string()
+        }
+    }
 }
 
 /// Decide both from the state of the index.
@@ -2344,8 +2378,30 @@ pub(crate) struct CommitPlan {
 /// every tracked change is about to go in. An armed amend needs no message —
 /// `--no-edit` keeps the one that is already on HEAD.
 pub(crate) fn commit_plan(status: &WorkingTreeStatus, amend: bool, message: &str) -> CommitPlan {
+    // Given only the status there is no cheaper answer than walking the
+    // entries — fine for a click or a test, and the panel's per-frame render
+    // goes through `commit_plan_with_conflicts` with the refresh's own count
+    // instead.
+    commit_plan_with_conflicts(status, amend, message, Some(status.conflicts().count()))
+}
+
+/// The decision itself, with the conflict count supplied so a per-frame
+/// caller can hand over the number the refresh already counted. `None` means
+/// that count does not exist yet (the index has not landed): the button
+/// stays disabled with "loading" rather than guess zero.
+fn commit_plan_with_conflicts(
+    status: &WorkingTreeStatus,
+    amend: bool,
+    message: &str,
+    conflicts: Option<usize>,
+) -> CommitPlan {
     let staged = status.staged().next().is_some();
     let tracked_edits = status.unstaged().next().is_some();
+    // `git commit` refuses outright while any path is still unmerged, whatever
+    // the message, the index or the merge's own `--allow-empty-message` say —
+    // so the button and the action paths gate on this before anything else.
+    let conflicts_known = conflicts.is_some();
+    let conflicts = conflicts.unwrap_or(0);
     let label = if amend {
         L10nKey::ScmCommitAmendButton
     } else if staged {
@@ -2361,12 +2417,22 @@ pub(crate) fn commit_plan(status: &WorkingTreeStatus, amend: bool, message: &str
     let something = staged || tracked_edits || amend;
     CommitPlan {
         label,
-        enabled: something && (has_message || amend || merging),
-        reason: if something {
+        enabled: conflicts_known
+            && something
+            && (has_message || amend || merging)
+            && conflicts == 0,
+        // The conflicts outrank the other excuses: there is work, and a
+        // written message does not help — the `U` paths are what git refuses on.
+        reason: if !conflicts_known {
+            L10nKey::PanelLoading
+        } else if conflicts > 0 {
+            L10nKey::ScmCommitHasConflicts
+        } else if something {
             L10nKey::ScmCommitNeedsMessage
         } else {
             L10nKey::ScmNothingToCommit
         },
+        conflicts,
     }
 }
 
@@ -2863,6 +2929,90 @@ mod tests {
         assert!(!commit_plan(&clean, false, "msg").enabled);
     }
 
+    fn conflict(path: &str) -> StatusEntry {
+        entry(
+            path,
+            ChangeCode::Unmerged,
+            ChangeCode::Unmerged,
+            EntryKind::Unmerged,
+        )
+    }
+
+    fn staged(path: &str) -> StatusEntry {
+        entry(
+            path,
+            ChangeCode::Modified,
+            ChangeCode::None,
+            EntryKind::Tracked,
+        )
+    }
+
+    #[test]
+    fn unresolved_conflicts_block_every_kind_of_commit() {
+        // `git commit` refuses outright while any path is still unmerged — a
+        // message, a staged file and an in-progress merge change nothing —
+        // so the button must stop saying "go" however it is armed.
+        let mixed = || status_of_repo("/a", vec![conflict("hit.rs"), staged("staged.rs")]);
+        assert_eq!(
+            mixed().conflicts().count(),
+            1,
+            "the fixture must hold a real conflict or nothing below tests anything"
+        );
+        assert!(
+            !commit_plan(&mixed(), false, "msg").enabled,
+            "a message does not lift a conflict"
+        );
+        let mut merging = mixed();
+        merging.operation = Some(RepoOperation::Merge);
+        assert!(
+            !commit_plan(&merging, false, "").enabled,
+            "--allow-empty-message is for a resolved merge, not a live one"
+        );
+        assert!(
+            !commit_plan(&mixed(), true, "").enabled,
+            "amend cannot conclude an unresolved merge either"
+        );
+
+        // The control on the same gate: resolving the last `U` must hand the
+        // button back. Mid-merge is the one state an empty message commits,
+        // because `ops` sends --allow-empty-message for exactly it.
+        let mut resolved = status_of_repo("/a", vec![staged("a.rs")]);
+        resolved.operation = Some(RepoOperation::Merge);
+        let plan = commit_plan(&resolved, false, "");
+        assert!(
+            plan.enabled,
+            "a resolved merge still commits on --allow-empty-message"
+        );
+        assert_eq!(
+            plan.label,
+            L10nKey::ScmCommitButton,
+            "the merge commit is still an ordinary commit, not Commit All"
+        );
+    }
+
+    #[test]
+    fn a_conflicted_plan_does_not_blame_the_message_or_the_index() {
+        // Both stock answers lie here: a message is written, and there is
+        // work — it just cannot be committed yet. The reason must name the
+        // conflicts instead; the conflict-specific key lands with the fix, so
+        // this only pins what the answer must not be.
+        let mixed = status_of_repo("/a", vec![conflict("a.rs"), staged("staged.rs")]);
+        let plan = commit_plan(&mixed, false, "msg");
+        assert!(!plan.enabled);
+        assert_ne!(
+            plan.reason,
+            L10nKey::ScmCommitNeedsMessage,
+            "a written message is not the blocker"
+        );
+        let only_conflicts = status_of_repo("/a", vec![conflict("a.rs")]);
+        assert_eq!(only_conflicts.conflicts().count(), 1);
+        assert_ne!(
+            commit_plan(&only_conflicts, false, "msg").reason,
+            L10nKey::ScmNothingToCommit,
+            "there is work; it cannot be committed yet"
+        );
+    }
+
     #[test]
     fn a_head_without_a_pushable_branch_says_why() {
         let branch = HeadState::Branch {
@@ -3203,7 +3353,11 @@ mod render_idle_gpui_tests {
     use crate::daemon::protocol::DaemonMsg;
     use crate::ui::app::{render_probe, test_window};
     use crate::ui::host_ops::HostId;
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{
+        Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+        PlatformInput, Point, TestAppContext, VisualTestContext,
+    };
+    use gpui_component::WindowExt as _;
     use tty59_core::core::config::RightPanelTab;
 
     const BUDGET: u64 = 200;
@@ -3227,6 +3381,76 @@ mod render_idle_gpui_tests {
             .output()
             .expect("git runs");
         assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    /// `git` for the answers, not the side effects: what `rev-parse` says.
+    fn git_out(root: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// `scm_panel_on`'s own wait, for the states the fixture reaches after the
+    /// panel is already up: a landed probe is one debounce plus a read.
+    fn wait_until(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        until: impl Fn(&Tty59App, &gpui::App) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.background_executor.run_until_parked();
+            if app.update_in(vcx, |app, _, cx| until(app, cx)) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the panel never reached the wanted state"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The pointer ritual of the strip tests, on the elements this window
+    /// really draws.
+    fn click(vcx: &mut VisualTestContext, at: Point<Pixels>) {
+        let move_event = |pressed| {
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: at,
+                pressed_button: pressed,
+                modifiers: Modifiers::none(),
+            })
+        };
+        let button_event = |down: bool| {
+            if down {
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                })
+            } else {
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                })
+            }
+        };
+        vcx.update(|window, cx| {
+            window.dispatch_event(move_event(None), cx);
+            window.dispatch_event(button_event(true), cx);
+            window.dispatch_event(button_event(false), cx);
+            window.refresh();
+        });
+        vcx.run_until_parked();
     }
 
     fn scm_panel_on(
@@ -3423,6 +3647,120 @@ mod render_idle_gpui_tests {
         assert!(!drawn(&mut vcx, readme));
         assert!(!drawn(&mut vcx, src_ui));
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The whole bug on a real repository: while a path sits unmerged the
+    /// commit must be dead — the button that offers it and the action the key
+    /// binding reaches — until the path is marked resolved.
+    #[gpui::test]
+    fn a_conflicted_merge_keeps_commit_dead_until_the_paths_clear(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("conflict");
+        git(&root, &["init", "--quiet", "-b", "base"]);
+        git(&root, &["config", "user.email", "test@tty59"]);
+        git(&root, &["config", "user.name", "tty59"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.join("hit.rs"), "fn hit() {}\n").unwrap();
+        git(&root, &["add", "hit.rs"]);
+        git(&root, &["commit", "--quiet", "-m", "base"]);
+        git(&root, &["checkout", "--quiet", "-b", "side"]);
+        std::fs::write(root.join("hit.rs"), "fn hit() { side() }\n").unwrap();
+        git(&root, &["commit", "--quiet", "-am", "side"]);
+        git(&root, &["checkout", "--quiet", "base"]);
+        std::fs::write(root.join("hit.rs"), "fn hit() { base() }\n").unwrap();
+        git(&root, &["commit", "--quiet", "-am", "base2"]);
+        // The merge has to refuse here — that refusal is the fixture.
+        let merged = std::process::Command::new("git")
+            .args(["merge", "--quiet", "side"])
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(!merged.status.success(), "the merge must stop on hit.rs");
+        std::fs::write(root.join("other.rs"), "fn other() {}\n").unwrap();
+        git(&root, &["add", "other.rs"]);
+
+        let (app, mut vcx, _pane) = scm_panel_on(cx, &root, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
+                    .is_some_and(|s| s.conflicts().count() == 1)
+            })
+        });
+        let press_commit = |vcx: &mut VisualTestContext| {
+            let at = vcx
+                .debug_bounds("scm-commit")
+                .expect("the commit button is drawn")
+                .center();
+            click(vcx, at);
+        };
+        let evidence = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, window, cx| {
+                (app.scm.committing.is_some(), window.notifications(cx).len())
+            })
+        };
+
+        // The press the panel shows must die on the button: no op dispatched,
+        // no toast. Lit pre-fix, this click put `git commit` straight into the
+        // `U` path and let git be the one to say no.
+        press_commit(&mut vcx);
+        let (armed, toasts) = evidence(&app, &mut vcx);
+        assert!(!armed, "a dead button still dispatched the commit");
+        assert_eq!(toasts, 0, "a swallowed press should say nothing");
+
+        // The palette has no button to grey out, so the action carries the
+        // reason — and still dispatches nothing.
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.run_scm_action(crate::ui::scm::actions::ScmIntent::Commit, window, cx);
+        });
+        let (armed, toasts) = evidence(&app, &mut vcx);
+        assert!(!armed, "the action path dispatched the same commit");
+        assert_eq!(toasts, 1, "the refused action should say why");
+
+        // The count the render reads comes from the status index; lose it
+        // while the status stays and the answer is still no — a missing count
+        // is not a clean one. The toast count is checked too, so a
+        // dispatched-and-failed commit cannot hide behind `committing`
+        // clearing itself on the way back.
+        app.update_in(&mut vcx, |app, _, cx| {
+            let repo = app.scm.repo.clone().expect("a repo is on screen");
+            cx.default_global::<crate::terminal::git_data::ScmData>()
+                .forget_index(repo.host, &repo.root);
+            cx.notify();
+        });
+        press_commit(&mut vcx);
+        let (armed, toasts_after) = evidence(&app, &mut vcx);
+        assert!(!armed, "no index is not 'no conflicts'");
+        assert_eq!(
+            toasts_after, toasts,
+            "no index is still a refusal, not a dispatch"
+        );
+
+        // Resolve the path; the watcher brings the new status and a fresh
+        // index in together, and only then does the same press mean something.
+        git(&root, &["add", "hit.rs"]);
+        let before = git_out(&root, &["rev-parse", "HEAD"]);
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::index_of(cx, r.host, &r.root).is_some()
+                    && crate::terminal::git_data::status_of(cx, r.host, &r.root).is_some_and(|s| {
+                        s.conflicts().next().is_none()
+                            && matches!(s.operation, Some(RepoOperation::Merge))
+                    })
+            })
+        });
+        press_commit(&mut vcx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            vcx.background_executor.run_until_parked();
+            if git_out(&root, &["rev-parse", "HEAD"]) != before {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the live button never made the merge commit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

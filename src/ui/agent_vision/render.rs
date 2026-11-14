@@ -11,6 +11,40 @@ use crate::ui::i18n::{L10nKey, t};
 
 use super::{FocusZone, PaneSummary, ProjectFilter, State, ViewMode};
 
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RenderedAgentRow {
+    pub key: super::PaneKey,
+    pub card: bool,
+    pub title: String,
+    pub reason: String,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RenderedReaderHeader {
+    pub key: super::PaneKey,
+    pub title: String,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static RENDERED_ROWS: std::cell::RefCell<Vec<RenderedAgentRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static RENDERED_HEADERS: std::cell::RefCell<Vec<RenderedReaderHeader>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn take_rendered_rows() -> Vec<RenderedAgentRow> {
+    RENDERED_ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()))
+}
+
+#[cfg(test)]
+pub(super) fn take_rendered_headers() -> Vec<RenderedReaderHeader> {
+    RENDERED_HEADERS.with(|headers| std::mem::take(&mut *headers.borrow_mut()))
+}
+
 impl State {
     pub(super) fn label(self) -> &'static str {
         t(match self {
@@ -33,20 +67,34 @@ impl State {
 }
 
 impl Tty59App {
-    pub(in crate::ui) fn agent_mode_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The Agents pill. `count` is what the strip already counted this frame,
+    /// so the number it says and the width the strip budgeted for it are one
+    /// scan of the panes.
+    pub(in crate::ui) fn agent_mode_button(
+        &self,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let active = self.agent_mode_active();
-        let count = self
-            .agent_vision
-            .state
-            .attention_count(&self.agent_vision.panes, &self.agent_vision.reads)
-            .total();
-        let label = if active {
+        let label = SharedString::from(if active {
             t(L10nKey::VisionWorkbench).to_string()
         } else {
             format!("{} ({count})", t(L10nKey::VisionAgents))
-        };
-        Button::new("agent-mode-toggle")
-            .label(label)
+        });
+        // The label is our own child, not the button's, so its size, weight and
+        // figures are the ones `StripMetrics` measured rather than whatever the
+        // button gives its text.
+        let text = div()
+            .flex_none()
+            .line_height(gpui::relative(1.))
+            .text_size(gpui::rems(crate::ui::tab_strip::PILL_TEXT))
+            .font_weight(FontWeight::NORMAL)
+            .not_italic()
+            .font_features(self.strip_metrics.features())
+            .child(label.clone());
+        let pill = Button::new("agent-mode-toggle")
+            .accessible_label(label)
+            .child(text)
             .small()
             .custom(
                 gpui_component::button::ButtonCustomVariant::new(cx)
@@ -56,18 +104,20 @@ impl Tty59App {
                     .active(rgb(cx.global::<crate::ui::presets::Surfaces>().rail.pressed).into()),
             )
             .h(px(crate::ui::tab_strip::TITLEBAR_SEARCH_H))
-            .px(px(10.))
+            .px(px(crate::ui::tab_strip::PILL_PAD_X))
+            .w(px(self.strip_metrics.pill_w(active, count)))
             .rounded(px(crate::ui::tab_strip::TITLEBAR_SEARCH_RADIUS))
             .bg(crate::ui::tab_strip::titlebar_search_fill(cx))
-            .text_size(gpui::rems(0.8125))
             .tooltip_element(crate::ui::tab_strip::chord_tooltip(
                 t(L10nKey::VisionToggle),
                 "ToggleAgentVision",
                 cx,
             ))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|app, _, window, cx| app.toggle_agent_vision(window, cx)))
-            .into_any_element()
+            .on_click(cx.listener(|app, _, window, cx| app.toggle_agent_vision(window, cx)));
+        #[cfg(test)]
+        let pill = pill.debug_selector(|| "agent-mode-pill".into());
+        pill.into_any_element()
     }
 
     pub(in crate::ui) fn agent_view_switch(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -241,29 +291,46 @@ impl Tty59App {
             .iter()
             .find(|project| project.group == pane.location.group)
             .map_or("", |project| project.name.as_str());
-        let title = match pane.pane_marker() {
-            Some(marker) => format!("{} · {marker}", pane.location.tab_title),
-            None => pane.location.tab_title.clone(),
-        };
-        let reason = pane.reason.as_deref().unwrap_or(pane.state.label());
+        let exited = pane.state == State::Exited;
+        let title = pane.heading();
+        let now = crate::core::config::unix_now();
+        let reason = pane.reason_line(now);
         let mut meta = format!("{} · {}", pane.agent_name(), project);
-        if let Some(since) = pane.since_ms {
-            let age = crate::core::config::unix_now().saturating_sub(since / 1000);
+        if let Some(since) = pane.since_ms.filter(|_| !exited) {
+            let age = now.saturating_sub(since / 1000);
             meta.push_str(&format!(" · {}", crate::ui::home::compact_age(age)));
         }
-        let status = if pane.state == State::Exited || pane.state == State::Idle {
-            div()
-                .size(px(6.))
-                .rounded_full()
-                .border_1()
-                .border_color(cx.theme().muted_foreground)
-                .when(pane.state == State::Idle, |dot| {
-                    dot.bg(cx.theme().muted_foreground)
-                })
-                .into_any_element()
-        } else {
-            self.row_status_dot(Some(pane.state.status()), 0, rgb(sf.base).into())
-                .unwrap_or_else(|| div().into_any_element())
+        #[cfg(test)]
+        RENDERED_ROWS.with(|rows| {
+            rows.borrow_mut().push(RenderedAgentRow {
+                key,
+                card,
+                title: title.clone(),
+                reason: reason.clone(),
+            });
+        });
+        let status = match pane.state {
+            State::Exited => None,
+            State::Idle => Some(
+                div()
+                    .size(px(6.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(cx.theme().muted_foreground)
+                    .bg(cx.theme().muted_foreground)
+                    .map(|dot| {
+                        #[cfg(test)]
+                        let dot = dot.debug_selector(move || {
+                            format!("agent-row-dot-{}-{}", key.host.0, key.pane)
+                        });
+                        dot
+                    })
+                    .into_any_element(),
+            ),
+            state => Some(
+                self.row_status_dot(Some(state.status()), 0, rgb(sf.base).into())
+                    .unwrap_or_else(|| div().into_any_element()),
+            ),
         };
         let row = h_flex()
             .id(SharedString::from(format!(
@@ -328,6 +395,9 @@ impl Tty59App {
                             .truncate()
                             .text_sm()
                             .when(selected, |row| row.font_weight(FontWeight::MEDIUM))
+                            .when(exited, |title| {
+                                title.text_color(cx.theme().muted_foreground)
+                            })
                             .map(|title| {
                                 #[cfg(test)]
                                 let title = title.debug_selector(move || {
@@ -337,14 +407,29 @@ impl Tty59App {
                             })
                             .child(title),
                     )
-                    .child(div().truncate().text_xs().child(reason.to_string()))
-                    .when(card, |column| {
+                    .child(
+                        div()
+                            .truncate()
+                            .text_xs()
+                            .when(exited, |reason| {
+                                reason.text_color(cx.theme().muted_foreground)
+                            })
+                            .child(reason),
+                    )
+                    .when(card && !exited, |column| {
                         column.when_some(pane.last_line.clone(), |column, line| {
                             column.child(
                                 div()
                                     .truncate()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
+                                    .map(|preview| {
+                                        #[cfg(test)]
+                                        let preview = preview.debug_selector(move || {
+                                            format!("agent-row-preview-{}-{}", key.host.0, key.pane)
+                                        });
+                                        preview
+                                    })
                                     .child(line),
                             )
                         })
@@ -363,7 +448,7 @@ impl Tty59App {
                 !card
                     || (pane.state == State::Done
                         && self.agent_vision.reads.attention(pane).is_some()),
-                |row| row.child(status),
+                |row| row.children(status),
             )
             .on_click(
                 cx.listener(move |app, _, window, cx| app.open_agent_terminal(key, window, cx)),
@@ -535,6 +620,14 @@ impl Tty59App {
                 .h_full()
                 .when_some(selected, |reader, pane| {
                     let key = pane.location.key;
+                    let heading = pane.heading();
+                    #[cfg(test)]
+                    RENDERED_HEADERS.with(|headers| {
+                        headers.borrow_mut().push(RenderedReaderHeader {
+                            key,
+                            title: heading.clone(),
+                        });
+                    });
                     reader
                         .child(
                             v_flex()
@@ -554,13 +647,10 @@ impl Tty59App {
                                                 .truncate()
                                                 .text_sm()
                                                 .font_weight(FontWeight::MEDIUM)
-                                                .child(match pane.pane_marker() {
-                                                    Some(marker) => format!(
-                                                        "{} · {marker}",
-                                                        pane.location.tab_title
-                                                    ),
-                                                    None => pane.location.tab_title.clone(),
-                                                }),
+                                                .when(pane.state == State::Exited, |title| {
+                                                    title.text_color(cx.theme().muted_foreground)
+                                                })
+                                                .child(heading),
                                         )
                                         .child(
                                             div()

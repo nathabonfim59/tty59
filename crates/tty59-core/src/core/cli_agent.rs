@@ -37,11 +37,14 @@ pub enum CLIAgent {
 }
 
 impl CLIAgent {
+    /// Offer order: every list `installed_on` feeds — the palette's launch
+    /// rows, a fresh profile's New Tab menu — names these first, so the
+    /// agents someone is likeliest to have installed lead.
     pub const ALL: [CLIAgent; 28] = [
         CLIAgent::Claude,
         CLIAgent::Codex,
-        CLIAgent::TraeCode,
         CLIAgent::Gemini,
+        CLIAgent::TraeCode,
         CLIAgent::Aider,
         CLIAgent::Amp,
         CLIAgent::OpenCode,

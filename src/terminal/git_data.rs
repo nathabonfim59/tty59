@@ -412,6 +412,13 @@ impl ScmData {
         Some(self.status_for(host, root))
     }
 
+    /// Forget the decoration index while keeping the status, so a test can
+    /// stand the render on the "index has not landed" branch the panel guards.
+    #[cfg(test)]
+    pub fn forget_index(&mut self, host: HostId, root: &Path) {
+        self.index.remove(host, root);
+    }
+
     pub fn epoch(&self, host: HostId, root: &Path) -> u64 {
         self.epoch.get(host, root).copied().unwrap_or(0)
     }

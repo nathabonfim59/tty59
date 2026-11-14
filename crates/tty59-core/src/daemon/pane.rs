@@ -6081,6 +6081,128 @@ mod tests {
             )),
             "the replay must carry the connection phase"
         );
+
+        // A pane reattached to mid-dial replays the dial's phase, not a
+        // `Connected` nobody reported — the phase is only stored once the far
+        // end granted the shell.
+        let mut st = test_state(true);
+        st.ssh_phase = Some(SshPhase::Authenticating);
+        let (tx, rx) = std::sync::mpsc::channel();
+        replay_state(&st, &tx, false);
+        drop(tx);
+        let replayed: Vec<SshPhase> = rx
+            .iter()
+            .filter_map(|m| match m {
+                DaemonMsg::SshStatus { phase } => Some(phase),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replayed, [SshPhase::Authenticating]);
+    }
+
+    /// The same replay, for a pane that got its `Connected` the hard way: a
+    /// reused connection too full for another session made `run_session`
+    /// redial a second link inside the same pane (daemon/ssh's saturated-
+    /// reuse retry). Whatever that run's last status was is what this pane's
+    /// state holds — so the replay must answer the redial's `Connected`, not
+    /// the phase its dial started at.
+    #[test]
+    fn a_reattaching_window_replays_the_phase_a_live_redial_ended_on() {
+        use crate::daemon::protocol::SshPhase;
+        use crate::daemon::ssh::test_support::{
+            FakeSshdListener, block_on, spec_for, test_manager,
+        };
+        use crate::daemon::ssh::{PromptBroker, SharedConnection};
+        let mgr = test_manager();
+        block_on(mgr, async {
+            let sshd = FakeSshdListener::listen(Some(1)).await;
+            let mut spec = spec_for(sshd.port);
+            spec.shell_integration = false;
+
+            // The pane already up holds conn A's one session — a second pane
+            // dialling the same spec reuses conn A, gets refused for
+            // saturation, and redials.
+            let (a_data_tx, _a_data_rx) = tokio::sync::mpsc::channel(16);
+            let (a_cmd_tx, a_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+            let a_slot: SharedConnection = Arc::new(Mutex::new(Weak::new()));
+            mgr.spawn_native_session(
+                1,
+                Box::new(spec.clone()),
+                None,
+                ws(80, 24),
+                PromptBroker::new(Box::new(|_| true)),
+                a_data_tx,
+                a_cmd_rx,
+                a_slot,
+            );
+            sshd.wait_for_opened(1).await;
+
+            // This pane's state hears the redial through the same broker
+            // wiring `native` builds: every `SshStatus` lands in `ssh_phase`.
+            let state = Arc::new(Mutex::new(test_state(true)));
+            let seen = Arc::clone(&state);
+            let broker = PromptBroker::new(Box::new(move |msg: DaemonMsg| {
+                let mut st = seen.lock().unwrap();
+                if let DaemonMsg::SshStatus { phase } = &msg {
+                    st.ssh_phase = Some(phase.clone());
+                }
+                match &st.subscriber {
+                    Some(sub) => sub.send(msg).is_ok(),
+                    None => false,
+                }
+            }));
+            let (b_data_tx, _b_data_rx) = tokio::sync::mpsc::channel(16);
+            let (b_cmd_tx, b_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+            let b_slot: SharedConnection = Arc::new(Mutex::new(Weak::new()));
+            mgr.spawn_native_session(
+                2,
+                Box::new(spec),
+                None,
+                ws(80, 24),
+                broker,
+                b_data_tx,
+                b_cmd_rx,
+                b_slot,
+            );
+
+            // The redial's `Connected` must be the last word the pane kept.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !matches!(
+                state.lock().unwrap().ssh_phase.as_ref(),
+                Some(SshPhase::Connected)
+            ) {
+                assert!(
+                    Instant::now() < deadline,
+                    "the redial never reported Connected"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            drop(b_cmd_tx);
+            drop(a_cmd_tx);
+            sshd.wait_for_closed(2).await;
+
+            let (tx, rx) = std::sync::mpsc::channel();
+            replay_state(&state.lock().unwrap(), &tx, false);
+            drop(tx);
+            let replayed: Vec<SshPhase> = rx
+                .iter()
+                .filter_map(|m| match m {
+                    DaemonMsg::SshStatus { phase } => Some(phase),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                replayed,
+                [SshPhase::Connected],
+                "the replay must answer the phase the live redial ended on"
+            );
+            assert_eq!(sshd.refused(), 1, "conn A was full when pane two dialled");
+            assert_eq!(
+                sshd.opened(),
+                2,
+                "pane A's shell on conn A, pane B's on conn B"
+            );
+        });
     }
 
     /// The client forgets its cwd on every `RemoteContext`, so a replay that

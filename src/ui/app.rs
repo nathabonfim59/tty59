@@ -1128,6 +1128,9 @@ pub struct Tty59App {
     /// rectangle was not drawn — scrolled out of a full strip, filtered out of
     /// the sidebar — and takes no part in the reading.
     pub(crate) strip_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    /// What the strip's Agents pill measures at the current font and language.
+    /// Drawing only reads it; it is measured again when one of those changes.
+    pub(crate) strip_metrics: crate::ui::tab_strip::StripMetrics,
     pub(crate) sidebar_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     /// Where each pinned group's block was drawn last frame, so a tab held
     /// over one can be told which group it is over. Only pinned groups are
@@ -1602,6 +1605,7 @@ impl Tty59App {
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
+        let strip_metrics = crate::ui::tab_strip::StripMetrics::new(window, cx);
         let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
@@ -1812,6 +1816,7 @@ impl Tty59App {
             tab_merge: Cell::new(None),
             pane_detach: Cell::new(None),
             strip_slots: Rc::new(RefCell::new(Vec::new())),
+            strip_metrics,
             sidebar_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_group_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_divider: Rc::new(Cell::new(None)),
@@ -6816,23 +6821,10 @@ impl Tty59App {
             }
             out.push(item);
         }
-        for agent in self.offered_agents(cx) {
-            out.push(
-                Item::new(
-                    t_fmt(
-                        L10nKey::AppCmdAgentLaunchTitle,
-                        &[("name", agent.display_name())],
-                    ),
-                    CommandKind::LaunchAgent(agent),
-                )
-                .with_subtitle(agent.launch_command(&cx.global::<Config>().agent_launch))
-                .with_avatar(Avatar {
-                    agent: Some(agent),
-                    ..Avatar::default()
-                })
-                .in_section(new_terminal.clone()),
-            );
-        }
+        out.extend(crate::ui::search::agent_launch_items(
+            &self.offered_agents(cx),
+            &cx.global::<Config>().agent_launch,
+        ));
         out
     }
 
@@ -9856,15 +9848,7 @@ impl Render for Tty59App {
         } else {
             self.document_dock_px(window, cx)
         };
-        // Where the docked header sits. Everywhere but macOS the title bar
-        // spans the workspace and leaves the strip above the column empty, so
-        // the header goes up into it; on macOS the column already reaches the
-        // top of the window and its own first row lands there.
-        let document_chrome = if cfg!(target_os = "macos") {
-            crate::ui::document_column::DocumentChrome::Dock
-        } else {
-            crate::ui::document_column::DocumentChrome::DockHoisted
-        };
+        let document_chrome = self.docked_document_chrome(window, cx);
         let document_header = document_dock_px
             .is_some()
             .then(|| self.render_document_header(document_chrome, window, cx))

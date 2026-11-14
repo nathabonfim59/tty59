@@ -27,6 +27,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::VisionDone => "Завершены",
         L10nKey::VisionIdle => "Бездействуют",
         L10nKey::VisionExited => "Завершили сеанс",
+        L10nKey::VisionExitedAge => "Завершён · {age}",
         L10nKey::VisionPane => "панель {i}/{n}",
         L10nKey::VisionDefault => "Открывать окна в режиме агентов",
         L10nKey::VisionDefaultDesc => {
@@ -1614,6 +1615,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmNothingToCommit => "Нет изменений для коммита",
         L10nKey::ScmNetworkBusy => "Для этого репозитория ещё выполняется другая сетевая операция",
         L10nKey::ScmCommitNeedsMessage => "Сначала напишите сообщение коммита",
+        L10nKey::ScmCommitHasConflicts => "Сначала разрешите конфликты: {count}",
         L10nKey::ScmDetailFilesFailed => "Не удалось прочитать список файлов",
         L10nKey::ScmTimeNow => "сейчас",
         L10nKey::ScmTimeMinutes => "{n} мин",
@@ -1694,6 +1696,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmSwitchRepository => "Сменить репозиторий",
         L10nKey::ScmFilesChanged => "Изменено файлов: {count}",
         L10nKey::ScmStagedFileCount => "Файлов в индексе: {count}",
+        L10nKey::ScmConflictCount => "Неразрешённых конфликтов: {count}",
         L10nKey::WindowStop => "Остановить",
         L10nKey::WindowDelete => "Удалить",
         L10nKey::WindowThisWorkspace => "эта рабочая область",
@@ -1843,6 +1846,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyTurnFinished => "Ответ завершён",
         L10nKey::TabTooltipMore => "Ещё",
         L10nKey::TabTooltipShowSidebar => "Показать боковую панель",
+        L10nKey::TabStripHiddenTabs => "Ещё вкладок: {count}",
         L10nKey::TabTooltipHideSidebar => "Скрыть боковую панель",
         L10nKey::TabTooltipHideDetailPanel => "Скрыть панель сведений",
         L10nKey::TabTooltipShowDetailPanel => "Показать панель сведений",
@@ -2428,6 +2432,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Интеграция оболочки tty59 не включилась в этой панели. Встроенное дополнение и меню Ctrl+R недоступны. Возможные причины: свои аргументы запуска оболочки, обёртка PTY или неподдерживаемая оболочка."
         }
         L10nKey::PaneTitleDisconnected => "{title}: нет соединения",
+        L10nKey::PaneTitleNotConnected => "{title}: не подключено",
         L10nKey::PaneTitleProcessExited => "{title}: процесс завершён",
         L10nKey::LoopbackForwardFailed => "Не удалось пробросить :{port}: {error}",
         L10nKey::TrayTooltipAgents => "tty59: {parts}",
@@ -2723,6 +2728,16 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::ScmStagedFileCount, "few") => "В индексе {count} файла",
         (L10nKey::ScmStagedFileCount, "many") => "В индексе {count} файлов",
         (L10nKey::ScmStagedFileCount, "other") => "В индексе {count} файлов",
+        (L10nKey::ScmCommitHasConflicts, "zero") => "Нет неразрешённых конфликтов",
+        (L10nKey::ScmCommitHasConflicts, "one") => "Сначала разрешите {count} конфликт",
+        (L10nKey::ScmCommitHasConflicts, "few") => "Сначала разрешите {count} конфликта",
+        (L10nKey::ScmCommitHasConflicts, "many") => "Сначала разрешите {count} конфликтов",
+        (L10nKey::ScmCommitHasConflicts, "other") => "Сначала разрешите {count} конфликта",
+        (L10nKey::ScmConflictCount, "zero") => "Нет конфликтов",
+        (L10nKey::ScmConflictCount, "one") => "{count} конфликт",
+        (L10nKey::ScmConflictCount, "few") => "{count} конфликта",
+        (L10nKey::ScmConflictCount, "many") => "{count} конфликтов",
+        (L10nKey::ScmConflictCount, "other") => "{count} конфликта",
         (L10nKey::PanelMoreChangedFiles, "zero") => "Других изменённых файлов нет.",
         (L10nKey::PanelMoreChangedFiles, "one") => {
             "…и ещё {count} изменённый файл. Посмотрите его командой git diff."
@@ -2870,6 +2885,11 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubShowAllReviewers, "few") => "Показать всех {count} рецензентов",
         (L10nKey::GitHubShowAllReviewers, "many") => "Показать всех {count} рецензентов",
         (L10nKey::GitHubShowAllReviewers, "other") => "Показать всех {count} рецензентов",
+        (L10nKey::TabStripHiddenTabs, "zero") => "Других вкладок нет",
+        (L10nKey::TabStripHiddenTabs, "one") => "Ещё {count} вкладка",
+        (L10nKey::TabStripHiddenTabs, "few") => "Ещё {count} вкладки",
+        (L10nKey::TabStripHiddenTabs, "many") => "Ещё {count} вкладок",
+        (L10nKey::TabStripHiddenTabs, "other") => "Ещё {count} вкладки",
         _ => return None,
     };
     Some(value)

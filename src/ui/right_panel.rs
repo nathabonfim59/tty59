@@ -2103,7 +2103,12 @@ fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
 #[cfg(test)]
 mod tests {
     use super::{InfoRow, InfoValue, format_rtt, forwards_port};
-    use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
+    use crate::daemon::protocol::{
+        DaemonMsg, ForwardStatus, ManagedForward, RemoteContext, RemoteKind, SshForwardKind,
+        SshPhase,
+    };
+    use crate::ui::app::Tty59App;
+    use gpui::{TestAppContext, VisualTestContext};
 
     fn forward(kind: SshForwardKind, target_host: &str, target_port: u16) -> ManagedForward {
         ManagedForward {
@@ -2254,5 +2259,119 @@ mod tests {
             None,
             "there is no sensible clipboard form of two coloured numbers"
         );
+    }
+
+    /// The detail pane's current SSH phase, the way `pane_forward_ctx` and
+    /// `remote_files_pane` read it.
+    fn detail_phase(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<SshPhase> {
+        app.update_in(vcx, |app, window, cx| {
+            app.tabs
+                .get(app.active)?
+                .detail_pane(window, cx)?
+                .read(cx)
+                .ssh_phase()
+        })
+    }
+
+    fn phase_landed(
+        app: &gpui::Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        want: &SshPhase,
+    ) -> bool {
+        for _ in 0..200 {
+            if detail_phase(app, vcx).as_ref() == Some(want) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// A pane mid-dial, wired the way a real `tty59 ssh` pane is: a native-ssh
+    /// remote context and a phase still short of `Connected`.
+    fn dial_in(
+        app: &gpui::Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        daemon: &mut crate::daemon::transport::Stream,
+    ) {
+        DaemonMsg::RemoteContext(Some(RemoteContext {
+            kind: RemoteKind::NativeSsh,
+            argv: Vec::new(),
+            target: "me@build-box".into(),
+        }))
+        .encode(daemon)
+        .unwrap();
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Authenticating,
+        }
+        .encode(daemon)
+        .unwrap();
+        assert!(
+            phase_landed(app, vcx, &SshPhase::Authenticating),
+            "the mid-dial phase never reached the pane"
+        );
+    }
+
+    /// Forwards are what a granted shell is for: the panel must not offer
+    /// them while the connect is still mid-flight, because `Connected` only
+    /// reports once the far end granted the shell (remote F13's other side).
+    ///
+    /// CONTROL: this passes on the pre-fix baseline — the statuses here are
+    /// fed straight down the wire, so it guards the panel's gate rather than
+    /// proving the producer's timing.
+    #[gpui::test]
+    fn the_forward_route_waits_for_the_granted_shell_control(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = crate::ui::app::test_window::harness_with_pane(cx);
+        dial_in(&app, &mut vcx, &mut daemon);
+
+        let ctx = app
+            .update_in(&mut vcx, |app, window, cx| app.pane_forward_ctx(window, cx))
+            .expect("a leaf pane always has a forward ctx");
+        assert!(
+            ctx.route.is_none(),
+            "no forwards while the dial is still up"
+        );
+
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Connected,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        assert!(phase_landed(&app, &mut vcx, &SshPhase::Connected));
+        let ctx = app
+            .update_in(&mut vcx, |app, window, cx| app.pane_forward_ctx(window, cx))
+            .expect("a leaf pane always has a forward ctx");
+        assert!(ctx.route.is_some(), "an established session holds forwards");
+    }
+
+    /// The SFTP panel gates on the same phase as forwards: browsing the far
+    /// filesystem needs the session channel the shell rides, so it too waits
+    /// for `Connected`.
+    ///
+    /// CONTROL: baseline-passing like the forward-route control above; it
+    /// guards the gate, it does not prove the producer's timing.
+    #[gpui::test]
+    fn remote_files_waits_for_the_granted_shell_control(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = crate::ui::app::test_window::harness_with_pane(cx);
+        dial_in(&app, &mut vcx, &mut daemon);
+
+        let files = app.update_in(&mut vcx, |app, window, cx| {
+            app.remote_files_pane(window, cx)
+        });
+        assert!(
+            files.is_none(),
+            "no remote files while the dial is still up"
+        );
+
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Connected,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        assert!(phase_landed(&app, &mut vcx, &SshPhase::Connected));
+        let files = app.update_in(&mut vcx, |app, window, cx| {
+            app.remote_files_pane(window, cx)
+        });
+        assert_eq!(files, Some((1, "me@build-box".to_string())));
     }
 }

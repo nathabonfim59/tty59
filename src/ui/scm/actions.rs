@@ -224,7 +224,7 @@ impl Tty59App {
             // first" and "nothing to commit" call for opposite actions, and
             // answering the first with the second sends the user staging
             // files they already staged (#546).
-            gpui_component::WindowExt::push_notification(window, t(plan.reason).to_string(), cx);
+            gpui_component::WindowExt::push_notification(window, plan.reason_text(), cx);
             // The follow-up dies with the commit: "commit and push" with
             // nothing to commit must not push whatever the branch holds.
             return;
