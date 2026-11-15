@@ -836,7 +836,13 @@ impl Tty59App {
             // In the overflow rows the path yields, so the whole of it is the
             // tooltip there; nowhere else is anything about it changed.
             let path_tip = overflow.then(|| SharedString::from(name.clone()));
-            let back_min = need.map_or(0., |n| n.piece_min(Item::Back));
+            // What the held row leaves the way back: its least, or, where the
+            // row cannot hold that, the chevron part and what remains for the
+            // path. The same width the plan packed it at.
+            let back_min = need.zip(plan).map_or(0., |(n, p)| n.eff(&p, Item::Back));
+            // The same overflow-only whole path says itself to assistive
+            // technology: nothing is allocated where the path is not cut.
+            let path_label = path_tip.clone();
             let path_el = if overflow {
                 // The path in the overflow rows is cut by the one measured
                 // elision the UI has, keeping both ends, in the width layout
@@ -899,6 +905,12 @@ impl Tty59App {
                             }))
                             .when_some(path_tip, |d, tip| {
                                 d.tooltip(move |window, cx| text_tooltip(tip.clone(), window, cx))
+                            })
+                            // In the overflow rows the path is cut to what the
+                            // row leaves, so the control says the whole path to
+                            // assistive technology; nowhere else is it changed.
+                            .when_some(path_label, |d, label| {
+                                d.role(gpui::Role::Button).aria_label(label)
                             })
                             .child(
                                 Icon::new(IconName::ChevronLeft)
@@ -968,26 +980,58 @@ impl Tty59App {
             );
         }
         if parts.loading {
+            // Where no row of the overflow holds the word whole it takes the
+            // row it has and is cut there, the way a summary word wider than
+            // its row is, and says so: its whole text on hover and as the
+            // accessible label. Where a row holds it, it is what it always was.
+            let cut = need.zip(plan).and_then(|(n, p)| n.refreshing_cut(&p));
+            let word = SharedString::from(t(L10nKey::Refreshing));
+            let tip = word.clone();
             refresh_el = Some(
                 div()
+                    .id("diff-overlay-refreshing")
                     .text_size(rems(META))
                     .text_color(cx.theme().muted_foreground)
                     .when(cfg!(test), |d| {
                         d.debug_selector(|| "diff-overlay-refreshing".into())
                     })
-                    .child(t(L10nKey::Refreshing))
+                    .when_some(cut, |d, width| {
+                        d.flex_none()
+                            .w(px(width))
+                            .truncate()
+                            .role(gpui::Role::Label)
+                            .aria_label(word.clone())
+                            .tooltip(move |window, cx| text_tooltip(tip.clone(), window, cx))
+                    })
+                    .child(word.clone())
                     .into_any_element(),
             );
         }
         // The chip stands beside the subject on the first line, and leads the
         // second when it has left.
-        let chip_el = subject.chip.map(|text| {
-            info_chip(
+        // Its padding is the one the plan packed it with: the usual 5px either
+        // side, and, only where the overflow's row lacks room for it, exactly
+        // what the row lacks of them, down to 3.5px, its word never trimmed.
+        let chip_pad = need
+            .zip(plan)
+            .filter(|(_, p)| p.overflow)
+            .map(|(n, p)| n.chip_pad(&p));
+        let chip_el = subject.chip.map(|text| match chip_pad {
+            Some(pad) if pad < crate::ui::right_panel::CHIP_PAD_X => {
+                crate::ui::right_panel::info_chip_padded(
+                    text,
+                    cx.theme().foreground.opacity(CHIP_FILL),
+                    cx.theme().muted_foreground,
+                    &mono,
+                    pad,
+                )
+            }
+            _ => info_chip(
                 text,
                 cx.theme().foreground.opacity(CHIP_FILL),
                 cx.theme().muted_foreground,
                 &mono,
-            )
+            ),
         });
         let (chip_first, chip_second) = if moved(0) {
             (None, chip_el)
@@ -1316,14 +1360,29 @@ impl Tty59App {
             .child(close_el);
         // The icon with the ref or the branch name: drawn at no less than the
         // planned minimum, so the ref never gives way below its floor.
-        let ref_el = h_flex()
-            .items_center()
-            .gap(rems(HEADER_GAP_REM))
-            .min_w(px(need.piece_min(Item::Ref)))
-            .flex_shrink(1.)
-            .child(icon_el)
-            .child(subject_el)
-            .into_any_element();
+        // Where the row cannot hold the icon, the gap and the ref, the icon is
+        // alone on the row before and the ref, whole, is first on the next: it
+        // is drawn at no less than the ref's own least, the same number the
+        // plan packed it at.
+        let (ref_el, icon_row_el) = if plan.ref_split {
+            let ref_alone = h_flex()
+                .items_center()
+                .min_w(px(need.ref_text_min()))
+                .flex_shrink(1.)
+                .child(subject_el)
+                .into_any_element();
+            (ref_alone, Some(icon_el))
+        } else {
+            let atom = h_flex()
+                .items_center()
+                .gap(rems(HEADER_GAP_REM))
+                .min_w(px(need.piece_min(Item::Ref)))
+                .flex_shrink(1.)
+                .child(icon_el)
+                .child(subject_el)
+                .into_any_element();
+            (atom, None)
+        };
         let name_el =
             self.render_document_terminal_name(Some(need.overflow_name_cap(&plan)), window, cx);
         // The pieces, in the order the plan packed them.
@@ -1342,6 +1401,10 @@ impl Tty59App {
         let rule = hairline(cx);
         let row_count = usize::from(plan.rows);
         let mut grouped: Vec<Vec<AnyElement>> = (0..row_count).map(|_| Vec::new()).collect();
+        // The split ref's icon leads the row of its own, before the ref's row.
+        if let Some(icon) = icon_row_el {
+            grouped[need.icon_row(&plan)].push(icon);
+        }
         for (i, piece) in pieces.into_iter().enumerate() {
             grouped[usize::from(need.row_of(&plan)[i])].push(piece);
         }
@@ -2380,6 +2443,12 @@ impl Tty59App {
             space: m.lexicon.space,
             line_h: m.lexicon.line_h,
             summary: parts.summary,
+            ref_text: if shape.is_rev {
+                m.rev_floor
+            } else {
+                m.name_min
+            },
+            back_chrome: back_w,
         };
         need.one_line = need.first_line(0).total();
         need
@@ -2734,6 +2803,12 @@ pub(crate) struct RowPlan {
     /// The row each piece is on, and how many rows hold them.
     row_of: [u8; ITEM_MAX],
     pub(crate) rows: u8,
+    /// The width each piece was packed at, which is the width it is drawn at.
+    eff: [f32; ITEM_MAX],
+    /// The ref's icon is alone on `icon_row`, and the ref is first on the row
+    /// after it: the row could not hold the icon, the gap and the ref.
+    pub(crate) ref_split: bool,
+    icon_row: u8,
     /// How tall the summary's row is.
     pub(crate) summary_h: f32,
 }
@@ -2803,9 +2878,53 @@ pub(crate) struct DiffNeed {
     line_h: f32,
     /// The diff has a summary.
     summary: bool,
+    /// The ref or branch name at the least it keeps, without its icon: the
+    /// half of the ref piece the overflow rows keep whole when the piece cannot
+    /// fit one row and the icon goes to a row of its own.
+    ref_text: f32,
+    /// The way back without its path: the chevron part.
+    back_chrome: f32,
+}
+
+/// What [`DiffNeed::pack`] decided: the row of each piece, how many rows, the
+/// width each piece was packed at and whether the ref was split from its icon.
+#[derive(Clone, Copy)]
+struct Packed {
+    row_of: [u8; ITEM_MAX],
+    rows: u8,
+    eff: [f32; ITEM_MAX],
+    /// The ref's icon is alone on `icon_row` and the ref, whole, is first on
+    /// the row after it.
+    split: bool,
+    icon_row: u8,
 }
 
 impl DiffNeed {
+    /// The width `item` is packed at, and drawn at, in a row of `cap` pixels:
+    /// the least it keeps, except for the three parts that may give up room
+    /// where the row has none to give. The Refreshing word takes the row when
+    /// it is wider than any row; the way back's path gives up only what the
+    /// row lacks, to what the row leaves after its chevron part; the Staged chip
+    /// gives up exactly what it lacks of its padding, at most
+    /// `2 * (CHIP_PAD_X - CHIP_PAD_X_MIN)`. Wherever the row holds the piece
+    /// whole, each is its least, to the pixel. The one function the packing,
+    /// the plan and the drawing read.
+    fn eff_w(&self, item: Item, cap: f32) -> f32 {
+        let w = self.piece_min(item);
+        match item {
+            Item::Refreshing => w.min(cap.max(0.)),
+            Item::Back => {
+                self.back_chrome + (w - self.back_chrome).min((cap - self.back_chrome).max(0.))
+            }
+            Item::Chip => {
+                w - 2.
+                    * (crate::ui::right_panel::CHIP_PAD_X
+                        - crate::ui::right_panel::chip_pad_x(w, cap))
+            }
+            _ => w,
+        }
+    }
+
     /// Whether tier `tier` is on the second line at level `level`.
     fn moved(&self, tier: usize, level: u8) -> bool {
         self.tiers[tier].present && (tier as u8) < level
@@ -2987,28 +3106,53 @@ impl DiffNeed {
     /// The pieces packed greedily, in order, into rows of `width` less the
     /// rows' own inset and trail with a gap between each two: the row each is
     /// on, and how many rows there are.
-    fn pack(&self, width: f32) -> ([u8; ITEM_MAX], u8) {
+    ///
+    /// Each piece is packed at its [`Self::eff_w`] in that row, and the ref
+    /// piece, the icon, a gap and the ref itself, which is the one piece the
+    /// row may not hold whole, comes apart there: the icon is alone on a row
+    /// before (the current one when it is empty, the next otherwise) and the
+    /// whole ref is first on the row after it. Wherever the row holds the ref
+    /// piece it is packed whole, as it always was.
+    fn pack(&self, width: f32) -> Packed {
         let cap = (width - crate::ui::app::CONTENT_INSET - self.trail).floor();
-        let mut row_of = [0u8; ITEM_MAX];
+        let mut packed = Packed {
+            row_of: [0u8; ITEM_MAX],
+            rows: 0,
+            eff: [0.; ITEM_MAX],
+            split: false,
+            icon_row: 0,
+        };
         let (mut row, mut used) = (0u8, 0.);
         for (i, spec) in self.items[..self.n_items].iter().enumerate() {
-            if used == 0. {
-                used = spec.w;
-            } else if used + self.gap + spec.w <= cap {
-                used += self.gap + spec.w;
+            let mut w = self.eff_w(spec.item, cap);
+            if spec.item == Item::Ref && w > cap {
+                if used != 0. {
+                    row += 1;
+                }
+                packed.split = true;
+                packed.icon_row = row;
+                row += 1;
+                w = self.ref_text;
+                used = w;
+            } else if used == 0. {
+                used = w;
+            } else if used + self.gap + w <= cap {
+                used += self.gap + w;
             } else {
                 row += 1;
-                used = spec.w;
+                used = w;
             }
-            row_of[i] = row;
+            packed.row_of[i] = row;
+            packed.eff[i] = w;
         }
-        (row_of, if self.n_items == 0 { 0 } else { row + 1 })
+        packed.rows = if self.n_items == 0 { 0 } else { row + 1 };
+        packed
     }
 
     /// The overflow's level in a body of `width`: one more than its rows, the
     /// first row, the packed rows and the summary's own.
     fn overflow_level(&self, width: f32) -> u8 {
-        (self.pack(width).1 + u8::from(self.summary) + 2).max(WRAP_LEVELS + 1)
+        (self.pack(width).rows + u8::from(self.summary) + 2).max(WRAP_LEVELS + 1)
     }
 
     /// How many lines the summary takes in a body of `width`.
@@ -3045,6 +3189,9 @@ impl DiffNeed {
                 sum_w: body,
                 row_of: [0; ITEM_MAX],
                 rows: 0,
+                eff: [0.; ITEM_MAX],
+                ref_split: false,
+                icon_row: 0,
                 summary_h: 0.,
             };
         }
@@ -3059,7 +3206,7 @@ impl DiffNeed {
         } else {
             (1, body)
         };
-        let (row_of, rows) = self.pack(level_w);
+        let packed = self.pack(level_w);
         RowPlan {
             state: WrapState { level, lines },
             overflow: true,
@@ -3067,10 +3214,50 @@ impl DiffNeed {
             lead: crate::ui::document_column::SWITCH_LEAD,
             level_w,
             sum_w,
-            row_of,
-            rows,
+            row_of: packed.row_of,
+            rows: packed.rows,
+            eff: packed.eff,
+            ref_split: packed.split,
+            icon_row: packed.icon_row,
             summary_h: self.summary_height(lines),
         }
+    }
+
+    /// The width `item` is drawn at in `plan`: the one it was packed at in the
+    /// held row. Outside the overflow rows it is the least the piece keeps.
+    pub(crate) fn eff(&self, plan: &RowPlan, item: Item) -> f32 {
+        if !plan.overflow {
+            return self.piece_min(item);
+        }
+        self.pieces()
+            .position(|piece| piece == item)
+            .map_or(0., |at| plan.eff[at])
+    }
+
+    /// The whole ref, without its icon, at the least it keeps: what the split
+    /// ref is drawn at in its own row, never less.
+    pub(crate) fn ref_text_min(&self) -> f32 {
+        self.ref_text
+    }
+
+    /// The row the split ref's icon is alone on.
+    pub(crate) fn icon_row(&self, plan: &RowPlan) -> usize {
+        usize::from(plan.icon_row)
+    }
+
+    /// The width the Refreshing word is cut to in `plan`, when no row holds it
+    /// whole.
+    pub(crate) fn refreshing_cut(&self, plan: &RowPlan) -> Option<f32> {
+        let whole = self.piece_min(Item::Refreshing);
+        let drawn = self.eff(plan, Item::Refreshing);
+        (plan.overflow && whole > 0. && drawn < whole).then_some(drawn)
+    }
+
+    /// The padding either side of the Staged chip in `plan`: the one the plan
+    /// packed it with.
+    pub(crate) fn chip_pad(&self, plan: &RowPlan) -> f32 {
+        let whole = self.piece_min(Item::Chip);
+        crate::ui::right_panel::CHIP_PAD_X - (whole - self.eff(plan, Item::Chip)).max(0.) / 2.
     }
 
     /// The least `item` is packed at, and drawn at: what its row was planned
@@ -3097,9 +3284,9 @@ impl DiffNeed {
         };
         let row = plan.row_of[at];
         let (mut others, mut count) = (0., 0);
-        for (i, spec) in self.items[..self.n_items].iter().enumerate() {
+        for i in 0..self.n_items {
             if i != at && plan.row_of[i] == row {
-                others += spec.w;
+                others += plan.eff[i];
                 count += 1;
             }
         }

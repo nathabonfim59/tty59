@@ -2331,6 +2331,39 @@ fn port_chip(
 /// pill's width.
 pub(crate) const CHIP_PAD_X: f32 = 5.;
 
+/// The least padding either side a chip may be trimmed to, in the one place
+/// that trims it: the diff header's chip in a row too narrow for it.
+pub(crate) const CHIP_PAD_X_MIN: f32 = 3.5;
+
+/// The padding either side of a chip `w` pixels wide (its word between two
+/// [`CHIP_PAD_X`] paddings) in a row `cap` pixels wide: [`CHIP_PAD_X`] where the
+/// row holds it, and otherwise exactly what the row lacks taken off the two
+/// paddings together, never below [`CHIP_PAD_X_MIN`] each: the word is never
+/// trimmed. The one function the plan that budgets the chip and the chip that
+/// is drawn both read.
+pub(crate) fn chip_pad_x(w: f32, cap: f32) -> f32 {
+    CHIP_PAD_X - (w - cap).clamp(0., 2. * (CHIP_PAD_X - CHIP_PAD_X_MIN)) / 2.
+}
+
+/// [`info_chip`] with `pad_x` either side of its text instead of
+/// [`CHIP_PAD_X`], for the one chip that gives up its padding to a narrow row.
+pub(crate) fn info_chip_padded(
+    text: &str,
+    bg: gpui::Hsla,
+    fg: gpui::Hsla,
+    mono: &gpui::SharedString,
+    pad_x: f32,
+) -> AnyElement {
+    let pill = pill_shell(bg, fg, mono)
+        .px(px(pad_x))
+        .child(text.to_string());
+    #[cfg(test)]
+    let mut pill = pill.debug_selector(|| "ui-chip".into());
+    #[cfg(test)]
+    crate::ui::paint_probe::note("ui.chip", &mut pill);
+    pill.into_any_element()
+}
+
 fn pill(text: &str, bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -> gpui::Div {
     pill_shell(bg, fg, mono).child(text.to_string())
 }

@@ -2983,11 +2983,14 @@ mod gpui_tests {
     /// 12.5px, under the 168px cap; real fonts are part of the native captures.
     const TAB_TITLE: &str = "release-candidate";
 
-    /// The one state of the labelled refs at which the filled header's measured
-    /// minima (555px) do not fit one line: Russian, 1000px wide, the panel
-    /// open (a 547px body). The locale is the code the tests switch to, exactly.
-    fn wraps_into_two_lines(locale: &str, labelled: bool, width: f32, panel: bool) -> bool {
-        locale == "ru-RU" && labelled && width == 1000. && panel
+    /// The states at which the filled header's measured minima do not fit one
+    /// line: Russian, 1000px wide, the panel open. The panel's tab-count slot
+    /// (B3) leaves that state a 519px body in the test backend (it was 547px),
+    /// under the labelled refs' 555px minima as before and now under the
+    /// plain refs' too, which the header measured at 1000px as two lines when
+    /// asked. The locale is the code the tests switch to, exactly.
+    fn wraps_into_two_lines(locale: &str, _labelled: bool, width: f32, panel: bool) -> bool {
+        locale == "ru-RU" && width == 1000. && panel
     }
 
     /// Where the filled header puts its secondary text, from painted bounds:
@@ -4624,6 +4627,16 @@ mod gpui_tests {
             wide.report(body_w),
             diff_widths(vcx)
         );
+        // Where no ladder level fits both lines the header is in the overflow
+        // rows, which carry their own contract ([`assert_overflow_rows`]): the
+        // first-line core and the second line's minima below are the ladder's
+        // precondition, and a body under them (the 402px a panel with a
+        // tab-count slot leaves at 1000px) is the overflow's case, not a
+        // reason for a taller ladder.
+        if wide.ladder_threshold() - 3. > body_w {
+            assert_overflow_rows(app, vcx, wide, whole, one_line, &summary_text(1, 0), what);
+            return;
+        }
         // The switches' margins yield to what the first line lacks, so what
         // has to fit is the core with them at nothing.
         let zero_lead_core = wide.core() - wide.margins;
@@ -4962,16 +4975,21 @@ mod gpui_tests {
     /// The native minimum-body capture: for each language and interface size
     /// the body, in logical pixels, the filled header has at the 720px window
     /// minimum with the sidebar and the right panel open (the same at 1x and
-    /// 2x). Seeded from the capture, not computed.
+    /// 2x). Seeded from the capture, not computed. Re-seeded on the tree with
+    /// the right panel's tab-count slot (B3): the panel's floor grew with the
+    /// interface size and the language, so five of the eight bodies fell (en
+    /// 16, ja 16 and zh 16 did not). The capture is
+    /// `.pr-assets/A4/b3/native/run/a4-b3-native-evidence.tgz`, the probe's
+    /// `body` at the 720px window of each language and size.
     const NATIVE_MINIMA: [(&str, f32, f32); 8] = [
         ("en", 16., 300.),
         ("ja-JP", 16., 300.),
-        ("ru-RU", 16., 263.),
+        ("ru-RU", 16., 235.),
         ("zh-CN", 16., 300.),
-        ("en", 24., 263.),
-        ("ja-JP", 24., 264.),
-        ("ru-RU", 24., 157.),
-        ("zh-CN", 24., 300.),
+        ("en", 24., 225.),
+        ("ja-JP", 24., 226.),
+        ("ru-RU", 24., 117.),
+        ("zh-CN", 24., 263.),
     ];
 
     /// The order the parts read in once the header has more rows than the
@@ -5189,9 +5207,41 @@ mod gpui_tests {
             wide.report(painted_body(vcx, what)),
             diff_widths(vcx)
         );
+        // Every control, figure and word is whole, but for two: the Refreshing
+        // word, where no row can hold it whole (it is wider than a row's usable
+        // width): it takes that width and is cut, the way a summary word wider
+        // than its row is; and the Staged chip, which gives up exactly what it
+        // lacks of its padding, at most 3px, its word never trimmed. Nothing
+        // else gets an exception.
+        let (mut painted, mut natural) = (diff_whole(vcx, what), *whole);
+        let usable = (painted_body(vcx, what) - wide.lead - wide.trail).floor();
+        if let (Some(drawn), Some(whole_w)) = (painted.refreshing, whole.refreshing) {
+            if f32::from(whole_w) > usable + 0.01 {
+                assert!(
+                    (f32::from(drawn) - usable).abs() <= 1.,
+                    "{what}: the Refreshing word, {whole_w:?} whole, is {drawn:?} where no row \
+                     holds it: it takes the {usable}px a row has; {report}"
+                );
+                painted.refreshing = None;
+                natural.refreshing = None;
+            }
+        }
+        if let (Some(drawn), Some(whole_w)) = (painted.chip, whole.chip) {
+            let whole_w = f32::from(whole_w);
+            if whole_w > usable + 0.01 {
+                let wanted = whole_w - (whole_w - usable).clamp(0., 3.);
+                assert!(
+                    (f32::from(drawn) - wanted).abs() <= 0.5,
+                    "{what}: the Staged chip, {whole_w}px whole, is {drawn:?} in a {usable}px \
+                     row: it gives up exactly the deficit of its padding, at most 3px, so \
+                     {wanted}px; {report}"
+                );
+                painted.chip = None;
+                natural.chip = None;
+            }
+        }
         assert_eq!(
-            diff_whole(vcx, what),
-            *whole,
+            painted, natural,
             "{what}: a control, figure or word is squeezed or gone; {report}"
         );
         let bands = header_bands(vcx);
@@ -5408,6 +5458,160 @@ mod gpui_tests {
             assert_contract_at(
                 &app, &mut vcx, &wide, &whole, one_line, width, &summary, &what,
             );
+        }
+        set_native_context(&app, &mut vcx, "en", 16.);
+    }
+
+    /// Where no row can hold the Refreshing word whole (the body the panel's
+    /// tab-count slot leaves at the 720px window, in Russian at the largest
+    /// size: 122px in the test backend, 117px natively) the word, and only
+    /// it, takes the width of the usable row and is cut there, the way a
+    /// summary word wider than its row is: nothing of it is painted past the
+    /// row's start or end, and hovering it shows the whole word. Where a row
+    /// holds it (the 157px body) it is unchanged: whole, with no tooltip.
+    /// The accessible label is not observable from here; it is checked by code
+    /// review and, on a native build, through AT-SPI.
+    #[gpui::test]
+    fn the_refreshing_word_takes_the_row_it_has_and_shows_its_whole_text_where_none_holds_it(
+        cx: &mut TestAppContext,
+    ) {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, held, _streams) = native_ui24_diff(cx);
+        set_native_context(&app, &mut vcx, "ru-RU", 24.);
+        put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 2400., 900.);
+        let state = "ru-RU UI24 Staged reading, native 50000/50000".to_string();
+        assert_holds(&app, &mut vcx, &held, &state);
+        let whole = diff_whole(&mut vcx, &state);
+        let natural = f32::from(
+            whole
+                .refreshing
+                .expect("a reading header has its Refreshing word"),
+        );
+        let one_line = diff_header(&mut vcx, &state).header.size.height;
+        let wide = measure_wide(&app, &mut vcx, &state, true);
+        let summary = summary_text(1, 0);
+        let text = crate::ui::i18n::t(crate::ui::i18n::L10nKey::Refreshing).to_string();
+        let eps = px(0.5);
+        let lead = crate::ui::app::CONTENT_INSET;
+        for target in [122., 117.] {
+            let width = solve_window(&app, &mut vcx, target, 520., &state);
+            let what = format!("{state}, a {target}px body in a {width}px window");
+            assert_holds(&app, &mut vcx, &held, &what);
+            let body = vcx
+                .debug_bounds("diff-overlay-body")
+                .unwrap_or_else(|| panic!("{what}: the body is not drawn"));
+            let close = vcx
+                .debug_bounds("diff-overlay-close")
+                .unwrap_or_else(|| panic!("{what}: the close tile is not drawn"));
+            let trail = f32::from(body.right() - close.right());
+            let usable = (f32::from(body.size.width) - lead - trail).floor();
+            assert!(
+                natural > usable,
+                "{what}: the premise is that no row holds the {natural}px word in {usable}px"
+            );
+            let word = vcx
+                .debug_bounds("diff-overlay-refreshing")
+                .unwrap_or_else(|| panic!("{what}: the Refreshing word is not drawn"));
+            assert!(
+                (f32::from(word.size.width) - usable).abs() <= 1.
+                    && word.left() >= body.left() + px(lead) - eps
+                    && word.right() <= body.right() - px(trail) + eps,
+                "{what}: the word {word:?} should be the {usable}px of the row, inside the \
+                 {lead}px lead and the {trail}px trail of the body {body:?}; {}",
+                diff_widths(&mut vcx)
+            );
+            let card = hover_tooltip(&mut vcx, "diff-overlay-refreshing")
+                .unwrap_or_else(|| panic!("{what}: the cut word has no tooltip with its text"));
+            let lines = tooltip_lines(&mut vcx, &text, f32::from(card.size.width));
+            let drawn = (f32::from(card.size.height) / tooltip_line_h(&mut vcx)).round() as usize;
+            assert!(
+                lines == 1 && drawn == 1 && f32::from(card.size.width) + 1. >= natural,
+                "{what}: the tooltip {card:?} does not show the whole word {text:?} on one line \
+                 ({lines} shaped, {drawn} drawn)"
+            );
+            assert_contract_at(
+                &app, &mut vcx, &wide, &whole, one_line, width, &summary, &what,
+            );
+        }
+        // A body with room holds it: whole, unchanged, nothing to hover.
+        let width = solve_window(&app, &mut vcx, 157., 520., &state);
+        let what = format!("{state}, the 157px body in a {width}px window");
+        assert_holds(&app, &mut vcx, &held, &what);
+        let word = vcx
+            .debug_bounds("diff-overlay-refreshing")
+            .unwrap_or_else(|| panic!("{what}: the Refreshing word is not drawn"));
+        assert!(
+            (f32::from(word.size.width) - natural).abs() <= 0.5,
+            "{what}: the word {word:?} is not its whole {natural}px where a row holds it"
+        );
+        assert!(
+            hover_tooltip(&mut vcx, "diff-overlay-refreshing").is_none(),
+            "{what}: a whole word has no tooltip"
+        );
+        set_native_context(&app, &mut vcx, "en", 16.);
+    }
+
+    /// The Staged chip is a 90px word between two 5px paddings, 100px. Where
+    /// the usable row (the body less the lead and the trail) is narrower, it
+    /// gives up exactly the deficit, and at most 3px of it (the paddings go from
+    /// 5px to 3.5px each), so its 90px word is never trimmed; where the row
+    /// holds it, it is the 100px it always was. The padding is not an
+    /// observable on its own, so the chip's painted width is: the whole word
+    /// plus both paddings, none less than 3.5px.
+    #[gpui::test]
+    fn the_staged_chip_gives_up_only_its_padding_deficit_and_keeps_its_whole_word(
+        cx: &mut TestAppContext,
+    ) {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, held, _streams) = native_ui24_diff(cx);
+        set_native_context(&app, &mut vcx, "ru-RU", 24.);
+        put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 2400., 900.);
+        let state = "ru-RU UI24 Staged reading, native 50000/50000".to_string();
+        assert_holds(&app, &mut vcx, &held, &state);
+        let natural = f32::from(
+            diff_whole(&mut vcx, &state)
+                .chip
+                .expect("a Staged header has its chip"),
+        );
+        let word = natural - 2. * crate::ui::right_panel::CHIP_PAD_X;
+        let eps = px(0.5);
+        let lead = crate::ui::app::CONTENT_INSET;
+        for target in [157., 122., 117.] {
+            let width = solve_window(&app, &mut vcx, target, 520., &state);
+            let what = format!("{state}, a {target}px body in a {width}px window");
+            assert_holds(&app, &mut vcx, &held, &what);
+            let body = vcx
+                .debug_bounds("diff-overlay-body")
+                .unwrap_or_else(|| panic!("{what}: the body is not drawn"));
+            let close = vcx
+                .debug_bounds("diff-overlay-close")
+                .unwrap_or_else(|| panic!("{what}: the close tile is not drawn"));
+            let trail = f32::from(body.right() - close.right());
+            let usable = (f32::from(body.size.width) - lead - trail).floor();
+            let chip = vcx
+                .debug_bounds("ui-chip")
+                .unwrap_or_else(|| panic!("{what}: the chip is not drawn"));
+            let wanted = natural - (natural - usable).clamp(0., 3.);
+            assert!(
+                (f32::from(chip.size.width) - wanted).abs() <= 0.5
+                    && f32::from(chip.size.width) >= word + 2. * 3.5 - 0.5
+                    && chip.left() >= body.left() + px(lead) - eps,
+                "{what}: the chip {chip:?} should be {wanted}px (the {natural}px chip less the \
+                 deficit against the {usable}px row, 3px at most, around its whole {word}px \
+                 word); {}",
+                diff_widths(&mut vcx)
+            );
+            if natural <= usable {
+                assert!(
+                    f32::from(chip.size.width) == natural
+                        || (f32::from(chip.size.width) - natural).abs() <= 0.5,
+                    "{what}: the chip {chip:?} changed where the row holds it whole"
+                );
+            }
         }
         set_native_context(&app, &mut vcx, "en", 16.);
     }
@@ -5891,6 +6095,20 @@ mod gpui_tests {
         Wide1440,
         Body437,
         Body157,
+        /// The test backend's 720px window with the panel's tab-count slot
+        /// (B3): a 122px body, whose usable row (less the lead and the trail)
+        /// is 102px, under the ref's icon, gap and short SHA (119px).
+        Body122,
+        /// The native 720px minimum with that slot at the largest size in
+        /// Russian: a 117px body, a 97px usable row.
+        Body117,
+        /// The native 1000px window with the diff's saved Dock falling back
+        /// (sidebar 180, panel 423): a 397px body.
+        Body397,
+        /// The native 1000px window in the other state, the Fill latch on
+        /// (sidebar 217, panel 423): a 360px body. A different state from the
+        /// saved-Dock fallback above, never a replacement for it.
+        Body360,
     }
 
     /// The commit's parts as painted: every one the header draws is whole where
@@ -5952,6 +6170,43 @@ mod gpui_tests {
             "{what}: the ref is {:?} wide, not its {natural:?} with room; {widths}",
             rev.size.width
         );
+        // The ref is its icon, a gap and its short SHA as one piece where the
+        // usable row (the body less the lead and the trail) holds all three:
+        // the icon and the SHA on one line, the gap between them. Where it
+        // does not, the icon is alone on a row before and the SHA, whole, is
+        // the first thing on the next, at the row's own start and inside its
+        // end: nothing is cut, and nothing is dropped.
+        let icon = found
+            .iter()
+            .find(|(name, _)| *name == "subject icon")
+            .unwrap()
+            .1;
+        let close = found.iter().find(|(name, _)| *name == "close").unwrap().1;
+        let lead = crate::ui::app::CONTENT_INSET;
+        let trail = f32::from(body.right() - close.right());
+        let usable = f32::from(body.size.width) - lead - trail;
+        let gap = 0.5 * vcx.update(|window, _| window.rem_size().as_f32());
+        let atom = f32::from(icon.size.width) + gap + f32::from(natural);
+        if atom <= usable + 0.01 {
+            assert!(
+                (f32::from(icon.center().y) - f32::from(rev.center().y)).abs() <= 4.
+                    && (f32::from(rev.left() - icon.right()) - gap).abs() <= 0.5,
+                "{what}: the usable row is {usable}px, holding the {atom}px icon, gap and SHA, \
+                 but the icon {icon:?} and the ref {rev:?} are not one piece on one line; \
+                 {widths}"
+            );
+        } else {
+            assert!(
+                icon.bottom() <= rev.top() + eps
+                    && (f32::from(icon.left() - body.left()) - lead).abs() <= 0.5
+                    && (f32::from(rev.left() - body.left()) - lead).abs() <= 0.5
+                    && rev.right() <= body.right() - px(trail) + eps,
+                "{what}: the usable row is {usable}px, under the {atom}px icon, gap and SHA: \
+                 the icon {icon:?} should be alone on the row before and the whole SHA {rev:?} \
+                 first on the next, inside the {lead}px lead and the {trail}px trail of the \
+                 body {body:?}; {widths}"
+            );
+        }
         if focused {
             let back = found
                 .iter()
@@ -5968,6 +6223,21 @@ mod gpui_tests {
         // The overflow rows' pieces, each at no less than its readable
         // minimum and inside the body: where they exist (they have selectors
         // in the overflow rows only), and where `require` says they must.
+        // The way back stays in the usable row, whatever its path: its chevron
+        // part is whole, and the path gives way inside it.
+        if focused {
+            let back = found
+                .iter()
+                .find(|(name, _)| *name == "back button")
+                .unwrap()
+                .1;
+            assert!(
+                back.left() >= body.left() + px(lead) - eps
+                    && back.right() <= body.right() - px(trail) + eps,
+                "{what}: the back button {back:?} is outside the usable row of {usable}px, the \
+                 body {body:?} less its {lead}px lead and {trail}px trail; {widths}"
+            );
+        }
         for (name, selector, least, wanted) in [
             (
                 "commit label",
@@ -5985,6 +6255,25 @@ mod gpui_tests {
         ] {
             match vcx.debug_bounds(selector) {
                 Some(piece) => {
+                    // The path's readable minimum is kept wherever the way back
+                    // holds it in the usable row; where it cannot, the path
+                    // gives up only what is lacking, down to what the row
+                    // leaves after the back button's chevron part.
+                    let least = if name == "path tail" {
+                        let back = found
+                            .iter()
+                            .find(|(owner, _)| *owner == "back button")
+                            .unwrap_or_else(|| panic!("{what}: a path without its back button"))
+                            .1;
+                        let chrome = f32::from(back.size.width - piece.size.width);
+                        if chrome + least <= usable + 0.01 {
+                            least
+                        } else {
+                            (usable - chrome).max(0.)
+                        }
+                    } else {
+                        least
+                    };
                     assert!(
                         f32::from(piece.size.width) >= least - 0.01
                             && piece.size.height >= px(1.)
@@ -6071,6 +6360,7 @@ mod gpui_tests {
         path: &str,
         scenes: &[CommitScene],
         minima: CommitMinima,
+        checks: Checks,
     ) {
         let kind = if subject.labelled() {
             "commit"
@@ -6118,19 +6408,145 @@ mod gpui_tests {
                     let width = solve_window(app, vcx, 157., 520., &state);
                     (width, painted_body(vcx, &state), true)
                 }
+                CommitScene::Body122 => {
+                    let width = solve_window(app, vcx, 122., 520., &state);
+                    (width, painted_body(vcx, &state), true)
+                }
+                CommitScene::Body117 => {
+                    let width = solve_window(app, vcx, 117., 520., &state);
+                    (width, painted_body(vcx, &state), true)
+                }
+                CommitScene::Body397 => {
+                    let width = solve_window(app, vcx, 397., 900., &state);
+                    (width, painted_body(vcx, &state), false)
+                }
+                CommitScene::Body360 => {
+                    let width = solve_window(app, vcx, 360., 900., &state);
+                    (width, painted_body(vcx, &state), false)
+                }
             };
             let what = format!("{state} at {width}px, body {painted}px");
             assert_holds(app, vcx, &held, &what);
-            assert_commit_fits(
-                vcx,
-                focused,
-                subject.labelled(),
-                natural,
-                minima,
-                label_needed,
-                &what,
-            );
+            if checks == Checks::Fits {
+                assert_commit_fits(
+                    vcx,
+                    focused,
+                    subject.labelled(),
+                    natural,
+                    minima,
+                    label_needed,
+                    &what,
+                );
+            }
+            if checks == Checks::WayBack && focused {
+                assert_way_back_row(vcx, minima.path, &what);
+                // A path short enough to fit its share whole is not cut at all.
+                if path.chars().count() > 12
+                    && matches!(scene, CommitScene::Body122 | CommitScene::Body117)
+                {
+                    assert_back_path_shows_both_ends_and_its_whole_text_on_hover(vcx, path, &what);
+                }
+            }
         }
+    }
+
+    /// Which part of a commit header a case asserts: every part inside the
+    /// body with the ref's icon and SHA placed as the usable row allows, or the
+    /// focused file's way back and its path alone.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Checks {
+        Fits,
+        WayBack,
+    }
+
+    /// The focused file's way back in the usable row (the body less the lead
+    /// and the trail): the whole control inside it, the path inside the
+    /// control, and the path at its readable minimum wherever the control holds
+    /// it there, or, where it cannot, at no less than what the row leaves
+    /// after the control's chevron part: the path gives up what is lacking and
+    /// no more.
+    fn assert_way_back_row(vcx: &mut VisualTestContext, least_path: f32, what: &str) {
+        let bounds = |vcx: &mut VisualTestContext, selector: &'static str| {
+            vcx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{what}: {selector} is not drawn"))
+        };
+        let body = bounds(vcx, "diff-overlay-body");
+        let close = bounds(vcx, "diff-overlay-close");
+        let back = bounds(vcx, "diff-overlay-unfocus");
+        let lead = crate::ui::app::CONTENT_INSET;
+        let trail = f32::from(body.right() - close.right());
+        let usable = f32::from(body.size.width) - lead - trail;
+        let eps = px(0.5);
+        // The path has a selector in the overflow rows only; in the ladder it
+        // is the header's own, and only the control has to be in its row.
+        let Some(path) = vcx.debug_bounds("diff-overlay-path") else {
+            assert!(
+                back.left() >= body.left() + px(lead) - eps
+                    && back.right() <= body.right() - px(trail) + eps,
+                "{what}: the back button {back:?} is outside the {usable}px usable row of the \
+                 body {body:?}; {}",
+                diff_widths(vcx)
+            );
+            return;
+        };
+        let chrome = f32::from(back.size.width - path.size.width);
+        let floor = if chrome + least_path <= usable + 0.01 {
+            least_path
+        } else {
+            (usable - chrome).max(0.)
+        };
+        let widths = diff_widths(vcx);
+        assert!(
+            back.left() >= body.left() + px(lead) - eps
+                && back.right() <= body.right() - px(trail) + eps
+                && path.left() >= back.left() - eps
+                && path.right() <= back.right() + eps,
+            "{what}: the back button {back:?} and its path {path:?} are not inside the {usable}px \
+             usable row of the body {body:?} ({lead}px lead, {trail}px trail); {widths}"
+        );
+        assert!(
+            f32::from(path.size.width) >= floor - 0.5,
+            "{what}: the path {path:?} is under the {floor}px the row leaves it ({chrome}px of \
+             chevron part, {least_path}px minimum, {usable}px row); {widths}"
+        );
+    }
+
+    /// Where the way back gives its path less than the readable minimum (the
+    /// row cannot hold it), the path is still the one measured elision of the
+    /// UI, Middle, with the head of the path and its tail both painted and an
+    /// ellipsis between, and hovering it shows the whole path on the lines the
+    /// text system gives it. The accessible label of the control is checked by
+    /// code review and, natively, through AT-SPI: not observable here.
+    fn assert_back_path_shows_both_ends_and_its_whole_text_on_hover(
+        vcx: &mut VisualTestContext,
+        path: &str,
+        what: &str,
+    ) {
+        crate::ui::text_elision::observe::clear();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        let id = gpui::ElementId::from("diff-overlay-path-text");
+        let label = crate::ui::text_elision::observe::label(&id)
+            .unwrap_or_else(|| panic!("{what}: the way back's path was not drawn"));
+        let (first, last) = (path.chars().next().unwrap(), path.chars().last().unwrap());
+        assert!(
+            label.painted
+                && label.text.contains('\u{2026}')
+                && label.text.chars().next() == Some(first)
+                && label.text.chars().last() == Some(last)
+                && label.text.chars().count() < path.chars().count(),
+            "{what}: the path {path:?} is not painted with its head, an ellipsis and its tail: \
+             {label:?}"
+        );
+        let card = hover_tooltip(vcx, "diff-overlay-path")
+            .unwrap_or_else(|| panic!("{what}: the cut path has no tooltip with its whole text"));
+        let lines = tooltip_lines(vcx, path, f32::from(card.size.width));
+        let drawn = (f32::from(card.size.height) / tooltip_line_h(vcx)).round() as usize;
+        assert_eq!(
+            drawn, lines,
+            "{what}: the tooltip {card:?} is {drawn} line(s), and the whole path {path:?} takes \
+             {lines} in its width"
+        );
     }
 
     /// A commit's header, with its label and bare, plain and opened on a file
@@ -6145,6 +6561,87 @@ mod gpui_tests {
     #[gpui::test]
     fn a_commit_header_keeps_its_ref_whole_and_every_part_inside_at_the_largest_font(
         cx: &mut TestAppContext,
+    ) {
+        check_commit_scenes(
+            cx,
+            &[
+                CommitScene::Wide1440,
+                CommitScene::Body437,
+                CommitScene::Body157,
+                CommitScene::Body397,
+                CommitScene::Body360,
+            ],
+            true,
+            Checks::Fits,
+        );
+    }
+
+    /// The focused file's way back keeps its path whole at its readable
+    /// minimum wherever the usable row holds both (the wide bodies, and the
+    /// two 1000px states: 397px with the saved Dock falling back, 360px with
+    /// the Fill latch on): the same behavior as before, unchanged.
+    #[gpui::test]
+    fn the_way_back_keeps_its_path_floor_where_the_row_holds_it(cx: &mut TestAppContext) {
+        check_commit_scenes(
+            cx,
+            &[
+                CommitScene::Wide1440,
+                CommitScene::Body437,
+                CommitScene::Body157,
+                CommitScene::Body397,
+                CommitScene::Body360,
+            ],
+            false,
+            Checks::WayBack,
+        );
+    }
+
+    /// At the floors (122px and the native 117px: usable rows of 102px and
+    /// 97px) the way back's chevron part and a path floor of 70px need 109px,
+    /// more than the row. The path gives up only what is lacking, down to the
+    /// 58px the native row leaves, through the UI's one Middle elision: its
+    /// head and its tail painted with an ellipsis between, the whole path on
+    /// hover. The control is inside the usable row. (The accessible label is
+    /// not observable here.)
+    #[gpui::test]
+    fn the_way_back_gives_its_path_only_the_width_the_row_lacks_at_the_floors(
+        cx: &mut TestAppContext,
+    ) {
+        check_commit_scenes(
+            cx,
+            &[CommitScene::Body122, CommitScene::Body117],
+            false,
+            Checks::WayBack,
+        );
+    }
+
+    /// The same commit headers where the usable row (the body less the lead
+    /// and the trail) is under the ref's icon, gap and short SHA: the 122px
+    /// body of the test backend's 720px window and the native 117px one (the
+    /// panel's tab-count slot, B3). The icon is alone on a row before and the
+    /// whole SHA is first on the next, nothing is outside the body or the row,
+    /// and a focused file's way back gives its path only the width it lacks,
+    /// keeping both ends of the path and its whole text on hover.
+    #[gpui::test]
+    fn a_commit_header_puts_the_icon_on_the_row_before_a_whole_sha_at_the_floors(
+        cx: &mut TestAppContext,
+    ) {
+        check_commit_scenes(
+            cx,
+            &[CommitScene::Body122, CommitScene::Body117],
+            false,
+            Checks::Fits,
+        );
+    }
+
+    /// Each of `scenes` for the commit headers of the native captures; with
+    /// `finding_first` the labelled commit on the native path leads, so its red
+    /// is the first one reported.
+    fn check_commit_scenes(
+        cx: &mut TestAppContext,
+        scenes: &[CommitScene],
+        finding_first: bool,
+        checks: Checks,
     ) {
         use crate::ui::tab_strip::overflow_gpui_tests::{set_ui_font_size, use_locale};
         if cfg!(target_os = "macos") {
@@ -6171,28 +6668,28 @@ mod gpui_tests {
             byline: kept_prefix(&app, &mut vcx, "000", crate::ui::right_panel::META, true),
             path: shaped_path(&app, &mut vcx, "000\u{2026}000").ceil(),
         };
-        let all = [
-            CommitScene::Wide1440,
-            CommitScene::Body437,
-            CommitScene::Body157,
-        ];
         // The finding first, so its red is the first one reported.
-        check_commit_case(
-            &app,
-            &mut vcx,
-            &DiffRef::Commit(COMMIT_SHA),
-            true,
-            PATHS[2],
-            &[CommitScene::Body437],
-            minima,
-        );
+        if finding_first {
+            check_commit_case(
+                &app,
+                &mut vcx,
+                &DiffRef::Commit(COMMIT_SHA),
+                true,
+                PATHS[2],
+                &[CommitScene::Body437],
+                minima,
+                checks,
+            );
+        }
         for subject in [DiffRef::Commit(COMMIT_SHA), DiffRef::BareCommit(COMMIT_SHA)] {
             for focused in [false, true] {
                 for path in PATHS {
                     if !focused && path != PATHS[0] {
                         continue;
                     }
-                    check_commit_case(&app, &mut vcx, &subject, focused, path, &all, minima);
+                    check_commit_case(
+                        &app, &mut vcx, &subject, focused, path, scenes, minima, checks,
+                    );
                 }
             }
         }
