@@ -260,6 +260,11 @@ pub(crate) enum Tone {
     /// The action a card warns about. Red, and only on the one site that has
     /// earned it — overriding a changed host key.
     Danger,
+    /// A destructive action that needs confirming but is not the card's main
+    /// warning: no fill, a 1px danger border and danger ink, with an 8% danger
+    /// wash under the pointer. The filled [`Tone::Danger`] stays reserved for
+    /// the one answer a card exists to warn about.
+    DangerOutline,
 }
 
 /// A dialog button. The click handler is attached only while `enabled`: a
@@ -279,6 +284,10 @@ pub(crate) fn button(
 ) -> Stateful<Div> {
     let theme = cx.theme();
     let surface: Hsla = gpui::rgb(rungs.base).into();
+    debug_assert!(
+        tone != Tone::DangerOutline || rungs.base == popover_rungs(cx).base,
+        "DangerOutline's ink is floored on the popover card only"
+    );
     let (fill, hover, ink): (Option<Hsla>, Option<Hsla>, Hsla) = match (tone, enabled) {
         // The surface's own next rung, like a well: `muted` is a step off the
         // window, and on a dark popover it was the card's own colour.
@@ -299,13 +308,23 @@ pub(crate) fn button(
                 theme.danger_foreground,
             )
         }
+        // Ink and wash are the cached pair floored on the popover card, which
+        // is the one surface this tone is built for.
+        (Tone::DangerOutline, true) => {
+            let cached = crate::ui::theme::danger_outline_ink(cx);
+            (
+                None,
+                Some(gpui::rgb(cached.popover_wash).into()),
+                gpui::rgb(cached.popover).into(),
+            )
+        }
         (Tone::Secondary, true) => (
             Some(gpui::rgb(rungs.hover).into()),
             Some(gpui::rgb(rungs.selected).into()),
             theme.foreground,
         ),
     };
-    h_flex()
+    let el = h_flex()
         .id(id)
         .flex_none()
         .items_center()
@@ -319,9 +338,30 @@ pub(crate) fn button(
         })
         .text_color(ink)
         .when_some(fill, |b, fill| b.bg(fill))
-        .when_some(hover, |b, hover| b.hover(move |s| s.bg(hover)))
+        .when(tone == Tone::DangerOutline && enabled, |b| {
+            b.border_1().border_color(theme.danger)
+        })
+        .when_some(hover, |b, hover| {
+            b.hover(move |s| {
+                let s = s.bg(hover);
+                #[cfg(test)]
+                let mut s = s;
+                #[cfg(test)]
+                if tone == Tone::DangerOutline {
+                    crate::ui::paint_probe::note("dialog.button.danger_outline.hover", &mut s);
+                }
+                s
+            })
+        })
         .when(enabled, |b| b.cursor_pointer().on_click(on_click))
-        .child(text.into())
+        .child(text.into());
+    #[cfg(test)]
+    let mut el = el;
+    #[cfg(test)]
+    if tone == Tone::DangerOutline {
+        crate::ui::paint_probe::note("dialog.button.danger_outline", &mut el);
+    }
+    el
 }
 
 /// What the real-render contrast tests of the switcher, Search Everywhere, the
@@ -390,5 +430,80 @@ pub(crate) mod test_themes {
                 self.0.join("\n")
             );
         }
+    }
+}
+
+/// A property of the recipe, not of any screen: built on each real theme, the
+/// destructive-outline button's ink and wash clear the text floor and its
+/// border the component floor against the popover surface. Whether a given
+/// control uses the recipe is that consumer's own witness.
+#[cfg(test)]
+mod danger_outline_tests {
+    use gpui::TestAppContext;
+
+    use super::test_themes::{self as themes, MARK_FLOOR, Misses, TEXT_FLOOR};
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::paint_probe::{self as probe, hsla24};
+
+    #[gpui::test]
+    fn danger_outline_clears_the_text_and_component_floors(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            probe::clear();
+            let surface = vcx.update(|_, cx| {
+                let rungs = popover_rungs(cx);
+                let _ = button(
+                    "rest",
+                    "Revert",
+                    Tone::DangerOutline,
+                    true,
+                    rungs,
+                    cx,
+                    |_, _, _| {},
+                );
+                let _ = button(
+                    "off",
+                    "Revert",
+                    Tone::DangerOutline,
+                    false,
+                    rungs,
+                    cx,
+                    |_, _, _| {},
+                );
+                rungs.base
+            });
+            let id = theme.id.as_str();
+            let notes = probe::all("dialog.button.danger_outline");
+            assert_eq!(notes.len(), 2, "{id}: the enabled and the disabled button");
+            let (rest, off) = (notes[0], notes[1]);
+            assert_eq!(rest.fill, None, "{id}: no fill at rest");
+            assert_eq!(off.border, None, "{id}: a disabled one draws no outline");
+            // The wash is what the enabled button paints under the pointer.
+            let washes = probe::all("dialog.button.danger_outline.hover");
+            assert_eq!(washes.len(), 1, "{id}: one wash, for the enabled button");
+            let wash = washes[0].fill.expect("the wash");
+            let ink = rest.text.expect("the ink");
+            let border = rest.border.expect("the 1px outline");
+            misses.floor(id, "ink at rest", ink, surface, TEXT_FLOOR);
+            misses.floor(id, "ink under the pointer", ink, wash, TEXT_FLOOR);
+            misses.floor(id, "outline", border, surface, MARK_FLOOR);
+            // The wash is 8% of the danger ink over the surface, worked out
+            // here channel by channel rather than by the recipe's own helper.
+            let danger = vcx.update(|_, cx| hsla24(cx.theme().danger));
+            for shift in [16, 8, 0] {
+                let channel = |rgb: u32| ((rgb >> shift) & 0xff) as f32;
+                let expected = channel(surface) * 0.92 + channel(danger) * 0.08;
+                assert!(
+                    (channel(wash) - expected).abs() <= 1.0,
+                    "{id}: wash channel {shift} is {} where 8% danger over the surface is {expected:.1}",
+                    channel(wash),
+                );
+            }
+        }
+        misses.assert_none("danger outline contrast");
     }
 }

@@ -703,7 +703,7 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         SearchEntry {
             section: General,
             title: VisionDefault,
-            keywords: VisionDefaultDesc,
+            keywords: SettingsSearchVisionDefaultKeywords,
         },
         SearchEntry {
             section: General,
@@ -3051,6 +3051,49 @@ mod tests {
         crate::ui::i18n::set_locale("en");
     }
 
+    /// Renaming a setting by its outcome must not strand someone who still
+    /// types the old name: "agent mode" and the ssh_config keywords were the
+    /// words these rows used to be found by, in every language.
+    #[test]
+    fn renamed_settings_are_still_found_by_their_old_words() {
+        for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
+            crate::ui::i18n::set_locale(locale);
+            for (query, title) in [
+                ("agent mode", L10nKey::VisionDefault),
+                ("start windows", L10nKey::VisionDefault),
+                (
+                    "terminal agents selector",
+                    L10nKey::SettingsSidebarAgentsToggle,
+                ),
+                ("hostname", L10nKey::SettingsHosts),
+                ("identityfile", L10nKey::SettingsHosts),
+                ("proxyjump", L10nKey::SettingsHosts),
+            ] {
+                let entry = settings_search_entries()
+                    .iter()
+                    .find(|e| e.title == title)
+                    .unwrap();
+                assert!(entry_matches(entry, query), "{locale}: {query}");
+            }
+        }
+        // The words each language's old row title was found by, typed in that
+        // language: no other catalog carries them, so only that language's own
+        // keywords can keep them working.
+        for (locale, query) in [
+            ("ru-RU", "режим агентов"),
+            ("ja-JP", "エージェントビュー"),
+            ("zh-CN", "Agent 视图"),
+        ] {
+            crate::ui::i18n::set_locale(locale);
+            let entry = settings_search_entries()
+                .iter()
+                .find(|e| e.title == L10nKey::VisionDefault)
+                .unwrap();
+            assert!(entry_matches(entry, query), "{locale}: {query}");
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
     #[test]
     fn settings_row_ids_survive_language_changes() {
         for key in [
@@ -3629,6 +3672,8 @@ mod tests {
             "Show title bar buttons on hover",
             "Option (⌥) acts as Meta",
             "Install the tty59 command on PATH",
+            "Open new windows in the Inbox",
+            "Show Terminal / Agents switch",
         ] {
             if title == "Option (⌥) acts as Meta" && !cfg!(target_os = "macos") {
                 continue;

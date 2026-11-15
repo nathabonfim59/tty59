@@ -87,6 +87,28 @@ pub struct Semantics {
 
 impl Global for Semantics {}
 
+/// How much of the danger ink the destructive-outline button's hover wash is,
+/// over the card it sits on.
+pub(crate) const DANGER_OUTLINE_WASH: f32 = 0.08;
+
+/// The destructive-outline button's text ink on a popover card (the gutter
+/// peek's Revert), cached per theme by `apply_theme`. It is the semantic
+/// danger ink exactly as authored wherever that already clears the text floor
+/// on the card and on the button's hover wash, and is corrected on both
+/// together where it does not. The outline keeps the authored ink; only the
+/// words move. A role for the popover surface alone: a card on another
+/// surface needs its own.
+#[derive(Debug, Clone, Copy)]
+pub struct DangerOutlineInk {
+    pub popover: u32,
+    /// The button's hover wash on that card: the authored danger ink at
+    /// `DANGER_OUTLINE_WASH` over it. Cached beside the ink floored on it, so
+    /// the painter blends nothing per frame.
+    pub popover_wash: u32,
+}
+
+impl Global for DangerOutlineInk {}
+
 impl Semantics {
     /// Maps core agent status onto the active theme's existing semantic roles
     /// so `tty59-core` stays free of UI theme dependencies.
@@ -183,6 +205,10 @@ pub struct ChromeInk {
     /// `SELECTED_CAPTION_TARGET` there and walked to it where it does not. The
     /// unselected captions and the shared caption itself are unchanged.
     pub selected_caption: u32,
+    /// The right panel's Changes-tab count (12px-class, regular): the theme's muted foreground, held
+    /// to `CHROME_SMALL_META_TARGET` on the panel fill, the window fill and the selected tab pill
+    /// (`Neutrals::secondary`) together, so one colour serves the selected and the unselected tab.
+    pub tab_count: u32,
 }
 
 /// Headroom by size, derived once in `apply_theme` and never at render time. Text painted at 12px or
@@ -196,9 +222,11 @@ pub struct ChromeInk {
 /// and only guarantees that a seed above its assigned target is returned unchanged. Scope today:
 /// `SettingsInk::unsaved` and `SettingsInk::glyph`.
 pub(crate) const SETTINGS_SMALL_TEXT_TARGET: f32 = 5.0;
-/// The same small-text target for the switcher's unpicked meta and count (11.5-12px regular text),
-/// whose 1x captures missed the floor. Chrome-side, derived once in `apply_theme`.
-pub(crate) const CHROME_SMALL_META_TARGET: f32 = 5.0;
+/// The chrome small regular meta/count target on popover and panel fills. A thin digit `1` fell below
+/// 4.5 in 1x captures despite a 5.0 token; 5.5 leaves raster headroom. Covers the switcher's unpicked
+/// meta/count, popup notes and the Changes tab count; derived once in `apply_theme`. Settings keep
+/// separate targets.
+pub(crate) const CHROME_SMALL_META_TARGET: f32 = 5.5;
 pub(crate) const SETTINGS_GLYPH_TARGET: f32 = 3.2;
 
 /// The contrast a caption keeps on a selected panel row: above the 4.5:1 text
@@ -804,6 +832,19 @@ impl Theme {
         }
     }
 
+    /// The destructive-outline button's ink on the popover card, floored on
+    /// the card and on the 8% danger wash it takes under the pointer. The wash
+    /// is taken from the authored danger ink, which is what is painted.
+    pub(crate) fn danger_outline_ink_from(&self, r: &Resolved) -> DangerOutlineInk {
+        let danger = self.semantics_with(&r.m).danger.ink;
+        let card = r.sf.popover.base;
+        let wash = mix(card, danger, DANGER_OUTLINE_WASH);
+        DangerOutlineInk {
+            popover: legible_across(&[card, wash], danger, TEXT_FLOOR),
+            popover_wash: wash,
+        }
+    }
+
     /// The settings page's secondary ink and off-switch track, floored on the
     /// fills they are painted on. Derived once per theme change, in
     /// `apply_theme`, so a page that draws hundreds of rows reads cached
@@ -903,6 +944,11 @@ impl Theme {
                 &[sf.sidebar.selected, sf.rail.selected],
                 m.muted_foreground,
                 SELECTED_CAPTION_TARGET,
+            ),
+            tab_count: legible_across(
+                &[m.background, m.sidebar, m.secondary],
+                m.muted_foreground,
+                CHROME_SMALL_META_TARGET,
             ),
         }
     }
@@ -3424,6 +3470,10 @@ ansi:
     const AA_SELECTED_CAPTION: f32 = 5.0;
     /// The small-text and small-glyph targets of the settings roles, written out likewise.
     const AA_SMALL_TEXT: f32 = 5.0;
+    /// The chrome small-text role's own derivation target (`CHROME_SMALL_META_TARGET`), kept as a
+    /// literal here so the oracle is independent of the constant it checks; the settings roles keep
+    /// `AA_SMALL_TEXT`.
+    const AA_CHROME_SMALL_META: f32 = 5.5;
     const AA_GLYPH: f32 = 3.2;
     const AA_MARK: f32 = 3.0;
 
@@ -3625,6 +3675,12 @@ ansi:
             "chrome selected_caption",
             chrome.selected_caption,
             &[s.sidebar.selected, s.rail.selected],
+            AA_TEXT,
+        );
+        add(
+            "chrome tab_count",
+            chrome.tab_count,
+            &[m.background, m.sidebar, m.secondary],
             AA_TEXT,
         );
         let unpicked = [s.popover.base, s.popover.hover];
@@ -3949,6 +4005,7 @@ ansi:
             "chrome unpicked_title",
             "chrome unpicked_meta",
             "chrome selected_caption",
+            "chrome tab_count",
             "chrome avatar_ink",
             "chrome keycap_ink",
             "chrome grip_idle",
@@ -3991,6 +4048,39 @@ ansi:
         assert!(!mirrored.derive(0xffffff).shares_one_ink());
         assert_eq!(mirrored.resolve().pole, 0x000000);
         assert_no_misses("white ink in the band", role_misses(&mirrored));
+    }
+
+    /// The destructive-outline ink in every theme there is, built-in and
+    /// generated: it clears the text floor on the popover card and on the 8%
+    /// danger wash it takes under the pointer, and it is the authored danger
+    /// ink exactly wherever that already did.
+    #[test]
+    fn danger_outline_ink_floors_on_the_card_and_its_wash_in_every_theme() {
+        let mut moved = 0;
+        for theme in builtins().into_iter().chain(generated_theme_grid()) {
+            let resolved = theme.resolve();
+            let cached = theme.danger_outline_ink_from(&resolved);
+            let authored = theme.semantics_with(&resolved.m).danger.ink;
+            let card = resolved.sf.popover.base;
+            let wash = mix(card, authored, 0.08);
+            assert_eq!(cached.popover_wash, wash, "{}: the wash", theme.id);
+            let held =
+                |ink: u32| contrast(ink, card) >= TEXT_FLOOR && contrast(ink, wash) >= TEXT_FLOOR;
+            assert!(
+                held(cached.popover),
+                "{}: {:06x} is {:.2}:1 on the card and {:.2}:1 on the wash",
+                theme.id,
+                cached.popover,
+                contrast(cached.popover, card),
+                contrast(cached.popover, wash)
+            );
+            if held(authored) {
+                assert_eq!(cached.popover, authored, "{}: moved without need", theme.id);
+            } else {
+                moved += 1;
+            }
+        }
+        assert!(moved > 0, "no theme needed the correction");
     }
 
     /// `legible_ink` picks white or black fill by fill, so on fills either
@@ -4275,7 +4365,11 @@ ansi:
     #[test]
     fn cached_inks_keep_seeds_that_already_pass() {
         let mut misses = Vec::new();
+        // Themes whose `tab_count` derivation target is physically unreachable (counted once per theme).
+        let mut tab_count_unreachable: Vec<String> = Vec::new();
+        let mut swept = 0usize;
         for t in sweep_themes() {
+            swept += 1;
             let r = t.resolve();
             let (m, s) = (&r.m, &r.sf);
             let fg = m.foreground;
@@ -4534,7 +4628,7 @@ ansi:
                     chrome.unpicked_meta,
                     m.muted_foreground,
                     &[s.popover.base, s.popover.hover][..],
-                    AA_SMALL_TEXT,
+                    AA_CHROME_SMALL_META,
                 ),
                 (
                     "selected_caption",
@@ -4542,6 +4636,13 @@ ansi:
                     m.muted_foreground,
                     &[s.sidebar.selected, s.rail.selected][..],
                     AA_SELECTED_CAPTION,
+                ),
+                (
+                    "tab_count",
+                    chrome.tab_count,
+                    m.muted_foreground,
+                    &[m.background, m.sidebar, m.secondary][..],
+                    AA_CHROME_SMALL_META,
                 ),
             ]
             .into_iter()
@@ -4566,13 +4667,56 @@ ansi:
                 // seed unchanged must be caught here, not skipped. A role with its own target then reaches
                 // it on every fill; an infeasible case (a mid-grey selection) is printed with its ratio.
                 let seed_misses = fills.iter().any(|&fill| contrast(seed, fill) < floor);
-                if [AA_SELECTED_CAPTION, AA_SMALL_TEXT, AA_GLYPH].contains(&floor) && seed_misses {
-                    for &fill in &fills {
-                        if contrast(color, fill) < floor {
+                if [
+                    AA_SELECTED_CAPTION,
+                    AA_SMALL_TEXT,
+                    AA_CHROME_SMALL_META,
+                    AA_GLYPH,
+                ]
+                .contains(&floor)
+                    && seed_misses
+                {
+                    // What one ink can do on ALL the fills together, as `legible_across` fixes one
+                    // direction for the whole set: the weakest fill's contrast for white and for black.
+                    let worst = |ink: u32| {
+                        fills
+                            .iter()
+                            .map(|&f| contrast(ink, f))
+                            .fold(f32::MAX, f32::min)
+                    };
+                    let best = worst(0xffffff).max(worst(0x000000));
+                    if best >= floor {
+                        for &fill in &fills {
+                            if contrast(color, fill) < floor {
+                                misses.push(format!(
+                                    "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the {floor} target",
+                                    t.id,
+                                    contrast(color, fill)
+                                ));
+                            }
+                        }
+                    } else {
+                        // The target is physically unreachable on this set. The ink must then be the
+                        // black or white endpoint with the highest worst-fill contrast (a tie allows
+                        // either), at exactly that ratio: not merely above some lower bar.
+                        if what == "tab_count" {
+                            tab_count_unreachable.push(t.id.clone());
+                        }
+                        if !((color == 0xffffff || color == 0x000000) && worst(color) == best) {
                             misses.push(format!(
-                                "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the {floor} target",
+                                "{}: unreachable {what} {color:#08x} is {:.2}:1 on its weakest fill; the best one ink reaches is {best:.2}:1 (white {:.2}, black {:.2}), the target {floor} cannot be met",
                                 t.id,
-                                contrast(color, fill)
+                                worst(color),
+                                worst(0xffffff),
+                                worst(0x000000)
+                            ));
+                        }
+                        // The public text floor stays unconditional, reachable target or not (a glyph is a mark: 3:1).
+                        if floor != AA_GLYPH && worst(color) < AA_TEXT {
+                            misses.push(format!(
+                                "{}: unreachable {what} {color:#08x} is {:.2}:1, under the public {AA_TEXT} floor",
+                                t.id,
+                                worst(color)
                             ));
                         }
                     }
@@ -4590,6 +4734,12 @@ ansi:
                 }
             }
         }
+        println!(
+            "tab_count {AA_CHROME_SMALL_META} target unreachable on {} of {swept} swept themes (once per theme; first {}, last {}); each holds the best black/white endpoint",
+            tab_count_unreachable.len(),
+            tab_count_unreachable.first().map_or("-", String::as_str),
+            tab_count_unreachable.last().map_or("-", String::as_str)
+        );
         assert_no_misses("seeds kept", misses);
     }
 }

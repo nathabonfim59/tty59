@@ -234,10 +234,6 @@ struct Row {
     preempted: bool,
     adopt: Option<Box<RemoteWorkspaceRow>>,
     remote_id: Option<WorkspaceId>,
-    /// Which `SelectWorkspaceN` reaches this workspace, zero-based — the
-    /// stable number the Workspaces menu shows too (#760). The list itself
-    /// stays most-recently-used first; the number is what does not move.
-    slot: Option<usize>,
     tabs: Vec<TabRow>,
 }
 
@@ -724,8 +720,30 @@ fn empty_list_text(scope: &MachineScope, groups: &[Group]) -> String {
 fn row_machine(group: &Group, show_machine: bool) -> Option<String> {
     show_machine.then(|| match group.target.is_some() {
         true => group.label.clone(),
-        false => t(L10nKey::SwitcherLocalHost).to_string(),
+        false => t(L10nKey::SwitcherThisComputer).to_string(),
     })
+}
+
+/// The state word at the end of a workspace row, and whether it is this
+/// window's own. The workspace this window shows is "Current", the word the
+/// tab column uses for its active tab; "Open" is one another window has open.
+/// "Open" is what a workspace would say either way, and it is the wrong word
+/// for one another client is driving.
+fn row_badge(row: &Row, group: &Group) -> Option<(&'static str, bool)> {
+    if row.preempted {
+        Some((t(L10nKey::SwitcherStatusTakenOver), false))
+    } else if row.current {
+        Some((t(L10nKey::SwitcherActiveTab), true))
+    } else if row.open {
+        Some((t(L10nKey::SwitcherOpen), false))
+    } else if group.target.is_some() && group.link == Link::Offline {
+        // Said in words where the other states go, not as a dot: the normal
+        // case carries nothing extra, so the exception is the only thing that
+        // speaks.
+        Some((t(L10nKey::SwitcherOffline), false))
+    } else {
+        None
+    }
 }
 
 /// Which separators the sub-line draws, for the parts it has: one after the
@@ -1049,8 +1067,6 @@ impl Tty59App {
 
         let mut groups: Vec<Group> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
-        let slots = crate::ui::windows::menu_order(cx);
-        let slot_of = |id: WorkspaceId| slots.iter().position(|(slot, _)| *slot == id);
         {
             let app: &App = cx;
             let store = WorkspaceStore::all(app);
@@ -1114,7 +1130,6 @@ impl Tty59App {
                     preempted: false,
                     adopt: None,
                     remote_id: w.host.as_ref().map(|r| r.workspace),
-                    slot: slot_of(w.id),
                     tabs: self.tab_rows_for(w.id, self.switcher_mru(), app),
                 });
             }
@@ -1216,7 +1231,6 @@ impl Tty59App {
                     preempted: false,
                     adopt: None,
                     remote_id: None,
-                    slot: slot_of(current),
                     tabs: self.tab_rows_for(current, self.switcher_mru(), app),
                 },
             );
@@ -1265,7 +1279,6 @@ impl Tty59App {
                     preempted: false,
                     adopt: None,
                     remote_id: None,
-                    slot: None,
                     tabs: self.tab_rows_for(ws.id, self.switcher_mru(), app),
                 })
                 .collect();
@@ -3288,22 +3301,7 @@ impl Tty59App {
             (false, false) => gpui::rgb(ink.unpicked_title).into(),
         };
 
-        // "Open" is what this workspace would say either way, and it is the
-        // wrong word for one another client is driving.
-        let badge = if row.preempted {
-            Some((t(L10nKey::SwitcherStatusTakenOver), false))
-        } else if row.current {
-            Some((t(L10nKey::SwitcherThisWindow), true))
-        } else if row.open {
-            Some((t(L10nKey::SwitcherOpen), false))
-        } else if group.target.is_some() && group.link == Link::Offline {
-            // Said in words where the other states go, not as a dot: the
-            // normal case carries nothing extra, so the exception is the
-            // only thing that speaks.
-            Some((t(L10nKey::SwitcherOffline), false))
-        } else {
-            None
-        };
+        let badge = row_badge(row, group);
 
         // Two lines rather than one: the left column is only LEFT_W wide, and a
         // workspace name plus path plus badge plus timestamp on one row pushes
@@ -3393,42 +3391,20 @@ impl Tty59App {
                     .flex_1()
                     .min_w_0()
                     .gap(px(2.))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(6.))
+                    .child(h_flex().items_center().gap(px(6.)).min_w_0().child({
+                        let name = div()
                             .min_w_0()
-                            .child({
-                                let name = div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(gpui::rems(13. / 16.))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(name_ink)
-                                    .child(row.name.clone());
-                                #[cfg(test)]
-                                let mut name = name;
-                                #[cfg(test)]
-                                crate::ui::paint_probe::note("switcher.name", &mut name);
-                                name
-                            })
-                            // The workspace's number — what Go to Workspace N
-                            // and the Workspaces menu call it — so the slot a
-                            // shortcut reaches can be read off the list that
-                            // does not sort by it (#760).
-                            .children(row.slot.map(|slot| {
-                                let number = div()
-                                    .flex_shrink_0()
-                                    .text_size(gpui::rems(11. / 16.))
-                                    .text_color(secondary)
-                                    .child((slot + 1).to_string());
-                                #[cfg(test)]
-                                let mut number = number;
-                                #[cfg(test)]
-                                crate::ui::paint_probe::note("switcher.slot", &mut number);
-                                number
-                            })),
-                    )
+                            .truncate()
+                            .text_size(gpui::rems(13. / 16.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(name_ink)
+                            .child(row.name.clone());
+                        #[cfg(test)]
+                        let mut name = name;
+                        #[cfg(test)]
+                        crate::ui::paint_probe::note("switcher.name", &mut name);
+                        name
+                    }))
                     .child({
                         // The path gives way first, from its middle so the last
                         // segment (the one that tells two workspaces apart)
@@ -3497,9 +3473,7 @@ impl Tty59App {
                     .gap(px(2.))
                     .text_size(gpui::rems(12. / 16.))
                     .text_color(secondary)
-                    // In words, the way the tab column's header says it: a
-                    // bare `1` here sat a few pixels from the slot number after
-                    // the name, and the two read as the same thing twice.
+                    // In words, the way the tab column's header says it.
                     .when(!row.tabs.is_empty(), |c| c.child(tab_count(row.tabs.len())))
                     .children(badge.map(|(label, _here)| {
                         let tag = div()
@@ -4182,7 +4156,6 @@ impl Group {
                 preempted: false,
                 adopt: Some(Box::new(r.clone())),
                 remote_id: Some(r.id),
-                slot: None,
                 // A workspace this client has never adopted has no local id to
                 // hang a machine-tree lookup on. The tab column says so.
                 tabs: Vec::new(),
@@ -4522,12 +4495,12 @@ mod tests {
     }
 
     /// The workspace row's shape: a `flex_1` column, and in it a truncating
-    /// name sized by its own text beside the slot number. gpui measures that
+    /// name sized by its own text. gpui measures that
     /// name once against the column's zero basis, and used to answer the
     /// content-size measure after it from the same cache — so every name in
     /// the list read "…" with the whole column free beside it.
     #[gpui::test]
-    fn a_truncating_name_beside_its_number_takes_the_room_it_has(cx: &mut gpui::TestAppContext) {
+    fn a_truncating_name_in_the_row_column_takes_the_room_it_has(cx: &mut gpui::TestAppContext) {
         use gpui::{AvailableSpace, InteractiveElement as _, point, size};
 
         let vcx = cx.add_empty_window();
@@ -4544,17 +4517,13 @@ mod tests {
                     .child(div().flex_shrink_0().size(px(WS_AVATAR)))
                     .child(
                         v_flex().flex_1().min_w_0().child(
-                            h_flex()
-                                .gap(px(6.))
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .debug_selector(|| "name".into())
-                                        .child("pale-seal"),
-                                )
-                                .child(div().flex_shrink_0().child("1")),
+                            h_flex().gap(px(6.)).min_w_0().child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .debug_selector(|| "name".into())
+                                    .child("pale-seal"),
+                            ),
                         ),
                     )
             },
@@ -4738,7 +4707,6 @@ mod tests {
             preempted: false,
             adopt: None,
             remote_id: None,
-            slot: None,
             tabs,
         }
     }
@@ -5137,8 +5105,27 @@ mod tests {
         let local = group(vec![]);
         assert_eq!(
             row_machine(&local, true),
-            Some(t(L10nKey::SwitcherLocalHost).to_string())
+            Some(t(L10nKey::SwitcherThisComputer).to_string())
         );
+    }
+
+    /// One word for "the workspace this window shows": the tab column's
+    /// "Current", not a second term. A workspace open in another window keeps
+    /// its own state word.
+    #[test]
+    fn the_workspace_this_window_shows_is_current_and_one_open_elsewhere_is_open() {
+        crate::ui::i18n::set_locale("en");
+        let g = group(vec![]);
+        let mut here = row("here", vec![]);
+        here.current = true;
+        here.open = true;
+        assert_eq!(row_badge(&here, &g), Some(("Current", true)));
+        let mut elsewhere = row("elsewhere", vec![]);
+        elsewhere.open = true;
+        assert_eq!(row_badge(&elsewhere, &g), Some(("Open", false)));
+        let mut closed = row("closed", vec![]);
+        closed.open = false;
+        assert_eq!(row_badge(&closed, &g), None);
     }
 
     /// Machine, path and time in that order, a separator only where something
@@ -7178,7 +7165,6 @@ mod contrast_tests {
         unlit: Vec<bool>,
         row: Vec<Painted>,
         name: Vec<Painted>,
-        slot: Vec<Painted>,
         meta: Vec<Painted>,
         side: Vec<Painted>,
         badge: Vec<Painted>,
@@ -7213,7 +7199,6 @@ mod contrast_tests {
             unlit,
             row: probe::all("switcher.row"),
             name: probe::all("switcher.name"),
-            slot: probe::all("switcher.slot"),
             meta: probe::all("switcher.meta"),
             side: probe::all("switcher.side"),
             badge: probe::all("switcher.badge"),
@@ -7223,7 +7208,6 @@ mod contrast_tests {
         for (what, painted) in [
             ("row", frame.row.len()),
             ("name", frame.name.len()),
-            ("slot", frame.slot.len()),
             ("meta", frame.meta.len()),
             ("side", frame.side.len()),
             ("badge", frame.badge.len()),
@@ -7280,7 +7264,7 @@ mod contrast_tests {
         let _probe = probe::scope();
         let mut misses = Misses::default();
         // The inks an unpicked row keeps (authored foreground name, muted meta,
-        // slot, state column and badge) on its resting and hovered rungs, as
+        // state column and badge) on its resting and hovered rungs, as
         // painted. Kept apart so a weak palette that misses there is named
         // without hiding what the selected-row roles do.
         let mut unpicked = Misses::default();
@@ -7302,7 +7286,6 @@ mod contrast_tests {
                             for (what, painted) in [
                                 ("name", &frame.name[i]),
                                 ("meta", &frame.meta[i]),
-                                ("slot", &frame.slot[i]),
                                 ("state column", &frame.side[i]),
                                 ("badge", &frame.badge[i]),
                             ] {
@@ -7370,7 +7353,6 @@ mod contrast_tests {
                     };
                     for (what, painted) in [
                         ("meta", &frame.meta[i]),
-                        ("slot", &frame.slot[i]),
                         ("state column", &frame.side[i]),
                         ("badge", &frame.badge[i]),
                     ] {

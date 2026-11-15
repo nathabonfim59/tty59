@@ -494,7 +494,8 @@ impl Tty59App {
         let mut body = v_flex().pb(px(12.));
         if let Some(err) = &error {
             let (text, hint) = describe_error(err, authenticated);
-            body = body.child(self.panel_empty(&text, hint.as_deref(), cx));
+            let hint = hint.map(|hint| hint_element(&hint, cx));
+            body = body.child(self.panel_empty_with(&text, hint, cx));
         }
         // An empty page with more behind it is not "no issues": `/issues`
         // pages filtered to one kind can come back empty (see `api::list`).
@@ -858,35 +859,185 @@ pub(crate) fn label_chip(label: &Label, cx: &gpui::App) -> AnyElement {
         .into_any_element()
 }
 
+/// The command the sign-in hints send the user to type. It is what is typed,
+/// so it is not translated; the catalog's sentence carries only where it goes.
+const GH_LOGIN: &str = "gh auth login";
+
+/// Where a catalog hint puts the command. A named placeholder rather than
+/// punctuation around it, so each language can word the sentence its own way.
+const COMMAND_PLACEHOLDER: &str = "{command}";
+
+/// One run of a hint: words, or the command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HintPiece {
+    Text(String),
+    Command,
+}
+
+/// A line of advice under an error, in the order it is read.
+///
+/// Built from the catalog's templates by cutting at [`COMMAND_PLACEHOLDER`], so
+/// the command is a piece of its own that can be drawn as a chip. Text that
+/// did not come from a template — a server's message — is one `Text` piece
+/// and is never searched for the placeholder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hint {
+    pieces: Vec<HintPiece>,
+}
+
+impl Hint {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
+        Hint {
+            pieces: vec![HintPiece::Text(text.into())],
+        }
+    }
+
+    /// A catalog template, cut where it names the command.
+    pub(crate) fn template(template: &str) -> Self {
+        let mut pieces = Vec::new();
+        let mut rest = template;
+        while let Some(at) = rest.find(COMMAND_PLACEHOLDER) {
+            if at > 0 {
+                pieces.push(HintPiece::Text(rest[..at].to_string()));
+            }
+            pieces.push(HintPiece::Command);
+            rest = &rest[at + COMMAND_PLACEHOLDER.len()..];
+        }
+        if !rest.is_empty() {
+            pieces.push(HintPiece::Text(rest.to_string()));
+        }
+        Hint { pieces }
+    }
+
+    /// `self`, a space, then `next` — two sentences of one hint.
+    fn then(mut self, next: Hint) -> Hint {
+        if self.pieces.is_empty() {
+            return next;
+        }
+        if next.pieces.is_empty() {
+            return self;
+        }
+        self.pieces.push(HintPiece::Text(" ".to_string()));
+        self.pieces.extend(next.pieces);
+        self
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    fn has_command(&self) -> bool {
+        self.pieces.contains(&HintPiece::Command)
+    }
+
+    /// The hint as plain words, the command spelled out, for what cannot draw
+    /// a chip.
+    pub(crate) fn plain(&self) -> String {
+        self.pieces
+            .iter()
+            .map(|piece| match piece {
+                HintPiece::Text(text) => text.as_str(),
+                HintPiece::Command => GH_LOGIN,
+            })
+            .collect()
+    }
+}
+
+/// The hint as it is drawn: plain text when it names no command, and
+/// otherwise its runs in a wrapping row with the command as an inline chip —
+/// mono, the muted wash and ink the label chips in this panel wear, radius 4,
+/// and a size relative to the line it sits in.
+///
+/// Whitespace the catalog put next to a run is kept as a gap after the run
+/// before it rather than as leading space, so a run that wraps to a new line
+/// does not start with an indent, and a language that sets no space beside
+/// the command (Chinese, Japanese) gets none.
+pub(crate) fn hint_element(hint: &Hint, cx: &gpui::App) -> AnyElement {
+    if !hint.has_command() {
+        return hint.plain().into_any_element();
+    }
+    let theme = cx.theme();
+    let (wash, ink) = (theme.foreground.opacity(0.08), theme.muted_foreground);
+    let mono = theme.mono_font_family.clone();
+    let space = rems(META * 0.25);
+
+    // Each run, with whether a space follows it.
+    let mut runs: Vec<(Option<&str>, bool)> = Vec::new();
+    for piece in &hint.pieces {
+        match piece {
+            HintPiece::Command => runs.push((None, false)),
+            HintPiece::Text(text) => {
+                if text.starts_with(char::is_whitespace)
+                    && let Some(last) = runs.last_mut()
+                {
+                    last.1 = true;
+                }
+                let words = text.trim();
+                if !words.is_empty() {
+                    runs.push((Some(words), text.ends_with(char::is_whitespace)));
+                }
+            }
+        }
+    }
+
+    let mut row = h_flex().flex_wrap().items_baseline();
+    for (words, spaced) in runs {
+        let run = match words {
+            Some(words) => div().child(words.to_string()),
+            None => {
+                let chip = div()
+                    .flex_none()
+                    .px(px(4.))
+                    .py(px(0.5))
+                    .rounded(px(4.))
+                    .bg(wash)
+                    .font_family(mono.clone())
+                    .text_size(rems(META * 0.85))
+                    .text_color(ink)
+                    .whitespace_nowrap()
+                    .child(GH_LOGIN);
+                #[cfg(test)]
+                let chip = chip.debug_selector(|| "github-hint-command".into());
+                chip
+            }
+        };
+        row = row.child(run.when(spaced, |run| run.mr(space)));
+    }
+    row.into_any_element()
+}
+
 /// What to tell the user about a failed call, and what they can do about it.
-pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Option<String>) {
-    let sign_in = || Some(t(L10nKey::GitHubSignInHint).to_string());
+pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Option<Hint>) {
+    let sign_in = || Some(Hint::template(t(L10nKey::GitHubSignInHint)));
     match err {
         ApiError::NotFound if authenticated => (t(L10nKey::GitHubNotFoundSignedIn).into(), None),
         ApiError::NotFound => (t(L10nKey::GitHubNotFoundSignedOut).into(), sign_in()),
         ApiError::Unauthorized => (t(L10nKey::GitHubUnauthorized).into(), sign_in()),
         ApiError::RateLimited { reset } => {
-            let mut hint: Vec<String> = Vec::new();
+            let mut hint = Hint::default();
             if let Some(at) = reset {
                 let minutes = ((at - now_unix()).max(0) + 59) / 60;
-                hint.push(t_fmt(
+                hint = hint.then(Hint::text(t_fmt(
                     L10nKey::GitHubRateLimitResetIn,
                     &[("n", &minutes.max(1).to_string())],
-                ));
+                )));
             }
             if !authenticated {
-                hint.push(t(L10nKey::GitHubRateLimitSignedOut).to_string());
+                hint = hint.then(Hint::template(t(L10nKey::GitHubRateLimitSignedOut)));
             }
             (
                 t(L10nKey::GitHubRateLimited).into(),
-                (!hint.is_empty()).then(|| hint.join(" ")),
+                (!hint.is_empty()).then_some(hint),
             )
         }
         ApiError::Forbidden(msg) => (
             t(L10nKey::GitHubForbidden).into(),
-            (!msg.is_empty()).then(|| msg.clone()),
+            (!msg.is_empty()).then(|| Hint::text(msg.clone())),
         ),
-        ApiError::Network(msg) => (t(L10nKey::GitHubNetworkError).into(), Some(msg.clone())),
+        ApiError::Network(msg) => (
+            t(L10nKey::GitHubNetworkError).into(),
+            Some(Hint::text(msg.clone())),
+        ),
         ApiError::Http(code) => (
             t_fmt(L10nKey::GitHubHttpError, &[("code", &code.to_string())]),
             None,
@@ -906,8 +1057,14 @@ mod tests {
         let (text, hint) = describe_error(&ApiError::RateLimited { reset: Some(reset) }, false);
         assert_eq!(text, t(L10nKey::GitHubRateLimited));
         let hint = hint.expect("a rate limit explains itself");
-        assert!(hint.contains("10 min"), "{hint}");
-        assert!(hint.contains("gh auth login"), "{hint}");
+        let words = hint.plain();
+        assert!(words.contains("10 min"), "{words}");
+        assert!(hint.has_command(), "{words}");
+        assert!(words.contains("gh auth login"), "{words}");
+        assert!(
+            !words.contains('`') && !words.contains(COMMAND_PLACEHOLDER),
+            "no literal backticks or placeholder: {words}"
+        );
 
         let (_, hint) = describe_error(&ApiError::RateLimited { reset: None }, true);
         assert!(
@@ -921,12 +1078,45 @@ mod tests {
         crate::ui::i18n::set_locale("en");
         let (out, hint) = describe_error(&ApiError::NotFound, false);
         assert_eq!(out, t(L10nKey::GitHubNotFoundSignedOut));
-        assert!(hint.unwrap().contains("gh auth login"));
+        assert!(hint.unwrap().has_command());
         let (inn, hint) = describe_error(&ApiError::NotFound, true);
         assert_eq!(inn, t(L10nKey::GitHubNotFoundSignedIn));
         assert!(hint.is_none());
         let (_, hint) = describe_error(&ApiError::Unauthorized, true);
-        assert!(hint.unwrap().contains("gh auth login"));
+        assert!(hint.unwrap().has_command());
+    }
+
+    /// The command is cut out of the catalog's sentence wherever the language
+    /// puts it, and the sentence around it survives whole.
+    #[test]
+    fn a_template_is_cut_at_the_command_wherever_it_sits() {
+        let text = |s: &str| HintPiece::Text(s.to_string());
+        assert_eq!(
+            Hint::template("Run {command} in a terminal.").pieces,
+            vec![text("Run "), HintPiece::Command, text(" in a terminal.")]
+        );
+        assert_eq!(
+            Hint::template("{command} 登录").pieces,
+            vec![HintPiece::Command, text(" 登录")]
+        );
+        assert_eq!(
+            Hint::template("在终端中运行{command}").pieces,
+            vec![text("在终端中运行"), HintPiece::Command]
+        );
+        // No placeholder: words only, nothing invented.
+        assert_eq!(
+            Hint::template("Just words.").pieces,
+            vec![text("Just words.")]
+        );
+    }
+
+    /// A server's message is data. If it happens to spell the placeholder it
+    /// must not turn into a command chip.
+    #[test]
+    fn a_servers_message_is_never_searched_for_the_placeholder() {
+        let hint = Hint::text("denied: {command}");
+        assert!(!hint.has_command());
+        assert_eq!(hint.plain(), "denied: {command}");
     }
 
     #[test]
@@ -963,6 +1153,9 @@ mod gpui_tests {
     use crate::daemon::protocol::DaemonMsg;
     use crate::ui::app::{Tty59App, test_window};
     use crate::ui::github::Connection;
+    use crate::ui::i18n::{L10nKey, t};
+
+    use super::Hint;
 
     struct Fake {
         asked: Mutex<Vec<String>>,
@@ -1039,6 +1232,66 @@ mod gpui_tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// Every request is refused as not found, which signed out is the answer
+    /// that tells the user to sign in.
+    struct Refusing;
+
+    impl Transport for Refusing {
+        fn get(&self, _path: &str) -> Result<Reply, ApiError> {
+            Err(ApiError::NotFound)
+        }
+
+        fn authenticated(&self) -> bool {
+            false
+        }
+    }
+
+    /// The sign-in hint of a real failed list: the command is one chip, drawn
+    /// inline, and the catalog sentence around it has no backticks to show.
+    #[gpui::test]
+    fn the_sign_in_hint_draws_the_command_as_one_chip(cx: &mut TestAppContext) {
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::Builder::new()
+            .prefix("tty59-gh-hint-")
+            .tempdir()
+            .expect("a scratch directory");
+        let root = std::fs::canonicalize(dir.path()).expect("it resolves");
+        git(&root, &["init", "--quiet"]);
+        git(
+            &root,
+            &["remote", "add", "origin", "https://github.com/acme/widgets"],
+        );
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        let transport: Arc<dyn Transport> = Arc::new(Refusing);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.github.connector = Some(Arc::new(move || Connection {
+                transport: transport.clone(),
+            }));
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::GitHub;
+            cx.notify();
+        });
+        DaemonMsg::Cwd(root.clone())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        settle(&app, &mut vcx, "the refused list", |app| {
+            app.github.lists.values().any(|l| l.error.is_some())
+        });
+        vcx.run_until_parked();
+
+        assert!(
+            vcx.debug_bounds("github-hint-command").is_some(),
+            "the command is drawn as a chip of its own"
+        );
+        let hint = Hint::template(t(L10nKey::GitHubSignInHint));
+        assert!(hint.has_command());
+        assert!(
+            !hint.plain().contains('`'),
+            "no literal backticks: {}",
+            hint.plain()
+        );
     }
 
     #[gpui::test]

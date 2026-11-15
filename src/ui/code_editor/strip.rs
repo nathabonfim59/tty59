@@ -247,7 +247,12 @@ impl Tty59App {
     }
 
     /// The width the header is drawn at in `chrome`.
-    fn editor_header_w(&self, chrome: DocumentChrome, window: &Window, cx: &gpui::App) -> f32 {
+    pub(super) fn editor_header_w(
+        &self,
+        chrome: DocumentChrome,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> f32 {
         let docked = self.document_dock_px(window, cx);
         match chrome {
             DocumentChrome::Fill => self.document_body_px(window, cx),

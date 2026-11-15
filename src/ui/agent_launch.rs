@@ -185,6 +185,56 @@ pub(crate) fn run_when_ready(slot: &PaneSlot, command: String, cx: &mut App) {
     }
 }
 
+// While a test holds `intercept_launches`, `launch_agent` records what it was
+// asked to launch and stops before it opens a shell. Off otherwise, and not
+// compiled outside tests.
+#[cfg(test)]
+std::thread_local! {
+    static LAUNCH_INTERCEPT: std::cell::RefCell<Option<Vec<(CLIAgent, SpawnWhere, String)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct LaunchIntercept;
+
+/// Start recording launch requests; dropping the guard stops. Nesting is a
+/// test bug, so it is refused rather than letting two tests share a record.
+#[cfg(test)]
+pub(crate) fn intercept_launches() -> LaunchIntercept {
+    LAUNCH_INTERCEPT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(slot.is_none(), "launch interception is already on");
+        *slot = Some(Vec::new());
+    });
+    LaunchIntercept
+}
+
+#[cfg(test)]
+impl LaunchIntercept {
+    pub(crate) fn requests(&self) -> Vec<(CLIAgent, SpawnWhere, String)> {
+        LAUNCH_INTERCEPT.with(|slot| slot.borrow().clone().unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+impl Drop for LaunchIntercept {
+    fn drop(&mut self) {
+        LAUNCH_INTERCEPT.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Whether the launch was taken by an interception, and so must not go on.
+#[cfg(test)]
+fn record_launch(agent: CLIAgent, at: SpawnWhere, command: &str) -> bool {
+    LAUNCH_INTERCEPT.with(|slot| match slot.borrow_mut().as_mut() {
+        Some(requests) => {
+            requests.push((agent, at, command.to_string()));
+            true
+        }
+        None => false,
+    })
+}
+
 impl Tty59App {
     /// The agents this window's quick launch offers, most likely first.
     pub(crate) fn offered_agents(&self, cx: &App) -> Vec<CLIAgent> {
@@ -215,6 +265,12 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) {
         let command = agent.launch_command(&cx.global::<Config>().agent_launch);
+        #[cfg(test)]
+        {
+            if record_launch(agent, at, &command) {
+                return;
+            }
+        }
         let slot = match at {
             SpawnWhere::NewTab => {
                 let cwd = self.tabs.get(self.active).and_then(|t| {

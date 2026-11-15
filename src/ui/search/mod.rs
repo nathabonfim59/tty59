@@ -19,7 +19,7 @@ pub(crate) use command::{
 };
 pub(crate) use files::{FileIndexStore, FileList};
 pub(crate) use score::fuzzy_score;
-pub(crate) use sources::{Catalog, LiveQuery, host_items};
+pub(crate) use sources::{Catalog, LiveQuery, alias_host_items, host_items};
 pub(crate) use view::{KEY_CONTEXT, SearchEvent, SearchView};
 
 use crate::ui::i18n::{L10nKey, t};

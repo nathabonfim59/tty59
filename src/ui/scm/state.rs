@@ -57,6 +57,15 @@ pub(crate) struct ScmPanelState {
     /// Which repository the panel is showing. Follows the active pane unless
     /// `repo_override` says otherwise.
     pub(crate) repo: Option<RepoKey>,
+    /// The repository the Changes tab's count is for: the current pane's (or a
+    /// still-valid explicit pick), maintained by `scm_sync_watchers` and `None`
+    /// whenever the right panel is closed or there is no live repository.
+    /// Unlike `repo` it does not wait for a Changes render, and it is never
+    /// left over from an earlier one.
+    pub(crate) count_repo: Option<RepoKey>,
+    /// The pane directory `count_repo` was resolved from, which is what the
+    /// cheap per-tab probe is keyed by. `None` for an explicit pick.
+    pub(crate) count_cwd: Option<PathBuf>,
     /// Set when the user picks a repository from the multi-repo dropdown, and
     /// cleared whenever the active tab changes — an explicit choice should
     /// outlive a pane switch inside one tab, not a jump to somewhere else.
@@ -120,7 +129,10 @@ pub(crate) struct ScmPanelState {
     /// The cheap per-tab git status the panel last reacted to. A change in it
     /// means a command touched the repository and the expensive status is due
     /// another look.
-    pub(crate) last_tab_status: Option<crate::terminal::git_status::GitStatus>,
+    /// Paired with the repository it was read for: a status is only a change
+    /// against an earlier one of the *same* repository, so a pane that moved
+    /// to another one is not mistaken for a command that touched this one.
+    pub(crate) last_tab_status: Option<(RepoKey, crate::terminal::git_status::GitStatus)>,
     pub(crate) graph: GraphState,
     /// When set, the panel body is replaced by a single commit's detail view
     /// instead of the working tree.
@@ -145,6 +157,17 @@ impl ScmPanelState {
         self.probe_attempt.retain(|(h, _), _| *h != host);
         self.branches.retain(|k, _| k.host != host);
         self.branches_loading.retain(|k| k.host != host);
+        if self.count_repo.as_ref().is_some_and(|k| k.host == host) {
+            self.count_repo = None;
+            self.count_cwd = None;
+        }
+        if self
+            .last_tab_status
+            .as_ref()
+            .is_some_and(|(k, _)| k.host == host)
+        {
+            self.last_tab_status = None;
+        }
         if self.repo_override.as_ref().is_some_and(|k| k.host == host) {
             self.repo_override = None;
             self.override_tab = None;

@@ -22,7 +22,7 @@
 
 pub(crate) mod client;
 pub(crate) mod convert;
-mod editor;
+pub(crate) mod editor;
 mod locations;
 mod providers;
 pub(crate) mod rpc;
@@ -178,6 +178,14 @@ pub(crate) struct LspStore {
     _subscriptions: Vec<Subscription>,
 }
 
+/// What a test asks [`LspStore::set_state_for_test`] for.
+#[cfg(test)]
+pub(crate) enum TestState {
+    Running { errors: usize, warnings: usize },
+    Starting,
+    Down,
+}
+
 pub(crate) type Resync = Rc<dyn Fn(&mut App) -> bool>;
 
 impl Global for LspStore {}
@@ -237,6 +245,76 @@ impl LspStore {
     fn update<R>(cx: &mut App, f: impl FnOnce(&mut LspStore, &mut App) -> R) -> R {
         Self::ensure(cx);
         cx.update_global::<LspStore, _>(f)
+    }
+
+    /// A server the status bar reports as missing, for tests of what that
+    /// reads like; the store's own detection needs the program off `PATH`.
+    #[cfg(test)]
+    pub(crate) fn mark_missing_for_test(server: &'static str, cx: &mut App) {
+        Self::update(cx, |store, _| {
+            store.missing.insert(server, Instant::now());
+        });
+    }
+
+    /// Puts `path`'s server in `state` without a process behind it, for tests
+    /// of what the status bar says in each. Nothing is spawned.
+    #[cfg(test)]
+    pub(crate) fn set_state_for_test(
+        path: &Path,
+        language: &str,
+        label: &str,
+        state: TestState,
+        owner: &Entity<InputState>,
+        cx: &mut App,
+    ) {
+        let spec = servers::spec_for_language(language).expect("a server for the language");
+        Self::update(cx, |store, _| {
+            let key = ServerKey {
+                name: spec.name,
+                root: path.parent().unwrap_or(path).to_path_buf(),
+            };
+            let (phase, problems) = match state {
+                TestState::Running { errors, warnings } => (Phase::Running, (errors, warnings)),
+                TestState::Starting => (Phase::Starting, (0, 0)),
+                TestState::Down => (Phase::Dead, (0, 0)),
+            };
+            store.missing.remove(spec.name);
+            store.servers.insert(
+                key.clone(),
+                Server {
+                    spec,
+                    label: label.into(),
+                    generation: 1,
+                    phase,
+                    client: None,
+                    caps: Rc::new(lsp_types::ServerCapabilities::default()),
+                    encoding: Encoding::Utf16,
+                    crashes: Vec::new(),
+                    idle_seq: 0,
+                    _tasks: Vec::new(),
+                },
+            );
+            store.docs.insert(
+                path.to_path_buf(),
+                Doc {
+                    uri: path_to_uri(path).expect("an absolute path"),
+                    language_id: spec.languages[0],
+                    server: key,
+                    version: 0,
+                    owner: owner.downgrade(),
+                    owner_id: owner.entity_id(),
+                    app_id: owner.entity_id(),
+                    app: WeakEntity::new_invalid(),
+                    window: None,
+                    sent: None,
+                    dirty: false,
+                    change_seq: 0,
+                    symbols_seq: 0,
+                    diagnostics: Vec::new(),
+                    problems,
+                },
+            );
+        });
     }
 
     // ---- The editor's side ----

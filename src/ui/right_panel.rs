@@ -27,20 +27,27 @@ pub(crate) fn shown_tab(tab: RightPanelTab) -> RightPanelTab {
     }
 }
 
-/// Wide enough for the word tabs, bare, beside the panel toggle at
-/// the default interface size — the Changes count is dropped before a label is
-/// ever cut. A larger UI font raises the floor past this; see
-/// [`right_panel_tabs_floor`].
+/// Wide enough for the word tabs and the widest Changes count (`99+`), beside
+/// the panel toggle, at the default interface size. The count's room is held
+/// whether or not there is one, so the panel's minimum width does not move as
+/// the number does. A larger UI font or a longer language raises the floor
+/// past this; see [`right_panel_tabs_floor`].
 pub(crate) const MIN_WIDTH: f32 = 240.;
 
-/// What the tab row needs with the count dropped: the labels, the row's lead,
-/// its 2px gaps, and the panel toggle at the trailing end.
-fn right_panel_tabs_floor(window: &Window, cx: &gpui::App) -> f32 {
-    let chrome = match cfg!(target_os = "macos") {
+/// What the tab row needs: the labels and the widest count, from the
+/// `RightTabMetrics` the tab row is drawn from, plus the row's lead, its 2px
+/// gaps, and the panel toggle at the trailing end.
+fn right_panel_tabs_floor(metrics: &crate::ui::tab_strip::RightTabMetrics) -> f32 {
+    (TAB_ROW_LEAD + metrics.tabs_w() + tabs_chrome_w()).ceil()
+}
+
+/// What the tab row keeps at its trailing end: the panel toggle and its inset
+/// on macOS, the row's inset elsewhere.
+pub(crate) fn tabs_chrome_w() -> f32 {
+    match cfg!(target_os = "macos") {
         true => crate::ui::tab_strip::trailing_chrome_tiles_w(),
         false => tile_trailing_inset(),
-    };
-    (TAB_ROW_LEAD + crate::ui::tab_strip::right_panel_tab_labels_w(window, cx) + chrome).ceil()
+    }
 }
 
 /// The tab row's leading inset: the selected tab's pill starts on
@@ -523,10 +530,10 @@ impl Tty59App {
     }
 
     /// The narrowest the panel may be drawn: `MIN_WIDTH`, or wider when the
-    /// interface font or the language makes the three tab labels and the two
-    /// chrome tiles beside them need more than that.
-    pub(crate) fn right_panel_min_px(&self, window: &Window, cx: &gpui::App) -> f32 {
-        MIN_WIDTH.max(right_panel_tabs_floor(window, cx))
+    /// interface font or the language makes the tab labels, the Changes count
+    /// and the chrome tiles beside them need more than that.
+    pub(crate) fn right_panel_min_px(&self, _window: &Window, _cx: &gpui::App) -> f32 {
+        MIN_WIDTH.max(right_panel_tabs_floor(&self.right_tab_metrics))
     }
 
     pub(crate) fn right_panel_max_px(&self, window: &Window, cx: &gpui::App) -> f32 {
@@ -594,31 +601,25 @@ impl Tty59App {
         };
         let (backing, handle) = self.right_panel_resize(window, cx);
 
-        Some(
-            v_flex()
-                .id("right-panel")
-                .relative()
-                .flex_none()
-                .w(px(width))
-                .h_full()
-                .child(backing)
-                .bg(crate::ui::theme::workspace_surface_color(cx))
-                .border_l(crate::ui::theme::hairline(window))
-                .border_color(cx.theme().sidebar_border)
-                .children(cfg!(target_os = "macos").then(|| {
-                    let row = h_flex()
-                        .id("right-panel-titlebar-drag")
-                        .flex_none()
-                        // Match TitleBar's content height, including its invisible
-                        // bottom border. Otherwise this row centres the toggle
-                        // half a point below its position in the closed panel.
-                        .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent);
-                    crate::ui::app::window_move_gesture(
-                        row,
-                        "right-panel-titlebar-drag",
-                        window,
-                        cx,
-                    )
+        let panel = v_flex()
+            .id("right-panel")
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .h_full()
+            .child(backing)
+            .bg(crate::ui::theme::workspace_surface_color(cx))
+            .border_l(crate::ui::theme::hairline(window))
+            .border_color(cx.theme().sidebar_border)
+            .children(cfg!(target_os = "macos").then(|| {
+                let row = h_flex()
+                    .id("right-panel-titlebar-drag")
+                    .flex_none()
+                    // Match TitleBar's content height, including its invisible
+                    // bottom border. Otherwise this row centres the toggle
+                    // half a point below its position in the closed panel.
+                    .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent);
+                crate::ui::app::window_move_gesture(row, "right-panel-titlebar-drag", window, cx)
                     .on_double_click(|_, window, _| window.titlebar_double_click())
                     .items_center()
                     .pl(px(TAB_ROW_LEAD))
@@ -629,23 +630,24 @@ impl Tty59App {
                     // when it moves into this row, so opening the panel does
                     // not shift the glyph or change its hover target.
                     .child(self.window_chrome(cx))
-                }))
-                // Only the Files and Search tabs step down 8px. Their first row
-                // is a filled search well whose top edge is the first thing you
-                // see, so it wants air under the tab row. Info and Source Control open on
-                // bare text centred in a 28px row, which already sits ~7px
-                // under the row's top; adding 8 more put their first line a
-                // visible step lower than the Files well beside them.
-                .children(
-                    (cfg!(target_os = "macos")
-                        && matches!(tab, RightPanelTab::Files | RightPanelTab::Search))
-                    .then(|| div().flex_none().h(px(8.))),
-                )
-                .child(body)
-                .children(self.sftp_transfers_footer(cx))
-                .child(handle)
-                .into_any_element(),
-        )
+            }))
+            // Only the Files and Search tabs step down 8px. Their first row
+            // is a filled search well whose top edge is the first thing you
+            // see, so it wants air under the tab row. Info and Source Control open on
+            // bare text centred in a 28px row, which already sits ~7px
+            // under the row's top; adding 8 more put their first line a
+            // visible step lower than the Files well beside them.
+            .children(
+                (cfg!(target_os = "macos")
+                    && matches!(tab, RightPanelTab::Files | RightPanelTab::Search))
+                .then(|| div().flex_none().h(px(8.))),
+            )
+            .child(body)
+            .children(self.sftp_transfers_footer(cx))
+            .child(handle);
+        #[cfg(test)]
+        let panel = panel.debug_selector(|| "right-panel".into());
+        Some(panel.into_any_element())
     }
 
     fn right_panel_resize(
@@ -784,7 +786,7 @@ impl Tty59App {
             }))
             // Where the tabs live in this row, they are the heading: the
             // current one already names the panel, and the Changes tab carries
-            // the count. No rule under it — the body's own inset is the break.
+            // its count (`right_panel_tabs`). No rule under it — the body's own inset is the break.
             .when(tabs.is_some(), |row| row.pl(px(TAB_ROW_LEAD)))
             .when(tabs.is_none(), |row| {
                 row.child(
@@ -918,6 +920,18 @@ impl Tty59App {
         hint: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.panel_empty_with(text, hint.map(|h| h.to_string().into_any_element()), cx)
+    }
+
+    /// [`Self::panel_empty`] with the hint already built, for one that is more
+    /// than a string — text around an element, such as a command in a chip. The
+    /// hint sits in the same secondary line the plain one does.
+    pub(crate) fn panel_empty_with(
+        &self,
+        text: &str,
+        hint: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
             .px(px(TEXT_INSET))
@@ -926,12 +940,7 @@ impl Tty59App {
             .text_size(rems(TEXT))
             .text_color(muted)
             .child(text.to_string())
-            .children(hint.map(|h| {
-                div()
-                    .text_size(rems(META))
-                    .text_color(muted)
-                    .child(h.to_string())
-            }))
+            .children(hint.map(|h| div().text_size(rems(META)).text_color(muted).child(h)))
             .into_any_element()
     }
 

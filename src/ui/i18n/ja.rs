@@ -29,10 +29,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::VisionExited => "終了",
         L10nKey::VisionExitedAge => "終了 · {age}",
         L10nKey::VisionPane => "ペイン {i}/{n}",
-        L10nKey::VisionDefault => "新規ウィンドウをエージェントビューで開く",
-        L10nKey::VisionDefaultDesc => {
-            "新規ウィンドウを受信トレイで開きます。上部バーからワークベンチに戻れます。"
-        }
+        L10nKey::VisionDefault => "新規ウィンドウを受信トレイで開く",
+        L10nKey::VisionDefaultDesc => "ワークベンチは上部バーからワンクリックで開けます。",
         L10nKey::SettingsNoMatchesShort => "一致なし",
         L10nKey::SettingsModifiedTitle => "変更済み",
         L10nKey::SettingsMatchCount => "{count} 件",
@@ -55,10 +53,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNoThemesMatch => "一致するテーマがありません",
         L10nKey::SettingsRestoreChanged => "変更した {count} 件を戻す",
         L10nKey::SettingsShortcutsHint => {
-            "ショートカットをクリックして新しいキーを押します。続けて別の組み合わせを押すとシーケンスになります。Esc で取消、⌫ で解除。"
+            "ショートカットをクリックして新しいキーを押します。続けて別の組み合わせを押すとシーケンスになります。Esc で取消、Backspace で解除。"
         }
         L10nKey::SettingsShortcutsHintTmux => {
-            "tmux プリセット：ペインとタブの操作はプレフィックスキーを使います。クリックで変更、Esc で取消、⌫ で解除。"
+            "tmux プリセット：ペインとタブの操作はプレフィックスキーを使います。クリックで変更、Esc で取消、Backspace で解除。"
         }
         L10nKey::SettingsShortcutConflict => {
             "{keys} は「{action}」で使われています。置き換えるとそちらから外れます。"
@@ -71,13 +69,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsAddHost => "ホストを追加",
         L10nKey::SettingsNoHostsMatch => "「{query}」に一致するホストはありません",
-        L10nKey::SettingsHostsFromFiles => "{files} か所から {count} 台のホスト",
+        L10nKey::SettingsHostsFromFiles => "{sources}から {hosts}",
         L10nKey::SettingsMoreHosts => "ほかに {count} 台のホスト",
         L10nKey::SettingsShowRecentOnly => "最近のみ表示",
         L10nKey::SettingsShowAll => "すべて表示",
         L10nKey::SettingsUnsaved => "未保存",
         L10nKey::SettingsNever => "未使用",
-        L10nKey::SettingsDefinedIn => "定義元",
+        L10nKey::SettingsDefinedIn => "取得元",
         L10nKey::SettingsConnectInNewTab => "新しいタブで接続",
         L10nKey::SettingsCopied => "コピーしました",
         L10nKey::SettingsNavMobile => "モバイル",
@@ -149,7 +147,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateAvailable => "アップデートあり",
         L10nKey::SettingsRevealHookFile => "フックファイルを表示",
         L10nKey::SettingsNavGeneral => "一般",
-        L10nKey::SettingsEditShortcuts => "ショートカットを編集…",
+        L10nKey::SettingsEditShortcuts => "ショートカットを編集",
         L10nKey::SettingsModifiedOnly => "変更済みのみ",
         L10nKey::SettingsModified => "変更済み",
         L10nKey::SettingsResetValue => "既定値に戻す",
@@ -203,7 +201,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchTabTerminals => "ターミナル",
         L10nKey::SearchTabHosts => "ホスト",
         L10nKey::SearchTabSymbols => "シンボル",
-        L10nKey::SearchPlaceholderAll => "ファイル、アクション、ターミナル、ホストを検索…",
+        L10nKey::SearchPlaceholderAll => "ターミナル、ホスト、コマンドを検索…",
         L10nKey::SearchPlaceholderActions => "コマンドを検索…",
         L10nKey::SearchPlaceholderTerminals => "開いているタブ、シェル、エージェントを検索…",
         L10nKey::SearchPlaceholderHosts => "ホストを検索、または user@host を入力して接続…",
@@ -774,7 +772,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "起動時に前回のタブ、分割、ディレクトリを復元します"
         }
         L10nKey::SettingsShowTrayIcon => "システムトレイアイコンを表示",
-        L10nKey::SettingsShowTrayIconDesc => "エージェントの入力待ちを通知",
+        L10nKey::SettingsShowTrayIconDesc => {
+            "tty59 をシステムトレイに常駐させ、入力待ちのエージェントを知らせます。"
+        }
         L10nKey::SettingsTabs => "タブ",
         L10nKey::SettingsNewTabPosition => "新規タブの表示位置",
         L10nKey::SettingsConfirmClose => "閉じる前に確認",
@@ -791,13 +791,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SidebarListTerminal => "ターミナル",
         L10nKey::SidebarListAgents => "エージェント",
-        L10nKey::SidebarNoAgents => "このワークスペースにエージェントはありません",
-        L10nKey::SettingsSidebarAgentsToggle => "ターミナル | エージェント切り替え",
+        L10nKey::SidebarNoAgents => "実行中のエージェントはありません",
+        L10nKey::SettingsSidebarAgentsToggle => "ターミナル / エージェント切り替えを表示",
         L10nKey::SettingsSidebarAgentsToggleDesc => {
-            "ワークベンチのサイドバー下部にリスト切り替えを表示します。"
+            "サイドバー下部で、ターミナルとエージェントを切り替えます。"
         }
         L10nKey::SettingsSearchSidebarAgentsToggleKeywords => {
-            "サイドバー ターミナル エージェント リスト 切り替え"
+            "サイドバー ターミナル エージェント リスト 切り替え ワークベンチ"
         }
         L10nKey::SettingsSidebarGrouping => "自動グループ化",
         L10nKey::SettingsSidebarGroupingDesc => {
@@ -837,7 +837,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsPreset => "プリセット",
         L10nKey::SettingsPresetDesc => "tmux はペイン・タブ操作をプレフィックスキーに（Ctrl-B C）",
         L10nKey::SettingsPrefix => "プレフィックスキー",
-        L10nKey::SettingsPressKeys => "キーを入力… · ⌫ でショートカットなし",
+        L10nKey::SettingsPressKeys => "キーを入力… · Backspace でショートカットなし",
         L10nKey::SettingsPauseToSaveEsc => "一時停止して保存 · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
             "ショートカットをクリックして新しいキーを押します。続けて押すと Ctrl-B X のようなシーケンスに。Esc で取消、Backspace で削除"
@@ -895,7 +895,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateDiscard => "破棄",
         L10nKey::SettingsAutoDownload => "アップデートをバックグラウンドでダウンロード",
         L10nKey::SettingsAutoDownloadDesc => {
-            "更新をバックグラウンドで取得し、再起動だけで適用。確認なしにはインストールしません"
+            "再起動するだけでインストールできます。確認なしにはインストールしません。"
         }
         L10nKey::SettingsUpdateChannel => "更新チャンネル",
         L10nKey::SettingsUpdateChannelDesc => "Nightly は毎晩最新コードからビルド（未テスト）",
@@ -949,7 +949,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "このリリースには checksums.txt がないため、tty59 は自動インストールを行いません"
         }
         L10nKey::SettingsVersionAvailable => "バージョン {version} が利用可能です",
-        L10nKey::SettingsCheckUpdatesDesc => "自動更新できない場合はリリースページを開く",
+        L10nKey::SettingsCheckUpdatesDesc => "tty59 の起動のたびに新しいバージョンを確認します。",
         L10nKey::SettingsCheckUpdatesOnLaunch => "起動時にアップデートを確認",
         L10nKey::SettingsCommandLine => "コマンドライン",
         L10nKey::SettingsCommandLineDesc => "tty59 コマンドを PATH に追加。次回起動時に反映",
@@ -1078,7 +1078,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "ctrl-r 逆検索 ファジー検索 履歴 fzf プロンプト history search ctrl-r reverse fuzzy recall prompt"
         }
         L10nKey::SettingsSearchHostsKeywords => {
-            "ssh ホスト 接続 保存 プロファイル インポート ssh_config 管理 追加 編集 クイック接続 hosts ssh profile import connect manage"
+            "ssh ホスト 接続 保存 プロファイル インポート ssh_config 管理 追加 編集 クイック接続 hosts ssh profile import connect manage hostname identityfile proxyjump alias"
         }
         L10nKey::SettingsSearchItalicFontKeywords => "タイプフェイス 斜体 italic oblique typeface",
         L10nKey::SettingsSearchKeybindingsKeywords => {
@@ -1264,7 +1264,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpEditRename => "名前を変更",
         L10nKey::SftpEditPermissions => "権限 · {mode}",
         L10nKey::SftpLoading => "読み込み中…",
-        L10nKey::SftpEmptyDirectory => "空のディレクトリです",
+        L10nKey::SftpEmptyDirectory => "空のフォルダです。",
         L10nKey::SftpContextOpen => "開く",
         L10nKey::SftpContextEdit => "編集",
         L10nKey::SftpContextFollowSymlink => "シンボリックリンクを辿る",
@@ -1273,10 +1273,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferSummaryRunning => "{count} 件転送中 · {pct}%",
         L10nKey::SftpTransferSummaryFailed => "{count} 件失敗",
         L10nKey::SftpTransferSummaryIdle => "転送",
+        // B3-R: finished-transfer summaries.
+        L10nKey::SftpTransferSummaryDownloads => "ダウンロード {count} 件完了",
+        L10nKey::SftpTransferSummaryUploads => "アップロード {count} 件完了",
+        L10nKey::SftpTransferSummaryBoth => "{downloads} · {uploads}",
+        L10nKey::SearchHostsHelper => "user@host を入力して接続します。",
         L10nKey::SftpTransferProgress => "{done} / {total} ({pct}%)",
         L10nKey::SftpTransferDone => "完了",
         L10nKey::SftpTransferCancelled => "キャンセル済み",
-        L10nKey::SftpTransferError => "エラー",
+        L10nKey::SftpTransferError => "失敗",
         L10nKey::SftpTransferListFailed => "転送状況を取得できませんでした: {error}",
         L10nKey::SftpPasteUploadFailed => {
             "{name} を {host} にアップロードできませんでした: {error}"
@@ -1411,12 +1416,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorGitRevertChange => "変更を元に戻す",
         L10nKey::EditorGitToggleGutter => "Git 変更マーカーの切り替え",
         L10nKey::EditorGitPeekRevert => "元に戻す",
-        L10nKey::EditorGitPeekSummary => "ステージ済みの版と比べて −{removed} +{added} 行",
+        L10nKey::EditorGitPeekSummary => "ステージ済みの版と比べて {changes}",
         L10nKey::EditorGitPeekAddedOnly => {
             "新しく追加された行です。ステージ済みの版にはここに何もありません。"
         }
         L10nKey::EditorGitPeekChange => "変更をプレビュー",
-        L10nKey::EditorGitPeekKeys => "Enter で元に戻す · Esc で閉じる",
+        L10nKey::EditorGitPeekKeys => "Esc で閉じる",
         L10nKey::EditorProblemsTitle => "問題",
         L10nKey::EditorProblemsToggle => "問題の表示切り替え",
         L10nKey::EditorProblemsNone => "開いているファイルに問題はありません。",
@@ -1493,10 +1498,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::LspRenameSymbolAction => "シンボル名を変更…",
         L10nKey::LspRenamePlaceholder => "{name} の新しい名前",
         L10nKey::LspRenameFailed => "{name} の名前を変更できませんでした",
-        L10nKey::LspServerMissing => "{name} 未インストール",
+        L10nKey::LspServerMissing => "言語サーバーなし",
         L10nKey::LspServerStarting => "{name} 起動中…",
         L10nKey::LspServerDown => "{name} 停止",
-        L10nKey::LspProblemsTooltip => "エラー {errors} 件、警告 {warnings} 件",
+        L10nKey::LspProblemsTooltip => "{errors}、{warnings}",
         L10nKey::SearchTabLocations => "場所",
         L10nKey::SearchPlaceholderLocations => "見つかった場所を絞り込む…",
         L10nKey::SearchLocationsNone => "見つかりませんでした",
@@ -1504,6 +1509,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelInfoTitle => "情報",
         L10nKey::PanelChangesTitle => "変更",
         L10nKey::PanelScmTitle => "変更",
+        // B3-P: the Changes tab's accessible name and tooltip.
+        L10nKey::PanelChangesTabCount => {
+            "変更、変更されたファイル {count} 件。一部のみステージ済みのファイルは 1 件として数えます。"
+        }
+        L10nKey::PanelChangesTabCapped => {
+            "変更、変更されたファイル 10,000 件以上。一部のみステージ済みのファイルは 1 件として数えます。"
+        }
         L10nKey::PanelFilesTitle => "ファイル",
         L10nKey::PanelSearchTitle => "検索",
         L10nKey::PanelGitHubTitle => "GitHub",
@@ -1704,7 +1716,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptTitle => "新しいワークツリータブ",
         L10nKey::WorktreePromptName => "ワークツリー名",
         L10nKey::WorktreePromptBranch => "新しいブランチ",
-        L10nKey::WorktreePromptBase => "開始地点",
+        L10nKey::WorktreePromptBase => "ベースブランチ",
         L10nKey::WorktreePromptCreating => "作成中…",
         L10nKey::WorktreePromptCreate => "作成",
         L10nKey::AppNewWorktreeFailed => "新しいワークツリーを作成できませんでした: {error}",
@@ -1879,11 +1891,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptPassphraseFor => "{key_path} のパスフレーズ",
         L10nKey::SshPromptTwoFactor => "二要素認証",
         L10nKey::SshPromptUnknownHost => "未知のホスト {host}",
-        L10nKey::SshPromptHostKeyChanged => {
-            "ホストキーが変更されました — 中間者攻撃の可能性があります"
-        }
+        L10nKey::SshPromptHostKeyChanged => "ホストキーが変更されました",
         L10nKey::SshPromptHostKeyChangedBody => {
-            "ホストキーが以前に信頼したものと異なります。攻撃の可能性があります"
+            "{host}:{port} のキーは、以前に信頼したキーと一致しなくなりました。接続が傍受されている可能性があります。"
         }
         L10nKey::SshPromptConnect => "接続",
         L10nKey::SshPromptUnlock => "ロック解除",
@@ -2132,9 +2142,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneDragHandleTooltip => "ドラッグしてこのペインを移動",
         L10nKey::AppWorktreeRemoved => "ワークツリー「{branch}」を削除しました",
         L10nKey::AppWorktreeRemoveFailed => "ワークツリーの削除に失敗しました: {error}",
-        L10nKey::WorktreePromptAgent => "起動",
+        L10nKey::WorktreePromptAgent => "起動方法",
         L10nKey::WorktreePromptShell => "シェル",
-        L10nKey::WorktreePromptTask => "タスク",
+        L10nKey::WorktreePromptTask => "最初のタスク",
         L10nKey::WorktreePromptSetup => "最初に .tty59/setup を実行",
         L10nKey::WorktreePromptSetupHint => {
             ".tty59/setup がありません。追加すると新しいワークツリーで `{command}` を実行します"
@@ -2458,7 +2468,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubNoIssues => "一致するイシューはありません。",
         L10nKey::GitHubNoPulls => "一致するプルリクエストはありません。",
         L10nKey::GitHubSignInHint => {
-            "ターミナルで `gh auth login` を実行してサインインし、再読み込みしてください。"
+            "ターミナルで {command} を実行してサインインし、再読み込みしてください。"
         }
         L10nKey::GitHubNotFoundSignedOut => {
             "GitHub でこのリポジトリが見つかりません。非公開の場合は先にサインインしてください。"
@@ -2470,7 +2480,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubRateLimited => "GitHub のレート制限に達しました。",
         L10nKey::GitHubRateLimitResetIn => "{n} 分後にリセットされます。",
         L10nKey::GitHubRateLimitSignedOut => {
-            "サインインしていない場合、GitHub へのリクエストは 1 時間に 60 回までです。`gh auth login` でサインインすると上限が上がります。"
+            "サインインしていない場合、GitHub へのリクエストは 1 時間に 60 回までです。{command} でサインインすると上限が上がります。"
         }
         L10nKey::GitHubForbidden => "GitHub がリクエストを拒否しました。",
         L10nKey::GitHubNetworkError => "GitHub に接続できません。",
@@ -2516,15 +2526,47 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "クリップボード コピー 折り返し 行 結合 clipboard copy wrap unwrap join lines claude raw"
         }
+        // B3-L: settings terminology and host/source counts.
+        L10nKey::SettingsPort => "ポート",
+        L10nKey::SettingsCopyJoinWrappedWithKey => {
+            "{desc}{key} または「{command}」で表示どおりにコピーします。"
+        }
+        L10nKey::SettingsCopyJoinWrappedUnbound => {
+            "{desc}「{command}」で表示どおりにコピーします。"
+        }
+        L10nKey::SettingsKeyFile => "鍵ファイル",
+        L10nKey::SettingsSearchVisionDefaultKeywords => {
+            "エージェントビュー エージェント 受信トレイ ワークベンチ 新規ウィンドウ 上部バー agent mode inbox workbench start windows"
+        }
+        L10nKey::SettingsHostCount => "{count} 台のホスト",
+        L10nKey::SettingsSourceCount => "{count} か所",
+        // B3-A: the agents rail's empty and no-match states.
+        L10nKey::SidebarAgentsEmptyHint => {
+            "このワークスペースで起動したエージェントがここに表示されます。"
+        }
+        L10nKey::SidebarNewAgent => "新しいエージェント",
+        L10nKey::SidebarNothingMatches => "「{query}」に一致するものはありません",
         L10nKey::SettingsCopyJoinWrapped => "コピー時に折り返し行をつなげる",
         L10nKey::SettingsCopyJoinWrappedDesc => {
-            "Claude Code のペインで、Claude が画面端で折り返した行をつなげ、段落を 1 行として貼り付けます。⌘⌥C または「そのままコピー」で表示どおりにコピーします"
+            "Claude Code のペインで、Claude が画面端で折り返した行をつなげ、段落を 1 行として貼り付けます。"
         }
         L10nKey::MermaidRendering => "図をレンダリング中…",
         L10nKey::MermaidRenderError => "図のエラー",
         L10nKey::MermaidViewerFullScreen => "全画面",
         L10nKey::MermaidViewerFit => "フィット",
         L10nKey::MermaidViewerExit => "全画面を終了 (Esc)",
+        // B3-E: editor status, empty hint and gutter peek.
+        L10nKey::LspMissingBody => {
+            "{name} を起動できませんでした。tty59 は PATH 上で次を探します：{programs}。{name} がインストールされ、実行できることを確認してください。"
+        }
+        L10nKey::LspErrorCount => "エラー {count} 件",
+        L10nKey::LspWarningCount => "警告 {count} 件",
+        L10nKey::EditorEmptyOpenHint => "{chord} でファイルを開く",
+        L10nKey::EditorEmptyTreeAlt => "またはファイルツリーから選ぶ",
+        L10nKey::EditorEmptyOpenUnbound => "ファイルツリーからファイルを選ぶ",
+        L10nKey::EditorGitPeekLinesAdded => "{count} 行追加",
+        L10nKey::EditorGitPeekLinesRemoved => "{count} 行削除",
+        L10nKey::EditorGitPeekChanges => "{removed}、{added}",
     })
 }
 
@@ -2545,6 +2587,26 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMoreHosts, "zero") => "ほかのホストはありません",
         (L10nKey::SettingsMoreHosts, "one") => "ほかに 1 台のホスト",
         (L10nKey::SettingsMoreHosts, "other") => "ほかに {count} 台のホスト",
+        // The two halves of `SettingsHostsFromFiles`, counted separately.
+        (L10nKey::SettingsHostCount, "zero") => "0 台のホスト",
+        (L10nKey::SettingsHostCount, "one") => "1 台のホスト",
+        (L10nKey::SettingsHostCount, "other") => "{count} 台のホスト",
+        (L10nKey::SettingsSourceCount, "zero") => "0 か所",
+        (L10nKey::SettingsSourceCount, "one") => "1 か所",
+        (L10nKey::SettingsSourceCount, "other") => "{count} か所",
+        // B3-E: plural forms.
+        (L10nKey::LspErrorCount, "zero") => "エラーなし",
+        (L10nKey::LspErrorCount, "one") => "エラー 1 件",
+        (L10nKey::LspErrorCount, "other") => "エラー {count} 件",
+        (L10nKey::LspWarningCount, "zero") => "警告なし",
+        (L10nKey::LspWarningCount, "one") => "警告 1 件",
+        (L10nKey::LspWarningCount, "other") => "警告 {count} 件",
+        (L10nKey::EditorGitPeekLinesAdded, "zero") => "追加された行なし",
+        (L10nKey::EditorGitPeekLinesAdded, "one") => "1 行追加",
+        (L10nKey::EditorGitPeekLinesAdded, "other") => "{count} 行追加",
+        (L10nKey::EditorGitPeekLinesRemoved, "zero") => "削除された行なし",
+        (L10nKey::EditorGitPeekLinesRemoved, "one") => "1 行削除",
+        (L10nKey::EditorGitPeekLinesRemoved, "other") => "{count} 行削除",
         (L10nKey::SettingsMoreAgents, "zero") => "ほかのエージェントはありません",
         (L10nKey::SettingsMoreAgents, "one") => "ほかに 1 件のエージェント",
         (L10nKey::SettingsMoreAgents, "other") => "ほかに {count} 件のエージェント",
@@ -2708,12 +2770,27 @@ pub fn translate_variant_ja(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubSkippedCount, "zero") => "スキップなし",
         (L10nKey::GitHubSkippedCount, "one") => "1 件スキップ",
         (L10nKey::GitHubSkippedCount, "other") => "{count} 件スキップ",
+        // B3-P: plural forms.
+        (L10nKey::PanelChangesTabCount, "zero") => "変更、変更されたファイルなし",
+        (L10nKey::PanelChangesTabCount, "one") => {
+            "変更、変更されたファイル {count} 件。一部のみステージ済みのファイルは 1 件として数えます。"
+        }
+        (L10nKey::PanelChangesTabCount, "other") => {
+            "変更、変更されたファイル {count} 件。一部のみステージ済みのファイルは 1 件として数えます。"
+        }
         (L10nKey::GitHubShowHiddenComments, "zero") => "ほかのコメントはありません",
         (L10nKey::GitHubShowHiddenComments, "one") => "ほか 1 件のコメントを表示",
         (L10nKey::GitHubShowHiddenComments, "other") => "ほか {count} 件のコメントを表示",
         (L10nKey::GitHubShowAllReviewers, "zero") => "レビュアーなし",
         (L10nKey::GitHubShowAllReviewers, "one") => "1 人のレビュアーを表示",
         (L10nKey::GitHubShowAllReviewers, "other") => "{count} 人のレビュアーをすべて表示",
+        // B3-R: plural forms.
+        (L10nKey::SftpTransferSummaryDownloads, "zero") => "完了したダウンロードなし",
+        (L10nKey::SftpTransferSummaryDownloads, "one") => "ダウンロード 1 件完了",
+        (L10nKey::SftpTransferSummaryDownloads, "other") => "ダウンロード {count} 件完了",
+        (L10nKey::SftpTransferSummaryUploads, "zero") => "完了したアップロードなし",
+        (L10nKey::SftpTransferSummaryUploads, "one") => "アップロード 1 件完了",
+        (L10nKey::SftpTransferSummaryUploads, "other") => "アップロード {count} 件完了",
         (L10nKey::TabStripHiddenTabs, "zero") => "他のタブはありません",
         (L10nKey::TabStripHiddenTabs, "one") => "他 1 個のタブ",
         (L10nKey::TabStripHiddenTabs, "other") => "他 {count} 個のタブ",

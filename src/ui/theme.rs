@@ -719,6 +719,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     cx.set_global(surfaces.clone());
     cx.set_global(sem);
     cx.set_global(presets::FillPole(resolved.pole));
+    cx.set_global(theme.danger_outline_ink_from(&resolved));
     cx.set_global(theme.settings_ink_from(&resolved));
     cx.set_global(theme.chrome_ink_from(&resolved));
     cx.set_global(interaction);
@@ -1035,6 +1036,13 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
 /// `Tty59App::with_session` applies it before it builds a view).
 pub(crate) fn semantics(cx: &App) -> presets::Semantics {
     *cx.global::<presets::Semantics>()
+}
+
+/// The destructive-outline button's cached ink on the popover card, derived
+/// once per theme change in [`apply_theme`]. Same required-global invariant as
+/// [`semantics`].
+pub(crate) fn danger_outline_ink(cx: &App) -> presets::DangerOutlineInk {
+    *cx.global::<presets::DangerOutlineInk>()
 }
 
 /// Reads the settings page's cached secondary ink and off-switch track,
@@ -2036,6 +2044,7 @@ mod tests {
                         chrome.selected_caption,
                         expected.selected_caption,
                     ),
+                    ("tab_count", chrome.tab_count, expected.tab_count),
                     (
                         "port_chip_ink",
                         chrome.port_chip_ink,

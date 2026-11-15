@@ -271,10 +271,7 @@ impl Tty59App {
                     .text_size(fs(12.))
                     .text_color(tk.sub)
                     .child(if show_all {
-                        t_fmt(
-                            L10nKey::SettingsHostsFromFiles,
-                            &[("count", &total.to_string()), ("files", &files.to_string())],
-                        )
+                        hosts_from_sources_text(total, files)
                     } else {
                         t_plural(L10nKey::SettingsMoreHosts, rest, &[])
                     })
@@ -572,18 +569,21 @@ impl Tty59App {
                 .map(|q| host_title(q))
         });
         let fields: Vec<(&str, String)> = [
-            ("HostName", Some(p.host.clone())),
+            (t(L10nKey::SettingsHost), Some(p.host.clone())),
             (
-                "User",
+                t(L10nKey::SettingsUser),
                 Some(if p.user.is_empty() {
                     "$USER".to_string()
                 } else {
                     p.user.clone()
                 }),
             ),
-            ("Port", Some(p.port.to_string())),
-            ("IdentityFile", p.identity_files.first().cloned()),
-            ("ProxyJump", jump),
+            (t(L10nKey::SettingsPort), Some(p.port.to_string())),
+            (
+                t(L10nKey::SettingsKeyFile),
+                p.identity_files.first().cloned(),
+            ),
+            (t(L10nKey::SettingsJumpHost), jump),
             (
                 t(L10nKey::SettingsDefinedIn),
                 Some(ssh_group_label(ssh_group_key(p)).to_string()),
@@ -741,9 +741,8 @@ impl Tty59App {
                         .max_w(px(FORM_FIELD_W)),
                 )
         };
-        // The secrets are not ssh_config keywords, so they are the only two
-        // labels here that are translated. Neither reaches the config file:
-        // `save_ssh_form_secrets` files them in the system keychain.
+        // The secrets get their own row shape: neither reaches the config
+        // file, `save_ssh_form_secrets` files them in the system keychain.
         let secret = |label: &'static str, input: &Entity<InputState>| {
             let focused = self.settings_input_focused(input, cx);
             h_flex()
@@ -766,18 +765,34 @@ impl Tty59App {
         };
         let fields = v_flex()
             .gap(px(6.))
-            .child(field("Alias", &form.name, false))
-            .child(field("HostName", &form.host, host_error.is_some()))
-            .child(field("User", &form.user, false))
-            .child(field("Port", &form.port, errors.port.is_some()))
+            .child(field(t(L10nKey::SettingsName), &form.name, false))
+            .child(field(
+                t(L10nKey::SettingsHost),
+                &form.host,
+                host_error.is_some(),
+            ))
+            .child(field(t(L10nKey::SettingsUser), &form.user, false))
+            .child(field(
+                t(L10nKey::SettingsPort),
+                &form.port,
+                errors.port.is_some(),
+            ))
             .when(form.wants_password(), |v| {
                 v.child(secret(t(L10nKey::SettingsPassword), &form.password))
             })
-            .child(field("IdentityFile", &form.identity_files, false))
+            .child(field(
+                t(L10nKey::SettingsKeyFile),
+                &form.identity_files,
+                false,
+            ))
             .when(form.wants_passphrase(), |v| {
                 v.child(secret(t(L10nKey::SettingsKeyPassphrase), &form.passphrase))
             })
-            .child(field("ProxyJump", &form.jump, errors.jump.is_some()));
+            .child(field(
+                t(L10nKey::SettingsJumpHost),
+                &form.jump,
+                errors.jump.is_some(),
+            ));
 
         v_flex()
             .gap(px(14.))
@@ -929,6 +944,84 @@ fn ssh_command(p: &SshProfile) -> String {
     cmd
 }
 
+/// "9 hosts from 3 sources": each count picks its own plural form, and the
+/// catalog template owns the word order around them.
+fn hosts_from_sources_text(hosts: usize, sources: usize) -> String {
+    t_fmt(
+        L10nKey::SettingsHostsFromFiles,
+        &[
+            ("hosts", &t_plural(L10nKey::SettingsHostCount, hosts, &[])),
+            (
+                "sources",
+                &t_plural(L10nKey::SettingsSourceCount, sources, &[]),
+            ),
+        ],
+    )
+}
+
 fn visible_is_empty(profiles: &[SshProfile], query: &str) -> bool {
     !profiles.iter().any(|p| ssh_row_matches(p, query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hosts_from_sources_text;
+    use crate::ui::i18n::{default_language_code, set_locale};
+
+    /// The two counts are independent: a sentence can be "9 hosts from 1
+    /// source" and each half has to agree with its own number.
+    #[test]
+    fn host_and_source_counts_agree_with_their_own_numbers() {
+        for (locale, cases) in [
+            (
+                "en",
+                vec![
+                    (1, 1, "1 host from 1 source"),
+                    (9, 1, "9 hosts from 1 source"),
+                    (9, 3, "9 hosts from 3 sources"),
+                    (1, 3, "1 host from 3 sources"),
+                    (0, 0, "0 hosts from 0 sources"),
+                ],
+            ),
+            (
+                "ru-RU",
+                vec![
+                    (1, 1, "1 хост из 1 источника"),
+                    (2, 2, "2 хоста из 2 источников"),
+                    (5, 5, "5 хостов из 5 источников"),
+                    (11, 11, "11 хостов из 11 источников"),
+                    (21, 21, "21 хост из 21 источника"),
+                    (22, 22, "22 хоста из 22 источников"),
+                    (21, 2, "21 хост из 2 источников"),
+                    (2, 21, "2 хоста из 21 источника"),
+                    (22, 1, "22 хоста из 1 источника"),
+                    (11, 22, "11 хостов из 22 источников"),
+                ],
+            ),
+            (
+                "zh-CN",
+                vec![
+                    (1, 1, "1 台主机，来自 1 个来源"),
+                    (9, 3, "9 台主机，来自 3 个来源"),
+                ],
+            ),
+            (
+                "ja-JP",
+                vec![
+                    (1, 1, "1 か所から 1 台のホスト"),
+                    (9, 3, "3 か所から 9 台のホスト"),
+                ],
+            ),
+        ] {
+            set_locale(locale);
+            for (hosts, sources, expected) in cases {
+                assert_eq!(
+                    hosts_from_sources_text(hosts, sources),
+                    expected,
+                    "{locale}: {hosts} hosts, {sources} sources"
+                );
+            }
+        }
+        set_locale(default_language_code());
+    }
 }

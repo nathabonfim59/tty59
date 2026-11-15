@@ -249,8 +249,10 @@ impl Tty59App {
             return self.scm_shell(title, body);
         };
 
-        let count = (status.total_entries > 0).then(|| status.total_entries.to_string());
-        let title = self.panel_title(t(L10nKey::PanelScmTitle), count, None, window, cx);
+        // The count lives on the Changes tab now; the heading slot this used to
+        // feed is the subtitle (`panel_title`'s second parameter) and was never
+        // drawn for this panel.
+        let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
 
         let branch = self.scm_branch_row(&repo, &status, cx);
         let naming = self.scm_new_branch_row(&repo, cx);
@@ -591,9 +593,11 @@ impl Tty59App {
             .map(|(_, names)| names.clone())
             .unwrap_or_default();
         let others = self.scm_repo_choices();
-        let unpushable = pushable_branch(&status.head).is_err();
-
-        move |menu, _window, _cx| {
+        // Why Push is unavailable, in the words `scm_push`'s own guard uses.
+        let push_blocked = pushable_branch(&status.head).err();
+        // How far the branch is from its upstream, from the status snapshot.
+        let (pull_count, push_count) = branch_verb_counts(status.ahead_behind);
+        move |menu, _window, cx| {
             let mut menu = menu.min_w(px(200.));
             // Past a dozen the list stops being scannable, so it scrolls
             // rather than growing taller than the window.
@@ -636,13 +640,24 @@ impl Tty59App {
                 (L10nKey::ScmPull, ScmIntent::Pull),
                 (L10nKey::ScmPush, ScmIntent::Push),
             ] {
+                // Pull's number is what is waiting upstream, Push's what is
+                // waiting here. A blocked Push says why in place of a number.
+                let (count, reason) = match intent {
+                    ScmIntent::Pull => (pull_count, None),
+                    ScmIntent::Push => (
+                        push_count.filter(|_| push_blocked.is_none()),
+                        push_blocked.map(t),
+                    ),
+                    _ => (None, None),
+                };
+                let verb = t(label);
                 menu = menu.item(
-                    PopupMenuItem::new(t(label))
+                    PopupMenuItem::element(move |_window, cx| verb_row(verb, count, reason, cx))
                         // Fetch works from any HEAD, and Pull fails loud out
                         // of git itself; a Push from a HEAD with no branch to
                         // move is the one item that could only die in
                         // scm_push's guard (#545).
-                        .disabled(unpushable && matches!(intent, ScmIntent::Push))
+                        .disabled(push_blocked.is_some() && matches!(intent, ScmIntent::Push))
                         .on_click({
                             let app = app.clone();
                             move |_, window, cx| {
@@ -657,22 +672,36 @@ impl Tty59App {
                     .separator()
                     .item(PopupMenuItem::label(t(L10nKey::ScmSwitchRepository)));
                 for other in &others {
-                    let label = other
-                        .root
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| other.root.display().to_string());
-                    menu = menu.item(PopupMenuItem::new(label).checked(*other == repo).on_click({
-                        let app = app.clone();
-                        let other = other.clone();
-                        move |_, _window, cx| {
-                            let _ = app.update(cx, |this, cx| {
-                                this.scm.repo_override = Some(other.clone());
-                                this.scm.override_tab = Some(this.active);
-                                cx.notify();
-                            });
-                        }
-                    }));
+                    let (label, parent) = repo_choice_label(other, cx);
+                    #[cfg(test)]
+                    let key = other.root.display().to_string();
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_window, cx| {
+                            let row = div().w_full().child(crate::ui::tab_strip::menu_row(
+                                label.clone(),
+                                parent.clone(),
+                                cx,
+                            ));
+                            #[cfg(test)]
+                            let row = {
+                                let key = key.clone();
+                                row.debug_selector(move || format!("scm-repo-choice:{key}"))
+                            };
+                            row
+                        })
+                        .checked(*other == repo)
+                        .on_click({
+                            let app = app.clone();
+                            let other = other.clone();
+                            move |_, _window, cx| {
+                                let _ = app.update(cx, |this, cx| {
+                                    this.scm.repo_override = Some(other.clone());
+                                    this.scm.override_tab = Some(this.active);
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                    );
                 }
             }
             menu
@@ -2112,27 +2141,111 @@ impl Tty59App {
     /// notification (including the one the probe's *start* fires) into another
     /// `git status`.
     pub(crate) fn right_panel_refresh_changes(&mut self, cx: &mut Context<Self>) {
-        let Some(repo) = self.scm.repo.clone() else {
-            return;
+        // The count's repository is the current pane's, so it wins over the
+        // panel's own, which is only as fresh as the last Changes render. With
+        // the right panel closed there is no count target and the old answer
+        // stands in: the epoch bump below is what lets the panel reopen on a
+        // status that is not older than the last command.
+        let (repo, cwd) = match self.scm.count_repo.clone() {
+            Some(repo) => (repo, self.scm.count_cwd.clone()),
+            None => match self.scm.repo.clone() {
+                Some(repo) => (repo, None),
+                None => return,
+            },
         };
+        // The cheap per-tab probe is keyed by the pane's directory, which is
+        // not always the repository root.
         let Some(seen) = cx
             .try_global::<crate::terminal::git_status::GitStatusCache>()
-            .and_then(|cache| cache.status_for(repo.host, &repo.root))
+            .and_then(|cache| cache.status_for(repo.host, cwd.as_deref().unwrap_or(&repo.root)))
         else {
             return;
         };
-        if self.scm.last_tab_status.as_ref() == Some(&seen) {
+        // Compared as a pair: the same status under another repository is a
+        // pane that moved, not a command that touched this one.
+        if self
+            .scm
+            .last_tab_status
+            .as_ref()
+            .is_some_and(|(held, status)| *held == repo && *status == seen)
+        {
             return;
         }
-        self.scm.last_tab_status = Some(seen);
+        self.scm.last_tab_status = Some((repo.clone(), seen));
         self.scm_invalidate(repo.host, &repo.root, cx);
         cx.notify();
+    }
+
+    /// What the Changes tab counts, for the repository of the current pane.
+    ///
+    /// Reads the status the watcher already keeps current (see
+    /// `ScmWatcher::ChangesCount`): two hash lookups and an `Arc` clone, no
+    /// scan of the entries and no git. `None` until that status has arrived,
+    /// and for a clean tree.
+    pub(crate) fn scm_changes_count(&self, cx: &gpui::App) -> Option<ChangesCount> {
+        let repo = self.scm.count_repo.as_ref()?;
+        let status = status_of(cx, repo.host, &repo.root)?;
+        changes_count(status.as_ref())
     }
 
     fn scm_toggle_group(&mut self, group: ScmGroup, count: usize, cx: &mut Context<Self>) {
         let collapsed = self.scm.group_collapsed(group, count);
         self.scm.set_group_collapsed(group, !collapsed);
         cx.notify();
+    }
+}
+
+/// The Changes tab's number, before it is worded.
+///
+/// It counts *files*: one per path git reports, which is
+/// `WorkingTreeStatus::total_entries`. A partly staged file is listed under
+/// both Staged and Changes but is one file here, and a conflict is one. The
+/// list below can therefore show more rows than the tab says, and the tab's
+/// tooltip says why. `total_entries` also keeps counting past the status
+/// cap, so the figure is not the length of whatever subset was loaded.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ChangesCount {
+    /// An exact number of changed files, at least one.
+    Files(usize),
+    /// The status hit its record cap, so any figure would look more precise
+    /// than it is.
+    Capped,
+}
+
+impl ChangesCount {
+    /// The largest number the tab draws; past it the tab reads `99+`.
+    pub(crate) const SHOWN_MAX: usize = 99;
+    /// Drawn in place of a number past [`Self::SHOWN_MAX`]. Not a word, so not
+    /// in the catalog; the full figure is in [`Self::description`].
+    pub(crate) const OVERFLOW: &'static str = "99+";
+
+    /// The text beside the tab's label.
+    pub(crate) fn label(self) -> String {
+        match self {
+            ChangesCount::Files(n) if n <= Self::SHOWN_MAX => n.to_string(),
+            _ => Self::OVERFLOW.to_string(),
+        }
+    }
+
+    /// The tab's tooltip and accessible name: the exact count, or that the
+    /// cap was reached, and how partly staged files are counted.
+    pub(crate) fn description(self) -> String {
+        match self {
+            ChangesCount::Files(n) => t_plural(L10nKey::PanelChangesTabCount, n, &[]),
+            ChangesCount::Capped => t(L10nKey::PanelChangesTabCapped).to_string(),
+        }
+    }
+}
+
+/// The count a status gives the Changes tab; `None` for a clean tree.
+pub(crate) fn changes_count(status: &WorkingTreeStatus) -> Option<ChangesCount> {
+    use tty59_core::core::git::status::MAX_STATUS_ENTRIES;
+    match status.total_entries {
+        0 => None,
+        // `truncated` is "more than the cap"; a status of exactly the cap is
+        // just as likely to be the first `MAX_STATUS_ENTRIES` of more.
+        n if status.truncated || n >= MAX_STATUS_ENTRIES => Some(ChangesCount::Capped),
+        n => Some(ChangesCount::Files(n)),
     }
 }
 
@@ -2230,6 +2343,88 @@ pub(crate) fn head_label(head: &HeadState) -> String {
         HeadState::Detached { oid } => oid.chars().take(7).collect(),
         _ => head.label(),
     }
+}
+
+/// The numbers beside Pull and Push, as `(pull, push)`, from the status
+/// snapshot's `(ahead, behind)`.
+///
+/// Pull is what is waiting upstream — behind — and Push what is waiting here —
+/// ahead. `None` is unknown and zero is level, and neither earns a number.
+fn branch_verb_counts(ahead_behind: Option<(u32, u32)>) -> (Option<u32>, Option<u32>) {
+    match ahead_behind {
+        Some((ahead, behind)) => (
+            Some(behind).filter(|n| *n > 0),
+            Some(ahead).filter(|n| *n > 0),
+        ),
+        None => (None, None),
+    }
+}
+
+/// A branch-menu verb: its name, then — trailing, muted, in tabular figures —
+/// how many commits it would move, or, under the name, why it is unavailable.
+///
+/// The number is a reading of the status snapshot, not a promise about the
+/// network, so it sits in the menu's secondary ink beside the verb instead of
+/// in its label.
+fn verb_row(
+    verb: &'static str,
+    count: Option<u32>,
+    reason: Option<&'static str>,
+    cx: &gpui::App,
+) -> impl IntoElement + use<> {
+    let muted: gpui::Hsla = gpui::rgb(crate::ui::theme::chrome_ink(cx).unpicked_meta).into();
+    let top = h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(div().child(verb))
+        .when_some(count, |row, n| {
+            let count_el = div()
+                .text_color(muted)
+                .font_features(crate::ui::theme::tabular_figures())
+                .child(n.to_string());
+            #[cfg(test)]
+            let count_el = count_el.debug_selector(move || format!("scm-menu-count:{verb}:{n}"));
+            row.child(count_el)
+        });
+    v_flex()
+        .w_full()
+        .child(top)
+        .when_some(reason, |column, why| {
+            let note = div().text_size(rems(META)).text_color(muted).child(why);
+            #[cfg(test)]
+            let note = note.debug_selector(move || format!("scm-menu-reason:{why}"));
+            column.child(note)
+        })
+}
+
+/// The folder a repository lives in, as the menu spells it: from `~` when
+/// that is inside `home`, and empty for a root that has no parent.
+fn parent_label(root: &Path, home: Option<&Path>) -> String {
+    root.parent()
+        .map(|parent| {
+            crate::ui::path_display::abbreviate_home(&parent.to_string_lossy(), home).into_owned()
+        })
+        .unwrap_or_default()
+}
+
+/// A repository choice's name and, beside it, the folder it lives in.
+///
+/// Two checkouts of one project share a name, so the name alone cannot tell
+/// them apart. The folder is spelled from the stored root — nothing is
+/// canonicalised or read from disk — and starts from `~` where that host's
+/// home is known. Only what is drawn is made of this; which repository a row
+/// selects is its `RepoKey`.
+fn repo_choice_label(repo: &RepoKey, cx: &gpui::App) -> (SharedString, SharedString) {
+    let name = repo
+        .root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| repo.root.display().to_string());
+    let home = crate::ui::path_display::home_for_host(cx, repo.host);
+    let parent = parent_label(&repo.root, home.as_deref());
+    (name.into(), parent.into())
 }
 
 /// The `↑2 ↓0` reading, or nothing.
@@ -2880,6 +3075,134 @@ mod tests {
             operation: None,
             prefilled_message: None,
         }
+    }
+
+    /// The tab counts files; the list counts rows. A partly staged file is
+    /// two rows (Staged and Changes) and one file, a conflict is one of each.
+    /// The oracle for the rows is the grouping the panel itself draws.
+    #[test]
+    fn the_changes_count_is_files_and_a_partly_staged_file_counts_once() {
+        let entries = vec![
+            // Staged, then edited again: under both Staged and Changes.
+            entry(
+                "both.rs",
+                ChangeCode::Modified,
+                ChangeCode::Modified,
+                EntryKind::Tracked,
+            ),
+            entry(
+                "staged.rs",
+                ChangeCode::Added,
+                ChangeCode::None,
+                EntryKind::Tracked,
+            ),
+            entry(
+                "new.rs",
+                ChangeCode::None,
+                ChangeCode::None,
+                EntryKind::Untracked,
+            ),
+            entry(
+                "clash.rs",
+                ChangeCode::Unmerged,
+                ChangeCode::Unmerged,
+                EntryKind::Unmerged,
+            ),
+        ];
+        let rows: usize = entries.iter().map(|e| groups_of(e).len()).sum();
+        assert_eq!(rows, 5, "both.rs is listed twice, every other path once");
+        assert!(
+            groups_of(&entries[3]) == vec![ScmGroup::Merge],
+            "a conflict is in the merge group only, never in a second one"
+        );
+
+        let status = status_of_repo("/a", entries);
+        assert_eq!(changes_count(&status), Some(ChangesCount::Files(4)));
+    }
+
+    #[test]
+    fn a_clean_tree_has_no_count() {
+        assert_eq!(changes_count(&status_of_repo("/a", Vec::new())), None);
+    }
+
+    /// The count is `total_entries`, which keeps counting past the cap, so
+    /// the loaded subset is never mistaken for the total; and at or over the
+    /// cap it stops pretending to be exact.
+    #[test]
+    fn the_count_stops_being_exact_at_the_status_cap() {
+        use tty59_core::core::git::status::MAX_STATUS_ENTRIES;
+        let mut status = status_of_repo("/a", Vec::new());
+
+        status.total_entries = MAX_STATUS_ENTRIES - 1;
+        assert_eq!(
+            changes_count(&status),
+            Some(ChangesCount::Files(MAX_STATUS_ENTRIES - 1))
+        );
+        // Exactly the cap could be the first `MAX_STATUS_ENTRIES` of more.
+        status.total_entries = MAX_STATUS_ENTRIES;
+        assert_eq!(changes_count(&status), Some(ChangesCount::Capped));
+        // Past it the entries are dropped but the total is not.
+        status.total_entries = MAX_STATUS_ENTRIES + 4_000;
+        status.truncated = true;
+        assert_eq!(changes_count(&status), Some(ChangesCount::Capped));
+    }
+
+    #[test]
+    fn the_tab_reads_99_plus_past_99_and_the_tooltip_keeps_the_figure() {
+        assert_eq!(ChangesCount::Files(1).label(), "1");
+        assert_eq!(ChangesCount::Files(99).label(), "99");
+        assert_eq!(ChangesCount::Files(100).label(), "99+");
+        assert_eq!(ChangesCount::Capped.label(), "99+");
+
+        crate::ui::i18n::set_locale("en");
+        let one = ChangesCount::Files(1).description();
+        assert!(
+            one.contains("1 changed file") && !one.contains("1 changed files"),
+            "{one}"
+        );
+        let many = ChangesCount::Files(250).description();
+        assert!(many.contains("250 changed files"), "{many}");
+        assert!(
+            ChangesCount::Capped.description().contains("10,000+"),
+            "the cap is named, not a precise-looking total"
+        );
+        for text in [&one, &many, &ChangesCount::Capped.description()] {
+            assert!(!text.contains("{count}"), "{text}");
+        }
+    }
+
+    /// Pull is what is behind, Push what is ahead. 3 ahead and 1 behind is the
+    /// audit's own example, so a swapped pair cannot pass.
+    #[test]
+    fn pull_counts_what_is_behind_and_push_what_is_ahead() {
+        assert_eq!(branch_verb_counts(Some((3, 1))), (Some(1), Some(3)));
+        assert_eq!(branch_verb_counts(Some((0, 2))), (Some(2), None));
+        assert_eq!(branch_verb_counts(Some((5, 0))), (None, Some(5)));
+        assert_eq!(branch_verb_counts(Some((0, 0))), (None, None), "level");
+        assert_eq!(
+            branch_verb_counts(None),
+            (None, None),
+            "unknown is not level"
+        );
+    }
+
+    /// Two checkouts of one project are told apart by where they live, from
+    /// the stored path alone.
+    #[test]
+    fn same_name_repositories_are_told_apart_by_their_folder() {
+        let home = Path::new("/home/demo");
+        let a = parent_label(Path::new("/home/demo/acme-web"), Some(home));
+        let b = parent_label(Path::new("/home/demo/work/acme-web"), Some(home));
+        let c = parent_label(Path::new("/srv/acme-web"), Some(home));
+        assert_eq!(a, "~");
+        assert_eq!(b, "~/work");
+        assert_eq!(c, "/srv", "outside home, spelled whole");
+        assert_eq!(
+            parent_label(Path::new("/home/demo/work/acme-web"), None),
+            "/home/demo/work",
+            "with no home to measure against the path is shown whole"
+        );
+        assert_eq!(parent_label(Path::new("/"), Some(home)), "");
     }
 
     #[test]
@@ -4180,6 +4503,212 @@ mod render_idle_gpui_tests {
     }
 }
 
+/// Is the repository's full status (`ScmData`, what `status_of` reads) there
+/// when the right panel is open on Info and the Changes tab has never been
+/// rendered? Real repository, the pane's real directory, the ordinary cheap
+/// per-tab resolution; nothing planted, no new producer, no accessor beyond
+/// what the application already has.
+#[cfg(all(test, unix))]
+mod first_visit_backing_status_gpui_tests {
+    use super::*;
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::terminal::git_data::ScmData;
+    use crate::terminal::git_status::GitStatusCache;
+    use crate::ui::app::test_window;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use tty59_core::core::config::RightPanelTab;
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    /// A repository with one edited file and two new ones: three changes.
+    fn repository() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("tty59-first-visit-")
+            .tempdir()
+            .expect("a scratch directory");
+        let root = std::fs::canonicalize(dir.path()).expect("it resolves");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "test@tty59"]);
+        git(&root, &["config", "user.name", "tty59"]);
+        std::fs::write(root.join("base.txt"), "0\n").unwrap();
+        git(&root, &["add", "base.txt"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "base",
+            ],
+        );
+        std::fs::write(root.join("base.txt"), "1\n").unwrap();
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        (dir, root)
+    }
+
+    /// Where things stand, for the message of an assertion.
+    fn dump(app: &Tty59App, cx: &gpui::App, root: &Path) -> String {
+        let cache = cx.global::<GitStatusCache>();
+        let resolved = cache
+            .repo_root_for(HostId::LOCAL, root)
+            .map(Path::to_path_buf);
+        let (subscribed, epoch) = match &resolved {
+            Some(resolved) => (
+                cx.try_global::<ScmData>()
+                    .is_some_and(|data| data.is_subscribed(HostId::LOCAL, resolved)),
+                cx.try_global::<ScmData>()
+                    .map(|data| data.epoch(HostId::LOCAL, resolved)),
+            ),
+            None => (false, None),
+        };
+        format!(
+            "panel visible={} tab={:?} | cheap status={:?} resolved root={resolved:?} | \
+             scm.repo={:?} subscribed={subscribed} epoch={epoch:?} | full status present={}",
+            app.right_panel_visible,
+            app.right_panel_tab,
+            cache.status_for(HostId::LOCAL, root),
+            app.scm.repo,
+            resolved
+                .as_deref()
+                .is_some_and(|r| status_of(cx, HostId::LOCAL, r).is_some()),
+        )
+    }
+
+    /// The pane really is in the repository (as `scm_panel_on` puts it), the
+    /// right panel is open on `tab`, and the ordinary cheap per-tab probe has
+    /// resolved the repository: waited for, not assumed, on the clock the
+    /// pane polls on (300 ms rounds) and the real one (20 ms sleeps).
+    fn open_and_resolve(
+        cx: &mut TestAppContext,
+        root: &Path,
+        tab: RightPanelTab,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        crate::daemon::transport::Stream,
+        PathBuf,
+    ) {
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        DaemonMsg::Cwd(root.to_path_buf())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = tab;
+            cx.notify();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let resolved = loop {
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(300));
+            vcx.background_executor.run_until_parked();
+            let resolved = vcx.update(|_, cx| {
+                let cache = cx.global::<GitStatusCache>();
+                cache
+                    .status_for(HostId::LOCAL, root)
+                    .and_then(|_| cache.repo_root_for(HostId::LOCAL, root))
+                    .map(Path::to_path_buf)
+            });
+            if let Some(resolved) = resolved {
+                break resolved;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cheap per-tab probe never resolved the repository: {}",
+                app.update_in(&mut vcx, |app, _, cx| dump(app, cx, root))
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        (app, vcx, pane, resolved)
+    }
+
+    /// Whether the full status shows up within `seconds` of real time, pumping
+    /// frames and the executor between looks.
+    fn full_status_within(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        resolved: &Path,
+        seconds: u64,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+        loop {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(300));
+            vcx.background_executor.run_until_parked();
+            if vcx.update(|_, cx| status_of(cx, HostId::LOCAL, resolved).is_some()) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// THE CLAIM. The repository is resolved by the ordinary cheap probe, the
+    /// panel is open on Info and the Changes tab was never rendered: the full
+    /// status is already there. The window keeps redrawing for its own reasons
+    /// (caret, the pane's poll), which is none of this test's business, so it
+    /// does not wait for the window to go quiet: the observation below pumps
+    /// frames and the executor itself.
+    #[gpui::test]
+    fn the_full_status_exists_before_the_changes_tab_was_ever_rendered(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository();
+        let (app, mut vcx, _pane, resolved) = open_and_resolve(cx, &root, RightPanelTab::Info);
+
+        app.update_in(&mut vcx, |app, _, _| {
+            assert!(
+                app.scm.repo.is_none(),
+                "precondition: the Changes tab was never rendered"
+            );
+            assert_eq!(app.right_panel_tab, RightPanelTab::Info);
+        });
+        let present = full_status_within(&app, &mut vcx, &resolved, 10);
+        assert!(
+            present,
+            "full backing status absent before Changes: the repository is resolved and the panel \
+             is open on Info, and nothing has read its status in 10 s. {}",
+            app.update_in(&mut vcx, |app, _, cx| dump(app, cx, &root))
+        );
+    }
+
+    /// The control: the same fixture, and the Changes tab rendered. The status
+    /// machinery, the repository path and the fixture all work, so an absence
+    /// in the test above is the application's and not the fixture's.
+    #[gpui::test]
+    fn the_changes_tab_render_produces_the_status_in_the_same_fixture(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository();
+        let (app, mut vcx, _pane, resolved) = open_and_resolve(cx, &root, RightPanelTab::Info);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_tab = RightPanelTab::Scm;
+            cx.notify();
+        });
+        let present = full_status_within(&app, &mut vcx, &resolved, 30);
+        assert!(
+            present,
+            "control failed: the Changes tab rendered and the status never arrived. {}",
+            app.update_in(&mut vcx, |app, _, cx| dump(app, cx, &root))
+        );
+        app.update_in(&mut vcx, |app, _, _| {
+            assert!(app.scm.repo.is_some(), "the Changes tab did render");
+        });
+    }
+}
+
 /// The action strip is the one place in the panel where a hover reveal sits
 /// under the pointer it is reacting to, so it is the one place where "is the
 /// row hovered" and "can the row's hitbox be seen from here" can disagree.
@@ -4314,6 +4843,935 @@ mod action_strip_gpui_tests {
             clicks.get(),
             1,
             "but a click on the strip belongs to the strip"
+        );
+    }
+}
+
+/// The Changes tab's count, drawn from a real repository and a real status
+/// probe, on a tab that is not the Changes tab.
+#[cfg(all(test, unix))]
+mod changes_count_gpui_tests {
+    use super::*;
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::terminal::git_data::ScmData;
+    use crate::terminal::git_status::{GitStatusCache, RepoSnapshot};
+    use crate::ui::app::test_window;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use tty59_core::core::config::RightPanelTab;
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    /// A repository with `untracked` new files and one file that is staged and
+    /// then edited again: `1 + untracked` files, and one row more than that in
+    /// the list, because the edited file is under Staged and under Changes.
+    fn repo_with(untracked: usize) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("tty59-scm-count-")
+            .tempdir()
+            .expect("a scratch directory");
+        let root = std::fs::canonicalize(dir.path()).expect("it resolves");
+        git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "user.email", "test@tty59"]);
+        git(&root, &["config", "user.name", "tty59"]);
+        std::fs::write(root.join("base.txt"), "0\n").unwrap();
+        git(&root, &["add", "base.txt"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "base",
+            ],
+        );
+        std::fs::write(root.join("base.txt"), "1\n").unwrap();
+        git(&root, &["add", "base.txt"]);
+        std::fs::write(root.join("base.txt"), "2\n").unwrap();
+        for i in 0..untracked {
+            std::fs::write(root.join(format!("u{i}.txt")), "x\n").unwrap();
+        }
+        // The directory goes when the caller lets go of it, whatever the
+        // test's outcome.
+        (dir, root)
+    }
+
+    /// Where the count's inputs stand, for the message of a wait that gave up:
+    /// the panel, the pane's own directories, the mirror, what the status
+    /// cache holds and who holds the repository.
+    fn state_dump(app: &Tty59App, cx: &gpui::App) -> String {
+        let (effective, git_cwd) = app
+            .tabs
+            .first()
+            .and_then(|tab| tab.pane.first_leaf())
+            .and_then(|leaf| leaf.terminal().cloned())
+            .map(|pane| {
+                let view = pane.read(cx);
+                (
+                    view.effective_cwd(),
+                    view.git_status_cwd().map(Path::to_path_buf),
+                )
+            })
+            .unwrap_or_default();
+        let target = app.scm.count_repo.as_ref();
+        let (loaded, holders, epoch) = match target {
+            Some(repo) => (
+                crate::terminal::git_data::status_of(cx, repo.host, &repo.root).is_some(),
+                cx.try_global::<ScmData>()
+                    .is_some_and(|data| data.is_subscribed(repo.host, &repo.root)),
+                cx.try_global::<ScmData>()
+                    .map(|data| data.epoch(repo.host, &repo.root)),
+            ),
+            None => (false, false, None),
+        };
+        format!(
+            "panel visible={} tab={:?} | pane effective_cwd={effective:?} git_status_cwd={git_cwd:?} \
+             | count_repo={:?} count_cwd={:?} scm.repo={:?} | count={:?} status_loaded={loaded} \
+             held={holders} epoch={epoch:?} | last_tab_status_repo={:?}",
+            app.right_panel_visible,
+            app.right_panel_tab,
+            app.scm.count_repo,
+            app.scm.count_cwd,
+            app.scm.repo,
+            app.scm_changes_count(cx),
+            app.scm.last_tab_status.as_ref().map(|(repo, _)| repo),
+        )
+    }
+
+    /// Wait for `until`, for as long as 30 seconds, on the real clock alone.
+    /// Every fixture that plants the pane's directory uses this one: the
+    /// pane's own poll runs on the executor clock and would put back the
+    /// directory the pane really has, so that clock is left where it is.
+    fn wait_until(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        until: impl Fn(&Tty59App, &gpui::App) -> bool,
+    ) {
+        wait(app, vcx, false, until)
+    }
+
+    /// [`wait_until`] that also moves the executor clock 300 ms a round, as
+    /// `test_window::quiesce` does: the repository's debounce waits on that
+    /// clock (`scm_debounce`) and compares against the real one. Only for a
+    /// pane whose directory is its real one (`DaemonMsg::Cwd`), since the pane
+    /// polls on that clock too.
+    fn wait_advancing(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        until: impl Fn(&Tty59App, &gpui::App) -> bool,
+    ) {
+        wait(app, vcx, true, until)
+    }
+
+    fn wait(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        advance: bool,
+        until: impl Fn(&Tty59App, &gpui::App) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            if advance {
+                vcx.executor()
+                    .advance_clock(std::time::Duration::from_millis(300));
+            }
+            vcx.background_executor.run_until_parked();
+            if app.update_in(vcx, |app, _, cx| until(app, cx)) {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                let state = app.update_in(vcx, |app, _, cx| state_dump(app, cx));
+                panic!(
+                    "the wanted state never arrived (executor clock advanced: {advance}): {state}"
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// Put the first tab's pane in `cwd`, and tell the cheap per-tab cache that
+    /// directory is in the repository `root` — which is how the app learns
+    /// where a pane is, with no Changes panel involved.
+    fn plant(app: &Tty59App, cwd: &Path, root: &Path, cx: &mut gpui::App) {
+        plant_with(app, cwd, root, (0, 0), cx)
+    }
+
+    /// [`plant`] with the cheap status's diff counts, which is what a command
+    /// that touched the repository changes.
+    fn plant_with(app: &Tty59App, cwd: &Path, root: &Path, counts: (u32, u32), cx: &mut gpui::App) {
+        let leaf = app.tabs[0].pane.first_leaf().expect("test tab has a pane");
+        leaf.terminal()
+            .expect("test pane is a terminal")
+            .update(cx, |view, _| {
+                view.set_git_status_cwd_for_test(Some(cwd.to_path_buf()))
+            });
+        cx.update_global::<GitStatusCache, _>(|cache, _| {
+            cache.finish_probe(
+                HostId::LOCAL,
+                cwd,
+                Some(RepoSnapshot {
+                    root: root.to_path_buf(),
+                    home: root.to_path_buf(),
+                    branch: "main".into(),
+                    counts: Some(counts),
+                }),
+            );
+        });
+    }
+
+    fn show(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        visible: bool,
+        tab: RightPanelTab,
+    ) {
+        app.update_in(vcx, |app, _, cx| {
+            app.right_panel_visible = visible;
+            app.right_panel_tab = tab;
+            cx.notify();
+        });
+    }
+
+    fn selector(tab: RightPanelTab) -> &'static str {
+        Box::leak(format!("right-panel-tab-{}", tab as usize).into_boxed_str())
+    }
+
+    /// The whole of the first look: no Changes render has happened, so the
+    /// panel's own `repo` is `None`, and the count is there anyway — resolved
+    /// from the pane, probed off-thread, drawn on the tab.
+    #[gpui::test]
+    fn the_count_is_there_before_the_changes_tab_was_ever_opened(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repo_with(3);
+        let (app, mut vcx, _pane) = test_window::harness_with_pane(cx);
+        app.update_in(&mut vcx, |app, _, cx| plant(app, &root, &root, cx));
+        show(&app, &mut vcx, true, RightPanelTab::Info);
+
+        // 1 staged-then-edited file and 3 untracked: 4 files, 5 rows.
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm_changes_count(cx) == Some(ChangesCount::Files(4))
+        });
+        app.update_in(&mut vcx, |app, _, _| {
+            assert!(
+                app.scm.repo.is_none(),
+                "the Changes tab was never rendered, so it recorded no repository"
+            );
+        });
+        vcx.run_until_parked();
+        let count = vcx
+            .debug_bounds("right-panel-tab-count")
+            .expect("the Changes tab draws its count while another tab is current");
+        let label = vcx
+            .debug_bounds("right-panel-tab-label")
+            .expect("and its label");
+        let gap = (count.left() - label.right()).as_f32();
+        assert!(
+            (gap - crate::ui::tab_strip::TAB_COUNT_GAP).abs() < 0.5,
+            "the count sits one gap after the label, not {gap}px"
+        );
+    }
+
+    /// The four tabs' drawn width and the width the panel's minimum was built
+    /// from, with `untracked + 1` files on the Changes tab.
+    fn tab_row_widths(cx: &mut TestAppContext, untracked: usize) -> (f32, f32) {
+        let (_dir, root) = repo_with(untracked);
+        let (app, mut vcx, _pane) = test_window::harness_with_pane(cx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_width.set(crate::ui::right_panel::MIN_WIDTH);
+            plant(app, &root, &root, cx)
+        });
+        show(&app, &mut vcx, true, RightPanelTab::Info);
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm_changes_count(cx).is_some()
+        });
+        vcx.run_until_parked();
+
+        let first = vcx
+            .debug_bounds(selector(RightPanelTab::Info))
+            .expect("first tab is drawn");
+        let last = vcx
+            .debug_bounds(selector(RightPanelTab::GitHub))
+            .expect("last tab is drawn");
+        let span = (last.right() - first.left()).as_f32();
+        let reserved = app.update_in(&mut vcx, |app, _, _| app.right_tab_metrics.tabs_w());
+        (span, reserved)
+    }
+
+    /// What the painter draws and what the floor reserves are one geometry: a
+    /// two-digit count (the audit's 11) takes no more than the floor holds.
+    #[gpui::test]
+    fn eleven_changes_fit_in_what_the_floor_reserves(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (span, reserved) = tab_row_widths(cx, 10);
+        assert!(
+            span <= reserved + 0.5,
+            "the tabs take {span}px but the floor reserves {reserved}px"
+        );
+    }
+
+    /// With the widest count on the tab (`99+`, whatever the real number is)
+    /// the tabs take exactly what the floor reserves: the reservation is that
+    /// count's, held when there is none too.
+    #[gpui::test]
+    fn the_widest_count_takes_exactly_the_reserved_width(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (span, reserved) = tab_row_widths(cx, 120);
+        assert!(
+            (span - reserved).abs() < 1.0,
+            "the painter and the floor measure the same row: {span}px against {reserved}px"
+        );
+    }
+
+    /// The count follows the pane the user is in now. The panel's own `repo`
+    /// still names the repository of the last Changes visit, and must not win.
+    #[gpui::test]
+    fn the_count_follows_the_current_pane_not_the_last_changes_visit(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let ((_dir_a, a), (_dir_b, b)) = (repo_with(1), repo_with(5));
+        let (app, mut vcx, _pane) = test_window::harness_with_pane(cx);
+
+        app.update_in(&mut vcx, |app, _, cx| plant(app, &a, &a, cx));
+        show(&app, &mut vcx, true, RightPanelTab::Scm);
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm.repo.is_some() && app.scm_changes_count(cx) == Some(ChangesCount::Files(2))
+        });
+
+        // Off the Changes tab, into the other repository.
+        app.update_in(&mut vcx, |app, _, cx| plant(app, &b, &b, cx));
+        show(&app, &mut vcx, true, RightPanelTab::Info);
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm_changes_count(cx) == Some(ChangesCount::Files(6))
+        });
+        app.update_in(&mut vcx, |app, _, _| {
+            assert_eq!(
+                app.scm.repo.as_ref().map(|r| &r.root),
+                Some(&a),
+                "the panel's own repository is the stale one"
+            );
+            assert_eq!(app.scm.count_repo.as_ref().map(|r| &r.root), Some(&b));
+        });
+    }
+
+    /// A commit made behind the tab's back reaches the count through the
+    /// repository's own watch, with the Changes tab never opened.
+    #[gpui::test]
+    fn a_commit_clears_the_count_on_a_tab_that_never_showed_changes(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repo_with(2);
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        // The pane really is in the repository, as `scm_panel_on` puts it, so
+        // its poll (on the executor clock moved below) keeps that directory
+        // and reads the cheap status itself: nothing here is planted.
+        DaemonMsg::Cwd(root.clone())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        show(&app, &mut vcx, true, RightPanelTab::Info);
+        wait_advancing(&app, &mut vcx, |app, cx| {
+            app.scm_changes_count(cx) == Some(ChangesCount::Files(3))
+        });
+
+        git(&root, &["add", "-A"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "all",
+            ],
+        );
+        wait_advancing(&app, &mut vcx, |app, cx| {
+            app.scm_changes_count(cx).is_none()
+        });
+        assert!(app.update_in(&mut vcx, |app, _, _| app.scm.repo.is_none()));
+    }
+
+    /// Who holds the repository open: the Changes panel and the count are two
+    /// holders of one repository, the count alone holds it on another tab, and
+    /// with the panel shut nothing does and nothing was read.
+    #[gpui::test]
+    fn the_count_holds_the_repository_only_while_the_panel_is_open(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repo_with(1);
+        let (app, mut vcx, _pane) = test_window::harness_with_pane(cx);
+        app.update_in(&mut vcx, |app, _, cx| plant(app, &root, &root, cx));
+
+        let holders = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| {
+                cx.default_global::<ScmData>()
+                    .subscriptions()
+                    .count(HostId::LOCAL, &root)
+            })
+        };
+
+        // Shut: frames go by, and nothing is held or read.
+        show(&app, &mut vcx, false, RightPanelTab::Info);
+        for _ in 0..10 {
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.background_executor.run_until_parked();
+        }
+        assert_eq!(holders(&mut vcx), 0);
+        assert!(app.update_in(&mut vcx, |app, _, _| app.scm.count_repo.is_none()));
+        assert!(
+            vcx.update(|_, cx| crate::terminal::git_data::status_of(cx, HostId::LOCAL, &root))
+                .is_none()
+        );
+
+        // The Changes tab: the panel and the count, one hold each.
+        show(&app, &mut vcx, true, RightPanelTab::Scm);
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm_changes_count(cx).is_some()
+        });
+        assert_eq!(holders(&mut vcx), 2);
+
+        // Another tab: the count alone keeps it.
+        show(&app, &mut vcx, true, RightPanelTab::Info);
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm_changes_count(cx).is_some()
+        });
+        assert_eq!(holders(&mut vcx), 1);
+
+        // Shut again: both let go, and the target is cleared with them.
+        show(&app, &mut vcx, false, RightPanelTab::Info);
+        wait_until(&app, &mut vcx, |app, _| app.scm.count_repo.is_none());
+        assert_eq!(holders(&mut vcx), 0);
+    }
+
+    /// A command finishing refreshes the repository the count is for, even
+    /// while the panel's own `repo` still names another from an earlier visit —
+    /// and the comparison is per repository, so the same status under the other
+    /// repository is a pane that moved, not a command.
+    #[gpui::test]
+    fn a_command_boundary_refreshes_the_count_target_and_not_the_last_visit(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = test_window::harness(cx);
+        let (stale, current) = (
+            RepoKey {
+                host: HostId::LOCAL,
+                root: PathBuf::from("/stale"),
+            },
+            RepoKey {
+                host: HostId::LOCAL,
+                root: PathBuf::from("/current"),
+            },
+        );
+        app.update_in(&mut vcx, |app, _, cx| {
+            cx.update_global::<GitStatusCache, _>(|cache, _| {
+                cache.finish_probe(
+                    HostId::LOCAL,
+                    Path::new("/current/src"),
+                    Some(RepoSnapshot {
+                        root: PathBuf::from("/current"),
+                        home: PathBuf::from("/current"),
+                        branch: "main".into(),
+                        counts: Some((0, 0)),
+                    }),
+                );
+            });
+            app.scm.repo = Some(stale.clone());
+            app.scm.count_repo = Some(current.clone());
+            app.scm.count_cwd = Some(PathBuf::from("/current/src"));
+
+            // The comparison is per repository: what was last seen is the SAME
+            // cheap status as the count target's own, but filed under the other
+            // repository (the pane moved from it). Equal statuses alone would
+            // read as "nothing happened"; the repository is what says otherwise.
+            let same = cx
+                .global::<GitStatusCache>()
+                .status_for(HostId::LOCAL, Path::new("/current/src"))
+                .expect("the cache answers for the count target's directory");
+            app.scm.last_tab_status = Some((stale.clone(), same.clone()));
+            assert!(
+                app.scm.last_tab_status == Some((stale.clone(), same)),
+                "precondition: the last status seen is the target's own, under the other repository"
+            );
+            let epoch = |cx: &mut gpui::App, key: &RepoKey| {
+                cx.default_global::<ScmData>().epoch(key.host, &key.root)
+            };
+            let (current_before, stale_before) = (epoch(cx, &current), epoch(cx, &stale));
+
+            app.right_panel_refresh_changes(cx);
+            assert_eq!(
+                app.scm.last_tab_status.as_ref().map(|(k, _)| k),
+                Some(&current),
+                "the status read is the count target's, from the pane's directory"
+            );
+            assert!(
+                epoch(cx, &current) > current_before,
+                "the count target's repository was marked changed"
+            );
+            assert_eq!(
+                epoch(cx, &stale),
+                stale_before,
+                "the repository of the last visit was not"
+            );
+        });
+    }
+
+    /// A directory that is not a repository. The pane is really in it and the
+    /// ordinary cheap per-tab probe has answered "no repository" (waited for,
+    /// not assumed), the right panel is open on Info, and an earlier Changes
+    /// visit has left its own repository in `scm.repo`. Over bounded rounds of
+    /// frames and executor turns the count has no target, no count, and the
+    /// status store has no subscription, no status and no epoch movement for
+    /// either the stale repository or this directory.
+    ///
+    /// The claim is exactly that: NO ADDED full-status git work, repository
+    /// resolution or polling. The pane's own cheap cwd detection (its poll and
+    /// `probe_repo`) is the baseline's and keeps running.
+    #[gpui::test]
+    fn a_directory_that_is_not_a_repository_adds_no_status_work_and_no_count(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let dir = tempfile::Builder::new()
+            .prefix("tty59-no-repo-")
+            .tempdir()
+            .expect("a scratch directory");
+        let plain = std::fs::canonicalize(dir.path()).expect("it resolves");
+        std::fs::write(plain.join("note.txt"), "x\n").unwrap();
+        let stale = repo("/stale/previous-visit");
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        DaemonMsg::Cwd(plain.clone())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        app.update_in(&mut vcx, |app, _, cx| {
+            // What an earlier visit to the Changes tab left behind.
+            app.scm.repo = Some(stale.clone());
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Info;
+            cx.notify();
+        });
+
+        // The ordinary cheap probe answers "not a repository": `Some(None)`.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(300));
+            vcx.background_executor.run_until_parked();
+            let answered = vcx.update(|_, cx| {
+                cx.global::<GitStatusCache>()
+                    .known_repo_for(HostId::LOCAL, &plain)
+                    == Some(None)
+            });
+            if answered {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cheap probe never answered 'not a repository' for the pane's directory: {}",
+                app.update_in(&mut vcx, |app, _, cx| state_dump(app, cx))
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        app.update_in(&mut vcx, |app, _, _| {
+            assert!(
+                app.scm.repo_override.is_none() && app.scm.override_tab.is_none(),
+                "precondition: no explicit repository pick"
+            );
+            assert!(
+                app.tabs.first().is_some_and(|tab| tab.code.is_none()),
+                "precondition: no editor"
+            );
+            assert_eq!(app.right_panel_tab, RightPanelTab::Info);
+        });
+
+        for round in 0..20 {
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.executor()
+                .advance_clock(std::time::Duration::from_millis(300));
+            vcx.background_executor.run_until_parked();
+            app.update_in(&mut vcx, |app, _, cx| {
+                assert!(
+                    app.scm.count_repo.is_none() && app.scm.count_cwd.is_none(),
+                    "round {round}: the count has no target: {}",
+                    state_dump(app, cx)
+                );
+                assert!(
+                    app.scm_changes_count(cx).is_none(),
+                    "round {round}: no count: {}",
+                    state_dump(app, cx)
+                );
+            });
+        }
+
+        vcx.update(|_, cx| {
+            let data = cx.try_global::<ScmData>();
+            assert!(
+                data.is_none_or(ScmData::is_quiet),
+                "the status store holds no subscription and no watch"
+            );
+            for root in [&stale.root, &plain] {
+                assert!(
+                    !data.is_some_and(|d| d.is_subscribed(HostId::LOCAL, root)),
+                    "{root:?} is not held"
+                );
+                assert!(
+                    crate::terminal::git_data::status_of(cx, HostId::LOCAL, root).is_none(),
+                    "{root:?} has no full status"
+                );
+                assert_eq!(
+                    data.map_or(0, |d| d.epoch(HostId::LOCAL, root)),
+                    0,
+                    "{root:?} was never marked changed"
+                );
+            }
+        });
+    }
+
+    fn set_ui_font_size(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, size: f32) {
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<crate::core::config::Config>().clone();
+            cfg.ui_font_size = size;
+            cx.set_global(cfg);
+        });
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+
+    /// The probe the audit asked for, as far as a test window can make it: with
+    /// the widest count on the tab, in every shipped language at 14 and 16px,
+    /// all four tabs sit inside the panel at its minimum width, and what the
+    /// floor comes to is printed (`--nocapture`).
+    ///
+    /// A test window shapes through a text system that gives every character
+    /// the same advance, so the *numbers* printed here are not the real
+    /// widths — those come from a native run — but containment holding in each
+    /// of these says the painter and the floor are one geometry whatever the
+    /// label lengths and the size are.
+    #[gpui::test]
+    fn all_four_tabs_stay_inside_the_panel_at_its_minimum(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repo_with(120);
+        let (app, mut vcx, _pane) = test_window::harness_with_pane(cx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            // Whatever width was saved, the panel is at its floor.
+            app.right_panel_width.set(0.);
+            plant(app, &root, &root, cx)
+        });
+        show(&app, &mut vcx, true, RightPanelTab::Info);
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm_changes_count(cx).is_some()
+        });
+
+        for locale in ["en", "ru-RU", "zh-CN", "ja-JP"] {
+            // `set_locale` falls back to English for a code it does not know.
+            assert!(crate::ui::i18n::find_language(locale).is_some(), "{locale}");
+            crate::ui::i18n::set_locale(locale);
+            for size in [14., 16.] {
+                set_ui_font_size(&app, &mut vcx, size);
+                let floor = app.update_in(&mut vcx, |app, window, cx| {
+                    app.right_panel_min_px(window, cx)
+                });
+                let bounds = |vcx: &mut VisualTestContext, selector: &'static str| {
+                    vcx.debug_bounds(selector)
+                        .unwrap_or_else(|| panic!("{locale} {size}px: {selector} was not drawn"))
+                };
+                let panel = bounds(&mut vcx, "right-panel");
+                let first = bounds(&mut vcx, selector(RightPanelTab::Info));
+                let last = bounds(&mut vcx, selector(RightPanelTab::GitHub));
+                eprintln!(
+                    "B3-P floor {locale} {size}px: min {floor}px (240 default), panel {}px, \
+                     tabs {}px",
+                    panel.size.width.as_f32(),
+                    (last.right() - first.left()).as_f32()
+                );
+                assert!(
+                    panel.size.width.as_f32() + 0.5 >= floor,
+                    "{locale} {size}px: the panel is narrower than its own floor"
+                );
+                assert!(
+                    (last.right().as_f32() + crate::ui::right_panel::tabs_chrome_w())
+                        <= panel.right().as_f32() + 0.5,
+                    "{locale} {size}px: the last tab runs past the panel's trailing chrome"
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// The pane moves to another directory of the same repository, and the
+    /// cheap status for that directory differs (a command changed something).
+    /// Whatever order the cache's landing and the frame that moves the count's
+    /// mirror arrive in, the outcome has to be the same: the status last seen
+    /// is the new directory's, and the repository has been marked changed.
+    ///
+    /// The order itself is deliberately not asserted. A first version of this
+    /// test required the cache to land BEFORE the mirror moved, in order to
+    /// witness a gap where the new status is read against the old directory
+    /// and missed; on the first Boat run the observer had already recorded the
+    /// new status, so that interleaving was not what happens here and the gap
+    /// is an unproven hypothesis, not a defect.
+    #[gpui::test]
+    fn a_new_directory_in_the_same_repository_marks_it_changed_when_its_status_differs(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx, _pane) = test_window::harness_with_pane(cx);
+        // Not a repository on disk: nothing here may be read, only the cheap
+        // cache's answers matter, and a real `git status` would write `.git`
+        // and bump the epoch on its own.
+        let root = PathBuf::from("/ordering/repo");
+        let (src, docs) = (root.join("src"), root.join("docs"));
+
+        app.update_in(&mut vcx, |app, _, cx| plant(app, &src, &root, cx));
+        show(&app, &mut vcx, true, RightPanelTab::Info);
+        wait_until(&app, &mut vcx, |app, _| {
+            app.scm.count_cwd.as_deref() == Some(src.as_path())
+        });
+        app.update_in(&mut vcx, |app, _, cx| app.right_panel_refresh_changes(cx));
+        vcx.run_until_parked();
+        let epoch = |vcx: &mut VisualTestContext| {
+            vcx.update(|_, cx| cx.default_global::<ScmData>().epoch(HostId::LOCAL, &root))
+        };
+        let before = epoch(&mut vcx);
+        let baseline = app.update_in(&mut vcx, |app, _, _| app.scm.last_tab_status.clone());
+        assert!(
+            baseline.is_some(),
+            "the baseline status was recorded against src"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            plant_with(app, &docs, &root, (2, 0), cx)
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(
+            app.update_in(&mut vcx, |app, _, _| app.scm.count_cwd.clone()),
+            Some(docs.clone()),
+            "the mirror is on the pane's new directory"
+        );
+        let landed = vcx.update(|_, cx| {
+            cx.global::<GitStatusCache>()
+                .status_for(HostId::LOCAL, &docs)
+        });
+        assert!(
+            landed.is_some() && landed != baseline.as_ref().map(|(_, status)| status.clone()),
+            "the cache holds a status for the new directory that differs from the last one seen"
+        );
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app.scm.last_tab_status.clone())
+                == landed.map(|status| (repo(root.to_str().unwrap()), status)),
+            "the status last seen is the new directory's, for this repository"
+        );
+        assert!(
+            epoch(&mut vcx) > before,
+            "the new directory's status differs from the one last seen, and nothing marked the \
+             repository changed"
+        );
+    }
+
+    fn repo(root: &str) -> RepoKey {
+        RepoKey {
+            host: HostId::LOCAL,
+            root: PathBuf::from(root),
+        }
+    }
+
+    fn leak(selector: String) -> &'static str {
+        Box::leak(selector.into_boxed_str())
+    }
+
+    fn status_with(
+        root: &str,
+        head: HeadState,
+        ahead_behind: Option<(u32, u32)>,
+    ) -> WorkingTreeStatus {
+        WorkingTreeStatus {
+            root: PathBuf::from(root),
+            home: PathBuf::from(root),
+            head,
+            upstream: Some("origin/main".into()),
+            ahead_behind,
+            entries: Vec::new(),
+            total_entries: 0,
+            truncated: false,
+            stash_count: 0,
+            operation: None,
+            prefilled_message: None,
+        }
+    }
+
+    fn branch(name: &str) -> HeadState {
+        HeadState::Branch {
+            name: name.into(),
+            oid: "1111111".into(),
+        }
+    }
+
+    /// The branch menu as the panel builds it, drawn. The entity is handed
+    /// back because it is the menu: its item listeners hold it weakly, so once
+    /// the caller lets go of it a click on the drawn frame does nothing.
+    fn draw_branch_menu(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        repo: &RepoKey,
+        status: &WorkingTreeStatus,
+    ) -> Entity<PopupMenu> {
+        let build = app.update_in(vcx, |app, _, cx| app.scm_branch_menu(repo, status, cx));
+        let menu = vcx.update(|window, cx| {
+            PopupMenu::build(window, cx, |menu, window, cx| build(menu, window, cx))
+        });
+        vcx.draw(
+            gpui::point(gpui::px(0.), gpui::px(0.)),
+            gpui::size(gpui::px(420.), gpui::px(700.)),
+            |_, _| menu.clone().into_any_element(),
+        );
+        menu
+    }
+
+    fn click(vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        use gpui::{
+            Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput,
+        };
+        vcx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: at,
+                    pressed_button: None,
+                    modifiers: Modifiers::none(),
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+            window.refresh();
+        });
+        vcx.run_until_parked();
+    }
+
+    /// The opened menu, not a label builder: Pull and Push carry the numbers
+    /// the snapshot says (3 ahead, 1 behind), a blocked Push says why in place
+    /// of a number, two checkouts of one name show where they live, and
+    /// clicking a repository selects exactly that repository.
+    #[gpui::test]
+    fn the_branch_menu_shows_counts_reasons_and_parents_and_keeps_identities(
+        cx: &mut TestAppContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx) = test_window::harness(cx);
+        let (one, two) = (repo("/work/one/acme-web"), repo("/work/two/acme-web"));
+        app.update_in(&mut vcx, |app, _, _| {
+            for (at, key) in [&one, &two].into_iter().enumerate() {
+                app.scm.roots.insert(
+                    (HostId::LOCAL, PathBuf::from(format!("/cwd/{at}"))),
+                    (Instant::now(), Some(key.root.clone())),
+                );
+            }
+        });
+
+        // 3 ahead, 1 behind: Pull says 1, Push says 3, never the other way.
+        let level = status_with("/work/one/acme-web", branch("main"), Some((3, 1)));
+        let menu = draw_branch_menu(&app, &mut vcx, &one, &level);
+        let shown = |vcx: &mut VisualTestContext, selector: String| {
+            vcx.debug_bounds(leak(selector)).is_some()
+        };
+        assert!(shown(&mut vcx, "scm-menu-count:Pull:1".into()));
+        assert!(shown(&mut vcx, "scm-menu-count:Push:3".into()));
+        assert!(!shown(&mut vcx, "scm-menu-count:Pull:3".into()));
+        assert!(!shown(&mut vcx, "scm-menu-count:Push:1".into()));
+        assert!(
+            !shown(&mut vcx, "scm-menu-count:Fetch:3".into())
+                && !shown(&mut vcx, "scm-menu-count:Fetch:1".into()),
+            "Fetch carries no number"
+        );
+
+        // The two same-named repositories are told apart by their folders.
+        assert!(shown(&mut vcx, "menu-row-name:acme-web".into()));
+        assert!(shown(&mut vcx, "menu-row-note:/work/one".into()));
+        assert!(shown(&mut vcx, "menu-row-note:/work/two".into()));
+
+        // Each row selects its own repository, whatever it is called.
+        let center = |vcx: &mut VisualTestContext, key: &RepoKey| {
+            vcx.debug_bounds(leak(format!("scm-repo-choice:{}", key.root.display())))
+                .expect("the repository row is drawn")
+                .center()
+        };
+        let at = center(&mut vcx, &two);
+        click(&mut vcx, at);
+        app.update_in(&mut vcx, |app, _, _| {
+            assert_eq!(app.scm.repo_override.as_ref(), Some(&two));
+            assert_eq!(app.scm.override_tab, Some(app.active));
+        });
+        // The first click dismissed that menu, as a click does. A second one
+        // is a fresh menu, opened the way the panel opens it.
+        drop(menu);
+        let menu = draw_branch_menu(&app, &mut vcx, &one, &level);
+        let at = center(&mut vcx, &one);
+        click(&mut vcx, at);
+        app.update_in(&mut vcx, |app, _, _| {
+            assert_eq!(app.scm.repo_override.as_ref(), Some(&one));
+        });
+
+        // A detached HEAD cannot push: no number, and the reason is on screen.
+        drop(menu);
+        let _menu = draw_branch_menu(
+            &app,
+            &mut vcx,
+            &one,
+            &status_with(
+                "/work/one/acme-web",
+                HeadState::Detached {
+                    oid: "2222222".into(),
+                },
+                Some((3, 1)),
+            ),
+        );
+        assert!(
+            shown(
+                &mut vcx,
+                format!("scm-menu-reason:{}", t(L10nKey::ScmPushDetached))
+            ),
+            "a blocked Push says why"
+        );
+        assert!(!shown(&mut vcx, "scm-menu-count:Push:3".into()));
+        assert!(
+            shown(&mut vcx, "scm-menu-count:Pull:1".into()),
+            "Pull is not blocked by a detached HEAD"
         );
     }
 }

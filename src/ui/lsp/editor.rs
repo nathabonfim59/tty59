@@ -6,19 +6,26 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Context, Entity, WeakEntity, Window, div, px};
+use gpui::{
+    AnyElement, Context, Entity, IntoElement, SharedString, WeakEntity, Window, div, px, rems,
+};
 use gpui_component::input::InputState;
 use gpui_component::menu::PopupMenu;
+use gpui_component::popover::Popover;
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, RopeExt as _, Sizable as _, WindowExt as _, h_flex,
+    ActiveTheme as _, Icon, IconName, RopeExt as _, Selectable, Sizable as _, Size, WindowExt as _,
+    h_flex, v_flex,
 };
 use lsp_types::Position;
 
 use super::convert::{self, Encoding};
-use super::{Freshen, LspStatus, LspStore};
+use super::{Freshen, LspStatus, LspStore, servers};
 use crate::ui::app::Tty59App;
+use crate::ui::code_editor::status::{self, Face};
 use crate::ui::code_editor::{BufferId, LocalFile};
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
+use crate::ui::right_panel::TEXT;
+use crate::ui::text_elision::{ElidedLabel, Mode};
 
 /// One buffer offered to the language servers.
 pub(crate) struct LspBuffer {
@@ -380,92 +387,212 @@ impl Tty59App {
             )
     }
 
-    /// The status bar's word on the front file's server: its problem counts
-    /// once it runs, or why there are none.
-    /// The language server's state for the status bar, and whether it is the
-    /// missing-server note, which leads the bar rather than joining the
-    /// readouts at its end.
-    pub(crate) fn render_lsp_status(&self, cx: &mut Context<Self>) -> Option<(AnyElement, bool)> {
+    /// The status bar's word on the front file's server, when there is one to
+    /// speak of: it runs, is starting, is down or is missing.
+    pub(crate) fn lsp_status_now(&self, cx: &gpui::App) -> Option<LspStatus> {
         if !Self::lsp_enabled(cx) {
             return None;
         }
         let f = self.editor_active_local_file()?;
-        let status = LspStore::status(&f.path, f.language, cx)?;
-        let muted = cx.theme().muted_foreground;
-        let element = match status {
-            LspStatus::Missing(name) => {
-                return Some((
-                    h_flex()
-                        .min_w_0()
-                        .gap(px(6.))
-                        .items_center()
-                        .child(
-                            div()
-                                .flex_none()
-                                .size(px(5.))
-                                .rounded_full()
-                                .bg(cx.theme().warning),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .child(t_fmt(L10nKey::LspServerMissing, &[("name", name)])),
-                        )
-                        .into_any_element(),
-                    true,
-                ));
-            }
-            LspStatus::Starting(name) => div()
+        LspStore::status(&f.path, f.language, cx)
+    }
+}
+
+/// The missing-server note: a warning dot and "No language server", which
+/// opens what tty59 tried. Passive: it runs nothing and scans nothing.
+pub(crate) fn render_lsp_missing(
+    name: &'static str,
+    label: SharedString,
+    cx: &gpui::App,
+) -> AnyElement {
+    let dot = cx.theme().warning;
+    let title = label.clone();
+    let popover = Popover::new("lsp-missing")
+        .anchor(gpui::Anchor::BottomLeft)
+        .trigger(MissingTrigger {
+            label,
+            dot,
+            selected: false,
+        })
+        // Built only while it is open.
+        .content(move |_, _, cx| {
+            status::probe(
+                v_flex()
+                    .max_w(px(HELP_MAX_W))
+                    // The row this hangs from keeps its words on one line, and
+                    // text style is inherited: this is prose and wraps.
+                    .whitespace_normal()
+                    .gap(px(4.))
+                    .text_size(rems(TEXT))
+                    .child(status::probe(
+                        div()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(title.clone()),
+                        "editor-status-lsp-help-title",
+                    ))
+                    .child(status::probe(
+                        div()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(missing_help(name)),
+                        "editor-status-lsp-help-body",
+                    )),
+                "editor-status-lsp-help",
+            )
+        });
+    // Shrinkable, unlike the other readouts: when even this note alone is
+    // wider than the row, its label gives way (below) rather than the row
+    // overflowing.
+    div().min_w_0().child(popover).into_any_element()
+}
+
+/// The widest the missing-server help is allowed to be.
+pub(crate) const HELP_MAX_W: f32 = 320.;
+
+/// What the missing-server popover says: the executables tried on `PATH`, from
+/// the server's own table. Nothing is run or searched to say it.
+pub(crate) fn missing_help(name: &str) -> String {
+    let programs = servers::SERVERS
+        .iter()
+        .find(|spec| spec.name == name)
+        .map(|spec| {
+            spec.commands
+                .iter()
+                .map(|(program, _)| *program)
+                .collect::<Vec<_>>()
+                .join(t(L10nKey::TrayAgentSep))
+        })
+        .unwrap_or_default();
+    t_fmt(
+        L10nKey::LspMissingBody,
+        &[("name", name), ("programs", &programs)],
+    )
+}
+
+/// The popover's trigger, the dot and the label, as one button-sized readout.
+#[derive(IntoElement)]
+struct MissingTrigger {
+    label: SharedString,
+    dot: gpui::Hsla,
+    selected: bool,
+}
+
+impl Selectable for MissingTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+}
+
+impl RenderOnce for MissingTrigger {
+    fn render(self, _: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
+        let fg = cx.theme().foreground;
+        let hover = cx.theme().muted;
+        status::probe(
+            h_flex().id("status-lsp-missing"),
+            "editor-status-lsp-missing",
+        )
+        .min_w_0()
+        .h(px(20.))
+        .px(px(4.))
+        .mx(px(-4.))
+        .gap(px(status::LEAD_GAP))
+        .items_center()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(move |s| s.bg(hover).text_color(fg))
+        .child(
+            div()
                 .flex_none()
-                .child(t_fmt(L10nKey::LspServerStarting, &[("name", &name)]))
-                .into_any_element(),
-            LspStatus::Down(name) => div()
-                .flex_none()
-                .child(t_fmt(L10nKey::LspServerDown, &[("name", &name)]))
-                .into_any_element(),
-            LspStatus::Running {
-                name,
-                errors,
-                warnings,
-            } => {
-                let tip = format!(
-                    "{name} — {}",
-                    t_fmt(
-                        L10nKey::LspProblemsTooltip,
-                        &[
-                            ("errors", &errors.to_string()),
-                            ("warnings", &warnings.to_string())
-                        ],
-                    )
-                );
-                let count = |icon: IconName, n: usize, color: gpui::Hsla| {
-                    h_flex()
-                        .gap(px(3.))
-                        .items_center()
-                        .child(Icon::new(icon).xsmall().text_color(if n > 0 {
-                            color
-                        } else {
-                            muted
-                        }))
-                        .child(n.to_string())
-                };
-                h_flex()
-                    .id("lsp-status")
-                    .flex_none()
-                    .gap_2()
-                    .items_center()
-                    .font_features(crate::ui::theme::tabular_figures())
-                    .child(count(IconName::CircleX, errors, cx.theme().danger))
-                    .child(count(IconName::TriangleAlert, warnings, cx.theme().warning))
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                    })
-                    .into_any_element()
-            }
-        };
-        Some((element, false))
+                .size(px(status::DOT))
+                .rounded_full()
+                .bg(self.dot),
+        )
+        .child(div().min_w_0().child(ElidedLabel::new(
+            "status-lsp-missing-label",
+            self.label,
+            Mode::End,
+        )))
+    }
+}
+
+/// The server's state when it is not running: starting or stopped.
+pub(crate) fn render_lsp_state(text: SharedString) -> AnyElement {
+    div().flex_none().child(text).into_any_element()
+}
+
+/// The running server's error and warning counts, with the sentence they
+/// make as the tooltip.
+pub(crate) fn render_lsp_counts(
+    name: &str,
+    errors: usize,
+    warnings: usize,
+    face: &Face,
+    cx: &gpui::App,
+) -> AnyElement {
+    let tip = format!("{name} — {}", problems_summary(errors, warnings));
+    let muted = cx.theme().muted_foreground;
+    let icon = face.icon;
+    let count = |glyph: IconName, n: usize, color: gpui::Hsla| {
+        h_flex()
+            .gap(px(status::COUNT_GAP))
+            .items_center()
+            .child(
+                Icon::new(glyph)
+                    .with_size(Size::Size(icon))
+                    .text_color(if n > 0 { color } else { muted }),
+            )
+            .child(n.to_string())
+    };
+    h_flex()
+        .id("lsp-status")
+        .flex_none()
+        .gap(px(status::PAIR_GAP))
+        .items_center()
+        .font_features(face.features(true))
+        .child(count(IconName::CircleX, errors, cx.theme().danger))
+        .child(count(IconName::TriangleAlert, warnings, cx.theme().warning))
+        .tooltip(move |window, cx| {
+            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
+        .into_any_element()
+}
+
+/// "1 error, 2 warnings", each count in its own plural form and the pair in
+/// the locale's own order.
+pub(crate) fn problems_summary(errors: usize, warnings: usize) -> String {
+    t_fmt(
+        L10nKey::LspProblemsTooltip,
+        &[
+            ("errors", &t_plural(L10nKey::LspErrorCount, errors, &[])),
+            (
+                "warnings",
+                &t_plural(L10nKey::LspWarningCount, warnings, &[]),
+            ),
+        ],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The counts as a person reads them, each in its own locale's plural
+    /// form, independent of how the key is assembled.
+    #[test]
+    fn the_problem_counts_read_in_each_locales_plural_forms() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(problems_summary(1, 1), "1 error, 1 warning");
+        assert_eq!(problems_summary(2, 3), "2 errors, 3 warnings");
+        assert_eq!(problems_summary(0, 0), "No errors, No warnings");
+
+        crate::ui::i18n::set_locale("ru-RU");
+        assert_eq!(problems_summary(1, 1), "1 ошибка, 1 предупреждение");
+        assert_eq!(problems_summary(2, 5), "2 ошибки, 5 предупреждений");
+        assert_eq!(problems_summary(11, 12), "11 ошибок, 12 предупреждений");
+        assert_eq!(problems_summary(21, 22), "21 ошибка, 22 предупреждения");
     }
 }

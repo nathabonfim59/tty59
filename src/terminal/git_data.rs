@@ -220,6 +220,10 @@ pub enum ScmWatcher {
     FileTree,
     /// The code editor, while it has a file from the repository open.
     Editor,
+    /// The right panel's Changes tab, for its count, while the panel is open on
+    /// any tab. The count is on screen whichever tab is current, so the tab
+    /// that draws the list is not the only one that needs the status.
+    ChangesCount,
 }
 
 /// Who is watching which repository, and a generation to date results by.
@@ -832,10 +836,37 @@ impl Tty59App {
     pub(crate) fn scm_sync_watchers(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.scm_forget_lost_hosts(cx);
 
+        // Mirrored for the tab row and the command-boundary refresh, which have
+        // no `Window` to find the pane with. Written only when it moves, and
+        // cleared with the target, so neither can read a repository the panel
+        // was last showing on some earlier visit.
+        let count_target = self.scm_count_target(window, cx);
+        let mirrored = match (&self.scm.count_repo, &count_target) {
+            (Some(held), Some((host, root, cwd))) => {
+                held.host == *host && held.root == *root && self.scm.count_cwd == *cwd
+            }
+            (None, None) => true,
+            _ => false,
+        };
+        if !mirrored {
+            self.scm.count_repo =
+                count_target
+                    .as_ref()
+                    .map(|(host, root, _)| crate::ui::scm::state::RepoKey {
+                        host: *host,
+                        root: root.clone(),
+                    });
+            self.scm.count_cwd = count_target.as_ref().and_then(|(_, _, cwd)| cwd.clone());
+        }
+
         let wanted = [
             (ScmWatcher::Panel, self.scm_panel_target(window, cx)),
             (ScmWatcher::FileTree, self.scm_tree_target(window, cx)),
             (ScmWatcher::Editor, self.scm_editor_target(cx)),
+            (
+                ScmWatcher::ChangesCount,
+                count_target.map(|(host, root, _)| (host, root)),
+            ),
         ];
         // Nothing to watch and nothing being watched, which is every frame of
         // a window whose panel is on another tab. Taking the global mutably
@@ -886,6 +917,41 @@ impl Tty59App {
             .try_global::<crate::terminal::git_status::GitStatusCache>()?
             .repo_root_for(host, view.git_status_cwd()?)?;
         Some((host, root.to_path_buf()))
+    }
+
+    /// The repository the Changes tab's count describes, while the panel is
+    /// open.
+    ///
+    /// Follows the *current* pane, not whatever the panel last drew: the
+    /// panel's own `repo` is only written by a Changes render, so on another
+    /// tab it still names the repository of the last visit. The one thing that
+    /// outranks the pane is the explicit pick from the repository switcher,
+    /// and only while it is still valid — made on this tab, on a host that is
+    /// still up. The root comes from the cheap per-tab probe's answer, so the
+    /// first look does not wait for the Changes tab to have been opened.
+    fn scm_count_target(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> Option<(HostId, PathBuf, Option<PathBuf>)> {
+        if !self.right_panel_open(cx) {
+            return None;
+        }
+        if let (Some(pick), Some(tab)) = (&self.scm.repo_override, self.scm.override_tab)
+            && tab == self.active
+            && crate::ui::host_registry::HostRegistry::lookup(cx, pick.host).is_some()
+        {
+            return Some((pick.host, pick.root.clone(), None));
+        }
+        let leaf = self.tabs.get(self.active)?.detail_pane(window, cx)?;
+        let view = leaf.read(cx);
+        let host = view.host_id();
+        crate::ui::host_registry::HostRegistry::lookup(cx, host)?;
+        let cwd = view.git_status_cwd()?;
+        let root = cx
+            .try_global::<crate::terminal::git_status::GitStatusCache>()?
+            .repo_root_for(host, cwd)?;
+        Some((host, root.to_path_buf(), Some(cwd.to_path_buf())))
     }
 
     /// The repository the file tree is decorating, while it is on screen.

@@ -170,13 +170,12 @@ impl Tty59App {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .child(t(L10nKey::EditorProblemsTitle)),
             )
-            .child(div().text_xs().text_color(muted).child(t_fmt(
-                L10nKey::LspProblemsTooltip,
-                &[
-                    ("errors", &errors.to_string()),
-                    ("warnings", &warnings.to_string()),
-                ],
-            )))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(crate::ui::lsp::editor::problems_summary(errors, warnings)),
+            )
             .child(div().flex_1())
             .child(
                 Button::new("editor-problems-close")

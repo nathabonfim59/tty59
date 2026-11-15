@@ -29,10 +29,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::VisionExited => "Exited",
         L10nKey::VisionExitedAge => "Exited · {age}",
         L10nKey::VisionPane => "pane {i}/{n}",
-        L10nKey::VisionDefault => "Start windows in agent mode",
-        L10nKey::VisionDefaultDesc => {
-            "Open new windows in the Inbox. Workbench stays available from the top bar."
-        }
+        L10nKey::VisionDefault => "Open new windows in the Inbox",
+        L10nKey::VisionDefaultDesc => "The Workbench is one click away in the top bar.",
         L10nKey::SettingsNoMatchesShort => "No matches",
         L10nKey::SettingsModifiedTitle => "Modified",
         L10nKey::SettingsMatchCount => "{count} matches",
@@ -55,10 +53,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNoThemesMatch => "No themes match",
         L10nKey::SettingsRestoreChanged => "Restore {count} changed",
         L10nKey::SettingsShortcutsHint => {
-            "Click a shortcut and press new keys. Press a second chord right after to make a sequence. Esc cancels, ⌫ clears."
+            "Click a shortcut and press new keys. Press a second chord right after to make a sequence. Esc cancels, Backspace clears."
         }
         L10nKey::SettingsShortcutsHintTmux => {
-            "tmux preset: pane and tab actions use a prefix key. Click a shortcut to change it; Esc cancels, ⌫ clears."
+            "tmux preset: pane and tab actions use a prefix key. Click a shortcut to change it; Esc cancels, Backspace clears."
         }
         L10nKey::SettingsShortcutConflict => {
             "{keys} is already used by “{action}”. Replacing takes it from there."
@@ -69,13 +67,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsHostsDesc => "Recently used hosts. Search to find any saved host.",
         L10nKey::SettingsAddHost => "Add host",
         L10nKey::SettingsNoHostsMatch => "No hosts match “{query}”",
-        L10nKey::SettingsHostsFromFiles => "{count} hosts from {files} sources",
+        L10nKey::SettingsHostsFromFiles => "{hosts} from {sources}",
         L10nKey::SettingsMoreHosts => "{count} more hosts",
         L10nKey::SettingsShowRecentOnly => "Show recent only",
         L10nKey::SettingsShowAll => "Show all",
         L10nKey::SettingsUnsaved => "Unsaved",
         L10nKey::SettingsNever => "Never",
-        L10nKey::SettingsDefinedIn => "Defined in",
+        L10nKey::SettingsDefinedIn => "Source",
         L10nKey::SettingsConnectInNewTab => "Connect in new tab",
         L10nKey::SettingsCopied => "Copied",
         L10nKey::SettingsNavMobile => "Mobile",
@@ -140,7 +138,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsRetrySave => "Retry saving",
 
         L10nKey::SettingsNavGeneral => "General",
-        L10nKey::SettingsEditShortcuts => "Edit shortcuts…",
+        L10nKey::SettingsEditShortcuts => "Edit shortcuts",
         L10nKey::SettingsModifiedOnly => "Modified only",
         L10nKey::SettingsModified => "Modified",
         L10nKey::SettingsResetValue => "Reset to default",
@@ -192,7 +190,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SearchTabTerminals => "Terminals",
         L10nKey::SearchTabHosts => "Hosts",
         L10nKey::SearchTabSymbols => "Symbols",
-        L10nKey::SearchPlaceholderAll => "Search files, actions, terminals and hosts…",
+        L10nKey::SearchPlaceholderAll => "Search terminals, hosts and commands…",
         L10nKey::SearchPlaceholderActions => "Search commands…",
         L10nKey::SearchPlaceholderTerminals => "Search open tabs, shells and agents…",
         L10nKey::SearchPlaceholderHosts => "Search hosts, or type user@host to connect…",
@@ -767,7 +765,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "Reopen last session's tabs, splits and directories."
         }
         L10nKey::SettingsShowTrayIcon => "Show tray icon",
-        L10nKey::SettingsShowTrayIconDesc => "Alerts when an agent needs input; jumps to its pane.",
+        L10nKey::SettingsShowTrayIconDesc => {
+            "Keep tty59 in the system tray; it flags agents that need input."
+        }
         L10nKey::SettingsTabs => "Tabs",
         L10nKey::SettingsNewTabPosition => "New tab position",
         L10nKey::SettingsNewTabPositionDesc => "Where a freshly opened tab is inserted.",
@@ -782,13 +782,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsTabBarPositionDesc => "A strip on top or a sidebar on the left.",
         L10nKey::SidebarListTerminal => "Terminal",
         L10nKey::SidebarListAgents => "Agents",
-        L10nKey::SidebarNoAgents => "No agents in this workspace",
-        L10nKey::SettingsSidebarAgentsToggle => "Terminal | Agents selector",
+        L10nKey::SidebarNoAgents => "No agents running",
+        L10nKey::SettingsSidebarAgentsToggle => "Show Terminal / Agents switch",
         L10nKey::SettingsSidebarAgentsToggleDesc => {
-            "Show the list selector at the bottom of the workbench sidebar."
+            "Toggles between terminals and agents at the bottom of the sidebar."
         }
         L10nKey::SettingsSearchSidebarAgentsToggleKeywords => {
-            "sidebar terminal agents list selector toggle"
+            "sidebar terminal agents list selector toggle switch workbench"
         }
         L10nKey::SettingsSidebarGrouping => "Auto grouping",
         L10nKey::SettingsSidebarGroupingDesc => {
@@ -830,7 +830,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsPreset => "Preset",
         L10nKey::SettingsPresetDesc => "tmux maps pane and tab actions to prefix keys (Ctrl-B C).",
         L10nKey::SettingsPrefix => "Prefix",
-        L10nKey::SettingsPressKeys => "Press keys… · ⌫ for no shortcut",
+        L10nKey::SettingsPressKeys => "Press keys… · Backspace for no shortcut",
         L10nKey::SettingsPauseToSaveEsc => "pause to save · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
             "Click a shortcut and press new keys; chain keys for sequences like Ctrl-B X. Esc cancels, Backspace clears."
@@ -886,7 +886,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsUpdateDiscard => "Discard",
         L10nKey::SettingsAutoDownload => "Download updates in the background",
         L10nKey::SettingsAutoDownloadDesc => {
-            "Download updates in the background so installing is just a restart. Nothing installs without asking."
+            "So installing is just a restart. Nothing installs without asking."
         }
         L10nKey::SettingsUpdateChannel => "Update channel",
         L10nKey::SettingsUpdateChannelDesc => {
@@ -942,9 +942,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "The release has no checksums.txt, so tty59 refuses to install it automatically."
         }
         L10nKey::SettingsVersionAvailable => "Version {version} is available.",
-        L10nKey::SettingsCheckUpdatesDesc => {
-            "Opens the release page if tty59 can't update in place."
-        }
+        L10nKey::SettingsCheckUpdatesDesc => "Check for a new version each time tty59 starts.",
         L10nKey::SettingsCheckUpdatesOnLaunch => "Check for updates on launch",
         L10nKey::SettingsCommandLine => "Command line",
         L10nKey::SettingsCommandLineDesc => {
@@ -1049,7 +1047,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
             "ctrl-r reverse search fuzzy history recall fzf prompt"
         }
         L10nKey::SettingsSearchHostsKeywords => {
-            "ssh host connection saved profile import ssh_config manage add edit quick connect"
+            "ssh host connection saved profile import ssh_config manage add edit quick connect hostname identityfile proxyjump alias"
         }
         L10nKey::SettingsSearchItalicFontKeywords => "typeface oblique",
         L10nKey::SettingsSearchKeybindingsKeywords => {
@@ -1201,7 +1199,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpEditRename => "Rename",
         L10nKey::SftpEditPermissions => "Permissions · {mode}",
         L10nKey::SftpLoading => "Loading…",
-        L10nKey::SftpEmptyDirectory => "Empty directory.",
+        L10nKey::SftpEmptyDirectory => "Empty folder.",
         L10nKey::SftpContextOpen => "Open",
         L10nKey::SftpContextEdit => "Edit",
         L10nKey::SftpContextFollowSymlink => "Follow Symlink",
@@ -1210,10 +1208,15 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpTransferSummaryRunning => "{count} transferring · {pct}%",
         L10nKey::SftpTransferSummaryFailed => "{count} failed",
         L10nKey::SftpTransferSummaryIdle => "Transfers",
+        // B3-R: finished-transfer summaries.
+        L10nKey::SftpTransferSummaryDownloads => "{count} downloads finished",
+        L10nKey::SftpTransferSummaryUploads => "{count} uploads finished",
+        L10nKey::SftpTransferSummaryBoth => "{downloads} · {uploads}",
+        L10nKey::SearchHostsHelper => "Type user@host to connect.",
         L10nKey::SftpTransferProgress => "{done} / {total} ({pct}%)",
-        L10nKey::SftpTransferDone => "done",
-        L10nKey::SftpTransferCancelled => "cancelled",
-        L10nKey::SftpTransferError => "error",
+        L10nKey::SftpTransferDone => "Done",
+        L10nKey::SftpTransferCancelled => "Cancelled",
+        L10nKey::SftpTransferError => "Failed",
         L10nKey::SftpTransferListFailed => "Could not check transfers: {error}",
         L10nKey::SftpPasteUploadFailed => "Could not upload {name} to {host}: {error}",
         L10nKey::LinkFileOpenFailed => "Could not open {path}: {error}",
@@ -1347,12 +1350,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorGitRevertChange => "Revert Change",
         L10nKey::EditorGitToggleGutter => "Toggle Git Change Markers",
         L10nKey::EditorGitPeekRevert => "Revert",
-        L10nKey::EditorGitPeekSummary => "−{removed} +{added} lines against the staged version",
+        L10nKey::EditorGitPeekSummary => "{changes} since the staged version",
         L10nKey::EditorGitPeekAddedOnly => {
             "These lines are new: the staged version has nothing here."
         }
         L10nKey::EditorGitPeekChange => "Peek Change",
-        L10nKey::EditorGitPeekKeys => "Enter reverts · Esc closes",
+        L10nKey::EditorGitPeekKeys => "Esc closes",
         L10nKey::EditorProblemsTitle => "Problems",
         L10nKey::EditorProblemsToggle => "Toggle Problems",
         L10nKey::EditorProblemsNone => "No problems in the open files.",
@@ -1431,10 +1434,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::LspRenameSymbolAction => "Rename Symbol…",
         L10nKey::LspRenamePlaceholder => "New name for {name}",
         L10nKey::LspRenameFailed => "Could not rename {name}",
-        L10nKey::LspServerMissing => "{name} not installed",
+        L10nKey::LspServerMissing => "No language server",
         L10nKey::LspServerStarting => "{name} starting…",
         L10nKey::LspServerDown => "{name} stopped",
-        L10nKey::LspProblemsTooltip => "{errors} errors, {warnings} warnings",
+        L10nKey::LspProblemsTooltip => "{errors}, {warnings}",
         L10nKey::SearchTabLocations => "Locations",
         L10nKey::SearchPlaceholderLocations => "Filter the places found…",
         L10nKey::SearchLocationsNone => "Nothing found",
@@ -1442,6 +1445,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PanelInfoTitle => "Info",
         L10nKey::PanelChangesTitle => "Changes",
         L10nKey::PanelScmTitle => "Changes",
+        // B3-P: the Changes tab's accessible name and tooltip.
+        L10nKey::PanelChangesTabCount => {
+            "Changes, {count} changed files. A partly staged file counts once."
+        }
+        L10nKey::PanelChangesTabCapped => {
+            "Changes, 10,000+ changed files. A partly staged file counts once."
+        }
         L10nKey::PanelFilesTitle => "Files",
         L10nKey::PanelSearchTitle => "Search",
         L10nKey::PanelGitHubTitle => "GitHub",
@@ -1632,7 +1642,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::WorktreePromptTitle => "New Worktree Tab",
         L10nKey::WorktreePromptName => "Worktree Name",
         L10nKey::WorktreePromptBranch => "New Branch",
-        L10nKey::WorktreePromptBase => "Start From",
+        L10nKey::WorktreePromptBase => "Base Branch",
         L10nKey::WorktreePromptCreating => "Creating…",
         L10nKey::WorktreePromptCreate => "Create",
         L10nKey::AppNewWorktreeFailed => "New worktree failed: {error}",
@@ -1818,9 +1828,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SshPromptPassphraseFor => "Passphrase for {key_path}",
         L10nKey::SshPromptTwoFactor => "Two-factor authentication",
         L10nKey::SshPromptUnknownHost => "Unknown host {host}",
-        L10nKey::SshPromptHostKeyChanged => "Host key CHANGED — possible man-in-the-middle",
+        L10nKey::SshPromptHostKeyChanged => "Host key changed",
         L10nKey::SshPromptHostKeyChangedBody => {
-            "The host key differs from the one previously trusted. This may be an attack."
+            "The key for {host}:{port} no longer matches the one you trusted. This can mean someone is intercepting the connection."
         }
         L10nKey::SshPromptConnect => "Connect",
         L10nKey::SshPromptUnlock => "Unlock",
@@ -2072,9 +2082,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PaneDragHandleTooltip => "Drag to move this pane",
         L10nKey::AppWorktreeRemoved => "Removed worktree \"{branch}\"",
         L10nKey::AppWorktreeRemoveFailed => "Worktree removal failed: {error}",
-        L10nKey::WorktreePromptAgent => "Start",
+        L10nKey::WorktreePromptAgent => "Open With",
         L10nKey::WorktreePromptShell => "Shell",
-        L10nKey::WorktreePromptTask => "Task",
+        L10nKey::WorktreePromptTask => "First Task",
         L10nKey::WorktreePromptSetup => "Runs .tty59/setup first",
         L10nKey::WorktreePromptSetupHint => {
             "No .tty59/setup. Add one to run `{command}` in new worktrees"
@@ -2386,7 +2396,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::GitHubNoRemoteHint => "None of this repository's remotes point at github.com.",
         L10nKey::GitHubNoIssues => "No issues match.",
         L10nKey::GitHubNoPulls => "No pull requests match.",
-        L10nKey::GitHubSignInHint => "Sign in with `gh auth login` in a terminal, then refresh.",
+        L10nKey::GitHubSignInHint => "Run {command} in a terminal, then refresh.",
         L10nKey::GitHubNotFoundSignedOut => {
             "GitHub did not find this repository. If it is private, sign in first."
         }
@@ -2397,7 +2407,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::GitHubRateLimited => "GitHub's rate limit is used up.",
         L10nKey::GitHubRateLimitResetIn => "It resets in {n} min.",
         L10nKey::GitHubRateLimitSignedOut => {
-            "Signed out, GitHub allows 60 requests an hour. Sign in with `gh auth login` for more."
+            "Signed out, GitHub allows 60 requests an hour. Sign in with {command} for more."
         }
         L10nKey::GitHubForbidden => "GitHub refused the request.",
         L10nKey::GitHubNetworkError => "Could not reach GitHub.",
@@ -2443,15 +2453,43 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "clipboard copy wrap unwrap join lines claude raw"
         }
+        // B3-L: settings terminology and host/source counts.
+        L10nKey::SettingsPort => "Port",
+        L10nKey::SettingsCopyJoinWrappedWithKey => {
+            "{desc} {key} or {command} copies them as shown."
+        }
+        L10nKey::SettingsCopyJoinWrappedUnbound => "{desc} {command} copies them as shown.",
+        L10nKey::SettingsKeyFile => "Key file",
+        L10nKey::SettingsSearchVisionDefaultKeywords => {
+            "agent mode agents inbox workbench start windows top bar"
+        }
+        L10nKey::SettingsHostCount => "{count} hosts",
+        L10nKey::SettingsSourceCount => "{count} sources",
+        // B3-A: the agents rail's empty and no-match states.
+        L10nKey::SidebarAgentsEmptyHint => "Agents you start in this workspace show up here.",
+        L10nKey::SidebarNewAgent => "New agent",
+        L10nKey::SidebarNothingMatches => "Nothing matches “{query}”",
         L10nKey::SettingsCopyJoinWrapped => "Join wrapped lines when copying",
         L10nKey::SettingsCopyJoinWrappedDesc => {
-            "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line. ⌘⌥C or Copy Raw copies them as shown"
+            "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line."
         }
         L10nKey::MermaidRendering => "Rendering diagram…",
         L10nKey::MermaidRenderError => "Diagram error",
         L10nKey::MermaidViewerFullScreen => "Full screen",
         L10nKey::MermaidViewerFit => "Fit",
         L10nKey::MermaidViewerExit => "Exit full screen (Esc)",
+        // B3-E: editor status, empty hint and gutter peek.
+        L10nKey::LspMissingBody => {
+            "{name} could not be started. tty59 looks on PATH for: {programs}. Make sure {name} is installed and can run."
+        }
+        L10nKey::LspErrorCount => "{count} errors",
+        L10nKey::LspWarningCount => "{count} warnings",
+        L10nKey::EditorEmptyOpenHint => "Open a file with {chord}",
+        L10nKey::EditorEmptyTreeAlt => "or pick one in the file tree",
+        L10nKey::EditorEmptyOpenUnbound => "Pick a file in the file tree",
+        L10nKey::EditorGitPeekLinesAdded => "{count} lines added",
+        L10nKey::EditorGitPeekLinesRemoved => "{count} lines removed",
+        L10nKey::EditorGitPeekChanges => "{removed}, {added}",
     }
 }
 
@@ -2472,6 +2510,26 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMoreHosts, "zero") => "No more hosts",
         (L10nKey::SettingsMoreHosts, "one") => "1 more host",
         (L10nKey::SettingsMoreHosts, "other") => "{count} more hosts",
+        // The two halves of `SettingsHostsFromFiles`, counted separately.
+        (L10nKey::SettingsHostCount, "zero") => "0 hosts",
+        (L10nKey::SettingsHostCount, "one") => "1 host",
+        (L10nKey::SettingsHostCount, "other") => "{count} hosts",
+        (L10nKey::SettingsSourceCount, "zero") => "0 sources",
+        (L10nKey::SettingsSourceCount, "one") => "1 source",
+        (L10nKey::SettingsSourceCount, "other") => "{count} sources",
+        // B3-E: plural forms.
+        (L10nKey::LspErrorCount, "zero") => "No errors",
+        (L10nKey::LspErrorCount, "one") => "1 error",
+        (L10nKey::LspErrorCount, "other") => "{count} errors",
+        (L10nKey::LspWarningCount, "zero") => "No warnings",
+        (L10nKey::LspWarningCount, "one") => "1 warning",
+        (L10nKey::LspWarningCount, "other") => "{count} warnings",
+        (L10nKey::EditorGitPeekLinesAdded, "zero") => "No lines added",
+        (L10nKey::EditorGitPeekLinesAdded, "one") => "1 line added",
+        (L10nKey::EditorGitPeekLinesAdded, "other") => "{count} lines added",
+        (L10nKey::EditorGitPeekLinesRemoved, "zero") => "No lines removed",
+        (L10nKey::EditorGitPeekLinesRemoved, "one") => "1 line removed",
+        (L10nKey::EditorGitPeekLinesRemoved, "other") => "{count} lines removed",
         (L10nKey::SettingsMoreAgents, "zero") => "No more agents",
         (L10nKey::SettingsMoreAgents, "one") => "1 more agent available",
         (L10nKey::SettingsMoreAgents, "other") => "{count} more agents available",
@@ -2642,12 +2700,27 @@ pub fn translate_variant_en(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubSkippedCount, "zero") => "None skipped",
         (L10nKey::GitHubSkippedCount, "one") => "1 skipped",
         (L10nKey::GitHubSkippedCount, "other") => "{count} skipped",
+        // B3-P: plural forms.
+        (L10nKey::PanelChangesTabCount, "zero") => "Changes, no changed files",
+        (L10nKey::PanelChangesTabCount, "one") => {
+            "Changes, {count} changed file. A partly staged file counts once."
+        }
+        (L10nKey::PanelChangesTabCount, "other") => {
+            "Changes, {count} changed files. A partly staged file counts once."
+        }
         (L10nKey::GitHubShowHiddenComments, "zero") => "No more comments",
         (L10nKey::GitHubShowHiddenComments, "one") => "Show 1 more comment",
         (L10nKey::GitHubShowHiddenComments, "other") => "Show {count} more comments",
         (L10nKey::GitHubShowAllReviewers, "zero") => "No reviewers",
         (L10nKey::GitHubShowAllReviewers, "one") => "Show 1 reviewer",
         (L10nKey::GitHubShowAllReviewers, "other") => "Show all {count} reviewers",
+        // B3-R: plural forms.
+        (L10nKey::SftpTransferSummaryDownloads, "zero") => "No downloads finished",
+        (L10nKey::SftpTransferSummaryDownloads, "one") => "1 download finished",
+        (L10nKey::SftpTransferSummaryDownloads, "other") => "{count} downloads finished",
+        (L10nKey::SftpTransferSummaryUploads, "zero") => "No uploads finished",
+        (L10nKey::SftpTransferSummaryUploads, "one") => "1 upload finished",
+        (L10nKey::SftpTransferSummaryUploads, "other") => "{count} uploads finished",
         (L10nKey::TabStripHiddenTabs, "zero") => "No more tabs",
         (L10nKey::TabStripHiddenTabs, "one") => "1 more tab",
         (L10nKey::TabStripHiddenTabs, "other") => "{count} more tabs",

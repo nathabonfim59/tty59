@@ -22,6 +22,7 @@ use crate::ui::editor_session::{self, TabEditor};
 use crate::ui::editor_text::{self, EditorConfig, Indent, LineEnding, TextFormat};
 use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::lsp::LspStatus;
 use crate::ui::zoom::SCROLL_GESTURE_IDLE;
 
 mod gutter;
@@ -29,6 +30,7 @@ mod nav;
 pub(crate) mod outline;
 mod problems;
 mod split;
+pub(crate) mod status;
 mod strip;
 
 pub(crate) use nav::KEY_CONTEXT as NAV_KEY_CONTEXT;
@@ -3269,6 +3271,25 @@ impl Tty59App {
     }
 }
 
+/// The chord the keymap has for Go to File right now, as the text a hint
+/// shows, or `None` while it is unbound. The first installed binding — the
+/// shipped chord, else the first one the config adds — and every stroke of it
+/// is spelled, the way the other key hints read the installed map.
+fn quick_open_chord(cx: &gpui::App) -> Option<String> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    let binding = keymap
+        .bindings_for_action(&crate::core::actions::QuickOpenFile)
+        .next()?;
+    let chord = binding
+        .keystrokes()
+        .iter()
+        .map(|stroke| gpui_component::kbd::Kbd::format(stroke.inner()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!chord.is_empty()).then_some(chord)
+}
+
 fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -3324,6 +3345,7 @@ impl Tty59App {
         let body = self.render_editor_body(
             self.tab_code().and_then(TabCode::active_id),
             self.tab_code().map_or(0, TabCode::focused_slot),
+            window,
             cx,
         );
         let conflict_banner = self
@@ -3389,7 +3411,7 @@ impl Tty59App {
                     this.toggle_code_panel(window, cx);
                 }))
                 .child(h_flex().flex_1().min_h_0().w_full().child(editor_col))
-                .child(self.render_code_status_bar(window, cx))
+                .child(self.render_code_status_bar(chrome, window, cx))
                 .into_any_element(),
         )
     }
@@ -3400,6 +3422,7 @@ impl Tty59App {
         &self,
         id: Option<BufferId>,
         slot: usize,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
@@ -3510,7 +3533,7 @@ impl Tty59App {
                                 .into_any_element(),
                         )
                     })
-                    .children(self.render_editor_gutter_peek(id, cx))
+                    .children(self.render_editor_gutter_peek(id, window, cx))
                     .context_menu(move |menu, _window, cx| {
                         Self::editor_body_menu(menu, &app, id, cx)
                     })
@@ -3840,14 +3863,8 @@ impl Tty59App {
             })
             .collect();
         let strip = if files.is_empty() {
-            div()
-                .min_w_0()
-                .px(px(8.))
-                .text_ellipsis()
-                .text_size(gpui::rems(strip::CELL_TEXT))
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(t(L10nKey::EditorNoFileOpen)))
-                .into_any_element()
+            // Nothing to name here: the body says no file is open.
+            div().min_w_0().into_any_element()
         } else {
             h_flex()
                 .id("editor-file-tabs")
@@ -4096,7 +4113,14 @@ impl Tty59App {
         )
     }
 
-    fn render_code_status_bar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_code_status_bar(
+        &self,
+        chrome: DocumentChrome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        use status::{Content, Lsp, Readout};
+
         // No path here: the breadcrumbs over the text show where the file is.
         let muted = cx.theme().muted_foreground;
         let active = self.active_buffer();
@@ -4125,9 +4149,23 @@ impl Tty59App {
                 }
             }
         });
-        let wrap: Option<bool> = active.map(|f| f.wrap);
-        let is_markdown = active.is_some_and(|f| f.language() == "markdown");
-        let preview = active.is_some_and(|f| f.preview);
+        let wrap: Option<SharedString> = active.map(|f| {
+            let label = if f.wrap {
+                t(L10nKey::EditorWrapOn)
+            } else {
+                t(L10nKey::EditorWrapOff)
+            };
+            label.into()
+        });
+        let preview: Option<SharedString> =
+            active.filter(|f| f.language() == "markdown").map(|f| {
+                let label = if f.preview {
+                    t(L10nKey::EditorEdit)
+                } else {
+                    t(L10nKey::EditorPreview)
+                };
+                label.into()
+            });
         let indent: Option<SharedString> = active.map(|f| {
             let key = if f.indent.hard_tabs {
                 L10nKey::EditorIndentTabs
@@ -4136,14 +4174,89 @@ impl Tty59App {
             };
             t_fmt(key, &[("n", &f.indent.size.to_string())]).into()
         });
-        let line_ending: Option<&'static str> = active.map(|f| f.format.line_ending.label());
+        let line_ending: Option<SharedString> =
+            active.map(|f| SharedString::from(f.format.line_ending.label()));
         let encoding: Option<SharedString> = active.map(|f| f.format.encoding_label().into());
-        let language: Option<&'static str> = active.and_then(|f| language_label(f.language()));
-        let (lsp_lead, lsp_tail) = match self.render_lsp_status(cx) {
-            Some((el, true)) => (Some(el), None),
-            Some((el, false)) => (None, Some(el)),
-            None => (None, None),
+        let language: Option<SharedString> = active
+            .and_then(|f| language_label(f.language()))
+            .map(SharedString::from);
+        let zoom: Option<SharedString> = active_id
+            .map(|_| cx.global::<crate::core::config::Config>().editor_zoom)
+            .filter(|zoom| *zoom != 1.0)
+            .map(|zoom| format!("{}%", (zoom * 100.).round()).into());
+        let lsp_status = self.lsp_status_now(cx);
+
+        // What the bar would say with room for everything; which of it fits
+        // the document column is `status`'s decision.
+        let face = status::Face::new(window, cx);
+        let content = Content {
+            lead: match &lsp_status {
+                Some(LspStatus::Missing(_)) => Some(t(L10nKey::LspServerMissing).into()),
+                _ => None,
+            },
+            lsp: match &lsp_status {
+                Some(LspStatus::Starting(name)) => Some(Lsp::State(
+                    t_fmt(L10nKey::LspServerStarting, &[("name", name)]).into(),
+                )),
+                Some(LspStatus::Down(name)) => Some(Lsp::State(
+                    t_fmt(L10nKey::LspServerDown, &[("name", name)]).into(),
+                )),
+                Some(LspStatus::Running {
+                    errors, warnings, ..
+                }) => Some(Lsp::Counts {
+                    errors: errors.to_string().into(),
+                    warnings: warnings.to_string().into(),
+                }),
+                _ => None,
+            },
+            cursor,
+            language,
+            eol: line_ending,
+            wrap,
+            preview,
+            zoom,
+            indent,
+            encoding,
         };
+        // The column the bar is the foot of, less the row's own inset.
+        let column = match chrome {
+            DocumentChrome::Fill => DocumentChrome::Fill,
+            DocumentChrome::Dock | DocumentChrome::DockHoisted => DocumentChrome::Dock,
+        };
+        let room = px((self.editor_header_w(column, window, cx)
+            - 2. * crate::ui::app::CONTENT_INSET)
+            .max(0.));
+        let kept = status::kept(window, &face, &content, room);
+        let lsp_lead = match (&lsp_status, kept.has(Readout::Lead)) {
+            (Some(LspStatus::Missing(name)), true) => content
+                .lead
+                .clone()
+                .map(|label| crate::ui::lsp::editor::render_lsp_missing(*name, label, cx)),
+            _ => None,
+        };
+        let lsp_tail = match (&lsp_status, kept.has(Readout::Problems)) {
+            (Some(LspStatus::Starting(_) | LspStatus::Down(_)), true) => {
+                content.lsp.as_ref().and_then(|lsp| match lsp {
+                    Lsp::State(text) => {
+                        Some(crate::ui::lsp::editor::render_lsp_state(text.clone()))
+                    }
+                    Lsp::Counts { .. } => None,
+                })
+            }
+            (
+                Some(LspStatus::Running {
+                    name,
+                    errors,
+                    warnings,
+                }),
+                true,
+            ) => Some(crate::ui::lsp::editor::render_lsp_counts(
+                name, *errors, *warnings, &face, cx,
+            )),
+            _ => None,
+        };
+        let shown =
+            |readout: Readout, text: Option<SharedString>| text.filter(|_| kept.has(readout));
 
         // Metadata, not a toolbar: caption ink on the plane's own fill, set
         // off by a hairline in the divider tone rather than a control border.
@@ -4165,95 +4278,105 @@ impl Tty59App {
                 .hover(move |s| s.bg(hover).text_color(fg))
                 .child(label)
         };
-        h_flex()
+        // Tabular figures, so the position does not jitter sideways as the
+        // caret walks from line 9 to line 10: the same features the width
+        // memo keys the cursor's text on.
+        let cursor_features = face.features(true);
+        status::probe(face.pin(h_flex()), "editor-status")
             .flex_none()
             .w_full()
             .h(px(28.))
             .items_center()
-            .gap(px(14.))
+            .gap(px(status::ROW_GAP))
             .px(px(crate::ui::app::CONTENT_INSET))
             .border_t(crate::ui::theme::hairline(window))
             .border_color(cx.theme().sidebar_border)
-            .text_size(gpui::rems(11.5 / 16.))
             .text_color(muted)
             .whitespace_nowrap()
             .children(lsp_lead)
             .child(div().flex_1())
             // The counts open the Problems list.
-            .children(lsp_tail.map(|status| {
-                div()
-                    .id("status-problems")
-                    .flex_none()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_editor_problems(cx)))
-                    .child(status)
+            .children(lsp_tail.map(|tail| {
+                status::probe(
+                    div().id("status-problems").flex_none().cursor_pointer(),
+                    "editor-status-problems",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_editor_problems(cx)))
+                .child(tail)
             }))
-            .when(is_markdown, |this| {
-                let label = if preview {
-                    t(L10nKey::EditorEdit)
-                } else {
-                    t(L10nKey::EditorPreview)
-                };
-                this.child(item("status-md-preview", label.into()).on_click(
-                    cx.listener(|this, _, window, cx| this.toggle_document_preview(window, cx)),
-                ))
-            })
-            .when_some(wrap, |this, wrap| {
-                let label = if wrap {
-                    t(L10nKey::EditorWrapOn)
-                } else {
-                    t(L10nKey::EditorWrapOff)
-                };
-                this.child(item("status-wrap", label.into()).on_click(
+            .children(
+                shown(Readout::Preview, content.preview.clone()).map(|label| {
+                    status::probe(item("status-md-preview", label), "editor-status-preview")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_document_preview(window, cx)
+                        }))
+                }),
+            )
+            .children(shown(Readout::Wrap, content.wrap.clone()).map(|label| {
+                status::probe(item("status-wrap", label), "editor-status-wrap").on_click(
                     cx.listener(|this, _, window, cx| this.toggle_document_wrap(window, cx)),
-                ))
-            })
-            // Tabular figures, so the position does not jitter sideways as
-            // the caret walks from line 9 to line 10. A click asks for a line
-            // to go to.
-            .when_some(cursor, |this, t| {
-                this.child(
-                    item("status-cursor", t)
-                        .font_features(crate::ui::theme::tabular_figures())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.editor_go_to_line(window, cx)),
-                        ),
                 )
-            })
-            .when_some(indent, |this, t| this.child(div().flex_none().child(t)))
-            .when_some(encoding, |this, t| this.child(div().flex_none().child(t)))
-            .when_some(line_ending, |this, eol| {
-                this.child(
-                    item("status-eol", eol.into())
-                        .on_click(cx.listener(|this, _, _w, cx| this.toggle_line_ending(cx))),
+            }))
+            // A click asks for a line to go to.
+            .children(shown(Readout::Cursor, content.cursor.clone()).map(|t| {
+                status::probe(item("status-cursor", t), "editor-status-cursor")
+                    .font_features(cursor_features)
+                    .on_click(cx.listener(|this, _, window, cx| this.editor_go_to_line(window, cx)))
+            }))
+            .children(shown(Readout::Indent, content.indent.clone()).map(|t| {
+                status::probe(
+                    div().id("status-indent").flex_none().child(t),
+                    "editor-status-indent",
                 )
-            })
-            .when_some(language, |this, l| this.child(div().flex_none().child(l)))
+            }))
+            .children(shown(Readout::Encoding, content.encoding.clone()).map(|t| {
+                status::probe(
+                    div().id("status-encoding").flex_none().child(t),
+                    "editor-status-encoding",
+                )
+            }))
+            .children(shown(Readout::Eol, content.eol.clone()).map(|eol| {
+                status::probe(item("status-eol", eol), "editor-status-eol")
+                    .on_click(cx.listener(|this, _, _w, cx| this.toggle_line_ending(cx)))
+            }))
+            .children(shown(Readout::Language, content.language.clone()).map(|l| {
+                status::probe(
+                    div().id("status-language").flex_none().child(l),
+                    "editor-status-language",
+                )
+            }))
             // The editor's zoom, next to the language, only while it is not
             // 100 % — the status bar reports state, and "100 %" is the state
             // nobody needs told about. A click resets, like Ctrl+0.
-            .when(
-                active_id.is_some() && {
-                    let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
-                    zoom != 1.0
-                },
-                |this| {
-                    let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
-                    let label = format!("{}%", (zoom * 100.).round());
-                    this.child(
-                        item("status-editor-zoom", label.into()).on_click(cx.listener(
-                            |this, _, window, cx| {
-                                if let Some(id) = this.tab_code().and_then(TabCode::active_id) {
-                                    this.editor_zoom_reset(id, None, window, cx);
-                                }
-                            },
-                        )),
-                    )
-                },
-            )
+            .children(shown(Readout::Zoom, content.zoom.clone()).map(|label| {
+                status::probe(item("status-editor-zoom", label), "editor-status-zoom").on_click(
+                    cx.listener(|this, _, window, cx| {
+                        if let Some(id) = this.tab_code().and_then(TabCode::active_id) {
+                            this.editor_zoom_reset(id, None, window, cx);
+                        }
+                    }),
+                )
+            }))
     }
 
+    /// The panel with no file in it: one way to open one, the keymap's own,
+    /// and the file tree as the alternative. With no chord bound, the tree is
+    /// the one thing it says.
     fn render_editor_empty(&self, cx: &Context<Self>) -> gpui::Div {
+        let muted = cx.theme().muted_foreground;
+        let (first, second) = match quick_open_chord(cx) {
+            Some(chord) => (
+                t_fmt(L10nKey::EditorEmptyOpenHint, &[("chord", &chord)]),
+                Some(t(L10nKey::EditorEmptyTreeAlt)),
+            ),
+            None => (t(L10nKey::EditorEmptyOpenUnbound).to_string(), None),
+        };
+        #[cfg(test)]
+        status::observe::say("editor-empty-open", &first);
+        #[cfg(test)]
+        if let Some(line) = second {
+            status::observe::say("editor-empty-tree", line);
+        }
         v_flex()
             .track_focus(&self.editor.empty_focus)
             .on_mouse_down(
@@ -4264,19 +4387,17 @@ impl Tty59App {
             .items_center()
             .justify_center()
             .gap_2()
-            .child(
-                Icon::new(IconName::File)
-                    .large()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::ui::i18n::t(
-                        crate::ui::i18n::L10nKey::OpenFileFromTree,
-                    )),
-            )
+            .child(Icon::new(IconName::File).large().text_color(muted))
+            .child(status::probe(
+                div().text_sm().text_color(muted).child(first),
+                "editor-empty-open",
+            ))
+            .children(second.map(|line| {
+                status::probe(
+                    div().text_xs().text_color(muted).child(line),
+                    "editor-empty-tree",
+                )
+            }))
     }
 
     fn render_editor_conflict_banner(
