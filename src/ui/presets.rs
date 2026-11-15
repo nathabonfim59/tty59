@@ -87,6 +87,28 @@ pub struct Semantics {
 
 impl Global for Semantics {}
 
+/// How much of the danger ink the destructive-outline button's hover wash is,
+/// over the card it sits on.
+pub(crate) const DANGER_OUTLINE_WASH: f32 = 0.08;
+
+/// The destructive-outline button's text ink on a popover card (the gutter
+/// peek's Revert), cached per theme by `apply_theme`. It is the semantic
+/// danger ink exactly as authored wherever that already clears the text floor
+/// on the card and on the button's hover wash, and is corrected on both
+/// together where it does not. The outline keeps the authored ink; only the
+/// words move. A role for the popover surface alone: a card on another
+/// surface needs its own.
+#[derive(Debug, Clone, Copy)]
+pub struct DangerOutlineInk {
+    pub popover: u32,
+    /// The button's hover wash on that card: the authored danger ink at
+    /// `DANGER_OUTLINE_WASH` over it. Cached beside the ink floored on it, so
+    /// the painter blends nothing per frame.
+    pub popover_wash: u32,
+}
+
+impl Global for DangerOutlineInk {}
+
 impl Semantics {
     /// Maps core agent status onto the active theme's existing semantic roles
     /// so `tty59-core` stays free of UI theme dependencies.
@@ -801,6 +823,19 @@ impl Theme {
             ],
             m,
             sf,
+        }
+    }
+
+    /// The destructive-outline button's ink on the popover card, floored on
+    /// the card and on the 8% danger wash it takes under the pointer. The wash
+    /// is taken from the authored danger ink, which is what is painted.
+    pub(crate) fn danger_outline_ink_from(&self, r: &Resolved) -> DangerOutlineInk {
+        let danger = self.semantics_with(&r.m).danger.ink;
+        let card = r.sf.popover.base;
+        let wash = mix(card, danger, DANGER_OUTLINE_WASH);
+        DangerOutlineInk {
+            popover: legible_across(&[card, wash], danger, TEXT_FLOOR),
+            popover_wash: wash,
         }
     }
 
@@ -3991,6 +4026,39 @@ ansi:
         assert!(!mirrored.derive(0xffffff).shares_one_ink());
         assert_eq!(mirrored.resolve().pole, 0x000000);
         assert_no_misses("white ink in the band", role_misses(&mirrored));
+    }
+
+    /// The destructive-outline ink in every theme there is, built-in and
+    /// generated: it clears the text floor on the popover card and on the 8%
+    /// danger wash it takes under the pointer, and it is the authored danger
+    /// ink exactly wherever that already did.
+    #[test]
+    fn danger_outline_ink_floors_on_the_card_and_its_wash_in_every_theme() {
+        let mut moved = 0;
+        for theme in builtins().into_iter().chain(generated_theme_grid()) {
+            let resolved = theme.resolve();
+            let cached = theme.danger_outline_ink_from(&resolved);
+            let authored = theme.semantics_with(&resolved.m).danger.ink;
+            let card = resolved.sf.popover.base;
+            let wash = mix(card, authored, 0.08);
+            assert_eq!(cached.popover_wash, wash, "{}: the wash", theme.id);
+            let held =
+                |ink: u32| contrast(ink, card) >= TEXT_FLOOR && contrast(ink, wash) >= TEXT_FLOOR;
+            assert!(
+                held(cached.popover),
+                "{}: {:06x} is {:.2}:1 on the card and {:.2}:1 on the wash",
+                theme.id,
+                cached.popover,
+                contrast(cached.popover, card),
+                contrast(cached.popover, wash)
+            );
+            if held(authored) {
+                assert_eq!(cached.popover, authored, "{}: moved without need", theme.id);
+            } else {
+                moved += 1;
+            }
+        }
+        assert!(moved > 0, "no theme needed the correction");
     }
 
     /// `legible_ink` picks white or black fill by fill, so on fills either
