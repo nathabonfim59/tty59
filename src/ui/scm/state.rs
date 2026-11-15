@@ -138,6 +138,14 @@ pub(crate) struct ScmPanelState {
     /// instead of the working tree.
     pub(crate) detail: Option<CommitDetailView>,
     pub(crate) scroll: gpui::ScrollHandle,
+    /// Where each group's rows start in `scroll`'s content, for
+    /// `rows_window`.
+    pub(crate) run_tops: crate::ui::scm::rows_window::RunTops,
+    /// The file row whose context menu is open, kept built however far the
+    /// list scrolls: the menu lives in that row's element state. Set when
+    /// the menu is built, cleared when it is dismissed.
+    pub(crate) menu_row: Option<(ScmGroup, String)>,
+    pub(crate) menu_sub: Option<gpui::Subscription>,
 }
 
 impl ScmPanelState {
