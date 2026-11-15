@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pane stops waiting, however that is noticed. It shows up as `prompt` in
   `tty59 agents --json` and in what the desktop and the phone receive.
   Older servers, desktops and phones simply don't send or read it.
+- **Copy Pane Address**: the Info panel's Session table starts with the
+  focused pane's address (`%42`) and a copy button, and Search Everywhere
+  and the app menu have a Copy Pane Address command (bindable). The address
+  pastes straight into `tty59 send` or `tty59 capture`, so a pane you split
+  by hand can be handed to the CLI or a driving agent.
 
 ## [26.14.1] - 2026-11-15
 
