@@ -982,11 +982,24 @@ impl Tty59App {
         if parts.loading {
             // Where no row of the overflow holds the word whole it takes the
             // row it has and is cut there, the way a summary word wider than
-            // its row is, and says so: its whole text on hover and as the
-            // accessible label. Where a row holds it, it is what it always was.
+            // its row is, and says so: its whole text on hover and to assistive
+            // technology. The cut is the UI's one measured elision, whose node
+            // carries the whole word as its value (a `Label` node is named from
+            // its value, never from an `aria_label`, which a real AT-SPI read
+            // showed to come out empty). Where a row holds it, it is what it
+            // always was.
             let cut = need.zip(plan).and_then(|(n, p)| n.refreshing_cut(&p));
             let word = SharedString::from(t(L10nKey::Refreshing));
             let tip = word.clone();
+            let shown = match cut {
+                Some(_) => crate::ui::text_elision::ElidedLabel::new(
+                    "diff-overlay-refreshing-text",
+                    word.clone(),
+                    crate::ui::text_elision::Mode::End,
+                )
+                .into_any_element(),
+                None => word.clone().into_any_element(),
+            };
             refresh_el = Some(
                 div()
                     .id("diff-overlay-refreshing")
@@ -999,11 +1012,9 @@ impl Tty59App {
                         d.flex_none()
                             .w(px(width))
                             .truncate()
-                            .role(gpui::Role::Label)
-                            .aria_label(word.clone())
                             .tooltip(move |window, cx| text_tooltip(tip.clone(), window, cx))
                     })
-                    .child(word.clone())
+                    .child(shown)
                     .into_any_element(),
             );
         }

@@ -5469,8 +5469,9 @@ mod gpui_tests {
     /// summary word wider than its row is: nothing of it is painted past the
     /// row's start or end, and hovering it shows the whole word. Where a row
     /// holds it (the 157px body) it is unchanged: whole, with no tooltip.
-    /// The accessible label is not observable from here; it is checked by code
-    /// review and, on a native build, through AT-SPI.
+    /// The cut is the measured elision (End), which is what carries the whole
+    /// word to assistive technology; the tooltip and the elision are checked here,
+    /// the accessible name natively through AT-SPI.
     #[gpui::test]
     fn the_refreshing_word_takes_the_row_it_has_and_shows_its_whole_text_where_none_holds_it(
         cx: &mut TestAppContext,
@@ -5522,6 +5523,24 @@ mod gpui_tests {
                  {lead}px lead and the {trail}px trail of the body {body:?}; {}",
                 diff_widths(&mut vcx)
             );
+            // The cut is the UI's measured elision, End mode, and it is that label
+            // that carries the whole word to assistive technology (as its value:
+            // a real AT-SPI read showed a `Label` named only by `aria_label`
+            // comes out empty), so it must be the thing drawn.
+            crate::ui::text_elision::observe::clear();
+            vcx.update(|window, _| window.refresh());
+            vcx.run_until_parked();
+            let shown = crate::ui::text_elision::observe::label(&gpui::ElementId::from(
+                "diff-overlay-refreshing-text",
+            ))
+            .unwrap_or_else(|| panic!("{what}: the cut word is not an elided label"));
+            assert!(
+                shown.painted
+                    && shown.text.ends_with('\u{2026}')
+                    && shown.text.chars().next() == text.chars().next()
+                    && shown.text.chars().count() < text.chars().count(),
+                "{what}: the cut word {text:?} is not painted as its head and an ellipsis: {shown:?}"
+            );
             let card = hover_tooltip(&mut vcx, "diff-overlay-refreshing")
                 .unwrap_or_else(|| panic!("{what}: the cut word has no tooltip with its text"));
             let lines = tooltip_lines(&mut vcx, &text, f32::from(card.size.width));
@@ -5549,6 +5568,16 @@ mod gpui_tests {
         assert!(
             hover_tooltip(&mut vcx, "diff-overlay-refreshing").is_none(),
             "{what}: a whole word has no tooltip"
+        );
+        crate::ui::text_elision::observe::clear();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        assert!(
+            crate::ui::text_elision::observe::label(&gpui::ElementId::from(
+                "diff-overlay-refreshing-text"
+            ))
+            .is_none(),
+            "{what}: a whole word is plain text, not an elided label"
         );
         set_native_context(&app, &mut vcx, "en", 16.);
     }
