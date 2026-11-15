@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remembered across launches (`files_show_hidden`, off by default). A
   folder holding only hidden files offers a Show link, and every window's
   tree follows a change made in another one or in `config.json`.
+- **Double-click a tab to rename it**, in the sidebar or the top strip:
+  the same inline box as the context menu's Rename. Double-clicking a
+  top-strip tab no longer zooms the window; the empty title bar beside the
+  tabs still does.
 - **Copy Path and Copy as host:path for remote files**: the SFTP browser's
   row menu and a remote workspace's Files tree copy a file's or folder's
   remote path, or the `user@host:/path` form `scp` and `rsync` take. The
