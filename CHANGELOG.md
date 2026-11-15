@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its top-right corner with the zoom shortcut beside it, and clicking the
   badge brings the other panes back. The pane's right-click menu reads
   Unzoom Pane while it is zoomed.
+- **A waiting agent's question travels with its status**: when Claude Code
+  or Codex stops to ask something, its hook now passes along what it asks,
+  the questions and their options or the tool it wants to run and on what.
+  The daemon holds it while the pane waits and drops it the moment the
+  pane stops waiting, however that is noticed. It shows up as `prompt` in
+  `tty59 agents --json` and in what the desktop and the phone receive.
+  Older servers, desktops and phones simply don't send or read it.
 
 ## [26.14.1] - 2026-11-15
 
