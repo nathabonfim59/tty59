@@ -2301,7 +2301,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsHostCount => "{count} 台主机",
         L10nKey::SettingsSourceCount => "{count} 个来源",
         // B3-A: the agents rail's empty and no-match states.
-        L10nKey::SidebarAgentsEmptyHint => "你在此工作区启动的智能体会显示在这里。",
+        L10nKey::SidebarAgentsEmptyHint => "此工作区启动的智能体会显示在这里。",
         L10nKey::SidebarNewAgent => "新建智能体",
         L10nKey::SidebarNothingMatches => "没有与“{query}”匹配的内容",
         L10nKey::SettingsCopyJoinWrapped => "复制时合并折行",
