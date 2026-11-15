@@ -262,6 +262,12 @@ pub struct Config {
     /// agent run that touched sixty files across a dozen modules.
     #[serde(default)]
     pub scm_changes_tree: bool,
+    /// Whether the Files tree and its name search list dotfiles. Off by
+    /// default, the way Finder and `ls` start; flipped by the eye button in the
+    /// Files search row, the tree's context menu or the Settings switch, and kept
+    /// across launches so a `.github` someone went looking for stays found.
+    #[serde(default)]
+    pub files_show_hidden: bool,
     /// Whether a file opens in the code panel with soft wrap on. Not a
     /// setting anyone picks up front: it is whatever the status bar's Wrap
     /// toggle (or `ToggleDocumentWrap`) was last left at, so the next file
@@ -868,6 +874,7 @@ impl Default for Config {
             document_ratio: default_document_ratio(),
             scm_graph_expanded: false,
             scm_changes_tree: false,
+            files_show_hidden: false,
             editor_soft_wrap: false,
             editor_markdown_preview: false,
             editor_zoom: default_editor_zoom(),
@@ -2058,6 +2065,21 @@ mod tests {
         let back: Config = serde_json::from_str(&json).unwrap();
         assert!(back.tab_group_shortcuts, "persisted");
         assert_eq!(back.tab_group_activation, TabGroupActivation::First);
+    }
+
+    #[test]
+    fn files_show_hidden_defaults_off_and_round_trips() {
+        assert!(!Config::default().files_show_hidden);
+
+        // A file from before the key existed keeps dotfiles out of the tree.
+        let old: Config = serde_json::from_str(r#"{"font_size": 15.0}"#).unwrap();
+        assert!(!old.files_show_hidden);
+
+        let on: Config = serde_json::from_str(r#"{"files_show_hidden": true}"#).unwrap();
+        assert!(on.files_show_hidden);
+        let json = serde_json::to_string(&on).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert!(back.files_show_hidden, "persisted");
     }
 
     #[test]

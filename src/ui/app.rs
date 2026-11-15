@@ -7465,6 +7465,9 @@ impl Tty59App {
                 self.set_editor_mermaid_colors(defaults.editor_mermaid_colors, cx)
             }
             L10nKey::SettingsEditorZoom => self.set_editor_zoom(defaults.editor_zoom, cx),
+            L10nKey::SettingsFilesShowHidden => {
+                self.set_files_show_hidden(defaults.files_show_hidden, cx)
+            }
             L10nKey::SettingsNotifyOnCommandFinish => {
                 self.set_notify_mode(defaults.notify_on_command_finish, cx)
             }

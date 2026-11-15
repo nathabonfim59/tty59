@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Middle-click a tab to close it**, in the sidebar or the top strip. It
   goes through the usual close, so an unsaved editor or a busy pane still
   asks first.
+- **Showing hidden files is a setting that sticks**: an eye button in the
+  Files search row shows or hides dotfiles and stays pressed while they are
+  listed, Settings → General → Files has the same switch, and the choice is
+  remembered across launches (`files_show_hidden`, off by default). A
+  folder holding only hidden files offers a Show link, and every window's
+  tree follows a change made in another one or in `config.json`.
 - **Copy Path and Copy as host:path for remote files**: the SFTP browser's
   row menu and a remote workspace's Files tree copy a file's or folder's
   remote path, or the `user@host:/path` form `scp` and `rsync` take. The
