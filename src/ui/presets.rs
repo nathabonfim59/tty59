@@ -4359,7 +4359,11 @@ ansi:
     #[test]
     fn cached_inks_keep_seeds_that_already_pass() {
         let mut misses = Vec::new();
+        // Themes whose `tab_count` 5.0 target is physically unreachable (counted once per theme).
+        let mut tab_count_unreachable: Vec<String> = Vec::new();
+        let mut swept = 0usize;
         for t in sweep_themes() {
+            swept += 1;
             let r = t.resolve();
             let (m, s) = (&r.m, &r.sf);
             let fg = m.foreground;
@@ -4658,12 +4662,47 @@ ansi:
                 // it on every fill; an infeasible case (a mid-grey selection) is printed with its ratio.
                 let seed_misses = fills.iter().any(|&fill| contrast(seed, fill) < floor);
                 if [AA_SELECTED_CAPTION, AA_SMALL_TEXT, AA_GLYPH].contains(&floor) && seed_misses {
-                    for &fill in &fills {
-                        if contrast(color, fill) < floor {
+                    // What one ink can do on ALL the fills together, as `legible_across` fixes one
+                    // direction for the whole set: the weakest fill's contrast for white and for black.
+                    let worst = |ink: u32| {
+                        fills
+                            .iter()
+                            .map(|&f| contrast(ink, f))
+                            .fold(f32::MAX, f32::min)
+                    };
+                    let best = worst(0xffffff).max(worst(0x000000));
+                    if best >= floor {
+                        for &fill in &fills {
+                            if contrast(color, fill) < floor {
+                                misses.push(format!(
+                                    "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the {floor} target",
+                                    t.id,
+                                    contrast(color, fill)
+                                ));
+                            }
+                        }
+                    } else {
+                        // The target is physically unreachable on this set. The ink must then be the
+                        // black or white endpoint with the highest worst-fill contrast (a tie allows
+                        // either), at exactly that ratio: not merely above some lower bar.
+                        if what == "tab_count" {
+                            tab_count_unreachable.push(t.id.clone());
+                        }
+                        if !((color == 0xffffff || color == 0x000000) && worst(color) == best) {
                             misses.push(format!(
-                                "{}: corrected {what} {color:#08x} is {:.2}:1 on {fill:#08x}, under the {floor} target",
+                                "{}: unreachable {what} {color:#08x} is {:.2}:1 on its weakest fill; the best one ink reaches is {best:.2}:1 (white {:.2}, black {:.2}), the target {floor} cannot be met",
                                 t.id,
-                                contrast(color, fill)
+                                worst(color),
+                                worst(0xffffff),
+                                worst(0x000000)
+                            ));
+                        }
+                        // The public text floor stays unconditional, reachable target or not (a glyph is a mark: 3:1).
+                        if floor != AA_GLYPH && worst(color) < AA_TEXT {
+                            misses.push(format!(
+                                "{}: unreachable {what} {color:#08x} is {:.2}:1, under the public {AA_TEXT} floor",
+                                t.id,
+                                worst(color)
                             ));
                         }
                     }
@@ -4681,6 +4720,12 @@ ansi:
                 }
             }
         }
+        println!(
+            "tab_count 5.0 target unreachable on {} of {swept} swept themes (once per theme; first {}, last {}); each holds the best black/white endpoint",
+            tab_count_unreachable.len(),
+            tab_count_unreachable.first().map_or("-", String::as_str),
+            tab_count_unreachable.last().map_or("-", String::as_str)
+        );
         assert_no_misses("seeds kept", misses);
     }
 }
