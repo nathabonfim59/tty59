@@ -18,7 +18,9 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::github::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
 use crate::ui::github::{GhTarget, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET};
+use crate::ui::right_panel::{
+    META, PanelAction, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET,
+};
 use crate::ui::scm::path::relative_time;
 use crate::ui::scm::state::RepoKey;
 
@@ -38,6 +40,9 @@ const SWITCH_H: f32 = 22.;
 const PINNED_GAP: f32 = 10.;
 const LIST_GAP: f32 = 14.;
 const PINNED_INSET: f32 = 14.;
+/// The Refresh button under a failed call — list or detail, only ever one on
+/// screen.
+const GITHUB_ERROR_REFRESH: &str = "panel-github-error-refresh";
 
 impl Tty59App {
     pub(crate) fn render_panel_github(
@@ -121,7 +126,7 @@ impl Tty59App {
         // The Git tab's gap under its pinned block, so the header reads as
         // one unit and the list starts clear of it.
         pinned.push(div().flex_none().h(px(LIST_GAP)).into_any_element());
-        let body = self.github_list_body(&chosen.slug, cx);
+        let body = self.github_list_body(&repo, &chosen.slug, cx);
         self.github_shell(title, pinned, body, false)
     }
 
@@ -479,9 +484,46 @@ impl Tty59App {
             .into_any_element()
     }
 
-    fn github_list_body(&mut self, slug: &RepoSlug, cx: &mut Context<Self>) -> AnyElement {
+    /// A failed call, said in words, with Refresh under it: every one of
+    /// these is answered by trying again — after `gh auth login`, after the
+    /// rate limit resets, once the network is back.
+    ///
+    /// `over_content` is a refresh that failed over something still on
+    /// screen. That one keeps the list or detail as the subject, so its button
+    /// steps down to the secondary paint. The click is `github_refresh` for
+    /// `repo`, the repository this body was drawn for — not whichever one the
+    /// pane has moved to by the time it lands.
+    pub(crate) fn github_error_body(
+        &self,
+        err: &ApiError,
+        repo: &RepoKey,
+        over_content: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (text, hint) = describe_error(err, self.github_authenticated());
+        let hint = hint.map(|hint| hint_element(&hint, cx));
+        let repo = repo.clone();
+        let on_click = cx.listener(move |this, _, _window, cx| {
+            this.github_refresh(Some(repo.clone()), cx);
+        });
+        let action = match over_content {
+            false => {
+                PanelAction::primary(GITHUB_ERROR_REFRESH, t(L10nKey::GitHubRefresh), on_click)
+            }
+            true => {
+                PanelAction::secondary(GITHUB_ERROR_REFRESH, t(L10nKey::GitHubRefresh), on_click)
+            }
+        };
+        self.panel_empty_with(&text, hint, Some(action), cx)
+    }
+
+    fn github_list_body(
+        &mut self,
+        repo: &RepoKey,
+        slug: &RepoSlug,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let query = self.github_query(slug);
-        let authenticated = self.github_authenticated();
         let Some(cache) = self.github.lists.get(&query) else {
             return self.panel_empty(t(L10nKey::PanelLoading), None, cx);
         };
@@ -490,18 +532,21 @@ impl Tty59App {
         let next_page = cache.next_page;
         let loading = cache.loading;
         let loaded = cache.loaded;
+        let fetched = cache.fetched.is_some();
 
         let mut body = v_flex().pb(px(12.));
         if let Some(err) = &error {
-            let (text, hint) = describe_error(err, authenticated);
-            let hint = hint.map(|hint| hint_element(&hint, cx));
-            body = body.child(self.panel_empty_with(&text, hint, cx));
+            body = body.child(self.github_error_body(err, repo, !items.is_empty(), cx));
         }
         // An empty page with more behind it is not "no issues": `/issues`
         // pages filtered to one kind can come back empty (see `api::list`).
         if items.is_empty() && next_page.is_none() {
             if error.is_none() {
-                let text = if loaded && !loading {
+                // "No issues" is an answer, and `fetched` is what marks one
+                // having landed: a Refresh clears the error and the stamp but
+                // leaves `loaded`, so without it the wait for the new answer
+                // read as an empty repository.
+                let text = if loaded && !loading && fetched {
                     match query.kind {
                         Kind::Issues => t(L10nKey::GitHubNoIssues),
                         Kind::Pulls => t(L10nKey::GitHubNoPulls),
@@ -1527,6 +1572,332 @@ mod gpui_tests {
         settle(&app, &mut vcx, "the detail read again", |_| {
             reads_of_pull() >= 2
         });
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- B3b recovery witnesses -------------------------------------------
+    //
+    // Baseline-compatible: none of these names an API that c700 lacks. Each
+    // looks for the Refresh button by its debug selector in a real app window,
+    // so on c700 it fails on its own `expect` ("... offers Refresh").
+
+    /// The selector the recovery button is drawn under.
+    const REFRESH: &str = "panel-github-error-refresh";
+
+    /// Every request is refused as not found, and counted.
+    struct CountingRefusing {
+        asks: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Transport for CountingRefusing {
+        fn get(&self, _path: &str) -> Result<Reply, ApiError> {
+            self.asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ApiError::NotFound)
+        }
+
+        fn authenticated(&self) -> bool {
+            false
+        }
+    }
+
+    /// Answers like [`Fake`] until `down` is set, then every request fails as a
+    /// dead link. What a refresh that fails over content already on screen
+    /// needs, without any timer or mock handler in the way.
+    struct Flaky {
+        inner: Fake,
+        down: std::sync::atomic::AtomicBool,
+    }
+
+    impl Transport for Flaky {
+        fn get(&self, path: &str) -> Result<Reply, ApiError> {
+            if self.down.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ApiError::Network("link down".into()));
+            }
+            self.inner.get(path)
+        }
+
+        fn authenticated(&self) -> bool {
+            true
+        }
+    }
+
+    /// The GitHub tab on `root`, a repository with an `acme/widgets` remote,
+    /// reading through `transport`.
+    fn github_on(
+        cx: &mut TestAppContext,
+        root: &Path,
+        transport: Arc<dyn Transport>,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        crate::daemon::transport::Stream,
+    ) {
+        git(root, &["init", "--quiet"]);
+        git(
+            root,
+            &["remote", "add", "origin", "https://github.com/acme/widgets"],
+        );
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        vcx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(800.)));
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.github.connector = Some(Arc::new(move || Connection {
+                transport: transport.clone(),
+            }));
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::GitHub;
+            cx.notify();
+        });
+        DaemonMsg::Cwd(root.to_path_buf())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        (app, vcx, pane)
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// A failed list with nothing to show says what to do and carries the
+    /// Refresh that does it; the click asks GitHub again. The sign-in hint's
+    /// command chip is still drawn beside it.
+    #[gpui::test]
+    fn a_failed_list_with_no_rows_offers_a_refresh_that_asks_again(cx: &mut TestAppContext) {
+        crate::ui::i18n::set_locale("en");
+        let root = scratch("refresh-list");
+        let refusing = Arc::new(CountingRefusing {
+            asks: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (app, mut vcx, _pane) = github_on(cx, &root, refusing.clone());
+        settle(&app, &mut vcx, "the refused list", |app| {
+            app.github.lists.values().any(|l| l.error.is_some())
+        });
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("github-hint-command").is_some(),
+            "the rich hint's command chip survives"
+        );
+        let button = vcx
+            .debug_bounds(REFRESH)
+            .expect("a failed list offers Refresh");
+        let before = refusing.asks.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(before >= 1, "the first try was made");
+
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        settle(&app, &mut vcx, "the list asked for again", |_| {
+            refusing.asks.load(std::sync::atomic::Ordering::SeqCst) > before
+        });
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failed call — here a signed-out 404 on one issue — says what to do
+    /// and carries the Refresh that does it: the click asks GitHub again.
+    #[gpui::test]
+    fn a_failed_detail_offers_a_refresh_that_asks_again(cx: &mut TestAppContext) {
+        let root = scratch("refresh-detail");
+        let fake = Arc::new(Fake {
+            asked: Mutex::new(Vec::new()),
+        });
+        let (app, mut vcx, _pane) = github_on(cx, &root, fake.clone());
+        settle(&app, &mut vcx, "the issue list", |app| {
+            app.github.lists.values().any(|l| l.loaded)
+        });
+
+        const MISSING: &str = "/repos/acme/widgets/issues/99";
+        let slug = app.update_in(&mut vcx, |app, _, cx| {
+            let slug = app.github.lists.keys().next().unwrap().slug.clone();
+            app.github_open_detail(slug.clone(), 99, cx);
+            slug
+        });
+        settle(&app, &mut vcx, "the failed detail", |app| {
+            app.github
+                .details
+                .get(&(slug.clone(), 99))
+                .is_some_and(|d| d.error.is_some())
+        });
+        let asked = |fake: &Fake| {
+            fake.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.as_str() == MISSING)
+                .count()
+        };
+        let before = asked(&fake);
+        assert!(before >= 1);
+
+        draw(&mut vcx);
+        let button = vcx
+            .debug_bounds(REFRESH)
+            .expect("a failed detail offers Refresh");
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        settle(&app, &mut vcx, "the detail asked for again", |_| {
+            asked(&fake) > before
+        });
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The link drops after a list and a detail are on screen. Both keep what
+    /// they had — the rows, the detail — and both still offer Refresh beside
+    /// the failure.
+    #[gpui::test]
+    fn a_failed_refresh_over_retained_rows_and_detail_still_offers_refresh(
+        cx: &mut TestAppContext,
+    ) {
+        let root = scratch("refresh-retained");
+        let flaky = Arc::new(Flaky {
+            inner: Fake {
+                asked: Mutex::new(Vec::new()),
+            },
+            down: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (app, mut vcx, _pane) = github_on(cx, &root, flaky.clone());
+        settle(&app, &mut vcx, "the issue list", |app| {
+            app.github
+                .lists
+                .values()
+                .any(|l| l.loaded && l.error.is_none() && !l.items.is_empty())
+        });
+        let slug = app.update_in(&mut vcx, |app, _, cx| {
+            let slug = app.github.lists.keys().next().unwrap().slug.clone();
+            app.github_open_detail(slug.clone(), 7, cx);
+            slug
+        });
+        settle(&app, &mut vcx, "the detail", |app| {
+            app.github
+                .details
+                .get(&(slug.clone(), 7))
+                .is_some_and(|d| d.detail.is_some())
+        });
+
+        // The link drops and everything cached is due again.
+        flaky.down.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.update_in(&mut vcx, |app, _, cx| {
+            for list in app.github.lists.values_mut() {
+                list.fetched = None;
+            }
+            for detail in app.github.details.values_mut() {
+                detail.fetched = None;
+            }
+            cx.notify();
+        });
+
+        // The detail is on screen: it keeps its content and says why it may
+        // be out of date.
+        settle(&app, &mut vcx, "the failed detail refresh", |app| {
+            app.github
+                .details
+                .get(&(slug.clone(), 7))
+                .is_some_and(|d| d.error.is_some())
+        });
+        draw(&mut vcx);
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| {
+                app.github.details[&(slug.clone(), 7)].detail.is_some()
+            }),
+            "the detail is kept"
+        );
+        assert!(
+            vcx.debug_bounds(REFRESH).is_some(),
+            "a failed refresh over a detail offers Refresh"
+        );
+
+        // Back to the list: the same, over the rows.
+        app.update_in(&mut vcx, |app, _, cx| app.github_close_detail(cx));
+        settle(&app, &mut vcx, "the failed list refresh", |app| {
+            app.github.lists.values().any(|l| l.error.is_some())
+        });
+        draw(&mut vcx);
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| {
+                app.github.lists.values().any(|l| !l.items.is_empty())
+            }),
+            "the rows are kept"
+        );
+        assert!(
+            vcx.debug_bounds(REFRESH).is_some(),
+            "a failed refresh over rows offers Refresh"
+        );
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Over rows already on screen the failure is not the subject, so the
+    /// button steps down to the secondary paint; when the failure is the whole
+    /// body it is the primary. Read through PanelAction's own probe note, from
+    /// the real window, for the list (over rows) and for a detail that never
+    /// loaded (the whole body).
+    #[gpui::test]
+    fn a_refresh_over_rows_is_secondary_and_one_that_is_the_whole_body_is_primary(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::paint_probe as probe;
+
+        let _probe = probe::scope();
+        let root = scratch("refresh-tone");
+        let flaky = Arc::new(Flaky {
+            inner: Fake {
+                asked: Mutex::new(Vec::new()),
+            },
+            down: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (app, mut vcx, _pane) = github_on(cx, &root, flaky.clone());
+        settle(&app, &mut vcx, "the issue list", |app| {
+            app.github
+                .lists
+                .values()
+                .any(|l| l.loaded && l.error.is_none() && !l.items.is_empty())
+        });
+
+        // The link drops: the list keeps its rows and says why.
+        flaky.down.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.update_in(&mut vcx, |app, _, cx| {
+            for list in app.github.lists.values_mut() {
+                list.fetched = None;
+            }
+            cx.notify();
+        });
+        settle(&app, &mut vcx, "the failed list refresh", |app| {
+            app.github.lists.values().any(|l| l.error.is_some())
+        });
+        probe::clear();
+        draw(&mut vcx);
+        assert!(
+            !probe::all("panel_action.secondary").is_empty(),
+            "a failure over rows is a secondary button"
+        );
+        assert!(
+            probe::all("panel_action.primary").is_empty(),
+            "and not a primary one"
+        );
+
+        // A detail that never loaded: the failure is all there is.
+        app.update_in(&mut vcx, |app, _, cx| {
+            let slug = app.github.lists.keys().next().unwrap().slug.clone();
+            app.github_open_detail(slug, 7, cx);
+        });
+        settle(&app, &mut vcx, "the failed detail", |app| {
+            app.github.details.values().any(|d| d.error.is_some())
+        });
+        probe::clear();
+        draw(&mut vcx);
+        assert!(
+            !probe::all("panel_action.primary").is_empty(),
+            "a failure that is the whole body is a primary button"
+        );
+        assert!(
+            probe::all("panel_action.secondary").is_empty(),
+            "and not a secondary one"
+        );
 
         test_window::quiesce(&mut vcx, Some(&root));
         let _ = std::fs::remove_dir_all(&root);

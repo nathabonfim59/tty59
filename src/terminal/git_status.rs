@@ -71,6 +71,22 @@ impl GitStatusCache {
         self.last_probe.clear_host(host);
     }
 
+    /// Forget a directory's negative answer so the next look asks again at
+    /// once: a repository was just created there. Only that directory on that
+    /// host. Its throttle goes with the answer, and a probe already in flight
+    /// is marked superseded so its (older) answer is re-asked rather than
+    /// believed. A directory already known to be inside a repository keeps its
+    /// answer, and every other directory's is untouched.
+    pub fn forget_cwd(&mut self, host: HostId, cwd: &Path) {
+        let cwd = key(host, cwd);
+        self.probes.invalidate(&(host, cwd.to_path_buf()));
+        if matches!(self.roots.get(host, &*cwd), Some(Some(_))) {
+            return;
+        }
+        self.roots.remove(host, &*cwd);
+        self.last_probe.remove(host, &*cwd);
+    }
+
     pub fn begin_probe(&mut self, host: HostId, cwd: &Path) -> bool {
         let key = (host, key(host, cwd).into_owned());
         if self.probes.begin(key.clone()) {
@@ -331,6 +347,66 @@ mod tests {
         assert!(
             !cache.note_diff_read(L, cwd, "feat/x", Some((0, 0))),
             "the same answer twice is not news — this is what breaks the loop"
+        );
+    }
+
+    /// `git init` in a folder the cache had answered "no repository" for: the
+    /// answer and its throttle go, so the next look asks at once; nothing else
+    /// does.
+    #[test]
+    fn a_negative_answer_is_forgotten_for_that_directory_only() {
+        let mut cache = GitStatusCache::default();
+        let (plain, other) = (Path::new("/plain"), Path::new("/other"));
+        let gap = Duration::from_secs(60);
+        for cwd in [plain, other] {
+            assert!(cache.begin_probe_throttled(L, cwd, gap));
+            cache.finish_probe(L, cwd, None);
+        }
+        assert_eq!(cache.known_repo_for(L, plain), Some(None));
+        assert!(!cache.probe_due(L, plain, gap), "the throttle holds");
+        assert!(!cache.retry_due(L, plain, gap), "inside the throttle");
+
+        cache.forget_cwd(L, plain);
+        assert_eq!(cache.known_repo_for(L, plain), None, "the answer is gone");
+        assert!(cache.probe_due(L, plain, gap), "and its throttle with it");
+        assert!(cache.retry_due(L, plain, gap));
+        assert_eq!(
+            cache.known_repo_for(L, other),
+            Some(None),
+            "another directory's negative answer stays"
+        );
+        assert!(!cache.probe_due(L, other, gap), "and so does its throttle");
+
+        let remote = HostId::from_connection_key("ssh-direct:me@box:22");
+        cache.finish_probe(remote, plain, None);
+        cache.forget_cwd(L, plain);
+        assert_eq!(
+            cache.known_repo_for(remote, plain),
+            Some(None),
+            "the same path on another machine is another directory"
+        );
+    }
+
+    /// A directory the cache has already found in a repository is not made to
+    /// forget it, and a probe in flight when the answer is forgotten is asked
+    /// to run again rather than believed.
+    #[test]
+    fn forgetting_keeps_a_found_repository_and_supersedes_a_probe_in_flight() {
+        let mut cache = GitStatusCache::default();
+        let found = Path::new("/repo/sub");
+        cache.finish_probe(L, found, Some(snap("/repo", "main", Some((1, 2)))));
+        cache.forget_cwd(L, found);
+        assert_eq!(
+            cache.known_repo_for(L, found),
+            Some(Some(PathBuf::from("/repo")))
+        );
+
+        let plain = Path::new("/plain");
+        assert!(cache.begin_probe(L, plain));
+        cache.forget_cwd(L, plain);
+        assert!(
+            cache.finish_probe(L, plain, None),
+            "the answer that was in flight is stale: ask for a rerun"
         );
     }
 

@@ -271,6 +271,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirUnreadable => "読み取れません",
         L10nKey::TreeSearchCapped => "最初の {n} 件のみ",
         L10nKey::TreeSearchFailed => "検索に失敗しました",
+        L10nKey::TreeRetry => "再試行",
         L10nKey::FileChangedOnDisk => "ディスク上でファイルが変更されました",
         L10nKey::Reload => "再読み込み",
         L10nKey::KeepMine => "自分の変更を保持",
@@ -1532,6 +1533,15 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNotAGitRepoHint => {
             "git リポジトリ内に移動すると、このタブに未コミットの変更が一覧表示されます"
         }
+        L10nKey::PanelInitRepo => "リポジトリを初期化",
+        L10nKey::PanelScmStatusFailed => "git ステータスを読み取れませんでした",
+        L10nKey::PanelScmStatusRetry => "再試行",
+        L10nKey::PanelCopyError => "エラーをコピー",
+        L10nKey::PanelScmGitExitStatus => "git が終了ステータス {code} で終了しました",
+        L10nKey::PanelScmGitSignal => "git がシグナルにより停止されました",
+        L10nKey::PanelScmGitUnusableRoot => "git rev-parse が使用できる出力を返しませんでした",
+        L10nKey::PanelScmGitPanicked => "git status が異常終了しました",
+        L10nKey::PanelScmGitPanickedWithReason => "git status が異常終了しました: {reason}",
         L10nKey::PanelNoChanges => "未コミットの変更はありません",
         L10nKey::PanelNoChangesHint => "ワーキングツリーはクリーンです",
         L10nKey::PanelSessionSubtitle => "セッション",

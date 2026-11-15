@@ -27,6 +27,118 @@ pub(crate) fn shown_tab(tab: RightPanelTab) -> RightPanelTab {
     }
 }
 
+/// Which of the two panel button paints an empty state's way out takes.
+///
+/// No danger tone: a way back from an empty or failed state is never the thing
+/// a panel warns about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelActionTone {
+    /// The inverted neutral — body ink as the fill — for the one thing the
+    /// state is waiting on.
+    Primary,
+    /// The light neutral fill, for a way out the panel offers rather than asks
+    /// for.
+    Secondary,
+}
+
+/// Space between an empty state's words and its button, on top of the 3px the
+/// column already puts between its lines: 8 in all, the panel's step.
+pub(crate) const PANEL_ACTION_GAP: f32 = 5.;
+
+type PanelActionHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>;
+
+/// A button under an empty or failed panel state: the recovery an Error state
+/// has to come with, in the panel's own 28px button.
+pub(crate) struct PanelAction {
+    id: gpui::SharedString,
+    label: gpui::SharedString,
+    tone: PanelActionTone,
+    on_click: PanelActionHandler,
+}
+
+impl PanelAction {
+    pub(crate) fn primary(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self::new(id, label, PanelActionTone::Primary, on_click)
+    }
+
+    pub(crate) fn secondary(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self::new(id, label, PanelActionTone::Secondary, on_click)
+    }
+
+    fn new(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        tone: PanelActionTone,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            tone,
+            on_click: Box::new(on_click),
+        }
+    }
+
+    /// The dialog button, on the panel's own surface ladder so the primary's
+    /// label reads as cut out of the panel and the secondary's fill is the
+    /// panel's next rung.
+    ///
+    /// The shared dialog recipe paints a Secondary label in the raw foreground,
+    /// which does not clear the text floor on every theme's hover rung. This
+    /// consumer lays the cached panel-row title ink over it
+    /// (`ChromeInk::panel_title`, floored on the sidebar's resting, hovered and
+    /// selected rows — the fills the Secondary button sits on and brightens to);
+    /// the recipe itself is left exactly as it is. Findable by `id` as a debug
+    /// selector in tests.
+    pub(crate) fn render(self, cx: &gpui::App) -> AnyElement {
+        let (tone, ink) = match self.tone {
+            PanelActionTone::Primary => (crate::ui::dialog::Tone::Primary, None),
+            PanelActionTone::Secondary => (
+                crate::ui::dialog::Tone::Secondary,
+                Some(gpui::rgb(crate::ui::theme::chrome_ink(cx).panel_title)),
+            ),
+        };
+        let rungs = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let on_click = self.on_click;
+        #[cfg(test)]
+        let selector = self.id.to_string();
+        let button = crate::ui::dialog::button(
+            self.id,
+            self.label,
+            tone,
+            true,
+            rungs,
+            cx,
+            move |e, w, cx| on_click(e, w, cx),
+        )
+        .when_some(ink, |button, ink| button.text_color(ink));
+        // The paints as this consumer leaves them: for a Secondary that is the
+        // overriding ink, which the recipe's own note (taken before it) cannot
+        // see. The hover fills stay the recipe's own, noted by `dialog::button`.
+        #[cfg(test)]
+        let mut button = button;
+        #[cfg(test)]
+        crate::ui::paint_probe::note(
+            match self.tone {
+                PanelActionTone::Primary => "panel_action.primary",
+                PanelActionTone::Secondary => "panel_action.secondary",
+            },
+            &mut button,
+        );
+        #[cfg(test)]
+        let button = button.debug_selector(move || selector);
+        button.into_any_element()
+    }
+}
+
 /// Wide enough for the word tabs and the widest Changes count (`99+`), beside
 /// the panel toggle, at the default interface size. The count's room is held
 /// whether or not there is one, so the panel's minimum width does not move as
@@ -920,16 +1032,25 @@ impl Tty59App {
         hint: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.panel_empty_with(text, hint.map(|h| h.to_string().into_any_element()), cx)
+        self.panel_empty_with(
+            text,
+            hint.map(|h| h.to_string().into_any_element()),
+            None,
+            cx,
+        )
     }
 
     /// [`Self::panel_empty`] with the hint already built, for one that is more
-    /// than a string — text around an element, such as a command in a chip. The
-    /// hint sits in the same secondary line the plain one does.
+    /// than a string — text around an element, such as a command in a chip —
+    /// and a way out under it. The hint sits in the same secondary line the
+    /// plain one does. A state that says something failed, or that something
+    /// is missing, and then leaves the user to work out the fix elsewhere is
+    /// half a message.
     pub(crate) fn panel_empty_with(
         &self,
         text: &str,
         hint: Option<AnyElement>,
+        action: Option<PanelAction>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
@@ -941,6 +1062,10 @@ impl Tty59App {
             .text_color(muted)
             .child(text.to_string())
             .children(hint.map(|h| div().text_size(rems(META)).text_color(muted).child(h)))
+            // Its own row, so the button keeps its width rather than being
+            // stretched across the column, with a pause above it that sets it
+            // apart from the text it answers.
+            .children(action.map(|a| h_flex().pt(px(PANEL_ACTION_GAP)).child(a.render(cx))))
             .into_any_element()
     }
 
@@ -2675,5 +2800,431 @@ mod contrast_tests {
             }
         }
         misses.assert_none("port chip inks");
+    }
+}
+
+/// B3b style sweeps over the recovery buttons of an empty or failed panel
+/// state. They render the real consumer, [`PanelAction`], on every built-in and
+/// every generated theme and read what it painted through the scoped probe: its
+/// own note of the final rest paints (for a Secondary that is the cached
+/// `panel_title` ink laid over the shared recipe's) and the shared recipe's
+/// note of the hover fill it sets. The label of a hovered button is the same
+/// ink as at rest — hover sets only the fill — so each pair is the final ink
+/// against the real fill. A raw `dialog::button` probe would measure the shared
+/// recipe, not this consumer. They change no recipe, token or target.
+///
+/// Limit, stated so it is not mistaken for coverage: this is style, not raster
+/// pixels, so native 4.5/3 measurements stay a separate gate.
+#[cfg(test)]
+mod recovery_button_diagnostics {
+    use gpui::TestAppContext;
+    use gpui_component::ActiveTheme as _;
+
+    use super::PanelAction;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, MARK_FLOOR, Misses, TEXT_FLOOR};
+    use crate::ui::paint_probe::{self as probe, Painted, hsla24};
+    use crate::ui::presets::{self, Theme};
+
+    /// The 877-odd themes: every built-in and the whole generated grid, not
+    /// the sampled spread the other contrast tests use.
+    fn every_theme() -> Vec<Theme> {
+        let mut all = presets::builtins();
+        all.extend(presets::generated_theme_grid());
+        all
+    }
+
+    /// What `PanelAction::render` painted for each tone on the theme now
+    /// applied: the final rest paints (`primary`, `secondary`) and the fill the
+    /// shared recipe sets under the pointer (`*_hover`); and the panel's fill.
+    struct Drawn {
+        primary: Painted,
+        secondary: Painted,
+        primary_hover: Painted,
+        secondary_hover: Painted,
+        sidebar_base: u32,
+        /// The panel's fill as `workspace_surface_color` returns it, RGB only;
+        /// `panel_alpha` is its alpha, which `hsla24` drops; the diagnostics
+        /// pin an opaque window and assert it (see `assert_opaque_panel`).
+        panel: u32,
+        panel_alpha: f32,
+        muted: u32,
+    }
+
+    /// An opaque window, set once before a theme loop: `test_themes::apply`
+    /// clones the Config global and changes only the theme fields, so these
+    /// survive every `apply_theme`.
+    fn pin_opaque_window(vcx: &mut gpui::VisualTestContext) {
+        vcx.update(|_, cx| {
+            let mut config = cx.global::<crate::core::config::Config>().clone();
+            config.window_opacity = Some(1.0);
+            config.window_blur = Some(false);
+            cx.set_global(config);
+        });
+    }
+
+    /// The ratios below are against `hsla24(panel)`, which drops alpha, so they
+    /// only mean something while the panel fill is solid. Fails by name if the
+    /// pinned fixture did not make it so.
+    fn assert_opaque_panel(id: &str, drawn: &Drawn) {
+        assert!(
+            drawn.panel_alpha >= 1.0,
+            "{id}: workspace_surface_color has alpha {} with window_opacity=Some(1.0) and \
+             window_blur=Some(false) pinned; the fixture is not opaque, so no ratio against the \
+             panel fill is valid",
+            drawn.panel_alpha
+        );
+    }
+
+    fn draw_buttons(vcx: &mut gpui::VisualTestContext) -> Drawn {
+        probe::clear();
+        let (sidebar_base, panel, panel_alpha, muted) = vcx.update(|_, cx| {
+            let rungs = cx.global::<presets::Surfaces>().sidebar;
+            // Rendering is what notes: the consumer's final rest paints and,
+            // inside it, the shared recipe's hover fill.
+            let _ = PanelAction::primary("diag-primary", "Refresh", |_, _, _| {}).render(cx);
+            let _ = PanelAction::secondary("diag-secondary", "Retry", |_, _, _| {}).render(cx);
+            let panel = crate::ui::theme::workspace_surface_color(cx);
+            (
+                rungs.base,
+                hsla24(panel),
+                panel.a,
+                hsla24(cx.theme().muted_foreground),
+            )
+        });
+        let one = |key: &'static str| {
+            let notes = probe::all(key);
+            assert_eq!(notes.len(), 1, "{key}: one note per drawn button");
+            notes[0]
+        };
+        Drawn {
+            primary: one("panel_action.primary"),
+            secondary: one("panel_action.secondary"),
+            primary_hover: one("dialog.button.primary.hover"),
+            secondary_hover: one("dialog.button.secondary.hover"),
+            sidebar_base,
+            panel,
+            panel_alpha,
+            muted,
+        }
+    }
+
+    /// Element and pair, at rest: the label of the Primary button (surface ink
+    /// on the `foreground` fill) and of the Secondary one (the cached
+    /// `panel_title` ink PanelAction lays over the recipe's, on the sidebar's
+    /// hover rung), 12.5px, so the 4.5:1 text floor, on the paints
+    /// `PanelAction::render` really set. Both paints must be opaque for the
+    /// ratio to mean anything, and that is checked too. No theme is skipped.
+    /// (Before PanelAction laid its own ink over the Secondary's, this test
+    /// read the raw recipe and missed in 45 of 877 themes, lowest ~4.27:1.)
+    #[gpui::test]
+    fn recovery_button_labels_clear_the_text_floor_on_every_theme(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        let mut translucent: Vec<String> = Vec::new();
+        pin_opaque_window(&mut vcx);
+        for theme in &every_theme() {
+            themes::apply(&mut vcx, theme);
+            let drawn = draw_buttons(&mut vcx);
+            let id = theme.id.as_str();
+            assert_opaque_panel(id, &drawn);
+            for (name, p) in [("primary", drawn.primary), ("secondary", drawn.secondary)] {
+                let (Some(fill), Some(ink)) = (p.fill, p.text) else {
+                    translucent.push(format!("{id}: {name} drew no solid fill or ink: {p:?}"));
+                    continue;
+                };
+                if p.fill_alpha != Some(1.0) || p.text_alpha != Some(1.0) {
+                    translucent.push(format!(
+                        "{id}: {name} is not opaque (fill {:?}, ink {:?})",
+                        p.fill_alpha, p.text_alpha
+                    ));
+                }
+                misses.floor(
+                    id,
+                    &format!("{name} label on its fill"),
+                    ink,
+                    fill,
+                    TEXT_FLOOR,
+                );
+            }
+        }
+        assert!(
+            translucent.is_empty(),
+            "recovery button paints: {} not solid\n{}",
+            translucent.len(),
+            translucent.join("\n")
+        );
+        misses.assert_none("recovery button label contrast");
+    }
+
+    /// Element and pair: the Primary button's `foreground` fill against the
+    /// panel's own fill is what makes it findable, so it carries the
+    /// 3:1 component floor and is asserted, with the window pinned opaque and
+    /// that asserted per theme (`hsla24` drops alpha). The Secondary button's
+    /// fill is the
+    /// sidebar's faint hover rung — a tint by design, named by its label — so
+    /// its ratio is printed, not asserted, with how often it falls under 3:1.
+    /// Also printed: whether the sidebar's `base` rung is the panel's fill (the
+    /// recipe takes its surface from the former, the panel paints the latter),
+    /// and how the muted ink of the state's reason (14px) and hint (12px)
+    /// stands against that fill, both text, at 4.5:1.
+    #[gpui::test]
+    fn recovery_button_fills_against_the_panel_fill_diagnostic(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        let mut secondary_under = 0usize;
+        let mut secondary_min = (f32::MAX, String::new());
+        let mut base_differs: Vec<String> = Vec::new();
+        let mut muted_under: Vec<String> = Vec::new();
+        let mut themes_seen = 0usize;
+        pin_opaque_window(&mut vcx);
+        for theme in &every_theme() {
+            themes::apply(&mut vcx, theme);
+            let drawn = draw_buttons(&mut vcx);
+            let id = theme.id.as_str();
+            themes_seen += 1;
+            assert_opaque_panel(id, &drawn);
+            if let Some(fill) = drawn.primary.fill {
+                misses.floor(
+                    id,
+                    "primary fill on the panel fill",
+                    fill,
+                    drawn.panel,
+                    MARK_FLOOR,
+                );
+            }
+            if let Some(fill) = drawn.secondary.fill {
+                let ratio = presets::contrast(fill, drawn.panel);
+                if ratio < MARK_FLOOR {
+                    secondary_under += 1;
+                }
+                if ratio < secondary_min.0 {
+                    secondary_min = (ratio, id.to_string());
+                }
+            }
+            if drawn.sidebar_base != drawn.panel {
+                base_differs.push(format!(
+                    "{id}: sidebar.base {:06x} vs panel fill {:06x}",
+                    drawn.sidebar_base, drawn.panel
+                ));
+            }
+            let muted = presets::contrast(drawn.muted, drawn.panel);
+            if muted < TEXT_FLOOR {
+                muted_under.push(format!("{id}: muted ink {muted:.2}:1 on the panel fill"));
+            }
+        }
+        eprintln!(
+            "recovery diagnostic over {themes_seen} themes (opaque window pinned): secondary fill \
+             vs panel under 3:1 in {secondary_under} (lowest {:.2}:1, {}); sidebar.base != panel \
+             fill in {}; muted ink (reason 14px / hint 12px) under 4.5:1 on the panel fill in {}",
+            secondary_min.0,
+            secondary_min.1,
+            base_differs.len(),
+            muted_under.len(),
+        );
+        for line in base_differs.iter().chain(&muted_under).take(40) {
+            eprintln!("  {line}");
+        }
+        misses.assert_none("recovery primary button fill");
+    }
+
+    /// Element and pair, under the pointer: the same final label ink as at
+    /// rest (hover sets only the fill) against the fill the shared recipe
+    /// really sets on hover — the Primary's `foreground` blended 14% toward the
+    /// surface, the Secondary's `sidebar.selected` rung — at the 4.5:1 text
+    /// floor, on every theme, none skipped. Both hover fills must be solid.
+    ///
+    /// The Secondary's hover is a GATE at 4.5:1 for every theme. The Primary's
+    /// is INFORMATIONAL: its hover fill is set by the shared dialog recipe
+    /// (`foreground` blended 14% toward the surface), no role floors it, and
+    /// changing it is the recipe owner's decision, not this package's — so its
+    /// misses are collected and printed as one aggregate (count of total, every
+    /// exact ink/fill pair), never asserted, never allow-listed. The rest
+    /// paints of both tones stay gated by the sibling test.
+    #[gpui::test]
+    fn recovery_button_hover_labels_clear_the_text_floor_on_every_theme(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        let mut not_solid: Vec<String> = Vec::new();
+        let mut primary_hover_under: Vec<(f32, String)> = Vec::new();
+        let mut themes_seen = 0usize;
+        pin_opaque_window(&mut vcx);
+        for theme in &every_theme() {
+            themes::apply(&mut vcx, theme);
+            let drawn = draw_buttons(&mut vcx);
+            let id = theme.id.as_str();
+            themes_seen += 1;
+            for (name, rest, hover) in [
+                ("primary", drawn.primary, drawn.primary_hover),
+                ("secondary", drawn.secondary, drawn.secondary_hover),
+            ] {
+                let (Some(ink), Some(fill)) = (rest.text, hover.fill) else {
+                    not_solid.push(format!(
+                        "{id}: {name} has no ink or no hover fill: rest {rest:?}, hover {hover:?}"
+                    ));
+                    continue;
+                };
+                if hover.fill_alpha != Some(1.0) || rest.text_alpha != Some(1.0) {
+                    not_solid.push(format!(
+                        "{id}: {name} hover is not opaque (fill {:?}, ink {:?})",
+                        hover.fill_alpha, rest.text_alpha
+                    ));
+                }
+                if name == "primary" {
+                    let ratio = presets::contrast(ink, fill);
+                    if ratio < TEXT_FLOOR {
+                        primary_hover_under.push((
+                            ratio,
+                            format!("{id}: ink {ink:06x} on hover fill {fill:06x} = {ratio:.2}:1"),
+                        ));
+                    }
+                } else {
+                    misses.floor(
+                        id,
+                        &format!("{name} label on its hover fill"),
+                        ink,
+                        fill,
+                        TEXT_FLOOR,
+                    );
+                }
+            }
+        }
+        // Informational, printed before any assertion so it survives one:
+        // the shared Primary hover, which this package does not own.
+        primary_hover_under.sort_by(|a, b| a.0.total_cmp(&b.0));
+        eprintln!(
+            "recovery diagnostic (informational, not asserted): Primary hover label under \
+             {TEXT_FLOOR}:1 in {} of {themes_seen} themes; lowest first, every pair:",
+            primary_hover_under.len()
+        );
+        for (_, line) in &primary_hover_under {
+            eprintln!("  {line}");
+        }
+        assert!(
+            not_solid.is_empty(),
+            "recovery button hover paints: {} not solid\n{}",
+            not_solid.len(),
+            not_solid.join("\n")
+        );
+        misses.assert_none("recovery secondary button hover label contrast");
+    }
+}
+
+#[cfg(test)]
+mod panel_empty_gpui_tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{Entity, TestAppContext, VisualTestContext, div, prelude::*, px};
+
+    use super::PanelAction;
+    use crate::ui::app::{Tty59App, test_window};
+
+    const ACTION: &str = "test-panel-empty-action";
+    const BODY: &str = "test-panel-empty-body";
+
+    /// An empty state on its own, in a window of its own, so the click lands on
+    /// it and nothing else.
+    struct EmptyState {
+        app: Entity<Tty59App>,
+        primary: bool,
+        with_action: bool,
+        clicks: Rc<Cell<u32>>,
+    }
+
+    impl gpui::Render for EmptyState {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            let on_click = move |_: &gpui::ClickEvent, _: &mut gpui::Window, _: &mut gpui::App| {
+                clicks.set(clicks.get() + 1);
+            };
+            let action = self.with_action.then(|| match self.primary {
+                true => PanelAction::primary(ACTION, "Refresh", on_click),
+                false => PanelAction::secondary(ACTION, "Retry", on_click),
+            });
+            let body = self.app.update(cx, |app, cx| {
+                app.panel_empty_with(
+                    "Something failed",
+                    Some("A hint.".to_string().into_any_element()),
+                    action,
+                    cx,
+                )
+            });
+            div()
+                .w(px(320.))
+                .h(px(600.))
+                .child(div().debug_selector(|| BODY.into()).child(body))
+        }
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+        app: &Entity<Tty59App>,
+        primary: bool,
+        with_action: bool,
+    ) -> (VisualTestContext, Rc<Cell<u32>>) {
+        let clicks = Rc::new(Cell::new(0));
+        let (app, seen) = (app.clone(), clicks.clone());
+        let window = cx.add_window(move |_, _| EmptyState {
+            app,
+            primary,
+            with_action,
+            clicks: seen,
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (vcx, clicks)
+    }
+
+    /// Both paints draw a 28px button under the text, and a click on it runs
+    /// the handler the call site gave — once.
+    #[gpui::test]
+    fn an_empty_states_action_renders_and_its_handler_fires(cx: &mut TestAppContext) {
+        let (app, _vcx, _pane) = test_window::harness_with_pane(cx);
+        for primary in [true, false] {
+            let (mut vcx, clicks) = open(cx, &app, primary, true);
+            let button = vcx
+                .debug_bounds(ACTION)
+                .expect("an empty state with an action draws its button");
+            assert_eq!(button.size.height, px(crate::ui::dialog::BUTTON_H));
+            vcx.simulate_click(button.center(), gpui::Modifiers::none());
+            assert_eq!(clicks.get(), 1, "primary: {primary}");
+        }
+    }
+
+    /// The button sits in a row of its own under the words, 8px clear of the
+    /// last line (the column's 3px gap and `PANEL_ACTION_GAP`), and keeps its
+    /// own width instead of stretching across the column.
+    #[gpui::test]
+    fn the_action_sits_in_its_own_row_under_the_words(cx: &mut TestAppContext) {
+        let (app, _vcx, _pane) = test_window::harness_with_pane(cx);
+        let (mut vcx, _) = open(cx, &app, false, true);
+        let body = vcx.debug_bounds(BODY).expect("the empty state is drawn");
+        let button = vcx.debug_bounds(ACTION).expect("and its button");
+        assert!(
+            button.origin.y > body.origin.y && button.bottom() <= body.bottom(),
+            "the button is inside the state, below its top: {button:?} in {body:?}"
+        );
+        assert!(
+            button.size.width < body.size.width,
+            "and is not stretched across the column: {button:?} in {body:?}"
+        );
+    }
+
+    /// `panel_empty` is unchanged: words only, no button to find.
+    #[gpui::test]
+    fn an_empty_state_without_an_action_draws_no_button(cx: &mut TestAppContext) {
+        let (app, _vcx, _pane) = test_window::harness_with_pane(cx);
+        let (mut vcx, _) = open(cx, &app, false, false);
+        assert!(vcx.debug_bounds(BODY).is_some(), "the state is drawn");
+        assert!(vcx.debug_bounds(ACTION).is_none());
     }
 }
