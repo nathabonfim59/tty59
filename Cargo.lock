@@ -3914,7 +3914,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/nathabonfim59/gpui-component?rev=47ed92c87578d2ba021b188626a455094b745091#47ed92c87578d2ba021b188626a455094b745091"
+source = "git+https://github.com/nathabonfim59/gpui-component?rev=79a9176b1df3d1b629ef62ee62a1e1e76e788232#79a9176b1df3d1b629ef62ee62a1e1e76e788232"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3997,7 +3997,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/nathabonfim59/gpui-component?rev=47ed92c87578d2ba021b188626a455094b745091#47ed92c87578d2ba021b188626a455094b745091"
+source = "git+https://github.com/nathabonfim59/gpui-component?rev=79a9176b1df3d1b629ef62ee62a1e1e76e788232#79a9176b1df3d1b629ef62ee62a1e1e76e788232"
 dependencies = [
  "anyhow",
  "gpui",
@@ -4011,7 +4011,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/nathabonfim59/gpui-component?rev=47ed92c87578d2ba021b188626a455094b745091#47ed92c87578d2ba021b188626a455094b745091"
+source = "git+https://github.com/nathabonfim59/gpui-component?rev=79a9176b1df3d1b629ef62ee62a1e1e76e788232#79a9176b1df3d1b629ef62ee62a1e1e76e788232"
 dependencies = [
  "proc-macro2",
  "quote",
