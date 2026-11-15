@@ -319,18 +319,20 @@ edition = "2024"
 version = "26.14.1"
 
 [workspace.dependencies]
-# Our fork's `tty7` branch carries the local customizations tty59 relies on:
-# `PopupMenu::with_size`, the 1px hairline menu separator, and the custom-button
-# label color the chrome tiles need. The exact commit is still pinned by
-# Cargo.lock. For co-developing the UI crate, point these back at a sibling
-# checkout: `path = "../gpui-component/crates/{ui,assets}"` — but never commit
+# Our fork (nathabonfim59/gpui-component, cut from the `tty7` line) carries the
+# local customizations tty59 relies on: `PopupMenu::with_size`, the 1px hairline
+# menu separator, the custom-button label color the chrome tiles need, and the
+# optional `focus.ring` color and `focus.ring_offset` gap a theme can set for
+# the keyboard focus ring. Both crates pin the same immutable `rev` so they
+# always come from one source. For co-developing the UI crate, point these back
+# at a sibling checkout: `path = "../gpui-component/crates/{ui,assets}"` — but never commit
 # that, since a path dependency can't resolve on CI.
 #
 # `tree-sitter-languages` compiles the grammars the code editor highlights with.
-gpui-component = { git = "https://github.com/l0ng-ai/gpui-component", branch = "tty7", version = "0.5.2", features = [
+gpui-component = { git = "https://github.com/nathabonfim59/gpui-component", rev = "d061ca6ec7cdc1c063dd91ecb2ea7db749446bef", version = "0.5.2", features = [
     "tree-sitter-languages",
 ] }
-gpui-component-assets = { git = "https://github.com/l0ng-ai/gpui-component", branch = "tty7", version = "0.5.1" }
+gpui-component-assets = { git = "https://github.com/nathabonfim59/gpui-component", rev = "d061ca6ec7cdc1c063dd91ecb2ea7db749446bef", version = "0.5.1" }
 
 gpui = { git = "https://github.com/zed-industries/zed", rev = "1d217ee39d381ac101b7cf49d3d22451ac1093fe" }
 # Base features are cross-platform (`font-kit`, `runtime_shaders` only map to the
