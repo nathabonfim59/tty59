@@ -5855,6 +5855,20 @@ mod agent_tests {
             .collect()
     }
 
+    /// The chord New Agent Tab ships on, spelled out per platform rather than
+    /// read from the keymap: macOS cmd-shift-a; Windows ctrl-alt-shift-insert
+    /// (Insert avoids the tested Polish AltGr printable shapes); Linux
+    /// ctrl-alt-shift-a.
+    fn shipped_new_agent_chord() -> Vec<(String, gpui::Modifiers)> {
+        if cfg!(target_os = "macos") {
+            strokes(&["cmd-shift-a"])
+        } else if cfg!(target_os = "windows") {
+            strokes(&["ctrl-alt-shift-insert"])
+        } else {
+            strokes(&["ctrl-alt-shift-a"])
+        }
+    }
+
     fn rail_chord(
         app: &Entity<Tty59App>,
         vcx: &mut gpui::VisualTestContext,
@@ -5924,14 +5938,13 @@ mod agent_tests {
         use crate::core::config::KeybindingOverride::Add;
         let (app, mut vcx, _streams) = empty_agents_rail(cx, Some(Add("ctrl-alt-m".into())));
         let chord = rail_chord(&app, &mut vcx);
-        // macOS ships New Agent Tab on cmd-shift-a and the added chord comes
-        // after it; elsewhere the action ships unbound and the added one leads.
-        let expected = if cfg!(target_os = "macos") {
-            strokes(&["cmd-shift-a"])
-        } else {
-            strokes(&["ctrl-alt-m"])
-        };
-        assert_eq!(chord, expected, "the first binding the keymap holds");
+        // Every platform ships a New Agent Tab chord and the added one comes
+        // after it, so the first binding the keymap holds is the shipped one.
+        assert_eq!(
+            chord,
+            shipped_new_agent_chord(),
+            "the first binding the keymap holds"
+        );
         assert!(vcx.debug_bounds("sidebar-new-agent-chord").is_some());
     }
 
@@ -5953,16 +5966,10 @@ mod agent_tests {
     #[gpui::test]
     fn the_new_agent_row_follows_the_shipped_default(cx: &mut gpui::TestAppContext) {
         let (app, mut vcx, _streams) = empty_agents_rail(cx, None);
-        let expected = if cfg!(target_os = "macos") {
-            strokes(&["cmd-shift-a"])
-        } else {
-            Vec::new()
-        };
-        assert_eq!(rail_chord(&app, &mut vcx), expected);
-        assert_eq!(
+        assert_eq!(rail_chord(&app, &mut vcx), shipped_new_agent_chord());
+        assert!(
             vcx.debug_bounds("sidebar-new-agent-chord").is_some(),
-            cfg!(target_os = "macos"),
-            "Linux and Windows ship New Agent Tab unbound, so no chord is drawn"
+            "every platform ships New Agent Tab on a chord, so the row draws it"
         );
     }
 

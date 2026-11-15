@@ -20,7 +20,7 @@ it shows what *your* copy is bound to. This is the shipped default.
 | New Workspace | <kbd>⌘ ⇧ N</kbd> | <kbd>Ctrl ⇧ N</kbd> |
 | Switch Workspace | <kbd>⌘ ⇧ O</kbd> | <kbd>Ctrl ⇧ O</kbd> |
 | New Window | <kbd>⌘ N</kbd> | — |
-| New Agent Tab | <kbd>⌘ ⇧ A</kbd> | — |
+| New Agent Tab | <kbd>⌘ ⇧ A</kbd> | Windows <kbd>Ctrl Alt ⇧ Insert</kbd> · Linux <kbd>Ctrl Alt ⇧ A</kbd> |
 | Go to Next Agent Needing Attention | <kbd>⌘ ⇧ U</kbd> | <kbd>Ctrl ⇧ U</kbd> |
 
 ## Panes
@@ -53,10 +53,18 @@ it shows what *your* copy is bound to. This is the shipped default.
 | Find Next · Previous | <kbd>⌘ G</kbd> · <kbd>⌘ ⇧ G</kbd> | <kbd>F3</kbd> · <kbd>⇧ F3</kbd> |
 | Clear Scrollback | <kbd>⌘ K</kbd> | <kbd>Ctrl ⇧ K</kbd> |
 | Copy · Paste | <kbd>⌘ C</kbd> · <kbd>⌘ V</kbd> | <kbd>Ctrl ⇧ C</kbd> · <kbd>Ctrl ⇧ V</kbd> · <kbd>⇧ Insert</kbd> |
+| Copy Raw (the rows as shown) | <kbd>⌘ ⌥ C</kbd> | Windows <kbd>Ctrl Alt Insert</kbd> · Linux <kbd>Ctrl Alt C</kbd> |
 | Insert Newline (at the prompt) | <kbd>⇧ ⏎</kbd> · <kbd>⌥ ⏎</kbd> | same |
 | Fuzzy history search | <kbd>⌃ R</kbd> | same |
 | Accept ghost suggestion | <kbd>→</kbd> | same |
 | Completion menu | <kbd>⇥</kbd> | same |
+
+On Windows, AltGr arrives as <kbd>Ctrl Alt</kbd> together with the character the layout
+assigns, for example ć for Polish AltGr+C and Ą for AltGr+⇧+A. A shortcut on a letter
+under <kbd>Ctrl Alt</kbd> is not invoked for such a press, so New Agent Tab and Copy Raw
+sit on <kbd>Insert</kbd> there. On Linux the layouts checked (German, French, Polish,
+US international) deliver AltGr as a level shift rather than as <kbd>Ctrl Alt</kbd>, so
+the letters stay.
 
 On Windows and Linux plain <kbd>Ctrl V</kbd> also pastes at a shell prompt.
 Inside a full-screen application — vim, less, tmux — it is passed through as

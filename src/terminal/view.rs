@@ -18906,6 +18906,441 @@ mod gpui_tests {
             })
             .unwrap();
     }
+
+    // ---- Copy Raw through the real keymap -------------------------------
+    //
+    // These drive `keymap::init` over a config and press keys the way the
+    // window does: the action either copies the selection or, when it
+    // propagates, the chord reaches the shell as bytes. Both ends are read —
+    // the clipboard (the effect) and the PTY — and the window's own report of
+    // how many presses resolved to Copy Raw and were consumed by its handler
+    // (the invocation count, see `count_copy_raw_runs`).
+
+    const COPY_RAW_SENTINEL: &str = "sentinel";
+
+    /// What the config ships for Copy Raw, typed out here on purpose: a
+    /// change of the default has to be a change of this test.
+    fn shipped_copy_raw_chord() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "cmd-alt-c"
+        } else if cfg!(target_os = "windows") {
+            "ctrl-alt-insert"
+        } else {
+            "ctrl-alt-c"
+        }
+    }
+
+    /// The bytes the shell receives when the shipped Copy Raw chord is pressed
+    /// and the keymap does not take it, written out from the xterm encoding
+    /// rather than read from the encoder: Ctrl+Alt+C is ESC then ETX; Ctrl+Alt+
+    /// Insert is `CSI 2 ; 7 ~` (modifier parameter 1 + alt 2 + ctrl 4 = 7, the
+    /// terminfo `kIC7` string). macOS: the Cmd chord reaches the shell as
+    /// nothing, so there is nothing to read.
+    fn shipped_copy_raw_chord_at_the_shell() -> Option<Vec<u8>> {
+        if cfg!(target_os = "macos") {
+            None
+        } else if cfg!(target_os = "windows") {
+            Some(b"\x1b[2;7~".to_vec())
+        } else {
+            Some(vec![0x1b, 0x03])
+        }
+    }
+
+    fn clipboard_text(cx: &mut TestAppContext) -> Option<String> {
+        cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+
+    /// `hello world` on the grid, the real keymap installed over `keybindings`
+    /// (the object `config.json` keeps under "keybindings"), the pane focused
+    /// and painted, and a sentinel on the clipboard so a copy is the one thing
+    /// that can change it. Nothing is selected yet.
+    fn copy_raw_fixture(
+        cx: &mut TestAppContext,
+        keybindings: serde_json::Value,
+    ) -> (
+        gpui::WindowHandle<TerminalView>,
+        Stream,
+        gpui::VisualTestContext,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let (window, mut daemon) = harness(cx);
+        cx.update(|cx| {
+            cx.update_global::<Config, _>(|cfg, _| {
+                cfg.keybindings =
+                    serde_json::from_value(keybindings).expect("the keybindings load");
+            });
+            crate::ui::keymap::init(cx);
+            cx.write_to_clipboard(ClipboardItem::new_string(COPY_RAW_SENTINEL.into()));
+        });
+        DaemonMsg::Output(b"hello world".to_vec())
+            .encode(&mut daemon)
+            .unwrap();
+        let mut shown = false;
+        for _ in 0..400 {
+            cx.run_until_parked();
+            let row: String = window
+                .update(cx, |view, _, _| {
+                    let term = view.terminal.term.clone();
+                    let term = term.lock();
+                    let vt = term.view();
+                    (0..11)
+                        .map(|c| {
+                            vt.glyph(GridPoint {
+                                line: 0,
+                                col: c as u16,
+                            })
+                            .c
+                        })
+                        .collect()
+                })
+                .unwrap();
+            if row == "hello world" {
+                shown = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(shown, "the output never reached the grid");
+        window
+            .update(cx, |view, window, cx| {
+                window.activate_window();
+                view.focus_handle.focus(window, cx);
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (window, daemon, vcx)
+    }
+
+    /// Counts the key presses the window resolved to Copy Raw *and* whose
+    /// handler consumed them. gpui reports a keystroke to its observers with
+    /// the resolved action only when the action's handler stopped propagation,
+    /// so a press the handler handed back (nothing selected) is not counted.
+    /// This is the invocation count; the clipboard is the effect.
+    fn count_copy_raw_runs(cx: &mut TestAppContext) -> std::rc::Rc<std::cell::Cell<usize>> {
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = runs.clone();
+        cx.update(|cx| {
+            cx.observe_keystrokes(move |event, _, _| {
+                if event.action.as_ref().is_some_and(|a| {
+                    gpui::Action::name(a.as_ref()) == <CopyRaw as gpui::Action>::name_for_type()
+                }) {
+                    seen.set(seen.get() + 1);
+                }
+            })
+            .detach();
+        });
+        runs
+    }
+
+    /// Selects `hello` and puts the sentinel back on the clipboard.
+    fn select_hello(window: &gpui::WindowHandle<TerminalView>, cx: &mut TestAppContext) {
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(COPY_RAW_SENTINEL.into())));
+        window
+            .update(cx, |view, _, cx| {
+                view.on_select_start(0, 0, true, 1, false, cx);
+                view.on_select_update(4, 0, false, cx);
+                view.on_select_end(cx);
+                assert!(view.has_selection(), "the drag must leave a selection");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn copy_raw_default_copies_the_selection_and_the_shell_never_sees_the_chord(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut daemon, mut vcx) = copy_raw_fixture(cx, serde_json::json!({}));
+        let runs = count_copy_raw_runs(cx);
+        select_hello(&window, cx);
+        vcx.simulate_keystrokes(shipped_copy_raw_chord());
+        assert_eq!(
+            runs.get(),
+            1,
+            "{} resolves to Copy Raw once and its handler consumes the press",
+            shipped_copy_raw_chord()
+        );
+        assert_eq!(
+            clipboard_text(cx).as_deref(),
+            Some("hello"),
+            "{} copies the selection",
+            shipped_copy_raw_chord()
+        );
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            None,
+            "the action consumed the chord; nothing may also reach the shell"
+        );
+    }
+
+    #[cfg_attr(target_os = "macos", allow(unused_variables, unused_mut))]
+    #[gpui::test]
+    fn copy_raw_with_nothing_selected_gives_the_chord_to_the_shell(cx: &mut TestAppContext) {
+        let (_window, mut daemon, mut vcx) = copy_raw_fixture(cx, serde_json::json!({}));
+        let runs = count_copy_raw_runs(cx);
+        vcx.simulate_keystrokes(shipped_copy_raw_chord());
+        assert_eq!(
+            runs.get(),
+            0,
+            "with nothing selected the handler hands the press back, so it is not consumed"
+        );
+        assert_eq!(
+            clipboard_text(cx).as_deref(),
+            Some(COPY_RAW_SENTINEL),
+            "there was nothing to copy"
+        );
+        if let Some(bytes) = shipped_copy_raw_chord_at_the_shell() {
+            assert_eq!(
+                next_input_until_timeout(&mut daemon),
+                Some(bytes),
+                "the shipped chord reaches the shell when the action hands it back"
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn copy_raw_rebound_copies_on_the_new_chord(cx: &mut TestAppContext) {
+        let (window, mut daemon, mut vcx) =
+            copy_raw_fixture(cx, serde_json::json!({ "CopyRaw": ["ctrl-alt-y"] }));
+        let runs = count_copy_raw_runs(cx);
+        select_hello(&window, cx);
+        vcx.simulate_keystrokes("ctrl-alt-y");
+        assert_eq!(runs.get(), 1, "the new chord resolves to Copy Raw once");
+        assert_eq!(clipboard_text(cx).as_deref(), Some("hello"));
+        assert_eq!(next_input_until_timeout(&mut daemon), None);
+    }
+
+    #[cfg_attr(target_os = "macos", allow(unused_variables, unused_mut))]
+    #[gpui::test]
+    fn copy_raw_rebound_releases_the_shipped_chord(cx: &mut TestAppContext) {
+        let (window, mut daemon, mut vcx) =
+            copy_raw_fixture(cx, serde_json::json!({ "CopyRaw": ["ctrl-alt-y"] }));
+        let runs = count_copy_raw_runs(cx);
+        select_hello(&window, cx);
+        vcx.simulate_keystrokes(shipped_copy_raw_chord());
+        assert_eq!(
+            runs.get(),
+            0,
+            "the old chord no longer resolves to Copy Raw"
+        );
+        assert_eq!(
+            clipboard_text(cx).as_deref(),
+            Some(COPY_RAW_SENTINEL),
+            "the old chord no longer copies"
+        );
+        if let Some(bytes) = shipped_copy_raw_chord_at_the_shell() {
+            // The positive control: the key went through live dispatch and
+            // landed in the shell instead.
+            assert_eq!(next_input_until_timeout(&mut daemon), Some(bytes));
+        }
+    }
+
+    #[cfg_attr(target_os = "macos", allow(unused_variables, unused_mut))]
+    #[gpui::test]
+    fn copy_raw_unbound_leaves_the_clipboard_and_the_chord_goes_to_the_shell(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut daemon, mut vcx) =
+            copy_raw_fixture(cx, serde_json::json!({ "CopyRaw": "" }));
+        let runs = count_copy_raw_runs(cx);
+        select_hello(&window, cx);
+        vcx.simulate_keystrokes(shipped_copy_raw_chord());
+        assert_eq!(runs.get(), 0, "an unbound action resolves to nothing");
+        assert_eq!(clipboard_text(cx).as_deref(), Some(COPY_RAW_SENTINEL));
+        if let Some(bytes) = shipped_copy_raw_chord_at_the_shell() {
+            assert_eq!(next_input_until_timeout(&mut daemon), Some(bytes));
+        }
+    }
+
+    /// What the pinned Windows backend delivers for a keypress that includes
+    /// AltGr on a layout that types on it (`process_key` in gpui_windows):
+    /// AltGr is read as Ctrl+Alt, the key name is the unshifted letter of the
+    /// virtual key, `key_char` is the character the layout produced, and
+    /// `prefer_character_input` is set because that character differs from
+    /// the one without Ctrl/Alt. SIMULATED: no Windows run is available, so
+    /// this is the shape read from the source, not a native capture.
+    #[cfg(not(target_os = "macos"))]
+    fn windows_altgr_event(shift: bool, key: &str, typed: &str) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: gpui::Modifiers {
+                    control: true,
+                    alt: true,
+                    shift,
+                    platform: false,
+                    function: false,
+                },
+                key: key.to_string(),
+                key_char: Some(typed.to_string()),
+            },
+            is_held: false,
+            prefer_character_input: true,
+        }
+    }
+
+    /// The same chord pressed where the layout types nothing on it: Ctrl+Alt
+    /// with no character, so nothing asks for text over the binding.
+    #[cfg(not(target_os = "macos"))]
+    fn windows_plain_chord_event(shift: bool, key: &str) -> KeyDownEvent {
+        KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: gpui::Modifiers {
+                    control: true,
+                    alt: true,
+                    shift,
+                    platform: false,
+                    function: false,
+                },
+                key: key.to_string(),
+                key_char: None,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    /// The Windows Insert chord as the pinned backend delivers it: Ctrl+Alt,
+    /// key `insert`, no character, no preference for text. SIMULATED on any
+    /// non-mac host through real window dispatch and the real pane, with the
+    /// Windows default listed as an override on the Linux toolkit/app table
+    /// (not claimed equal to a native Windows table). The shell's side is
+    /// `CSI 2 ; 7 ~`, specified in `shipped_copy_raw_chord_at_the_shell`.
+    #[cfg(not(target_os = "macos"))]
+    const SIMULATED_INSERT_AT_THE_SHELL: &[u8] = b"\x1b[2;7~";
+
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn simulated_windows_insert_with_nothing_selected_reaches_the_shell(cx: &mut TestAppContext) {
+        let (window, mut daemon, mut vcx) =
+            copy_raw_fixture(cx, serde_json::json!({ "CopyRaw": ["ctrl-alt-insert"] }));
+        let runs = count_copy_raw_runs(cx);
+        vcx.simulate_event(windows_plain_chord_event(false, "insert"));
+        assert_eq!(
+            runs.get(),
+            0,
+            "with nothing selected the handler hands the press back"
+        );
+        assert_eq!(clipboard_text(cx).as_deref(), Some(COPY_RAW_SENTINEL));
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(SIMULATED_INSERT_AT_THE_SHELL.to_vec()),
+            "the Insert chord reaches the shell as CSI 2;7~"
+        );
+        // Positive control, same fixture: with a selection the same event
+        // is consumed by Copy Raw and copies.
+        select_hello(&window, cx);
+        vcx.simulate_event(windows_plain_chord_event(false, "insert"));
+        assert_eq!(runs.get(), 1);
+        assert_eq!(clipboard_text(cx).as_deref(), Some("hello"));
+        assert_eq!(next_input_until_timeout(&mut daemon), None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn simulated_windows_insert_unbound_reaches_the_shell_and_copies_nothing(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut daemon, mut vcx) =
+            copy_raw_fixture(cx, serde_json::json!({ "CopyRaw": "" }));
+        let runs = count_copy_raw_runs(cx);
+        select_hello(&window, cx);
+        vcx.simulate_event(windows_plain_chord_event(false, "insert"));
+        assert_eq!(runs.get(), 0, "an unbound action resolves to nothing");
+        assert_eq!(clipboard_text(cx).as_deref(), Some(COPY_RAW_SENTINEL));
+        // The live positive control is the shell receiving the chord: the
+        // event went through real dispatch and the real pane.
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(SIMULATED_INSERT_AT_THE_SHELL.to_vec())
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn simulated_windows_insert_released_by_a_rebind_reaches_the_shell(cx: &mut TestAppContext) {
+        let (window, mut daemon, mut vcx) =
+            copy_raw_fixture(cx, serde_json::json!({ "CopyRaw": ["ctrl-alt-y"] }));
+        let runs = count_copy_raw_runs(cx);
+        select_hello(&window, cx);
+        vcx.simulate_event(windows_plain_chord_event(false, "insert"));
+        assert_eq!(runs.get(), 0, "the rebind released the Insert chord");
+        assert_eq!(clipboard_text(cx).as_deref(), Some(COPY_RAW_SENTINEL));
+        assert_eq!(
+            next_input_until_timeout(&mut daemon),
+            Some(SIMULATED_INSERT_AT_THE_SHELL.to_vec()),
+            "and it lands in the shell instead"
+        );
+        // Positive control, same fixture: the new chord copies.
+        select_hello(&window, cx);
+        vcx.simulate_keystrokes("ctrl-alt-y");
+        assert_eq!(runs.get(), 1);
+        assert_eq!(clipboard_text(cx).as_deref(), Some("hello"));
+    }
+
+    /// SIMULATED Windows, real window dispatch and the real TerminalView input
+    /// handler. The table is the Linux toolkit/app table with the Windows
+    /// default listed for Copy Raw as an override (a list replaces the shipped
+    /// chord); it is not claimed equivalent to a native Windows table. A Polish
+    /// AltGr+C and AltGr+Shift+C arrive as Ctrl+Alt(+Shift), key `c`,
+    /// `key_char` ć / Ć and `prefer_character_input`. Those printable shapes do
+    /// not invoke Copy Raw; the Windows default, Ctrl+Alt+Insert, is delivered
+    /// with no character and copies once. What the pane does with the AltGr
+    /// press itself is characterised separately and not asserted here.
+    #[cfg(not(target_os = "macos"))]
+    fn polish_altgr_does_not_invoke_copy_raw_but_insert_does(
+        cx: &mut TestAppContext,
+        shift: bool,
+        typed: &str,
+    ) {
+        // The Windows default, typed out: the keymap tests pin the selector
+        // that ships it.
+        let (window, _daemon, mut vcx) =
+            copy_raw_fixture(cx, serde_json::json!({ "CopyRaw": ["ctrl-alt-insert"] }));
+        let runs = count_copy_raw_runs(cx);
+        select_hello(&window, cx);
+        vcx.simulate_event(windows_altgr_event(shift, "c", typed));
+        assert_eq!(
+            runs.get(),
+            0,
+            "the printable Polish AltGr{} +C shape ({typed}) does not invoke Copy Raw",
+            if shift { "+Shift" } else { "" }
+        );
+        assert_eq!(
+            clipboard_text(cx).as_deref(),
+            Some(COPY_RAW_SENTINEL),
+            "a printable AltGr shape ({typed}) must not copy"
+        );
+        select_hello(&window, cx);
+        vcx.simulate_event(windows_plain_chord_event(false, "insert"));
+        assert_eq!(
+            runs.get(),
+            1,
+            "Ctrl+Alt+Insert resolves to Copy Raw once and its handler consumes the press"
+        );
+        assert_eq!(
+            clipboard_text(cx).as_deref(),
+            Some("hello"),
+            "and copies the selection"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn simulated_windows_polish_altgr_c_does_not_invoke_copy_raw_but_insert_does(
+        cx: &mut TestAppContext,
+    ) {
+        polish_altgr_does_not_invoke_copy_raw_but_insert_does(cx, false, "ć");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn simulated_windows_polish_altgr_shift_c_does_not_invoke_copy_raw_but_insert_does(
+        cx: &mut TestAppContext,
+    ) {
+        polish_altgr_does_not_invoke_copy_raw_but_insert_does(cx, true, "Ć");
+    }
 }
 
 /// The window between the shell reporting a prompt and its line editor

@@ -1971,13 +1971,16 @@ mod tests {
         format!("{BASE} Copy Raw copies them as shown.")
     }
 
-    // The key names are spelled out here rather than read from `Kbd::format`:
-    // Windows and Linux write Alt+Win+C for the shipped `cmd-alt-c`, macOS ⌥⌘C.
+    // The key names are spelled out here rather than read from `Kbd::format`,
+    // one literal per platform: macOS ⌥⌘C (`cmd-alt-c`); Windows Ctrl+Alt+Insert
+    // (Insert avoids the tested Polish AltGr printable shapes); Linux Ctrl+Alt+C.
     fn shipped_chord() -> &'static str {
         if cfg!(target_os = "macos") {
             "⌥⌘C"
+        } else if cfg!(target_os = "windows") {
+            "Ctrl+Alt+Insert"
         } else {
-            "Alt+Win+C"
+            "Ctrl+Alt+C"
         }
     }
 
