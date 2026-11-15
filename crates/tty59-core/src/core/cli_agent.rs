@@ -1279,6 +1279,12 @@ impl AgentSessionState {
         if before != Some(self.status) {
             self.since_ms = Some(now_ms);
         }
+        // A prompt only lives while the pane waits. The hook paths clear it
+        // themselves, but the screen and OSC detector moves the status
+        // without them, and this is the one call every move goes through.
+        if self.status != AgentStatus::Waiting {
+            self.prompt = None;
+        }
     }
 
     /// How long the session has held its status, in seconds, by `now_ms`.

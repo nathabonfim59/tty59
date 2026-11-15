@@ -7434,6 +7434,91 @@ mod tests {
         assert_eq!(st.agent_session.as_ref().unwrap().status, AgentStatus::Done);
     }
 
+    fn held_prompt() -> crate::core::cli_agent::AgentPrompt {
+        crate::core::cli_agent::AgentPrompt {
+            id: "toolu_1".into(),
+            kind: crate::core::cli_agent::AgentPromptKind::Permission {
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                detail: None,
+            },
+        }
+    }
+
+    /// The screen detector, not a hook, takes the pane off waiting: the
+    /// prompt held for the wait goes with it. Hook events clear it in
+    /// `apply_event`, but the detector moves the status without them.
+    #[test]
+    fn a_screen_detected_end_of_waiting_drops_the_prompt() {
+        let mut st = test_state(true);
+        let mut sniffer = OscSniffer::new();
+        apply_signals(
+            &mut st,
+            sniffer.feed(
+                concat!(
+                    "\x1b]777;notify;tty59://cli-agent;",
+                    r#"{"v":1,"agent":"claude","event":"prompt-submit"}"#,
+                    "\x07",
+                )
+                .as_bytes(),
+            ),
+        );
+        let epoch = active_detection(&st).unwrap().epoch;
+        let writer = ScreenWriter::Controller(1);
+        let now = Instant::now();
+        let blocker = AgentScreenHint {
+            epoch,
+            revision: 7,
+            rule: Some("live_blocked_form".into()),
+        };
+        apply_screen_hint(&mut st, writer, blocker.clone(), now);
+        let settled = now + Duration::from_secs(3);
+        apply_screen_hint(&mut st, writer, blocker.clone(), settled);
+        let state = st.agent_session.as_mut().unwrap();
+        assert_eq!(state.status, AgentStatus::Waiting);
+        state.prompt = Some(held_prompt());
+
+        apply_screen_hint(
+            &mut st,
+            writer,
+            AgentScreenHint {
+                epoch,
+                revision: 8,
+                rule: Some("live_prompt_box".into()),
+            },
+            settled,
+        );
+        apply_screen_hint(&mut st, writer, blocker, settled);
+        let state = st.agent_session.as_ref().unwrap();
+        assert_eq!(state.status, AgentStatus::Done);
+        assert_eq!(state.prompt, None, "the screen ended the wait");
+    }
+
+    /// The same for an end of waiting the agent's OSC progress reports.
+    #[test]
+    fn an_osc_detected_end_of_waiting_drops_the_prompt() {
+        let mut st = test_state(true);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(vec!["grok".into()]),
+            Some(21),
+        );
+        let mut sniffer = OscSniffer::new();
+        apply_signals(&mut st, sniffer.feed(b"\x1b]9;4;1;-1\x07"));
+        apply_signals(
+            &mut st,
+            sniffer.feed(b"\x1b]777;notify;Test agent;Please review\x07"),
+        );
+        let state = st.agent_session.as_mut().unwrap();
+        assert_eq!(state.status, AgentStatus::Waiting);
+        state.prompt = Some(held_prompt());
+
+        apply_signals(&mut st, sniffer.feed(b"\x1b]9;4;0;0\x07"));
+        let state = st.agent_session.as_ref().unwrap();
+        assert_eq!(state.status, AgentStatus::Done);
+        assert_eq!(state.prompt, None, "the OSC progress ended the wait");
+    }
+
     #[test]
     fn a_kitty_notification_marks_a_hookless_agent_waiting() {
         use crate::core::cli_agent::{AgentStatus, CLIAgent};
