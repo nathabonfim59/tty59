@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The side panel's error states now offer a way out: **Initialize repository**
+  on the Changes tab outside a repository, **Refresh** under a failed GitHub
+  list or detail, and **Retry** under an unreadable folder or a failed search
+  in the Files tab.
+
+### Fixed
+
+- When git status cannot be read for a known repository and nothing has been
+  read yet, the Changes tab now shows "Couldn't read git status" with git's own
+  reason, **Retry** and **Copy error**, instead of "Loading…" indefinitely.
+
 ## [26.14.0] - 2026-11-14
 
 ### Added

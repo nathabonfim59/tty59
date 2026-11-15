@@ -267,6 +267,24 @@ pub(crate) enum Tone {
     DangerOutline,
 }
 
+/// The `paint_probe` key a button's own paints are noted under, at rest or
+/// under the pointer (test builds only; nothing here reaches a release build).
+/// The destructive-outline keys are the ones its contrast test has always read;
+/// Primary and Secondary are noted beside them so a consumer's sweep can read
+/// the real hover fills. `Danger` has no note.
+#[cfg(test)]
+fn probe_key(tone: Tone, hover: bool) -> Option<&'static str> {
+    match (tone, hover) {
+        (Tone::DangerOutline, false) => Some("dialog.button.danger_outline"),
+        (Tone::DangerOutline, true) => Some("dialog.button.danger_outline.hover"),
+        (Tone::Primary, false) => Some("dialog.button.primary"),
+        (Tone::Primary, true) => Some("dialog.button.primary.hover"),
+        (Tone::Secondary, false) => Some("dialog.button.secondary"),
+        (Tone::Secondary, true) => Some("dialog.button.secondary.hover"),
+        (Tone::Danger, _) => None,
+    }
+}
+
 /// A dialog button. The click handler is attached only while `enabled`: a
 /// disabled button has to be inert, not merely grey.
 ///
@@ -347,8 +365,8 @@ pub(crate) fn button(
                 #[cfg(test)]
                 let mut s = s;
                 #[cfg(test)]
-                if tone == Tone::DangerOutline {
-                    crate::ui::paint_probe::note("dialog.button.danger_outline.hover", &mut s);
+                if let Some(key) = probe_key(tone, true) {
+                    crate::ui::paint_probe::note(key, &mut s);
                 }
                 s
             })
@@ -358,8 +376,8 @@ pub(crate) fn button(
     #[cfg(test)]
     let mut el = el;
     #[cfg(test)]
-    if tone == Tone::DangerOutline {
-        crate::ui::paint_probe::note("dialog.button.danger_outline", &mut el);
+    if let Some(key) = probe_key(tone, false) {
+        crate::ui::paint_probe::note(key, &mut el);
     }
     el
 }
