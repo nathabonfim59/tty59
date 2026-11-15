@@ -205,6 +205,10 @@ pub struct ChromeInk {
     /// `SELECTED_CAPTION_TARGET` there and walked to it where it does not. The
     /// unselected captions and the shared caption itself are unchanged.
     pub selected_caption: u32,
+    /// The right panel's Changes-tab count (12px-class, regular): the theme's muted foreground, held
+    /// to `CHROME_SMALL_META_TARGET` on the panel fill, the window fill and the selected tab pill
+    /// (`Neutrals::secondary`) together, so one colour serves the selected and the unselected tab.
+    pub tab_count: u32,
 }
 
 /// Headroom by size, derived once in `apply_theme` and never at render time. Text painted at 12px or
@@ -938,6 +942,11 @@ impl Theme {
                 &[sf.sidebar.selected, sf.rail.selected],
                 m.muted_foreground,
                 SELECTED_CAPTION_TARGET,
+            ),
+            tab_count: legible_across(
+                &[m.background, m.sidebar, m.secondary],
+                m.muted_foreground,
+                CHROME_SMALL_META_TARGET,
             ),
         }
     }
@@ -3662,6 +3671,12 @@ ansi:
             &[s.sidebar.selected, s.rail.selected],
             AA_TEXT,
         );
+        add(
+            "chrome tab_count",
+            chrome.tab_count,
+            &[m.background, m.sidebar, m.secondary],
+            AA_TEXT,
+        );
         let unpicked = [s.popover.base, s.popover.hover];
         add(
             "chrome unpicked_title",
@@ -3984,6 +3999,7 @@ ansi:
             "chrome unpicked_title",
             "chrome unpicked_meta",
             "chrome selected_caption",
+            "chrome tab_count",
             "chrome avatar_ink",
             "chrome keycap_ink",
             "chrome grip_idle",
@@ -4610,6 +4626,13 @@ ansi:
                     m.muted_foreground,
                     &[s.sidebar.selected, s.rail.selected][..],
                     AA_SELECTED_CAPTION,
+                ),
+                (
+                    "tab_count",
+                    chrome.tab_count,
+                    m.muted_foreground,
+                    &[m.background, m.sidebar, m.secondary][..],
+                    AA_SMALL_TEXT,
                 ),
             ]
             .into_iter()

@@ -1511,6 +1511,8 @@ impl Tty59App {
         let active_tab = self.right_panel_tab;
         let body_ink = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
+        // The count's own ink, floored on the panel fill and on the selected pill alike.
+        let count_ink: gpui::Hsla = gpui::rgb(crate::ui::theme::chrome_ink(cx).tab_count).into();
         // Read once for the row, from the status the watcher keeps current: no
         // repository lookup and no scan of the entries.
         let changes = self.scm_changes_count(cx);
@@ -1587,7 +1589,7 @@ impl Tty59App {
                                         .font_family(count_font.family.clone())
                                         .font_features(count_font.features.clone())
                                         .font_weight(count_font.weight)
-                                        .text_color(muted)
+                                        .text_color(count_ink)
                                         .child(count.label());
                                     #[cfg(test)]
                                     let count_el =

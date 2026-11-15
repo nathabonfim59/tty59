@@ -2044,6 +2044,7 @@ mod tests {
                         chrome.selected_caption,
                         expected.selected_caption,
                     ),
+                    ("tab_count", chrome.tab_count, expected.tab_count),
                     (
                         "port_chip_ink",
                         chrome.port_chip_ink,
