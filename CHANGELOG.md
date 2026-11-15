@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.14.1] - 2026-11-15
+
+### Fixed
+
+- **Typing in the terminal no longer lags with a large repository's
+  Changes tab open**: the panel built and laid out every changed file on
+  every frame, so with hundreds of changes your keystrokes queued for
+  seconds before they reached the shell. It now builds only the rows on
+  screen, and typing stays immediate however long the list is.
+
 ## [26.14.0] - 2026-11-14
 
 ### Added
