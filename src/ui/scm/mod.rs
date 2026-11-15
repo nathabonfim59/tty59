@@ -11,6 +11,7 @@ pub(crate) mod detail;
 pub(crate) mod graph;
 pub(crate) mod panel;
 pub(crate) mod path;
+pub(crate) mod rows_window;
 #[cfg(test)]
 mod rows_window_tests;
 pub(crate) mod state;

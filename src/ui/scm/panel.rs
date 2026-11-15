@@ -37,6 +37,7 @@ use crate::ui::right_panel::{
 use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
 use crate::ui::scm::path::split_display_path;
+use crate::ui::scm::rows_window::RowsWindow;
 use crate::ui::scm::state::{RepoKey, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
 use crate::ui::scm::tree::{TreeRow, normalize_query, path_matches, tree_rows};
@@ -295,7 +296,7 @@ impl Tty59App {
                         .child(self.scm_filter_row(window, cx))
                         .into_any_element(),
                 );
-                self.scm_groups(&repo, &status, cx)
+                self.scm_groups(&repo, &status, window, cx)
             }
         };
         let history = self.render_graph_section(&repo, window, cx);
@@ -1363,10 +1364,58 @@ impl Tty59App {
         ));
     }
 
+    /// Record the row a context menu just opened on, until it is dismissed.
+    fn scm_menu_opened(
+        &mut self,
+        group: ScmGroup,
+        path: String,
+        menu: &gpui::Entity<PopupMenu>,
+        cx: &mut Context<Self>,
+    ) {
+        self.scm.menu_row = Some((group, path));
+        // Replacing the subscription drops the last menu's: only the menu
+        // that is open now can clear the pin.
+        self.scm.menu_sub = Some(
+            cx.subscribe(menu, |this, _menu, _: &gpui::DismissEvent, cx| {
+                this.scm.menu_row = None;
+                cx.notify();
+            }),
+        );
+    }
+
+    fn scm_menu_row_is(&self, group: ScmGroup, entry: &StatusEntry) -> bool {
+        self.scm
+            .menu_row
+            .as_ref()
+            .is_some_and(|(g, path)| *g == group && path == entry.path.as_str())
+    }
+
+    /// A group's run of `len` rows, windowed to the panel's scroller at the
+    /// rem this frame lays out against.
+    fn scm_rows_window(
+        &self,
+        group: ScmGroup,
+        len: usize,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> RowsWindow {
+        let row_h = rems(ROW_H / 16.).to_pixels(window.rem_size()).as_f32();
+        RowsWindow::new(
+            group,
+            len,
+            row_h,
+            &self.scm.run_tops,
+            &self.scm.scroll,
+            cx.entity_id(),
+            window,
+        )
+    }
+
     fn scm_groups(
         &mut self,
         repo: &RepoKey,
         status: &Arc<WorkingTreeStatus>,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Groups are told apart by the pause between them, not by a rule:
@@ -1405,7 +1454,9 @@ impl Tty59App {
                 .child(self.scm_group_header(repo, group, &entries, collapsed, cx));
             if !collapsed {
                 let shown = entries.len().min(MAX_RENDERED_FILES);
-                if tree {
+                // Only the rows the viewport reaches are built; see
+                // `rows_window`. Which rows exist is decided here as before.
+                let run = if tree {
                     // A filter opens every directory: a match folded away
                     // under a closed row is a match the filter failed to show.
                     let filtering = query.is_some();
@@ -1413,8 +1464,16 @@ impl Tty59App {
                     let rows = tree_rows(entries[..shown].iter().map(|e| e.path.as_str()), |key| {
                         !filtering && folded.contains(&(group, key.to_string()))
                     });
-                    for row in rows {
-                        block = block.child(match row {
+                    let pin = rows.iter().position(|row| {
+                        matches!(row, TreeRow::File { index, .. }
+                            if self.scm_menu_row_is(group, entries[*index]))
+                    });
+                    let run = self.scm_rows_window(group, rows.len(), window, cx).pin(pin);
+                    let built = rows
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(i, _)| run.builds(*i))
+                        .map(|(_, row)| match row {
                             TreeRow::Dir {
                                 key,
                                 label,
@@ -1424,16 +1483,31 @@ impl Tty59App {
                             } => self.scm_dir_row(
                                 group, key, label, depth, files, collapsed, !filtering, cx,
                             ),
-                            TreeRow::File { index, depth } => {
-                                self.scm_file_row(repo, group, entries[index], Some(depth), cx)
-                            }
-                        });
-                    }
+                            TreeRow::File { index, depth } => self.scm_file_row(
+                                repo,
+                                group,
+                                entries[index],
+                                Some(depth),
+                                None,
+                                cx,
+                            ),
+                        })
+                        .collect();
+                    run.finish(built)
                 } else {
-                    for entry in entries.iter().take(shown) {
-                        block = block.child(self.scm_file_row(repo, group, entry, None, cx));
-                    }
-                }
+                    let pin = entries[..shown]
+                        .iter()
+                        .position(|e| self.scm_menu_row_is(group, e));
+                    let run = self.scm_rows_window(group, shown, window, cx).pin(pin);
+                    let built = run
+                        .indices()
+                        .map(|i| {
+                            self.scm_file_row(repo, group, entries[i], None, Some((i, shown)), cx)
+                        })
+                        .collect();
+                    run.finish(built)
+                };
+                block = block.child(run);
                 if entries.len() > shown {
                     block = block.child(self.scm_note(
                         t_plural(L10nKey::PanelMoreChangedFiles, entries.len() - shown, &[]),
@@ -1694,12 +1768,17 @@ impl Tty59App {
     /// One changed file. `depth` is its level in the tree view, and `None` in
     /// the flat list — where the row carries its directory beside the name,
     /// since there is no directory row above it to say it.
+    ///
+    /// `set` is the row's index in the flat list and the list's length, so a
+    /// screen reader can say "12 of 300" although only the rows on screen are
+    /// built.
     fn scm_file_row(
         &self,
         repo: &RepoKey,
         group: ScmGroup,
         entry: &StatusEntry,
         depth: Option<usize>,
+        set: Option<(usize, usize)>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
@@ -1731,6 +1810,9 @@ impl Tty59App {
                 t(group_label(group))
             )))
             .aria_selected(selected)
+            .when_some(set, |row, (index, size)| {
+                row.aria_position_in_set(index + 1).aria_size_of_set(size)
+            })
             .debug_selector(move || selector.to_string())
             .group(id)
             .relative()
@@ -1772,6 +1854,12 @@ impl Tty59App {
                 let repo = repo.clone();
                 let entry = entry.clone();
                 move |menu, _window, cx| {
+                    // Built on open, outside render: the row is kept built
+                    // while its menu is up, however far the list scrolls.
+                    let popup = cx.entity();
+                    let path = entry.path.as_str().to_string();
+                    let _ =
+                        app.update(cx, |this, cx| this.scm_menu_opened(group, path, &popup, cx));
                     Self::scm_row_context_menu(menu, &app, &repo, group, &entry, cx)
                 }
             })
