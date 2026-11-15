@@ -2589,6 +2589,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpSymlinkAria => "{name}, symbolic link",
         L10nKey::SshPromptPassphrasePlaceholder => "Passphrase",
         L10nKey::SshPromptSaveToKeychain => "Save to keychain",
+        // A2-H: a pinned group's header mark is status only.
+        L10nKey::SidebarPinnedFolderMark => "Pinned folder",
+        L10nKey::SidebarPinnedGroupMark => "Pinned group",
     }
 }
 

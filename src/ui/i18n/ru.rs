@@ -2687,6 +2687,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpSymlinkAria => "{name}, символическая ссылка",
         L10nKey::SshPromptPassphrasePlaceholder => "Парольная фраза",
         L10nKey::SshPromptSaveToKeychain => "Сохранить в связке ключей",
+        // A2-H: a pinned group's header mark is status only.
+        L10nKey::SidebarPinnedFolderMark => "Закреплённая папка",
+        L10nKey::SidebarPinnedGroupMark => "Закреплённая группа",
     })
 }
 

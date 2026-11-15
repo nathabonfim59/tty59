@@ -2669,6 +2669,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpSymlinkAria => "{name}、シンボリックリンク",
         L10nKey::SshPromptPassphrasePlaceholder => "パスフレーズ",
         L10nKey::SshPromptSaveToKeychain => "キーチェーンに保存",
+        // A2-H: a pinned group's header mark is status only.
+        L10nKey::SidebarPinnedFolderMark => "固定されたフォルダ",
+        L10nKey::SidebarPinnedGroupMark => "固定されたグループ",
     })
 }
 
