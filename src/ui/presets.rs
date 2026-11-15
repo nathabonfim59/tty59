@@ -222,9 +222,11 @@ pub struct ChromeInk {
 /// and only guarantees that a seed above its assigned target is returned unchanged. Scope today:
 /// `SettingsInk::unsaved` and `SettingsInk::glyph`.
 pub(crate) const SETTINGS_SMALL_TEXT_TARGET: f32 = 5.0;
-/// The same small-text target for the switcher's unpicked meta and count (11.5-12px regular text),
-/// whose 1x captures missed the floor. Chrome-side, derived once in `apply_theme`.
-pub(crate) const CHROME_SMALL_META_TARGET: f32 = 5.0;
+/// The chrome small regular meta/count target on popover and panel fills. A thin digit `1` fell below
+/// 4.5 in 1x captures despite a 5.0 token; 5.5 leaves raster headroom. Covers the switcher's unpicked
+/// meta/count, popup notes and the Changes tab count; derived once in `apply_theme`. Settings keep
+/// separate targets.
+pub(crate) const CHROME_SMALL_META_TARGET: f32 = 5.5;
 pub(crate) const SETTINGS_GLYPH_TARGET: f32 = 3.2;
 
 /// The contrast a caption keeps on a selected panel row: above the 4.5:1 text
@@ -3468,6 +3470,10 @@ ansi:
     const AA_SELECTED_CAPTION: f32 = 5.0;
     /// The small-text and small-glyph targets of the settings roles, written out likewise.
     const AA_SMALL_TEXT: f32 = 5.0;
+    /// The chrome small-text role's own derivation target (`CHROME_SMALL_META_TARGET`), kept as a
+    /// literal here so the oracle is independent of the constant it checks; the settings roles keep
+    /// `AA_SMALL_TEXT`.
+    const AA_CHROME_SMALL_META: f32 = 5.5;
     const AA_GLYPH: f32 = 3.2;
     const AA_MARK: f32 = 3.0;
 
@@ -4359,7 +4365,7 @@ ansi:
     #[test]
     fn cached_inks_keep_seeds_that_already_pass() {
         let mut misses = Vec::new();
-        // Themes whose `tab_count` 5.0 target is physically unreachable (counted once per theme).
+        // Themes whose `tab_count` derivation target is physically unreachable (counted once per theme).
         let mut tab_count_unreachable: Vec<String> = Vec::new();
         let mut swept = 0usize;
         for t in sweep_themes() {
@@ -4622,7 +4628,7 @@ ansi:
                     chrome.unpicked_meta,
                     m.muted_foreground,
                     &[s.popover.base, s.popover.hover][..],
-                    AA_SMALL_TEXT,
+                    AA_CHROME_SMALL_META,
                 ),
                 (
                     "selected_caption",
@@ -4636,7 +4642,7 @@ ansi:
                     chrome.tab_count,
                     m.muted_foreground,
                     &[m.background, m.sidebar, m.secondary][..],
-                    AA_SMALL_TEXT,
+                    AA_CHROME_SMALL_META,
                 ),
             ]
             .into_iter()
@@ -4661,7 +4667,15 @@ ansi:
                 // seed unchanged must be caught here, not skipped. A role with its own target then reaches
                 // it on every fill; an infeasible case (a mid-grey selection) is printed with its ratio.
                 let seed_misses = fills.iter().any(|&fill| contrast(seed, fill) < floor);
-                if [AA_SELECTED_CAPTION, AA_SMALL_TEXT, AA_GLYPH].contains(&floor) && seed_misses {
+                if [
+                    AA_SELECTED_CAPTION,
+                    AA_SMALL_TEXT,
+                    AA_CHROME_SMALL_META,
+                    AA_GLYPH,
+                ]
+                .contains(&floor)
+                    && seed_misses
+                {
                     // What one ink can do on ALL the fills together, as `legible_across` fixes one
                     // direction for the whole set: the weakest fill's contrast for white and for black.
                     let worst = |ink: u32| {
@@ -4721,7 +4735,7 @@ ansi:
             }
         }
         println!(
-            "tab_count 5.0 target unreachable on {} of {swept} swept themes (once per theme; first {}, last {}); each holds the best black/white endpoint",
+            "tab_count {AA_CHROME_SMALL_META} target unreachable on {} of {swept} swept themes (once per theme; first {}, last {}); each holds the best black/white endpoint",
             tab_count_unreachable.len(),
             tab_count_unreachable.first().map_or("-", String::as_str),
             tab_count_unreachable.last().map_or("-", String::as_str)
