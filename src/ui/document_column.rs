@@ -111,7 +111,7 @@ const SWITCH_FRAME_W: f32 = 14.;
 const SWITCH_FRAME_H: f32 = 11.;
 const SWITCH_EDGE: f32 = 2.;
 const SWITCH_GAP: f32 = 2.;
-const SWITCH_LEAD: f32 = 8.;
+pub(crate) const SWITCH_LEAD: f32 = 8.;
 const SWITCH_CELL_RADIUS: f32 = 5.;
 const SWITCH_TRACK_RADIUS: f32 = 7.;
 
@@ -241,10 +241,13 @@ pub(crate) fn glyph_unified(ink: gpui::Hsla) -> gpui::AnyElement {
     glyph_two_panes(ink, false)
 }
 
-/// The sunken track the two cells sit on.
-pub(crate) fn switch_track(
+/// The sunken track the two cells sit on, with the margin before it given: a
+/// header that has to find room for its first line lets that margin yield, and
+/// nothing else does.
+pub(crate) fn switch_track_with_lead(
     id: &'static str,
     cells: Vec<gpui::AnyElement>,
+    lead: f32,
     cx: &gpui::App,
 ) -> gpui::AnyElement {
     let sf = cx.global::<crate::ui::presets::Surfaces>().window;
@@ -253,7 +256,7 @@ pub(crate) fn switch_track(
         .when(cfg!(test), |d| d.debug_selector(move || id.into()))
         .occlude()
         .flex_none()
-        .ml(px(SWITCH_LEAD))
+        .ml(px(lead))
         .p(px(SWITCH_EDGE))
         .gap(px(SWITCH_GAP))
         .rounded(px(SWITCH_TRACK_RADIUS))
@@ -323,6 +326,29 @@ pub(crate) const fn terminal_button_fixed_w(divider: f32) -> f32 {
         + 2. * TERMINAL_DIVIDER_MX
 }
 
+/// What the terminal button of a filled header does with its name.
+#[derive(Clone, Copy)]
+pub(crate) enum TerminalName {
+    /// The name is in the button, held to a cap in pixels, or to the button's
+    /// own when `None`.
+    Inline(Option<f32>),
+    /// The name has left for the header's second line, where
+    /// [`Tty59App::render_document_terminal_name`] draws it; the button keeps
+    /// its badge, its divider, its tip and its label.
+    Moved,
+}
+
+/// What the terminal button spends without its name once the name has left:
+/// its padding, its badge and the divider after it with the room either side
+/// of it. The gap before the name goes with the name.
+pub(crate) const fn terminal_badge_only_w(divider: f32) -> f32 {
+    TERMINAL_PILL_PAD_L
+        + TERMINAL_PILL_BADGE
+        + TERMINAL_PILL_PAD_R
+        + divider
+        + 2. * TERMINAL_DIVIDER_MX
+}
+
 impl Tty59App {
     /// A filled document's lead: the terminal it covers, by name, and a way
     /// back that keeps the file or diff open beside it. Both surfaces use this
@@ -334,48 +360,62 @@ impl Tty59App {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        self.render_document_terminal_button_capped(chrome, None, window, cx)
+        self.render_document_terminal_button_with(chrome, TerminalName::Inline(None), window, cx)
+    }
+
+    /// The tooltip of a terminal name that may be cut or has left its button:
+    /// the whole title, not the shortened one the label ladder gives a chip.
+    fn terminal_whole_name(
+        &self,
+        name: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::SharedString {
+        let whole = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| self.full_tab_label(tab, Some(window), cx))
+            .map(|label| label.text)
+            .unwrap_or_else(|| name.to_string().into());
+        format!("{}: {whole}", t(L10nKey::DocumentDock)).into()
     }
 
     /// [`Self::render_document_terminal_button`] with the name held to a cap, in
-    /// pixels, by a header that has worked out what room the name has. The
-    /// button's tooltip then carries the whole name, since the name may be cut.
-    /// `None` is the button as it always was.
-    pub(crate) fn render_document_terminal_button_capped(
+    /// pixels, by a header that has worked out what room the name has, or with
+    /// the name gone from it. The button's tooltip then carries the whole name,
+    /// since the name may be cut or elsewhere. `Inline(None)` is the button as
+    /// it always was.
+    pub(crate) fn render_document_terminal_button_with(
         &self,
         chrome: DocumentChrome,
-        name_cap: Option<f32>,
+        name_mode: TerminalName,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         if chrome != DocumentChrome::Fill {
             return None;
         }
-        let theme = cx.theme();
         let name = self
             .tabs
             .get(self.active)
             .map(|tab| self.tab_label(tab, self.active, Some(window), cx))
             .unwrap_or_default();
         let badge_bg = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.selected);
-        let name_max = name_cap.unwrap_or(HEADER_CELL_MAX_W);
-        // The tooltip of a name that may be cut spells out the whole title, not
-        // the shortened one the label ladder gives a chip.
-        let whole_name: Option<gpui::SharedString> = if name_cap.is_some() {
-            let whole = self
-                .tabs
-                .get(self.active)
-                .and_then(|tab| self.full_tab_label(tab, Some(window), cx))
-                .map(|label| label.text)
-                .unwrap_or_else(|| name.clone().into());
-            Some(format!("{}: {whole}", t(L10nKey::DocumentDock)).into())
-        } else {
-            None
+        let (name_cap, name_moved) = match name_mode {
+            TerminalName::Inline(cap) => (cap, false),
+            TerminalName::Moved => (None, true),
         };
+        let name_max = name_cap.unwrap_or(HEADER_CELL_MAX_W);
+        let whole_name: Option<gpui::SharedString> =
+            (name_cap.is_some() || name_moved).then(|| self.terminal_whole_name(&name, window, cx));
+        let theme = cx.theme();
         Some(
             h_flex()
                 .flex_none()
                 .items_center()
+                .when(cfg!(test), |group| {
+                    group.debug_selector(|| "document-terminal-group".into())
+                })
                 .child(
                     h_flex()
                         .id("document-back-to-terminal")
@@ -403,22 +443,27 @@ impl Tty59App {
                                 .items_center()
                                 .justify_center()
                                 .bg(badge_bg)
+                                .when(cfg!(test), |badge| {
+                                    badge.debug_selector(|| "document-terminal-badge".into())
+                                })
                                 .font_family(theme.mono_font_family.clone())
                                 .text_size(px(9.5))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(">_"),
                         )
-                        .child(
-                            div()
-                                .max_w(px(name_max))
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .when(cfg!(test), |d| {
-                                    d.debug_selector(|| "document-terminal-name".into())
-                                })
-                                .child(name),
-                        )
+                        .when(!name_moved, |button| {
+                            button.child(
+                                div()
+                                    .max_w(px(name_max))
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .overflow_hidden()
+                                    .when(cfg!(test), |d| {
+                                        d.debug_selector(|| "document-terminal-name".into())
+                                    })
+                                    .child(name.clone()),
+                            )
+                        })
                         .tooltip(move |window, cx| match &whole_name {
                             Some(whole) => gpui_component::tooltip::Tooltip::new(whole.clone())
                                 .build(window, cx),
@@ -437,6 +482,52 @@ impl Tty59App {
                         .mx(px(TERMINAL_DIVIDER_MX))
                         .bg(theme.border),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// The terminal's name on a filled header's second line, once it has left
+    /// its button: the same words in the same ink and size, held to `cap`
+    /// pixels, with the button's tooltip and its action. The button keeps the
+    /// role and the label, so assistive technology meets one button; this is
+    /// the same click for a pointer that lands on the name.
+    pub(crate) fn render_document_terminal_name(
+        &self,
+        cap: Option<f32>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let name = self
+            .tabs
+            .get(self.active)
+            .map(|tab| self.tab_label(tab, self.active, Some(window), cx))?;
+        let whole = self.terminal_whole_name(&name, window, cx);
+        let theme = cx.theme();
+        Some(
+            div()
+                .id("document-terminal-name-moved")
+                .flex_none()
+                .max_w(px(cap.unwrap_or(HEADER_CELL_MAX_W)))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .overflow_hidden()
+                .text_size(rems(HEADER_CELL_TEXT))
+                .text_color(theme.muted_foreground)
+                .cursor_pointer()
+                .hover({
+                    let ink = theme.foreground;
+                    move |s| s.text_color(ink)
+                })
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "document-terminal-name".into())
+                })
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(whole.clone()).build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_document_layout(DocumentLayout::Dock, cx);
+                }))
+                .child(name)
                 .into_any_element(),
         )
     }
@@ -606,6 +697,16 @@ impl Tty59App {
         chrome: DocumentChrome,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.document_layout_switch_with_lead(chrome, SWITCH_LEAD, cx)
+    }
+
+    /// [`Self::document_layout_switch`] with the margin before it given.
+    pub(crate) fn document_layout_switch_with_lead(
+        &self,
+        chrome: DocumentChrome,
+        lead: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let current = layout_switch_cell(chrome);
         let cell = |i: usize,
                     layout: DocumentLayout,
@@ -622,12 +723,13 @@ impl Tty59App {
                 cx,
             )
         };
-        switch_track(
+        switch_track_with_lead(
             "document-layout-switch",
             vec![
                 cell(0, DocumentLayout::Dock, glyph_dock, L10nKey::DocumentDock),
                 cell(1, DocumentLayout::Fill, glyph_fill, L10nKey::DocumentFill),
             ],
+            lead,
             cx,
         )
     }

@@ -34,7 +34,7 @@ pub(crate) mod status;
 mod strip;
 
 pub(crate) use nav::KEY_CONTEXT as NAV_KEY_CONTEXT;
-pub(crate) use strip::header_inline;
+pub(crate) use strip::{HEADER_HYSTERESIS, header_inline};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -389,10 +389,12 @@ pub(crate) struct EditorPanelState {
     /// beside the terminal's floor, so it is kept filled a little past the
     /// point it would fit again. Written by `editor_header_latch_sync` alone.
     diff_fill: bool,
-    /// Whether a filled diff's metadata was last found to need a second line,
-    /// so it is kept there a little past the point one line would fit again.
-    /// Written by `editor_header_latch_sync` alone.
-    pub(crate) diff_two_line: bool,
+    /// How many tiers of a filled diff's secondary parts were last found to
+    /// need the second line (none, the chip with the Refreshing word, those
+    /// and the terminal's name, all three with the summary), so each is kept
+    /// there a little past the point it would fit again. Written by
+    /// `editor_header_latch_sync` alone.
+    pub(crate) diff_wrap: crate::ui::diff_overlay::WrapState,
     /// What the `+N` button's glyphs measure at the current font and size.
     /// Drawing only reads it; `editor_header_latch_sync` re-measures when the
     /// font or size it is for has changed.
@@ -472,7 +474,7 @@ impl EditorPanelState {
             strip_picker: None,
             header_inline: false,
             diff_fill: false,
-            diff_two_line: false,
+            diff_wrap: crate::ui::diff_overlay::WrapState::default(),
             overflow_glyphs: strip::OverflowMetrics::measure(window, cx),
             diff_header: crate::ui::diff_overlay::DiffHeaderMetrics::measure(
                 window,

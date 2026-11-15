@@ -26,7 +26,7 @@ use crate::ui::app::{TitleStripRow as _, Tty59App};
 use crate::ui::diff_list::{DiffRow, FileHead, RowAt};
 use crate::ui::diff_rows::{DiffSelection, Side, SplitCell, SplitRow, UnifiedRow};
 use crate::ui::document_column::{
-    DocumentChrome, glyph_split, glyph_unified, switch_cell, switch_ink, switch_track,
+    DocumentChrome, glyph_split, glyph_unified, switch_cell, switch_ink,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{HEADING, META, META_MONO, TEXT, TEXT_MONO, git_badge, info_chip};
@@ -731,6 +731,9 @@ impl Tty59App {
         };
         Some(
             shell
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "diff-overlay-body".into())
+                })
                 .text_color(cx.theme().foreground)
                 .track_focus(&focus_handle)
                 .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -792,23 +795,33 @@ impl Tty59App {
         let mono = SharedString::from(self.font_family.clone());
         let subject = source_subject(&overlay.source, branch);
         let shape = source_shape(&overlay.source);
-        // A filled header decides its lines from what is measured and the room
-        // it is drawn in, never from what it has painted: the one-line budget
-        // against the body, held the editor's margin by the last answer the
-        // app's events recorded. The names then take what their line leaves.
+        // A filled header decides what is on its second line from what is
+        // measured and the room it is drawn in, never from what it has painted:
+        // the first level whose two lines both fit the body, held the editor's
+        // margin by the last answer the app's events recorded. The names then
+        // take what their line leaves.
         let need =
             (chrome == DocumentChrome::Fill).then(|| self.diff_fill_need(overlay, window, cx));
         let body = self.document_body_px(window, cx);
-        let two_line = need.is_some_and(|n| n.wraps(body, self.editor.diff_two_line));
+        let plan = need.map(|n| n.plan(body, self.editor.diff_wrap));
+        let overflow = plan.is_some_and(|p| p.overflow);
+        let level = plan.map_or(0, |p| p.ladder);
+        let two_line = overflow || need.is_some_and(|n| n.has_second_line(level));
+        let moved = |tier: usize| !overflow && need.is_some_and(|n| n.tier_moved(tier, level));
+        let switch_lead = plan.map_or(crate::ui::document_column::SWITCH_LEAD, |p| p.lead);
         let parts = HeaderParts::of(overlay, shape, chrome, (added, removed));
-        let caps = need.map(|n| n.caps(body, two_line));
+        let caps = need.map(|n| n.caps(body, level));
         let rem = window.rem_size();
         let hover = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.hover);
 
-        // The metadata, in the order it is read: the focused file's way back,
-        // the file count, the two totals and the Refreshing word. On one line
-        // it follows the subject; on two it is the second line.
-        let mut metadata: Vec<AnyElement> = Vec::new();
+        // The focused file's way back and the two totals are on the first
+        // line whatever the level; the summary and the Refreshing word are on
+        // the first or the second with the chip and the terminal's name.
+        let mut back: Option<AnyElement> = None;
+        let mut summary_el: Option<AnyElement> = None;
+        let mut added_el: Option<AnyElement> = None;
+        let mut removed_el: Option<AnyElement> = None;
+        let mut refresh_el: Option<AnyElement> = None;
         // The focused file's path is the only other thing on the strip that
         // grows without bound, and it used to refuse to yield any of it: a
         // header with a commit label already spends its slack on the subject,
@@ -820,7 +833,10 @@ impl Tty59App {
         // last thing to go.
         if let Some(name) = focused_name(overlay) {
             let (head, leaf) = crate::ui::path_display::split_path_leaf(&name);
-            metadata.push(
+            // In the overflow rows the path yields, so the whole of it is the
+            // tooltip there; nowhere else is anything about it changed.
+            let path_tip = overflow.then(|| SharedString::from(name.clone()));
+            back = Some(
                 div()
                     .occlude()
                     .min_w_0()
@@ -851,6 +867,12 @@ impl Tty59App {
                                     cx.notify();
                                 }
                             }))
+                            .when_some(path_tip, |d, tip| {
+                                d.tooltip(move |window, cx| {
+                                    gpui_component::tooltip::Tooltip::new(tip.clone())
+                                        .build(window, cx)
+                                })
+                            })
                             .child(
                                 Icon::new(IconName::ChevronLeft)
                                     .size(rem * FOCUS_CHEVRON_REM)
@@ -875,14 +897,11 @@ impl Tty59App {
         // second home. Filled, it is also one of the two names that give, so
         // it is held between its minimum and what its line leaves, and its
         // tooltip has the whole of it.
-        if parts.summary {
-            let mut summary = t_plural(L10nKey::DiffChangedFiles, files, &[]);
-            if untracked > 0 {
-                summary.push_str(&t_plural(L10nKey::DiffUntrackedCount, untracked, &[]));
-            }
+        let summary_string = (parts.summary && !overflow).then(|| summary_text(files, untracked));
+        if let Some(summary) = summary_string {
             let whole = SharedString::from(summary);
             let tip = whole.clone();
-            metadata.push(
+            summary_el = Some(
                 div()
                     .id("diff-overlay-summary")
                     .text_size(rems(META))
@@ -904,7 +923,7 @@ impl Tty59App {
             );
         }
         if parts.added {
-            metadata.push(
+            added_el = Some(
                 div()
                     .text_size(rems(META))
                     .font_features(tabular())
@@ -917,7 +936,7 @@ impl Tty59App {
             );
         }
         if parts.removed {
-            metadata.push(
+            removed_el = Some(
                 div()
                     .text_size(rems(META))
                     .font_features(tabular())
@@ -930,7 +949,7 @@ impl Tty59App {
             );
         }
         if parts.loading {
-            metadata.push(
+            refresh_el = Some(
                 div()
                     .text_size(rems(META))
                     .text_color(cx.theme().muted_foreground)
@@ -941,11 +960,201 @@ impl Tty59App {
                     .into_any_element(),
             );
         }
-        let (inline_metadata, second_line) = if two_line {
-            (Vec::new(), metadata)
+        // The chip stands beside the subject on the first line, and leads the
+        // second when it has left.
+        let chip_el = subject.chip.map(|text| {
+            info_chip(
+                text,
+                cx.theme().foreground.opacity(CHIP_FILL),
+                cx.theme().muted_foreground,
+                &mono,
+            )
+        });
+        let (chip_first, chip_second) = if moved(0) {
+            (None, chip_el)
         } else {
-            (metadata, Vec::new())
+            (chip_el, None)
         };
+        let (refresh_first, refresh_second) = if moved(0) {
+            (None, refresh_el)
+        } else {
+            (refresh_el, None)
+        };
+        let (summary_first, summary_second) = if moved(2) {
+            (None, summary_el)
+        } else {
+            (summary_el, None)
+        };
+        // The terminal's name leaves its button for the second line when the
+        // level says so; the button keeps its badge, its divider and its tip.
+        let name_mode = if moved(1) {
+            crate::ui::document_column::TerminalName::Moved
+        } else {
+            crate::ui::document_column::TerminalName::Inline(caps.map(|(name, _)| name))
+        };
+        let name_second = moved(1)
+            .then(|| self.render_document_terminal_name(caps.map(|(name, _)| name), window, cx))
+            .flatten();
+
+        let icon_el = gpui::svg()
+            .path(subject.icon)
+            .flex_shrink_0()
+            .size(px(SUBJECT_ICON))
+            .when(cfg!(test), |d| {
+                d.debug_selector(|| "diff-overlay-icon".into())
+            })
+            .text_color(cx.theme().muted_foreground)
+            .into_any_element();
+        let subject_el = if subject.is_rev {
+            // A revision is an identifier, not a name: it belongs in the
+            // same monospace the patch below it is set in. It is also
+            // whatever the source says — an arbitrary ref, a range, a
+            // patch id — so it is the one part of the header that gives
+            // when the controls beside it need the room, the way the branch
+            // name below does, and the tooltip keeps the whole ref.
+            let full = SharedString::from(subject.full);
+            div()
+                .id("diff-overlay-rev")
+                .min_w_0()
+                .truncate()
+                .text_size(rems(TEXT_MONO))
+                .font_weight(FontWeight::MEDIUM)
+                .font_family(self.font_family.clone())
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                })
+                .child(subject.text)
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "diff-overlay-rev".into())
+                })
+                .painted("header-rev")
+                .into_any_element()
+        } else {
+            // This is the name that gives, in a column and filled alike:
+            // the header has the room it has rather than the room a name
+            // would like, and a branch name that refused to yield any of it
+            // pushed the view toggle and the close tile off the end. It
+            // takes the slack the spacer below would otherwise have — the
+            // same trade the label branch makes, and for the same reason
+            // two `flex_1` siblings would split the line and truncate the
+            // name with empty space beside it.
+            let styled = |d: gpui::Div| {
+                d.when(parts.slack, |d| d.flex_1().min_w_0().truncate())
+                    .when(!parts.slack, |d| d.flex_shrink_0())
+                    .text_size(rems(TEXT))
+                    .font_weight(FontWeight::MEDIUM)
+            };
+            if overflow {
+                // Yielding in the overflow rows, it carries its whole name.
+                let tip = SharedString::from(subject.text.clone());
+                styled(div())
+                    .id("diff-overlay-subject")
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-subject".into())
+                    })
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    })
+                    .child(subject.text)
+                    .into_any_element()
+            } else {
+                styled(div()).child(subject.text).into_any_element()
+            }
+        };
+        // The subject takes the slack the spacer below would otherwise
+        // have, which is why that one is skipped when a label is present:
+        // two growing siblings split the line in half and the subject
+        // would truncate with empty space beside it.
+        //
+        // `flex_auto` rather than `flex_1` for the shrinking half of that:
+        // both grow the same, but `flex_1` bases the item at zero, and an
+        // item based at zero has a scaled shrink factor of zero — it
+        // absorbs none of a deficit and simply gets nothing, so the
+        // subject would vanish first however high the others' shrink
+        // factors were. Based at its content width it yields last, which
+        // is the order the strip wants.
+        //
+        // The two of them are one group in the row, based at zero (`flex_1`)
+        // and held at no less than the gap between them. A group based at
+        // zero has no shrink factor, so it takes only the room left after
+        // the ref and the fixed parts have what they need and gives the ref
+        // none of its own: the ref gives way to nothing but a deficit that
+        // is its own to take, and the label and byline are squeezed first.
+        // Inside the group their order is what it was.
+        let label_el = subject.label.as_ref().map(|label| {
+            let whole = SharedString::from(label.subject.clone());
+            let group = h_flex()
+                .flex_1()
+                .min_w(rems(HEADER_GAP_REM))
+                .items_center()
+                .gap(rems(HEADER_GAP_REM));
+            let words = div().flex_auto().min_w_0().truncate().text_size(rems(TEXT));
+            // Yielding in the overflow rows, the commit's subject carries its
+            // whole text there.
+            let group = if overflow {
+                let tip = whole.clone();
+                group.child(
+                    words
+                        .id("diff-overlay-label-subject")
+                        .when(cfg!(test), |d| {
+                            d.debug_selector(|| "diff-overlay-label-subject".into())
+                        })
+                        .tooltip(move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                        })
+                        .child(whole),
+                )
+            } else {
+                group.child(words.child(whole))
+            };
+            group
+                // Yields before the subject does, for the same reason
+                // the path below it does: an author name is unbounded
+                // too, and of the three things on this strip it is the
+                // one nobody reads twice.
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_shrink(999.)
+                        .truncate()
+                        .text_size(rems(META))
+                        .font_features(tabular())
+                        .text_color(cx.theme().muted_foreground)
+                        .child(label_byline(label, now_unix())),
+                )
+                .into_any_element()
+        });
+        let view_el = div()
+            .occlude()
+            .flex_shrink_0()
+            .child(self.diff_view_switch(switch_lead, cx))
+            .into_any_element();
+        // Where the panel sits, answered by the same two cells the code panel
+        // offers. This used to be a right-click menu only, so the one surface
+        // whose whole point is showing half a screen of context had no way to
+        // ask for the screen.
+        let layout_el = self.document_layout_switch_with_lead(chrome, switch_lead, cx);
+        let close_el = div()
+            .occlude()
+            .flex_shrink_0()
+            .when(cfg!(test), |d| {
+                d.debug_selector(|| "diff-overlay-close".into())
+            })
+            .child(
+                crate::ui::tab_strip::chrome_tile_sized(
+                    Button::new("diff-overlay-close").icon(Icon::new(IconName::Close)),
+                    CLOSE_TILE,
+                    crate::ui::tab_strip::RAIL_TILE_GLYPH,
+                    false,
+                    cx,
+                )
+                .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                .tooltip(t(L10nKey::DiffCloseTooltip))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.close_diff_overlay(window, cx);
+                })),
+            )
+            .into_any_element();
 
         let row = h_flex()
             .id("diff-overlay-header")
@@ -957,195 +1166,133 @@ impl Tty59App {
         } else {
             row
         };
-        let first_line = row
+        let (Some(plan), Some(need)) = (plan.filter(|p| p.overflow), need) else {
+            let second_line: Vec<AnyElement> =
+                [chip_second, refresh_second, name_second, summary_second]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+            let first_line = row
+                .flex_shrink_0()
+                // The row's own hairline stays exactly as thin as it is drawn; it
+                // only gives back the half point the title bar spends, so this
+                // header's tiles land on the traffic lights' line rather than below.
+                .title_strip_row(
+                    HAIRLINE_W,
+                    // Wrapped, the one rule is the second line's; this row keeps
+                    // the box it has and draws nothing at its bottom edge.
+                    if two_line {
+                        gpui::transparent_black()
+                    } else {
+                        hairline(cx)
+                    },
+                )
+                // The header's sha and paths are identifiers, not prose: set the
+                // way the patch rows below are, by the Font ligatures setting.
+                .font_features(code_features(cx))
+                .pl(px(lead))
+                // The close tile is a notch smaller than the title bar's own, and
+                // is pulled in by half the difference so its glyph stays on the
+                // column every other trailing tile in the window is centred on.
+                .pr(px(header_trail()))
+                .gap(rems(HEADER_GAP_REM))
+                .items_center()
+                .children(self.render_document_terminal_button_with(chrome, name_mode, window, cx))
+                .child(icon_el)
+                .child(subject_el)
+                // A faint neutral pill, the one the graph gives HEAD: the chip
+                // qualifies the branch beside it rather than competing with it,
+                // and the title bar spends no accent on anything.
+                .children(chip_first)
+                .children(label_el)
+                .children(back)
+                .children(summary_first)
+                .children(added_el)
+                .children(removed_el)
+                .children(refresh_first)
+                .when(parts.spacer, |bar| bar.child(div().flex_1()))
+                .child(view_el)
+                .child(layout_el)
+                .child(close_el);
+            if !two_line {
+                return first_line.into_any_element();
+            }
+            // The metadata that did not fit beside the subject, on a line of its
+            // own below the first: every figure and word whole, the summary
+            // holding what its line leaves.
+            return v_flex()
+                .flex_shrink_0()
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "diff-overlay-header".into())
+                })
+                .child(first_line)
+                .child(
+                    h_flex()
+                        .h(px(SECOND_LINE_H))
+                        .items_center()
+                        .pl(px(crate::ui::app::CONTENT_INSET))
+                        .pr(px(header_trail()))
+                        .gap(rems(HEADER_GAP_REM))
+                        .font_features(code_features(cx))
+                        .border_b(HAIRLINE_W)
+                        .border_color(hairline(cx))
+                        .children(second_line),
+                )
+                .into_any_element();
+        };
+
+        // No ladder level fits both lines: the first row is the terminal's
+        // badge group and the close tile at the trailing end, and every other
+        // piece is whole in the rows below, in the order it reads, the summary
+        // last on a row of its own as prose. The widths are the ones planned.
+        let first_row = row
             .flex_shrink_0()
-            // The row's own hairline stays exactly as thin as it is drawn; it
-            // only gives back the half point the title bar spends, so this
-            // header's tiles land on the traffic lights' line rather than below.
-            .title_strip_row(
-                HAIRLINE_W,
-                // Wrapped, the one rule is the second line's; this row keeps
-                // the box it has and draws nothing at its bottom edge.
-                if two_line {
-                    gpui::transparent_black()
-                } else {
-                    hairline(cx)
-                },
-            )
-            // The header's sha and paths are identifiers, not prose: set the
-            // way the patch rows below are, by the Font ligatures setting.
+            .title_strip_row(HAIRLINE_W, gpui::transparent_black())
             .font_features(code_features(cx))
             .pl(px(lead))
-            // The close tile is a notch smaller than the title bar's own, and
-            // is pulled in by half the difference so its glyph stays on the
-            // column every other trailing tile in the window is centred on.
             .pr(px(header_trail()))
             .gap(rems(HEADER_GAP_REM))
             .items_center()
-            .children(self.render_document_terminal_button_capped(
+            .children(self.render_document_terminal_button_with(
                 chrome,
-                caps.map(|(name, _)| name),
+                crate::ui::document_column::TerminalName::Moved,
                 window,
                 cx,
             ))
-            .child(
-                gpui::svg()
-                    .path(subject.icon)
-                    .flex_shrink_0()
-                    .size(px(SUBJECT_ICON))
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(if subject.is_rev {
-                // A revision is an identifier, not a name: it belongs in the
-                // same monospace the patch below it is set in. It is also
-                // whatever the source says — an arbitrary ref, a range, a
-                // patch id — so it is the one part of the header that gives
-                // when the controls beside it need the room, the way the branch
-                // name below does, and the tooltip keeps the whole ref.
-                let full = SharedString::from(subject.full);
-                div()
-                    .id("diff-overlay-rev")
-                    .min_w_0()
-                    .truncate()
-                    .text_size(rems(TEXT_MONO))
-                    .font_weight(FontWeight::MEDIUM)
-                    .font_family(self.font_family.clone())
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
-                    })
-                    .child(subject.text)
-                    .when(cfg!(test), |d| {
-                        d.debug_selector(|| "diff-overlay-rev".into())
-                    })
-                    .painted("header-rev")
-                    .into_any_element()
-            } else {
-                // This is the name that gives, in a column and filled alike:
-                // the header has the room it has rather than the room a name
-                // would like, and a branch name that refused to yield any of it
-                // pushed the view toggle and the close tile off the end. It
-                // takes the slack the spacer below would otherwise have — the
-                // same trade the label branch makes, and for the same reason
-                // two `flex_1` siblings would split the line and truncate the
-                // name with empty space beside it.
-                div()
-                    .when(parts.slack, |d| d.flex_1().min_w_0().truncate())
-                    .when(!parts.slack, |d| d.flex_shrink_0())
-                    .text_size(rems(TEXT))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(subject.text)
-                    .into_any_element()
-            })
-            // A faint neutral pill, the one the graph gives HEAD: the chip
-            // qualifies the branch beside it rather than competing with it,
-            // and the title bar spends no accent on anything.
-            .when_some(subject.chip, |bar, text| {
-                bar.child(info_chip(
-                    text,
-                    cx.theme().foreground.opacity(CHIP_FILL),
-                    cx.theme().muted_foreground,
-                    &mono,
-                ))
-            })
-            // The subject takes the slack the spacer below would otherwise
-            // have, which is why that one is skipped when a label is present:
-            // two growing siblings split the line in half and the subject
-            // would truncate with empty space beside it.
-            //
-            // `flex_auto` rather than `flex_1` for the shrinking half of that:
-            // both grow the same, but `flex_1` bases the item at zero, and an
-            // item based at zero has a scaled shrink factor of zero — it
-            // absorbs none of a deficit and simply gets nothing, so the
-            // subject would vanish first however high the others' shrink
-            // factors were. Based at its content width it yields last, which
-            // is the order the strip wants.
-            //
-            // The two of them are one group in the row, based at zero (`flex_1`)
-            // and held at no less than the gap between them. A group based at
-            // zero has no shrink factor, so it takes only the room left after
-            // the ref and the fixed parts have what they need and gives the ref
-            // none of its own: the ref gives way to nothing but a deficit that
-            // is its own to take, and the label and byline are squeezed first.
-            // Inside the group their order is what it was.
-            .when_some(subject.label.as_ref(), |bar, label| {
-                bar.child(
-                    h_flex()
-                        .flex_1()
-                        .min_w(rems(HEADER_GAP_REM))
-                        .items_center()
-                        .gap(rems(HEADER_GAP_REM))
-                        .child(
-                            div()
-                                .flex_auto()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(rems(TEXT))
-                                .child(SharedString::from(label.subject.clone())),
-                        )
-                        // Yields before the subject does, for the same reason
-                        // the path below it does: an author name is unbounded
-                        // too, and of the three things on this strip it is the
-                        // one nobody reads twice.
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_shrink(999.)
-                                .truncate()
-                                .text_size(rems(META))
-                                .font_features(tabular())
-                                .text_color(cx.theme().muted_foreground)
-                                .child(label_byline(label, now_unix())),
-                        ),
-                )
-            })
-            .children(inline_metadata)
-            .when(parts.spacer, |bar| bar.child(div().flex_1()))
-            .child(
-                div()
-                    .occlude()
-                    .flex_shrink_0()
-                    .child(self.diff_view_switch(cx)),
-            )
-            // Where the panel sits, answered by the same two cells the code panel
-            // offers. This used to be a right-click menu only, so the one surface
-            // whose whole point is showing half a screen of context had no way to
-            // ask for the screen.
-            .child(self.document_layout_switch(chrome, cx))
-            .child(
-                div()
-                    .occlude()
-                    .flex_shrink_0()
-                    .when(cfg!(test), |d| {
-                        d.debug_selector(|| "diff-overlay-close".into())
-                    })
-                    .child(
-                        crate::ui::tab_strip::chrome_tile_sized(
-                            Button::new("diff-overlay-close").icon(Icon::new(IconName::Close)),
-                            CLOSE_TILE,
-                            crate::ui::tab_strip::RAIL_TILE_GLYPH,
-                            false,
-                            cx,
-                        )
-                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-                        .tooltip(t(L10nKey::DiffCloseTooltip))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_diff_overlay(window, cx);
-                        })),
-                    ),
-            );
-        if !two_line {
-            return first_line.into_any_element();
+            .child(div().flex_1())
+            .child(close_el);
+        let cluster = h_flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap(rems(HEADER_GAP_REM))
+            .child(icon_el)
+            .child(subject_el)
+            .children(label_el)
+            .into_any_element();
+        let name_el =
+            self.render_document_terminal_name(Some(need.overflow_name_cap(&plan)), window, cx);
+        // The pieces, in the order the plan packed them.
+        let mut pieces: Vec<AnyElement> = vec![cluster];
+        pieces.extend(back);
+        pieces.extend(added_el);
+        pieces.extend(removed_el);
+        pieces.push(view_el);
+        pieces.push(layout_el);
+        pieces.extend(chip_first.or(chip_second));
+        pieces.extend(refresh_first.or(refresh_second));
+        pieces.extend(name_el);
+        debug_assert_eq!(pieces.len(), need.pieces().count());
+        let rule = hairline(cx);
+        let row_count = usize::from(plan.rows);
+        let mut grouped: Vec<Vec<AnyElement>> = (0..row_count).map(|_| Vec::new()).collect();
+        for (i, piece) in pieces.into_iter().enumerate() {
+            grouped[usize::from(need.row_of(&plan)[i])].push(piece);
         }
-        // The metadata that did not fit beside the subject, on a line of its
-        // own below the first: every figure and word whole, the summary
-        // holding what its line leaves.
-        v_flex()
-            .flex_shrink_0()
-            .when(cfg!(test), |d| {
-                d.debug_selector(|| "diff-overlay-header".into())
-            })
-            .child(first_line)
-            .child(
+        let mut rows: Vec<AnyElement> = Vec::with_capacity(row_count + 1);
+        for (r, els) in grouped.into_iter().enumerate() {
+            let closing = !parts.summary && r + 1 == row_count;
+            rows.push(
                 h_flex()
                     .h(px(SECOND_LINE_H))
                     .items_center()
@@ -1153,10 +1300,86 @@ impl Tty59App {
                     .pr(px(header_trail()))
                     .gap(rems(HEADER_GAP_REM))
                     .font_features(code_features(cx))
+                    .when(closing, |d| d.border_b(HAIRLINE_W).border_color(rule))
+                    .children(els)
+                    .into_any_element(),
+            );
+        }
+        // The summary is prose: its own row, every word an element of its own
+        // (so it can break only between words), the numbers at their budgeted
+        // width, a word wider than the row alone cut with its own tooltip.
+        if parts.summary {
+            let metrics = &self.editor.diff_header;
+            let lexicon = &metrics.lexicon;
+            let cap_w = plan.summary_cap();
+            let muted = cx.theme().muted_foreground;
+            let words: Vec<AnyElement> = lexicon
+                .render_words(files, untracked)
+                .into_iter()
+                .enumerate()
+                .map(|(i, (shared, budget))| {
+                    // Every word's box is the width planned for it, or the
+                    // row's if it is wider than that, where it is cut alone.
+                    let over = budget > cap_w + 0.01;
+                    let tip = shared.clone();
+                    div()
+                        .id(("diff-overlay-summary-word", i))
+                        .flex_none()
+                        .w(px(budget.min(cap_w)))
+                        .text_size(rems(META))
+                        .font_family(lexicon.family.clone())
+                        .font_weight(FontWeight::NORMAL)
+                        .not_italic()
+                        .font_features(lexicon.features.clone())
+                        .h(px(lexicon.line_h))
+                        .line_height(px(lexicon.line_h))
+                        .text_color(muted)
+                        .when(over, |d| {
+                            d.truncate().tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                            })
+                        })
+                        .when(cfg!(test), |d| {
+                            d.debug_selector(move || format!("diff-overlay-summary-word-{i}"))
+                        })
+                        .child(shared)
+                        .into_any_element()
+                })
+                .collect();
+            rows.push(
+                h_flex()
+                    .h(px(plan.summary_h))
+                    .items_center()
+                    .pl(px(crate::ui::app::CONTENT_INSET))
+                    .pr(px(header_trail()))
                     .border_b(HAIRLINE_W)
-                    .border_color(hairline(cx))
-                    .children(second_line),
-            )
+                    .border_color(rule)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            // Held to the plan: as tall as its lines, the lines
+                            // from the top, no stretching of them or the words.
+                            .items_start()
+                            .content_start()
+                            .gap_x(px(metrics.lexicon.space))
+                            .w(px(cap_w))
+                            .h(px(f32::from(plan.state.lines) * lexicon.line_h))
+                            .when(cfg!(test), |d| {
+                                d.debug_selector(|| "diff-overlay-summary".into())
+                            })
+                            .children(words),
+                    )
+                    .into_any_element(),
+            );
+        }
+        v_flex()
+            .flex_shrink_0()
+            .when(cfg!(test), |d| {
+                d.debug_selector(|| "diff-overlay-header".into())
+            })
+            .child(first_row)
+            .children(rows)
             .into_any_element()
     }
 
@@ -1171,7 +1394,7 @@ impl Tty59App {
     ///
     /// The tooltip still carries the words: a divider down a frame is not
     /// self-explanatory, and neither is a set of rules across one.
-    fn diff_view_switch(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn diff_view_switch(&self, lead: f32, cx: &mut Context<Self>) -> AnyElement {
         let current = view_mode(cx);
         let cell =
             |i: usize, mode: DiffViewMode, glyph: fn(gpui::Hsla) -> AnyElement, tip: L10nKey| {
@@ -1188,7 +1411,7 @@ impl Tty59App {
                     cx,
                 )
             };
-        switch_track(
+        crate::ui::document_column::switch_track_with_lead(
             "diff-overlay-view",
             vec![
                 cell(0, DiffViewMode::Split, glyph_split, L10nKey::DiffViewSplit),
@@ -1199,6 +1422,7 @@ impl Tty59App {
                     L10nKey::DiffViewUnified,
                 ),
             ],
+            lead,
             cx,
         )
     }
@@ -1739,44 +1963,24 @@ impl HeaderParts {
         }
     }
 
-    /// How many children the row has on one line: the terminal button of a
-    /// filled header, the icon and the subject, each part that is there (a
-    /// label is its subject and its byline), the two switches and the close
-    /// tile.
+    /// How many children the row has that never leave it: the terminal button
+    /// of a filled header, the icon and the subject, the focused file's way
+    /// back, the two totals, the spacer, the two switches and the close tile.
     ///
     /// A label still counts as the two pieces it is made of, though the row
     /// holds them as one group: the gap inside that group, which the group is
     /// held to no less than, is the gap the second piece would have had in the
     /// row. The count, and so the gaps the budget reserves, is what it was.
-    fn children(&self) -> usize {
+    fn fixed_children(&self) -> usize {
         let one = |there: bool| usize::from(there);
         one(self.terminal)
             + 2
-            + one(self.staged)
             + 2 * one(self.labelled)
             + one(self.focused)
-            + one(self.summary)
             + one(self.added)
             + one(self.removed)
-            + one(self.loading)
             + one(self.spacer)
             + 3
-    }
-
-    /// The metadata a second line takes: the focused file's back button, the
-    /// summary, the two counts and the Refreshing word, whichever are there.
-    fn metadata(&self) -> usize {
-        let one = |there: bool| usize::from(there);
-        one(self.focused)
-            + one(self.summary)
-            + one(self.added)
-            + one(self.removed)
-            + one(self.loading)
-    }
-
-    /// How many children the first line has when the metadata is on a second.
-    fn first_line(&self) -> usize {
-        self.children() - self.metadata()
     }
 }
 
@@ -1818,6 +2022,11 @@ pub(crate) struct DiffHeaderMetrics {
     /// of any glyphs.
     summary_min: f32,
     name_min: f32,
+    /// The ten templates the summary can be made of in the current language,
+    /// and every word of them, measured: the language and the summary's font
+    /// are what the words depend on, never the counts.
+    templates: [&'static str; 10],
+    lexicon: SummaryLexicon,
 }
 
 impl DiffHeaderMetrics {
@@ -1846,6 +2055,8 @@ impl DiffHeaderMetrics {
             ..chip_font.clone()
         };
         let word_font = font(ui_family.clone(), features.clone());
+        let templates = summary_templates();
+        let lexicon = SummaryLexicon::measure(window, &figures, meta, &templates);
         Self {
             rem,
             ui_family,
@@ -1859,7 +2070,10 @@ impl DiffHeaderMetrics {
                 .ceil(),
             plus: figure("+"),
             minus: figure("−"),
-            digit: figure("0"),
+            // The widest of the ten digits, measured once with the summary's
+            // words: a font that ignores tabular figures cannot under-price a
+            // count.
+            digit: lexicon.digit,
             rev_floor: crate::ui::tab_strip::measure_text(
                 text,
                 &rev_font,
@@ -1876,6 +2090,8 @@ impl DiffHeaderMetrics {
                 "000\u{2026}",
             )
             .ceil(),
+            templates,
+            lexicon,
         }
     }
 
@@ -1886,6 +2102,7 @@ impl DiffHeaderMetrics {
             && self.features == code_features(cx)
             && self.staged == t(L10nKey::ScmChipStaged)
             && self.refreshing == t(L10nKey::Refreshing)
+            && self.templates == summary_templates()
     }
 
     /// A count drawn as `sign` and the digits of `n`, as a run.
@@ -1939,11 +2156,10 @@ impl Tty59App {
     /// each part as the one that draws it. Arithmetic over what is already
     /// measured; nothing is shaped here.
     ///
-    /// The one-line figure is always the one-line budget — every part that is
-    /// there, on the one row, with the refs and names at the least they keep —
-    /// whatever line the header is on, so that moving the metadata to a second
-    /// line cannot lower the figure that decided it. The per-line figures are
-    /// what the header's own lines need when it is on two.
+    /// Every figure is read off what the diff has, never off where the parts
+    /// are drawn now: the tiers that may leave the first line are there or not
+    /// by the overlay, so a level's budget is the same whichever line each
+    /// part happens to be on.
     fn diff_need(
         &self,
         overlay: &DiffOverlayState,
@@ -1951,124 +2167,854 @@ impl Tty59App {
         divider: f32,
         cx: &gpui::App,
     ) -> DiffNeed {
-        let totals = match &overlay.load {
-            DiffLoad::Ready(loaded) => loaded.stats().totals,
-            _ => (0, 0),
+        let (totals, files, untracked) = match &overlay.load {
+            DiffLoad::Ready(loaded) => {
+                let stats = loaded.stats();
+                (stats.totals, loaded.files.len(), stats.untracked_count)
+            }
+            _ => ((0, 0), 0, 0),
         };
         let shape = source_shape(&overlay.source);
         let parts = HeaderParts::of(overlay, shape, chrome, totals);
         let m = &self.editor.diff_header;
         let gap = HEADER_GAP_REM * m.rem;
-        let lead = self.diff_header_lead(chrome, cx);
-        // What the first line carries whichever line the metadata is on.
-        let mut first =
-            SUBJECT_ICON + 2. * crate::ui::document_column::layout_switch_w() + CLOSE_TILE;
-        if parts.terminal {
-            first += crate::ui::document_column::terminal_button_fixed_w(divider);
-        }
-        if parts.staged {
-            first += m.staged_w + 2. * crate::ui::right_panel::CHIP_PAD_X;
-        }
-        // A ref gives way before anything else does, but not below one short
-        // id's worth: a readable minimum, the same for every ref, so the text
-        // of a ref never moves the point the header gives way at.
+        // What never leaves the first line: the icon, the two switches' tracks
+        // (their margins are given separately, they may yield), the close
+        // tile, a ref at the least it keeps, the focused file's way back and
+        // the two totals, whole.
+        let mut core = SUBJECT_ICON
+            + 2. * (crate::ui::document_column::layout_switch_w()
+                - crate::ui::document_column::SWITCH_LEAD)
+            + CLOSE_TILE;
         if shape.is_rev {
-            first += m.rev_floor;
+            core += m.rev_floor;
         }
-        // What the metadata carries: the figures and words, whole.
-        let mut meta = 0.;
+        let back_w =
+            FOCUS_PAD_L + FOCUS_CHEVRON_REM * m.rem + FOCUS_GAP_REM * m.rem + f32::from(ROW_INSET);
         if parts.focused {
-            meta += FOCUS_PAD_L
-                + FOCUS_CHEVRON_REM * m.rem
-                + FOCUS_GAP_REM * m.rem
-                + f32::from(ROW_INSET);
+            core += back_w;
         }
+        let (added_w, removed_w) = (m.count_w(m.plus, totals.0), m.count_w(m.minus, totals.1));
         if parts.added {
-            meta += m.count_w(m.plus, totals.0);
+            core += added_w;
         }
         if parts.removed {
-            meta += m.count_w(m.minus, totals.1);
+            core += removed_w;
         }
-        if parts.loading {
-            meta += m.refreshing_w;
+        let (pill, pill_badge) = if parts.terminal {
+            (
+                crate::ui::document_column::terminal_button_fixed_w(divider),
+                crate::ui::document_column::terminal_badge_only_w(divider),
+            )
+        } else {
+            (0., 0.)
+        };
+        // The tiers, in the order they leave the first line: the Staged chip
+        // with the Refreshing word, the terminal's name, the summary.
+        let chip_w = if parts.staged {
+            m.staged_w + 2. * crate::ui::right_panel::CHIP_PAD_X
+        } else {
+            0.
+        };
+        let refreshing_w = if parts.loading { m.refreshing_w } else { 0. };
+        let tiers = [
+            Tier {
+                present: parts.staged || parts.loading,
+                min: chip_w + refreshing_w,
+                kids_first: usize::from(parts.staged) + usize::from(parts.loading),
+                kids_second: usize::from(parts.staged) + usize::from(parts.loading),
+                flex: false,
+            },
+            Tier {
+                present: parts.terminal,
+                min: m.name_min,
+                kids_first: 0,
+                kids_second: 1,
+                flex: true,
+            },
+            Tier {
+                present: parts.summary,
+                min: m.summary_min,
+                kids_first: 1,
+                kids_second: 1,
+                flex: true,
+            },
+        ];
+        // What the overflow rows pack, in the order they read: the subject
+        // with its icon, the way back, the totals, the two switches (with
+        // their margins), the chip, the Refreshing word, the terminal's name.
+        let subject_min = SUBJECT_ICON
+            + gap
+            + if shape.is_rev {
+                m.rev_floor
+            } else {
+                m.name_min
+            }
+            + if parts.labelled { 2. * gap } else { 0. };
+        let switch_w = crate::ui::document_column::layout_switch_w();
+        let mut items = [ItemSpec {
+            item: Item::Subject,
+            w: 0.,
+        }; ITEM_MAX];
+        let mut n_items = 0;
+        for (present, item, w) in [
+            (true, Item::Subject, subject_min),
+            (parts.focused, Item::Back, back_w),
+            (parts.added, Item::Added, added_w),
+            (parts.removed, Item::Removed, removed_w),
+            (true, Item::View, switch_w),
+            (true, Item::Layout, switch_w),
+            (parts.staged, Item::Chip, chip_w),
+            (parts.loading, Item::Refreshing, refreshing_w),
+            (parts.terminal, Item::Name, m.name_min),
+        ] {
+            if present {
+                items[n_items] = ItemSpec { item, w };
+                n_items += 1;
+            }
         }
-        let name_min = if parts.terminal { m.name_min } else { 0. };
-        let summary_min = if parts.summary { m.summary_min } else { 0. };
-        let trail = header_trail();
-        let one_fixed = lead + trail + first + meta + gap * (parts.children() - 1) as f32;
-        let first_fixed = lead + trail + first + gap * (parts.first_line() as f32 - 1.);
-        let second_fixed = crate::ui::app::CONTENT_INSET
-            + trail
-            + meta
-            + gap * (parts.metadata() as f32 - 1.).max(0.);
-        DiffNeed {
-            one_line: one_fixed + name_min + summary_min,
-            one_fixed,
-            first_fixed,
-            second_fixed,
-            name_min,
-            summary_min,
+        // The summary, as the words the lexicon prices: the templates its two
+        // counts select, never shaped or formatted here.
+        let words = if parts.summary {
+            m.lexicon.words(files, untracked)
+        } else {
+            SummaryWords::default()
+        };
+        let mut need = DiffNeed {
+            one_line: 0.,
+            lead: self.diff_header_lead(chrome, cx),
+            trail: header_trail(),
+            gap,
+            core,
+            pill,
+            pill_badge,
+            fixed_children: parts.fixed_children(),
+            tiers,
+            items,
+            n_items,
+            words,
+            space: m.lexicon.space,
+            line_h: m.lexicon.line_h,
             summary: parts.summary,
-            second: parts.metadata() > 0,
+        };
+        need.one_line = need.first_line(0).total();
+        need
+    }
+}
+
+/// The summary as the header says it for a diff of `files` files and
+/// `untracked` untracked ones.
+fn summary_text(files: usize, untracked: usize) -> String {
+    let mut summary = t_plural(L10nKey::DiffChangedFiles, files, &[]);
+    if untracked > 0 {
+        summary.push_str(&t_plural(L10nKey::DiffUntrackedCount, untracked, &[]));
+    }
+    summary
+}
+
+/// The ten templates the summary can be made of in the current language: the
+/// changed files' five and the untracked count's five.
+fn summary_templates() -> [&'static str; 10] {
+    let (changed, untracked) = (
+        crate::ui::i18n::plural_templates(L10nKey::DiffChangedFiles),
+        crate::ui::i18n::plural_templates(L10nKey::DiffUntrackedCount),
+    );
+    [
+        changed[0],
+        changed[1],
+        changed[2],
+        changed[3],
+        changed[4],
+        untracked[0],
+        untracked[1],
+        untracked[2],
+        untracked[3],
+        untracked[4],
+    ]
+}
+
+/// What a header's pieces are, in the order the overflow rows read them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Item {
+    Subject,
+    Back,
+    Added,
+    Removed,
+    View,
+    Layout,
+    Chip,
+    Refreshing,
+    Name,
+}
+
+/// How many pieces the overflow rows pack.
+const ITEM_MAX: usize = 9;
+
+#[derive(Clone, Copy)]
+struct ItemSpec {
+    item: Item,
+    /// The least it takes in a row.
+    w: f32,
+}
+
+/// The most words the summary's plan holds: two templates' worth, each of at
+/// most half of it (see [`SummaryLexicon::measure`]).
+const SUMMARY_WORDS_MAX: usize = 32;
+
+/// The widths the summary's words take, in the order they read, each a whole
+/// element: bounded, on the stack.
+#[derive(Clone, Copy)]
+struct SummaryWords {
+    n: usize,
+    w: [f32; SUMMARY_WORDS_MAX],
+}
+
+impl Default for SummaryWords {
+    fn default() -> Self {
+        Self {
+            n: 0,
+            w: [0.; SUMMARY_WORDS_MAX],
         }
     }
 }
 
-/// What the header's fixed parts add up to, and what is left for the names.
-/// `*_fixed` is every width but the names' own minima: the one-line row's, the
-/// first line's and the second's.
+impl SummaryWords {
+    /// How many lines the words take in `cap` pixels, broken only between
+    /// words with `space` between: a word wider than `cap` is a capped word on
+    /// a line of its own, the words before it end their line and the words
+    /// after it begin a new one. The comparison is exact: `cap` is whole
+    /// pixels, floored, and is the width the row is drawn at.
+    fn lines(&self, space: f32, cap: f32) -> u8 {
+        let (mut lines, mut used) = (0u8, 0.);
+        for &w in &self.w[..self.n] {
+            if w > cap {
+                lines += 1;
+                used = 0.;
+            } else if used == 0. {
+                lines += 1;
+                used = w;
+            } else if used + space + w <= cap {
+                used += space + w;
+            } else {
+                lines += 1;
+                used = w;
+            }
+        }
+        lines.max(1)
+    }
+}
+
+/// One word of a summary template.
+#[derive(Clone)]
+enum Tok {
+    /// A word as it stands: kept for the render to clone, measured once and
+    /// rounded up as the element it is drawn as.
+    Word { text: SharedString, w: f32 },
+    /// A word with the count in it: what comes before the digits and after,
+    /// each measured once; the digits are priced at the widest digit.
+    Count {
+        prefix: SharedString,
+        suffix: SharedString,
+        prefix_w: f32,
+        suffix_w: f32,
+    },
+}
+
+/// Where the plural category `category` is among a plural-aware key's five
+/// templates, which [`crate::ui::i18n::plural_templates`] lists in this order.
+fn category_slot(category: crate::ui::i18n::PluralCategory) -> usize {
+    use crate::ui::i18n::PluralCategory as C;
+    match category {
+        C::Zero => 0,
+        C::One => 1,
+        C::Few => 2,
+        C::Many => 3,
+        C::Other => 4,
+    }
+}
+
+/// Every template the summary can be made of in the current language, each
+/// split into typed words and measured when the fonts, the size, the features
+/// or the language change, and priced by arithmetic after that: the summary is
+/// the template the existing plural selection picks for the changed files'
+/// count and, with untracked files, the one it picks for theirs, so every word
+/// of it is one of these or a count between a template's affixes.
+#[derive(Clone)]
+struct SummaryLexicon {
+    /// The changed files' five templates, then the untracked count's five.
+    templates: Vec<Vec<Tok>>,
+    /// The gap between two words: a space.
+    space: f32,
+    /// The widest of the ten digits in the summary's font and features, so a
+    /// font whose digits are not all alike is never under budget.
+    digit: f32,
+    /// One line of the summary, rounded up once: the line height every word is
+    /// drawn with, the same one the plan multiplies.
+    line_h: f32,
+    /// The font the words are measured in and drawn in: shared, not rebuilt.
+    family: SharedString,
+    features: gpui::FontFeatures,
+}
+
+impl SummaryLexicon {
+    fn measure(
+        window: &Window,
+        font: &gpui::Font,
+        size: f32,
+        templates: &[&'static str; 10],
+    ) -> Self {
+        let text = window.text_system();
+        let shaped = |s: &str| crate::ui::tab_strip::measure_text(text, font, size, s);
+        let digit = (0..10).map(|d| shaped(&d.to_string())).fold(0., f32::max);
+        let split = |template: &'static str| -> Vec<Tok> {
+            template
+                .split_whitespace()
+                .map(|token| match token.find("{count}") {
+                    Some(at) => {
+                        let (prefix, suffix) = (&token[..at], &token[at + "{count}".len()..]);
+                        Tok::Count {
+                            prefix: SharedString::from(prefix.to_string()),
+                            suffix: SharedString::from(suffix.to_string()),
+                            prefix_w: if prefix.is_empty() {
+                                0.
+                            } else {
+                                shaped(prefix)
+                            },
+                            suffix_w: if suffix.is_empty() {
+                                0.
+                            } else {
+                                shaped(suffix)
+                            },
+                        }
+                    }
+                    None => Tok::Word {
+                        text: SharedString::from(token.to_string()),
+                        w: shaped(token).ceil(),
+                    },
+                })
+                .collect()
+        };
+        let templates: Vec<Vec<Tok>> = templates.iter().map(|t| split(*t)).collect();
+        // The plan holds the words of two templates on the stack: a template
+        // with more words than half of it is a translation the header cannot
+        // plan, and is refused here, where the language changes, rather than
+        // having a word left out of what is drawn.
+        for template in &templates {
+            assert!(
+                template.len() <= SUMMARY_WORDS_MAX / 2,
+                "a summary template has more than {} words",
+                SUMMARY_WORDS_MAX / 2
+            );
+        }
+        // One line of the summary, as the element draws it: the default line
+        // height at the summary's size.
+        let mut style = window.text_style();
+        style.font_size = px(size).into();
+        Self {
+            templates,
+            space: shaped(" "),
+            digit,
+            line_h: style
+                .line_height_in_pixels(window.rem_size())
+                .as_f32()
+                .ceil(),
+            family: font.family.clone(),
+            features: font.features.clone(),
+        }
+    }
+
+    /// The template slot of a count's plural form: `base` for the changed
+    /// files' templates, 5 more for the untracked count's.
+    fn slot(base: usize, count: usize) -> usize {
+        base + category_slot(crate::ui::i18n::PluralCategory::from_count(count))
+    }
+
+    /// The widths of the summary's words for `files` changed files and
+    /// `untracked` untracked ones, from the typed words of the templates the
+    /// plural selection picks and the digits of each count: arithmetic, no
+    /// text.
+    fn words(&self, files: usize, untracked: usize) -> SummaryWords {
+        let mut words = SummaryWords::default();
+        for (base, count, there) in [(0, files, true), (5, untracked, untracked > 0)] {
+            if !there {
+                continue;
+            }
+            let digits = crate::ui::tab_strip::count_digits(count) as f32;
+            for tok in &self.templates[Self::slot(base, count)] {
+                words.w[words.n] = match tok {
+                    Tok::Word { w, .. } => *w,
+                    Tok::Count {
+                        prefix_w, suffix_w, ..
+                    } => (prefix_w + digits * self.digit + suffix_w).ceil(),
+                };
+                words.n += 1;
+            }
+        }
+        words
+    }
+
+    /// What the render draws, word by word: the text and the width of its box,
+    /// the same width [`Self::words`] planned.
+    fn render_words(&self, files: usize, untracked: usize) -> Vec<(SharedString, f32)> {
+        let mut out = Vec::new();
+        for (base, count, there) in [(0, files, true), (5, untracked, untracked > 0)] {
+            if !there {
+                continue;
+            }
+            let digits = crate::ui::tab_strip::count_digits(count) as f32;
+            for tok in &self.templates[Self::slot(base, count)] {
+                out.push(match tok {
+                    Tok::Word { text, w } => (text.clone(), *w),
+                    Tok::Count {
+                        prefix,
+                        suffix,
+                        prefix_w,
+                        suffix_w,
+                    } => (
+                        SharedString::from(format!("{prefix}{count}{suffix}")),
+                        (prefix_w + digits * self.digit + suffix_w).ceil(),
+                    ),
+                });
+            }
+        }
+        out
+    }
+}
+
+/// One tier of what may leave the filled header's first line.
+#[derive(Clone, Copy)]
+struct Tier {
+    /// The diff has it.
+    present: bool,
+    /// The least it keeps: whole for the chip and the Refreshing word, the
+    /// readable minimum for a name and a summary that give way.
+    min: f32,
+    /// How many children of the row it is on the first line, and on the second.
+    kids_first: usize,
+    kids_second: usize,
+    /// Its width gives way to the room its line leaves.
+    flex: bool,
+}
+
+/// What one line's parts add up to: the fixed widths with the gaps between
+/// the children, and the minima of the parts that give way.
+#[derive(Clone, Copy)]
+struct LineNeed {
+    fixed: f32,
+    flex: f32,
+}
+
+impl LineNeed {
+    fn total(self) -> f32 {
+        self.fixed + self.flex
+    }
+}
+
+/// How many tiers of the filled header's secondary parts are on its second
+/// line: none, the chip with the Refreshing word, those and the terminal's
+/// name, all three with the summary.
+pub(crate) const WRAP_LEVELS: u8 = 3;
+
+/// What the header was last found to be, so each part of it is held the
+/// editor's margin past the point it would shrink again: `level` is the
+/// ladder's (0 to [`WRAP_LEVELS`]) or, past it, one more than the rows the
+/// overflow gives the header; `lines` is the lines of the summary on its own
+/// row, 1 outside the overflow. Written by `editor_header_latch_sync` alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WrapState {
+    pub(crate) level: u8,
+    pub(crate) lines: u8,
+}
+
+/// The header's plan in a body: which ladder level, or which rows, and the
+/// widths each of them was planned at, so that drawing, the names' caps and
+/// the summary's height all use what was planned.
+#[derive(Clone, Copy)]
+pub(crate) struct RowPlan {
+    pub(crate) state: WrapState,
+    /// No ladder level fits: the header is in the overflow rows.
+    pub(crate) overflow: bool,
+    /// The ladder level, when not in the overflow.
+    pub(crate) ladder: u8,
+    /// The margin before each switch, which yields only to what the last
+    /// ladder level lacks.
+    pub(crate) lead: f32,
+    /// The width the pieces were packed at, and the one the summary was
+    /// wrapped at: the body, or the body less the margin while a count is held.
+    level_w: f32,
+    sum_w: f32,
+    /// The row each piece is on, and how many rows hold them.
+    row_of: [u8; ITEM_MAX],
+    pub(crate) rows: u8,
+    /// How tall the summary's row is.
+    pub(crate) summary_h: f32,
+}
+
+impl RowPlan {
+    /// The width the summary's words are wrapped in, inside its row.
+    pub(crate) fn summary_cap(&self) -> f32 {
+        (self.sum_w - crate::ui::app::CONTENT_INSET - header_trail()).floor()
+    }
+}
+
+/// What a count is, at `body` pixels and in `body` less the margin, once held:
+/// a count that would fall is kept at no more than it was, and no less than
+/// what the narrower width gives, until the margin clears for each step of it;
+/// a count that does not fall is the one the body gives. Returns the count and
+/// the width it was found at, which is never more than `body`.
+fn held(count_at: impl Fn(f32) -> u8, body: f32, was: u8) -> (u8, f32) {
+    let now = count_at(body);
+    if now >= was {
+        return (now, body);
+    }
+    let margin = body - crate::ui::code_editor::HEADER_HYSTERESIS;
+    let kept = count_at(margin);
+    if kept <= was {
+        return (kept, margin);
+    }
+    // More than it was at the narrower width and fewer at the body: the
+    // narrowest width in between that has no more than it was.
+    let (mut lo, mut hi) = (margin, body);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.;
+        if count_at(mid) <= was {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    (count_at(hi), hi)
+}
+
+/// What the header's fixed parts add up to, and what each line of it needs at
+/// each level. The levels are ordered: level `k` has the first `k` tiers on a
+/// second line, a tier the diff does not have is not a level, and the budget
+/// of a level is read off what the diff has, never off where its parts are.
+/// When no level fits both lines the header has more rows: every piece is
+/// packed whole into rows in the order it reads.
 #[derive(Clone, Copy)]
 pub(crate) struct DiffNeed {
     /// Everything on one line, with the names at their minima.
     pub(crate) one_line: f32,
-    one_fixed: f32,
-    first_fixed: f32,
-    second_fixed: f32,
-    name_min: f32,
-    summary_min: f32,
+    lead: f32,
+    trail: f32,
+    gap: f32,
+    /// What never leaves the first line, apart from the terminal button and
+    /// the switches' margins.
+    core: f32,
+    /// The terminal button beside its name, and without it, as the name's gap
+    /// goes with the name.
+    pill: f32,
+    pill_badge: f32,
+    fixed_children: usize,
+    tiers: [Tier; 3],
+    items: [ItemSpec; ITEM_MAX],
+    n_items: usize,
+    words: SummaryWords,
+    space: f32,
+    line_h: f32,
+    /// The diff has a summary.
     summary: bool,
-    /// There is metadata for a second line to carry.
-    second: bool,
 }
 
 impl DiffNeed {
-    /// Whether the metadata goes onto a second line in `body` pixels: when the
-    /// one-line budget does not fit, and held the editor's margin more once it
-    /// has. `was` is the line the header was last found to need.
-    pub(crate) fn wraps(&self, body: f32, was: bool) -> bool {
-        self.second && crate::ui::code_editor::header_inline(body, self.one_line, was)
+    /// Whether tier `tier` is on the second line at level `level`.
+    fn moved(&self, tier: usize, level: u8) -> bool {
+        self.tiers[tier].present && (tier as u8) < level
     }
 
-    /// The room the terminal button's name and the summary keep, as
-    /// `(name, summary)` caps in whole pixels, floored. On one line they share
-    /// what the fixed parts leave: after each has its minimum, the name takes
-    /// half of what is left (up to the button's own cap) and the summary the
-    /// rest, so the two never add up to more than there is. On two lines each
-    /// has the room its own line leaves. Neither is ever less than its
-    /// minimum.
-    pub(crate) fn caps(&self, body: f32, two_lines: bool) -> (f32, f32) {
-        let cap = crate::ui::document_column::HEADER_CELL_MAX_W;
-        let (name, summary) = if two_lines {
-            ((body - self.first_fixed).min(cap), body - self.second_fixed)
-        } else {
-            let free = body - self.one_fixed;
-            let name = if self.summary {
-                let extra = free - self.name_min - self.summary_min;
-                (self.name_min + extra / 2.).min(cap)
+    /// The first line at `level` with `lead` before each switch: the lead and
+    /// trail, what never leaves, the terminal button (without its name once
+    /// the name has left), the tiers that have not left, and a gap between
+    /// each child.
+    fn first_line_with(&self, level: u8, lead: f32) -> LineNeed {
+        let mut fixed = self.lead
+            + self.trail
+            + self.core
+            + 2. * lead
+            + if self.moved(1, level) {
+                self.pill_badge
             } else {
-                free.min(cap)
+                self.pill
             };
-            let name = name.floor().max(self.name_min);
-            (name, free - name)
-        };
+        let mut flex = 0.;
+        let mut kids = self.fixed_children;
+        for (tier, t) in self.tiers.iter().enumerate() {
+            if !t.present || self.moved(tier, level) {
+                continue;
+            }
+            kids += t.kids_first;
+            if t.flex {
+                flex += t.min;
+            } else {
+                fixed += t.min;
+            }
+        }
+        LineNeed {
+            fixed: fixed + self.gap * (kids as f32 - 1.),
+            flex,
+        }
+    }
+
+    fn first_line(&self, level: u8) -> LineNeed {
+        self.first_line_with(level, crate::ui::document_column::SWITCH_LEAD)
+    }
+
+    /// The second line at `level`: what is on it, or none when nothing is.
+    fn second_line(&self, level: u8) -> Option<LineNeed> {
+        let mut fixed = crate::ui::app::CONTENT_INSET + self.trail;
+        let mut flex = 0.;
+        let mut kids = 0;
+        for (tier, t) in self.tiers.iter().enumerate() {
+            if !self.moved(tier, level) {
+                continue;
+            }
+            kids += t.kids_second;
+            if t.flex {
+                flex += t.min;
+            } else {
+                fixed += t.min;
+            }
+        }
+        (kids > 0).then(|| LineNeed {
+            fixed: fixed + self.gap * (kids as f32 - 1.),
+            flex,
+        })
+    }
+
+    /// Whether the header has a second line at `level`.
+    pub(crate) fn has_second_line(&self, level: u8) -> bool {
+        self.second_line(level).is_some()
+    }
+
+    /// Whether the tier that holds the chip and the Refreshing word, the
+    /// terminal's name, or the summary (`tier` 0, 1, 2) is on the second line.
+    pub(crate) fn tier_moved(&self, tier: usize, level: u8) -> bool {
+        self.moved(tier, level)
+    }
+
+    /// The last level the ladder has for this diff: every tier it has moved.
+    fn last_level(&self) -> u8 {
+        (1..=WRAP_LEVELS)
+            .rev()
+            .find(|level| self.tiers[*level as usize - 1].present)
+            .unwrap_or(0)
+    }
+
+    /// The ladder's level in `body` pixels: the fewest tiers on the second
+    /// line for which both lines fit, a level held the editor's margin past
+    /// the point it would fit once the header has been at a level with more
+    /// moved, or in the overflow rows (any `was` past the ladder). The last
+    /// level fits when the first line does with the switches' margins at
+    /// nothing, which is what they yield to. None when no level fits.
+    fn ladder_level(&self, body: f32, was: u8) -> Option<u8> {
+        let last = self.last_level();
+        for level in 0..=WRAP_LEVELS {
+            if level > 0 && !self.tiers[level as usize - 1].present {
+                continue;
+            }
+            let lead = if level == last {
+                0.
+            } else {
+                crate::ui::document_column::SWITCH_LEAD
+            };
+            let need = self
+                .second_line(level)
+                .map_or(0., LineNeed::total)
+                .max(self.first_line_with(level, lead).total());
+            if !crate::ui::code_editor::header_inline(body, need, was > level) {
+                return Some(level);
+            }
+        }
+        None
+    }
+
+    /// The margin before each switch at `level` in `body`: whole, except at
+    /// the last level when the first line is short of the body, when each
+    /// gives up half of the shortage, never below nothing.
+    pub(crate) fn switch_lead(&self, body: f32, level: u8) -> f32 {
+        let lead = crate::ui::document_column::SWITCH_LEAD;
+        if level != self.last_level() {
+            return lead;
+        }
+        let short = self.first_line_with(level, lead).total() - body;
+        if short <= 0. {
+            lead
+        } else {
+            (lead - short / 2.).clamp(0., lead)
+        }
+    }
+
+    /// How the names share `free` pixels on a line they are both on, or one
+    /// takes what there is: `(name, summary)`, whole pixels, floored, never
+    /// less than a minimum. After each has its minimum the name takes half of
+    /// what is left (up to the button's own cap) and the summary the rest.
+    fn share(&self, free: f32, name: bool, summary: bool) -> (f32, f32) {
+        let cap = crate::ui::document_column::HEADER_CELL_MAX_W;
+        let (name_min, summary_min) = (self.tiers[1].min, self.tiers[2].min);
+        match (name, summary) {
+            (true, true) => {
+                let extra = free - name_min - summary_min;
+                let name = (name_min + extra / 2.).min(cap).floor().max(name_min);
+                (name, (free - name).floor().max(summary_min))
+            }
+            (true, false) => (free.min(cap).floor().max(name_min), summary_min),
+            (false, true) => (name_min, free.floor().max(summary_min)),
+            (false, false) => (name_min, summary_min),
+        }
+    }
+
+    /// The room the terminal's name and the summary keep at `level`, as
+    /// `(name, summary)` caps: each has the room its own line leaves, and
+    /// neither is ever less than its minimum.
+    pub(crate) fn caps(&self, body: f32, level: u8) -> (f32, f32) {
+        let (name_here, summary_here) = (
+            self.tiers[1].present && !self.moved(1, level),
+            self.tiers[2].present && !self.moved(2, level),
+        );
+        let first = self.share(
+            body - self
+                .first_line_with(level, self.switch_lead(body, level))
+                .fixed,
+            name_here,
+            summary_here,
+        );
+        let second = self.second_line(level).map_or((0., 0.), |line| {
+            self.share(
+                body - line.fixed,
+                self.moved(1, level),
+                self.moved(2, level),
+            )
+        });
         (
-            name.floor().max(self.name_min),
-            summary.floor().max(self.summary_min),
+            if name_here { first.0 } else { second.0 },
+            if summary_here { first.1 } else { second.1 },
         )
     }
 
     pub(crate) fn summary_min(&self) -> f32 {
-        self.summary_min
+        self.tiers[2].min
+    }
+
+    /// The pieces packed greedily, in order, into rows of `width` less the
+    /// rows' own inset and trail with a gap between each two: the row each is
+    /// on, and how many rows there are.
+    fn pack(&self, width: f32) -> ([u8; ITEM_MAX], u8) {
+        let cap = (width - crate::ui::app::CONTENT_INSET - self.trail).floor();
+        let mut row_of = [0u8; ITEM_MAX];
+        let (mut row, mut used) = (0u8, 0.);
+        for (i, spec) in self.items[..self.n_items].iter().enumerate() {
+            if used == 0. {
+                used = spec.w;
+            } else if used + self.gap + spec.w <= cap {
+                used += self.gap + spec.w;
+            } else {
+                row += 1;
+                used = spec.w;
+            }
+            row_of[i] = row;
+        }
+        (row_of, if self.n_items == 0 { 0 } else { row + 1 })
+    }
+
+    /// The overflow's level in a body of `width`: one more than its rows, the
+    /// first row, the packed rows and the summary's own.
+    fn overflow_level(&self, width: f32) -> u8 {
+        (self.pack(width).1 + u8::from(self.summary) + 2).max(WRAP_LEVELS + 1)
+    }
+
+    /// How many lines the summary takes in a body of `width`.
+    fn lines_at(&self, width: f32) -> u8 {
+        if !self.summary {
+            return 1;
+        }
+        self.words.lines(
+            self.space,
+            (width - crate::ui::app::CONTENT_INSET - self.trail).floor(),
+        )
+    }
+
+    /// How tall a row of `lines` lines of the summary is: as tall as the
+    /// others when it is one line, and as the lines need, in the same padding
+    /// above and below, when it is more.
+    fn summary_height(&self, lines: u8) -> f32 {
+        let pad = ((SECOND_LINE_H - self.line_h) / 2.).max(0.);
+        (f32::from(lines) * self.line_h + 2. * pad).max(SECOND_LINE_H)
+    }
+
+    /// The header's plan in `body` pixels, given what it was last found to
+    /// be. The ladder first, unchanged; only when no level fits both of its
+    /// lines are the pieces packed into rows and the summary given its own,
+    /// each count held the editor's margin on its own.
+    pub(crate) fn plan(&self, body: f32, was: WrapState) -> RowPlan {
+        if let Some(level) = self.ladder_level(body, was.level) {
+            return RowPlan {
+                state: WrapState { level, lines: 1 },
+                overflow: false,
+                ladder: level,
+                lead: self.switch_lead(body, level),
+                level_w: body,
+                sum_w: body,
+                row_of: [0; ITEM_MAX],
+                rows: 0,
+                summary_h: 0.,
+            };
+        }
+        let past = was.level > WRAP_LEVELS;
+        let (level, level_w) = held(
+            |w| self.overflow_level(w),
+            body,
+            if past { was.level } else { 0 },
+        );
+        let (lines, sum_w) = if self.summary {
+            held(|w| self.lines_at(w), body, if past { was.lines } else { 0 })
+        } else {
+            (1, body)
+        };
+        let (row_of, rows) = self.pack(level_w);
+        RowPlan {
+            state: WrapState { level, lines },
+            overflow: true,
+            ladder: self.last_level(),
+            lead: crate::ui::document_column::SWITCH_LEAD,
+            level_w,
+            sum_w,
+            row_of,
+            rows,
+            summary_h: self.summary_height(lines),
+        }
+    }
+
+    /// The pieces the overflow rows pack, in the order they read.
+    pub(crate) fn pieces(&self) -> impl Iterator<Item = Item> + '_ {
+        self.items[..self.n_items].iter().map(|spec| spec.item)
+    }
+
+    /// How wide the terminal's name may be in the overflow rows: what its row
+    /// leaves beside the other pieces on it (each at its least), up to the
+    /// button's cap, never under its minimum.
+    pub(crate) fn overflow_name_cap(&self, plan: &RowPlan) -> f32 {
+        let cap = (plan.level_w - crate::ui::app::CONTENT_INSET - self.trail).floor();
+        let Some(at) = self.pieces().position(|item| item == Item::Name) else {
+            return self.tiers[1].min;
+        };
+        let row = plan.row_of[at];
+        let (mut others, mut count) = (0., 0);
+        for (i, spec) in self.items[..self.n_items].iter().enumerate() {
+            if i != at && plan.row_of[i] == row {
+                others += spec.w;
+                count += 1;
+            }
+        }
+        (cap - others - self.gap * count as f32)
+            .min(crate::ui::document_column::HEADER_CELL_MAX_W)
+            .floor()
+            .max(self.tiers[1].min)
+    }
+
+    /// The row index of each packed piece, in the order of [`Self::pieces`].
+    pub(crate) fn row_of<'a>(&self, plan: &'a RowPlan) -> &'a [u8] {
+        &plan.row_of[..self.n_items]
     }
 }
 

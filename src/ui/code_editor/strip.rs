@@ -410,25 +410,31 @@ impl Tty59App {
             )
     }
 
-    /// Whether a filled diff's metadata needs a second line: the diff is in
-    /// front and filling the workspace (the layout asked for, or `fills`, the
-    /// fallback), and its one-line budget does not fit the body it is drawn in.
-    /// Read-only; the latch it is held against is
-    /// [`Self::editor_header_latch_sync`]'s.
-    fn diff_wraps(&self, fills: bool, window: &Window, cx: &gpui::App) -> bool {
+    /// How many tiers of a filled diff's secondary parts are on a second
+    /// line, and in how many rows and summary lines: the diff is in front and
+    /// filling the workspace (the layout asked for, or `fills`, the fallback),
+    /// and the plan it gets in the body it is drawn in. Read-only; the latch it
+    /// is held against is [`Self::editor_header_latch_sync`]'s.
+    fn diff_wrap_level(
+        &self,
+        fills: bool,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> crate::ui::diff_overlay::WrapState {
         let filled = fills || self.document_layout(cx) == crate::core::config::DocumentLayout::Fill;
         if !filled || self.document_front() != Some(crate::ui::app::OverlayTop::Diff) {
-            return false;
+            return Default::default();
         }
         let Some(overlay) = self
             .tabs
             .get(self.active)
             .and_then(|t| t.diff_overlay.as_ref())
         else {
-            return false;
+            return Default::default();
         };
         self.diff_fill_need(overlay, window, cx)
-            .wraps(self.document_body_px(window, cx), self.editor.diff_two_line)
+            .plan(self.document_body_px(window, cx), self.editor.diff_wrap)
+            .state
     }
 
     /// Whether the header is a code editor's or a diff's in a docked column
@@ -472,11 +478,12 @@ impl Tty59App {
         let fills = self.diff_fills(window, cx);
         let refilled = self.editor.diff_fill != fills;
         self.editor.diff_fill = fills;
-        // Then the line a filled diff's metadata is on, judged against the
-        // same body the header is drawn in, held the same margin.
-        let wraps = self.diff_wraps(fills, window, cx);
-        let rewrapped = self.editor.diff_two_line != wraps;
-        self.editor.diff_two_line = wraps;
+        // Then which tiers of a filled diff's secondary parts are on its second
+        // line, judged against the same body the header is drawn in, each
+        // level held the same margin.
+        let wrap = self.diff_wrap_level(fills, window, cx);
+        let rewrapped = self.editor.diff_wrap != wrap;
+        self.editor.diff_wrap = wrap;
         // The pill's count is scanned only for a header that can be lifted;
         // every other notification leaves here without touching the panes.
         let inline = self.editor_header_hoistable(window, cx) && {
@@ -1597,10 +1604,16 @@ mod gpui_tests {
         for i in 0..6 {
             ids.push(open_rs(&app, &mut vcx, &format!("/dots/dirty-file-{i}.rs")));
         }
-        app.update_in(&mut vcx, |app, _, _| {
+        // The buffers are marked dirty the way the editor does it, and the
+        // window is told to draw them: without the notification a frame is
+        // only drawn if something else asks for one, which a long run of other
+        // tests in the process can make late.
+        app.update_in(&mut vcx, |app, window, cx| {
             for id in &ids {
                 app.buffer_mut(*id).unwrap().dirty = true;
             }
+            cx.notify();
+            window.refresh();
         });
         let active_pos = app.read_with(&vcx, |app, _| app.tab_code().unwrap().active);
         vcx.run_until_parked();
@@ -2978,9 +2991,11 @@ mod gpui_tests {
     }
 
     /// Where the filled header puts its secondary text, from painted bounds:
-    /// the summary inside the header row, after the ref and before the first
-    /// count (or the switches), and the terminal button's name inside that
-    /// button, which is inside the row.
+    /// on one line the summary between the ref and the first count (or the
+    /// switches) and the terminal button's name inside that button; on two,
+    /// whichever of them left the first line is on the second, clear of the
+    /// first line, the name before the summary, and whichever stayed is where
+    /// it was on one line.
     fn assert_secondary_bounds(vcx: &mut VisualTestContext, lines: usize, what: &str) {
         let get = |vcx: &mut VisualTestContext, selector: &'static str| {
             vcx.debug_bounds(selector)
@@ -2999,6 +3014,7 @@ mod gpui_tests {
             .debug_bounds("diff-overlay-added")
             .or_else(|| vcx.debug_bounds("diff-overlay-view"))
             .unwrap_or_else(|| panic!("{what}: neither a count nor the switches are drawn"));
+        let close = get(vcx, "diff-overlay-close");
         let eps = px(0.5);
         assert_eq!(
             header_lines(vcx, what),
@@ -3010,36 +3026,50 @@ mod gpui_tests {
             "{what}: the terminal button {button:?} is outside the header row {header:?}"
         );
         assert!(
-            name.left() >= button.left() - eps && name.right() <= button.right() + eps,
-            "{what}: the name {name:?} is outside its button {button:?}"
-        );
-        assert!(
             summary.left() >= header.left() - eps && summary.right() <= header.right() + eps,
             "{what}: the summary {summary:?} is outside the header row {header:?}"
         );
-        if lines == 1 {
+        let (name_below, summary_below) = (
+            name.center().y > close.bottom(),
+            summary.center().y > close.bottom(),
+        );
+        assert!(
+            lines == 2 || (!name_below && !summary_below),
+            "{what}: one line, and the name or the summary is below the close button"
+        );
+        if name_below {
+            assert!(
+                !overlaps(name, button) && !overlaps(name, rev) && !overlaps(name, close),
+                "{what}: the name {name:?} is painted over the first line"
+            );
+        } else {
+            assert!(
+                name.left() >= button.left() - eps && name.right() <= button.right() + eps,
+                "{what}: the name {name:?} is outside its button {button:?}"
+            );
+        }
+        if summary_below {
+            for (above, other) in [("terminal button", button), ("ref", rev), ("close", close)] {
+                assert!(
+                    !overlaps(summary, other),
+                    "{what}: the summary {summary:?} is painted over the {above} {other:?}"
+                );
+            }
+            assert!(
+                !name_below || name.right() <= summary.left() + eps,
+                "{what}: the summary {summary:?} is before the name {name:?} on the second line"
+            );
+        } else {
             assert!(
                 summary.left() >= rev.right() - eps && summary.right() <= after.left() + eps,
                 "{what}: the summary {summary:?} is not between the ref {rev:?} and {after:?}"
             );
-            return;
         }
-        // On two lines the summary is on the second, beside its own counts and
-        // clear of everything on the first.
-        let close = get(vcx, "diff-overlay-close");
+        // The summary never leaves before the name does.
         assert!(
-            summary.center().y > close.bottom()
-                && (f32::from(summary.center().y) - f32::from(after.center().y)).abs() <= 1.
-                && summary.right() <= after.left() + eps,
-            "{what}: the summary {summary:?} is not beside the counts {after:?} on the second \
-             line, below the close button {close:?}"
+            !(summary_below && !name_below),
+            "{what}: the summary left the first line before the terminal's name"
         );
-        for (above, other) in [("terminal button", button), ("ref", rev), ("close", close)] {
-            assert!(
-                !overlaps(summary, other),
-                "{what}: the summary {summary:?} is painted over the {above} {other:?}"
-            );
-        }
     }
 
     /// A prefix of `text` of three characters and the ellipsis, shaped and
@@ -3239,14 +3269,14 @@ mod gpui_tests {
                             "{what}: the {name} {painted:?} keeps less than its first characters \
                              and an ellipsis ({kept}px); painted widths: {widths}"
                         );
-                        if lines == 2 {
-                            // A second line is taken so that nothing is cut.
+                        if lines == 2 && on_second_line(&mut vcx, selector, &what) {
+                            // What a second line takes it takes whole.
                             assert!(
                                 painted + px(0.5) >= natural,
-                                "{what}: on two lines the {name} {painted:?} is whole, not cut \
-                                 from {natural:?}; painted widths: {widths}"
+                                "{what}: on the second line the {name} {painted:?} is whole, not \
+                                 cut from {natural:?}; painted widths: {widths}"
                             );
-                        } else if panel {
+                        } else if panel && lines == 1 {
                             assert!(
                                 painted + px(0.5) < natural,
                                 "{what}: with the panel open the {name} {painted:?} is cut from \
@@ -3265,35 +3295,100 @@ mod gpui_tests {
         use_locale(&app, &mut vcx, "en", "Agents");
     }
 
-    /// What the filled header's first line holds, left to right: the actions
-    /// and what the diff is of.
-    const LINE_ONE: [(&str, &str); 6] = [
+    /// What the filled header's first line always holds, left to right: the
+    /// actions (the terminal button, the focused file's way back, the two
+    /// switches, the close tile), what the diff is of, and its two totals.
+    const FIRST_ROW: [(&str, &str); 8] = [
         ("terminal button", "document-back-to-terminal"),
         ("ref", "diff-overlay-rev"),
-        ("Staged chip", "ui-chip"),
+        ("back button", "diff-overlay-unfocus"),
+        ("added figure", "diff-overlay-added"),
+        ("removed figure", "diff-overlay-removed"),
         ("view switch", "diff-overlay-view"),
         ("layout switch", "document-layout-switch"),
         ("close", "diff-overlay-close"),
     ];
 
-    /// What may flow to a second line, left to right: the metadata.
-    const LINE_TWO: [(&str, &str); 5] = [
-        ("back button", "diff-overlay-unfocus"),
-        ("summary", "diff-overlay-summary"),
-        ("added figure", "diff-overlay-added"),
-        ("removed figure", "diff-overlay-removed"),
-        ("Refreshing word", "diff-overlay-refreshing"),
+    /// What may leave the first line, in the order it leaves: the Staged chip
+    /// with the Refreshing word, then the terminal's name, then the summary.
+    /// Where they are drawn on the second line they keep this order.
+    const TIERS: [&[(&str, &str)]; 3] = [
+        &[
+            ("Staged chip", "ui-chip"),
+            ("Refreshing word", "diff-overlay-refreshing"),
+        ],
+        &[("terminal name", "document-terminal-name")],
+        &[("summary", "diff-overlay-summary")],
     ];
 
+    /// Which tiers are drawn on the second line, from painted bounds: `None`
+    /// for a tier the header does not have, and the tier's own fields never
+    /// split across the two lines.
+    fn tiers_lower(vcx: &mut VisualTestContext, what: &str) -> [Option<bool>; 3] {
+        let close = vcx
+            .debug_bounds("diff-overlay-close")
+            .unwrap_or_else(|| panic!("{what}: the close button is not drawn"));
+        let mut out = [None; 3];
+        for (tier, fields) in TIERS.iter().enumerate() {
+            let rows: Vec<(&str, bool)> = fields
+                .iter()
+                .filter_map(|(name, selector)| {
+                    vcx.debug_bounds(selector)
+                        .map(|field| (*name, field.center().y > close.bottom()))
+                })
+                .collect();
+            if let Some((_, first)) = rows.first() {
+                assert!(
+                    rows.iter().all(|(_, lower)| lower == first),
+                    "{what}: the fields of one tier are on different lines: {rows:?}"
+                );
+                out[tier] = Some(*first);
+            }
+        }
+        out
+    }
+
+    /// The chip with the Refreshing word leaves the first line before the
+    /// terminal's name, and the name before the summary: a tier on the second
+    /// line has every tier before it there too.
+    fn assert_tier_order(tiers: [Option<bool>; 3], what: &str) {
+        let mut still_first: Option<usize> = None;
+        for (tier, lower) in tiers.iter().enumerate() {
+            match lower {
+                Some(false) => still_first = still_first.or(Some(tier)),
+                Some(true) => assert!(
+                    still_first.is_none(),
+                    "{what}: tier {tier} is on the second line while tier {still_first:?} is \
+                     still on the first: {tiers:?}"
+                ),
+                None => {}
+            }
+        }
+    }
+
+    /// Whether the painted field is below the first line, which the close
+    /// tile is on whatever the header does.
+    fn on_second_line(vcx: &mut VisualTestContext, selector: &'static str, what: &str) -> bool {
+        let close = vcx
+            .debug_bounds("diff-overlay-close")
+            .unwrap_or_else(|| panic!("{what}: the close button is not drawn"));
+        vcx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{what}: {selector} is not drawn"))
+            .center()
+            .y
+            > close.bottom()
+    }
+
     /// How many lines the filled header is drawn on, from painted bounds: two
-    /// when any of the metadata is centred below the close tile, which is on
-    /// the first line whatever the header does.
+    /// when any of what may leave the first line is centred below the close
+    /// tile, which is on the first line whatever the header does.
     fn header_lines(vcx: &mut VisualTestContext, what: &str) -> usize {
         let close = vcx
             .debug_bounds("diff-overlay-close")
             .unwrap_or_else(|| panic!("{what}: the close button is not drawn"));
-        let lower = LINE_TWO
+        let lower = TIERS
             .iter()
+            .flat_map(|fields| fields.iter())
             .filter_map(|(_, selector)| vcx.debug_bounds(selector))
             .any(|field| field.center().y > close.bottom());
         1 + usize::from(lower)
@@ -3312,9 +3407,11 @@ mod gpui_tests {
     /// control, count and word whole and inside the header's own bounds on
     /// both axes, nothing painted over anything else. On one line that is the
     /// header's whole contract and its height is the one it has with room;
-    /// on two, the actions and what the diff is of stay on the first, the
-    /// metadata is on the second, below the close button, left to right, and
-    /// the header is taller than one line.
+    /// on two, the actions, the focused file's way back and the totals stay on
+    /// the first, and what leaves it leaves in order (the chip with the
+    /// Refreshing word, then the terminal's name, then the summary) to a
+    /// second line below the close button, left to right, and the header is
+    /// taller than one line.
     fn assert_filled_lines(
         vcx: &mut VisualTestContext,
         whole: &Whole,
@@ -3355,33 +3452,43 @@ mod gpui_tests {
             "{what}: the header {:?} is outside the window",
             h.header
         );
+        let tiers = tiers_lower(vcx, what);
+        assert_tier_order(tiers, what);
         let mut first = Vec::new();
-        for (name, selector) in LINE_ONE {
+        for (name, selector) in FIRST_ROW {
             if let Some(field) = vcx.debug_bounds(selector) {
                 first.push((name, field));
             }
         }
-        let mut second = Vec::new();
-        for (name, selector) in LINE_TWO {
-            if let Some(field) = vcx.debug_bounds(selector) {
-                second.push((name, field));
+        // What stayed on the first line of what may leave it, and what left.
+        let (mut kept, mut second) = (Vec::new(), Vec::new());
+        for (tier, fields) in TIERS.iter().enumerate() {
+            for (name, selector) in fields.iter() {
+                if let Some(field) = vcx.debug_bounds(selector) {
+                    if tiers[tier] == Some(true) {
+                        second.push((*name, field));
+                    } else {
+                        kept.push((*name, field));
+                    }
+                }
             }
         }
         assert!(
             !second.is_empty(),
             "{what}: two lines, and nothing on the second; painted widths: {widths}"
         );
-        for (name, field) in first.iter().chain(second.iter()) {
+        for (name, field) in first.iter().chain(kept.iter()).chain(second.iter()) {
             assert!(
                 field.left() >= h.header.left() - eps
                     && field.right() <= h.header.right() + eps
                     && field.top() >= h.header.top() - eps
                     && field.bottom() <= h.header.bottom() + eps,
-                "{what}: the {name} {field:?} is outside the header {:?}",
+                "{what}: the {name} {field:?} is outside the header {:?}; painted widths: {widths}",
                 h.header
             );
         }
-        // The first line, in order, on the first line.
+        // The first line, in order, on the first line: the actions and the
+        // totals never leave it.
         let mut end: Option<Pixels> = None;
         for (name, field) in &first {
             assert!(
@@ -3396,9 +3503,26 @@ mod gpui_tests {
             }
             end = Some(field.right());
         }
-        // The second line, in order, on one line of its own, below the first.
+        // What stayed beside them is clear of them; the terminal's name is
+        // inside its own button.
+        for (name, field) in &kept {
+            assert!(
+                field.center().y <= h.close.bottom(),
+                "{what}: the {name} {field:?} is below the first line"
+            );
+            for (above, other) in &first {
+                assert!(
+                    (*name == "terminal name" && *above == "terminal button")
+                        || !overlaps(*field, *other),
+                    "{what}: the {name} {field:?} is painted over the {above} {other:?}"
+                );
+            }
+        }
+        // What left is on one line of its own, below the first, in the order
+        // the tiers leave in, clear of everything on the first.
         let first_bottom = first
             .iter()
+            .chain(kept.iter())
             .map(|(_, field)| f32::from(field.bottom()))
             .fold(f32::MIN, f32::max);
         for (name, field) in &second {
@@ -3422,7 +3546,7 @@ mod gpui_tests {
                 );
             }
             end = Some(field.right());
-            for (above, other) in &first {
+            for (above, other) in first.iter().chain(kept.iter()) {
                 assert!(
                     !overlaps(*field, *other),
                     "{what}: the {name} {field:?} is painted over the {above} {other:?}"
@@ -3627,46 +3751,43 @@ mod gpui_tests {
                     };
                     assert_filled_lines(&mut vcx, &whole, 1000., one_line, lines, &what);
                     if lines == 2 {
-                        // On two lines nothing is cut: the name is whole in its
-                        // button, and the summary is whole on the second line
-                        // beside its own counts, each at its wide width.
-                        let get = |vcx: &mut VisualTestContext, selector: &'static str| {
-                            vcx.debug_bounds(selector)
-                                .unwrap_or_else(|| panic!("{what}: {selector} is not drawn"))
-                        };
-                        let (button, name, summary) = (
-                            get(&mut vcx, "document-back-to-terminal"),
-                            get(&mut vcx, "document-terminal-name"),
-                            get(&mut vcx, "diff-overlay-summary"),
+                        // The chip, with the Refreshing word, is the first to
+                        // leave the first line; the totals never do; and what
+                        // else is on the second line is whole, at its wide
+                        // width.
+                        let tiers = tiers_lower(&mut vcx, &what);
+                        assert_eq!(
+                            tiers[0],
+                            Some(true),
+                            "{what}: the Staged chip is the first to leave the first line:                              {tiers:?}"
                         );
-                        let (close, added) = (
-                            get(&mut vcx, "diff-overlay-close"),
-                            get(&mut vcx, "diff-overlay-added"),
-                        );
-                        let eps = px(0.5);
-                        assert!(
-                            (f32::from(name.size.width) - f32::from(name_wide)).abs() <= 0.5
-                                && (f32::from(summary.size.width) - f32::from(summary_wide)).abs()
-                                    <= 0.5,
-                            "{what}: on two lines the name {:?} and the summary {:?} are whole: \
-                             {name_wide:?} and {summary_wide:?}",
-                            name.size.width,
-                            summary.size.width
-                        );
-                        assert!(
-                            name.left() >= button.left() - eps
-                                && name.right() <= button.right() + eps,
-                            "{what}: the name {name:?} is outside its button {button:?}"
-                        );
-                        assert!(
-                            summary.center().y > close.bottom()
-                                && summary.right() <= added.left() + eps
-                                && (f32::from(summary.center().y) - f32::from(added.center().y))
-                                    .abs()
-                                    <= 1.,
-                            "{what}: the summary {summary:?} is not on the second line beside \
-                             the counts {added:?}"
-                        );
+                        for (selector, wide) in [
+                            ("diff-overlay-added", None),
+                            ("diff-overlay-removed", None),
+                            ("document-terminal-name", Some(name_wide)),
+                            ("diff-overlay-summary", Some(summary_wide)),
+                        ] {
+                            let lower = on_second_line(&mut vcx, selector, &what);
+                            match wide {
+                                None => assert!(
+                                    !lower,
+                                    "{what}: {selector} left the first line: the totals stay"
+                                ),
+                                Some(wide) if lower => {
+                                    let painted = vcx
+                                        .debug_bounds(selector)
+                                        .unwrap_or_else(|| panic!("{what}: {selector} gone"))
+                                        .size
+                                        .width;
+                                    assert!(
+                                        (f32::from(painted) - f32::from(wide)).abs() <= 0.5,
+                                        "{what}: on the second line {selector} {painted:?} is \
+                                         whole: {wide:?}"
+                                    );
+                                }
+                                Some(_) => {}
+                            }
+                        }
                     }
                     assert!(
                         app.read_with(&vcx, |app, cx| app.document_layout(cx))
@@ -3839,8 +3960,8 @@ mod gpui_tests {
         held
     }
 
-    /// The focused file's back button is inside the header and, on one line,
-    /// after the ref and before the view switch.
+    /// The focused file's back button is inside the header, on its first
+    /// line, after the ref and before the view switch.
     fn assert_back_button(vcx: &mut VisualTestContext, what: &str) {
         let h = diff_header(vcx, what);
         let back = vcx
@@ -3855,19 +3976,23 @@ mod gpui_tests {
             "{what}: the back button {back:?} is outside the header {:?}",
             h.header
         );
-        if header_lines(vcx, what) == 1 {
-            if let Some(rev) = h.rev {
-                assert!(
-                    back.left() >= rev.right() - eps,
-                    "{what}: the back button {back:?} starts inside the ref {rev:?}"
-                );
-            }
+        // The way back is an action: it is on the first line, after the ref
+        // and before the view switch, on one line or two.
+        assert!(
+            back.center().y <= h.close.bottom(),
+            "{what}: the back button {back:?} is below the first line"
+        );
+        if let Some(rev) = h.rev {
             assert!(
-                back.right() <= h.view.left() + eps,
-                "{what}: the back button {back:?} runs into the view switch {:?}",
-                h.view
+                back.left() >= rev.right() - eps,
+                "{what}: the back button {back:?} starts inside the ref {rev:?}"
             );
         }
+        assert!(
+            back.right() <= h.view.left() + eps,
+            "{what}: the back button {back:?} runs into the view switch {:?}",
+            h.view
+        );
     }
 
     /// A commit opened on a file, as its detail's file rows open it: the label
@@ -4025,6 +4150,18 @@ mod gpui_tests {
         vcx: &mut VisualTestContext,
         loading: bool,
     ) -> std::sync::Arc<crate::terminal::git_diff::DiffSnapshot> {
+        open_staged_counts(app, vcx, loading, 1_234_567, 7_654_321)
+    }
+
+    /// [`open_staged_diff`] with the counts the one file holds: the seven-digit
+    /// ones are a stress case; a native capture's are `50_000` and `50_000`.
+    fn open_staged_counts(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        loading: bool,
+        added: u32,
+        removed: u32,
+    ) -> std::sync::Arc<crate::terminal::git_diff::DiffSnapshot> {
         use crate::terminal::git_diff::{DiffSnapshot, DiffSource, FileDiff, FileStatus};
         let snapshot = std::sync::Arc::new(DiffSnapshot {
             root: std::path::PathBuf::from("/no/such/tty59/repo"),
@@ -4034,8 +4171,8 @@ mod gpui_tests {
                 path: "a.rs".into(),
                 old_path: None,
                 status: FileStatus::Modified,
-                added: 1_234_567,
-                removed: 7_654_321,
+                added,
+                removed,
                 binary: false,
                 truncated: None,
                 hunks: Vec::new(),
@@ -4144,6 +4281,1567 @@ mod gpui_tests {
         });
         let back = staged_edge(&app, &mut vcx, &held, "back at rest");
         assert_eq!(back, rest, "the same settings give the same point");
+    }
+
+    /// Everything the native Staged, reading header draws, as selectors: each
+    /// must be drawn, at the wide reference and at every target. A missing node
+    /// is a failure, never something to skip.
+    const NATIVE_NODES: [(&str, &str); 11] = [
+        ("subject icon", "diff-overlay-icon"),
+        ("Staged chip", "ui-chip"),
+        ("Refreshing word", "diff-overlay-refreshing"),
+        ("terminal button", "document-back-to-terminal"),
+        ("terminal name", "document-terminal-name"),
+        ("summary", "diff-overlay-summary"),
+        ("added figure", "diff-overlay-added"),
+        ("removed figure", "diff-overlay-removed"),
+        ("view switch", "diff-overlay-view"),
+        ("layout switch", "document-layout-switch"),
+        ("close", "diff-overlay-close"),
+    ];
+
+    /// What the filled header's parts measure with room, as painted, and what
+    /// each keeps at the least: the numbers a failure reports. Read from
+    /// painted bounds and the text system, never from the header's own budget,
+    /// so a test that reports them cannot agree with the header by sharing its
+    /// arithmetic.
+    struct Wide {
+        lead: f32,
+        trail: f32,
+        gap: f32,
+        /// What never leaves the first line, as painted: the terminal button
+        /// without its name, the subject's icon, the totals, the two switches
+        /// and the close tile.
+        fixed: Vec<(&'static str, f32)>,
+        /// What may leave it, whole and at the least it keeps: the chip, the
+        /// Refreshing word, the terminal's name and the summary.
+        movable: Vec<(&'static str, f32, f32)>,
+        /// The margins the two switches are drawn with, before each of them,
+        /// on top of the row's gap.
+        margins: f32,
+        /// The gap between the terminal's badge and its name, which goes with
+        /// the name.
+        name_gap: f32,
+        /// One line of the summary, as painted: its height with room.
+        summary_line_h: f32,
+        /// Whether the diff has totals to draw: the two counts are parts of
+        /// the header only then, and are required exactly then.
+        totals: bool,
+        /// The least the subject keeps. A branch name gives way entirely, so
+        /// it has no floor of its own but is still a child of the row, and
+        /// takes a gap.
+        subject_floor: f32,
+    }
+
+    impl Wide {
+        /// The parts this fixture's header draws, every one of them required.
+        fn nodes(&self) -> Vec<(&'static str, &'static str)> {
+            NATIVE_NODES
+                .iter()
+                .copied()
+                .filter(|(name, _)| self.totals || !name.ends_with("figure"))
+                .collect()
+        }
+
+        /// The order the parts read in the overflow rows for this fixture.
+        fn order(&self) -> Vec<(&'static str, &'static str)> {
+            OVERFLOW_ORDER
+                .iter()
+                .copied()
+                .filter(|(name, _)| self.totals || !name.ends_with("figure"))
+                .collect()
+        }
+
+        /// The first line's core: the fixed parts, the subject at its floor,
+        /// the lead and trail, and a gap between each of the row's children
+        /// (the fixed parts and the subject).
+        fn core(&self) -> f32 {
+            self.lead
+                + self.trail
+                + self.margins
+                + self.fixed.iter().map(|(_, w)| w).sum::<f32>()
+                + self.subject_floor
+                + self.gap * self.fixed.len() as f32
+        }
+
+        /// The tier each of the movable parts is in: the chip and the
+        /// Refreshing word, the terminal's name, the summary.
+        const TIER_OF: [usize; 4] = [0, 0, 1, 2];
+
+        /// The first line with the first `level` tiers on a second, from the
+        /// painted widths: what never leaves, the terminal group (with its
+        /// name's gap and the name while the name is there), the tiers that
+        /// are still there at the least they keep, a gap between each child.
+        /// The switches keep their margins, except at the last level where
+        /// they may yield to nothing.
+        fn first_line_at(&self, level: usize) -> f32 {
+            let mut width = self.lead
+                + self.trail
+                + if level >= 3 { 0. } else { self.margins }
+                + self.fixed.iter().map(|(_, w)| w).sum::<f32>()
+                + self.subject_floor;
+            let mut children = self.fixed.len() + 1;
+            if level < 2 {
+                width += self.name_gap;
+            }
+            for (part, (label, _, kept)) in self.movable.iter().enumerate() {
+                if Self::TIER_OF[part] >= level {
+                    width += kept;
+                    if *label != "terminal name" {
+                        children += 1;
+                    }
+                }
+            }
+            width + self.gap * (children as f32 - 1.)
+        }
+
+        /// The second line with the first `level` tiers on it, or nothing.
+        fn second_line_at(&self, level: usize) -> f32 {
+            let moved: Vec<f32> = self
+                .movable
+                .iter()
+                .enumerate()
+                .filter(|(part, _)| Self::TIER_OF[*part] < level)
+                .map(|(_, (_, _, kept))| *kept)
+                .collect();
+            if moved.is_empty() {
+                return 0.;
+            }
+            self.lead
+                + self.trail
+                + moved.iter().sum::<f32>()
+                + self.gap * (moved.len() as f32 - 1.)
+        }
+
+        /// The least body any ladder level fits both lines in, from the
+        /// painted widths: the fewest pixels at which the header needs no
+        /// more rows than the ladder's two.
+        fn ladder_threshold(&self) -> f32 {
+            (0..=3)
+                .map(|level| self.first_line_at(level).max(self.second_line_at(level)))
+                .fold(f32::MAX, f32::min)
+        }
+
+        /// The second line with every tier on it, each at the least it keeps.
+        fn second_line(&self) -> f32 {
+            self.lead
+                + self.trail
+                + self.movable.iter().map(|(_, _, kept)| kept).sum::<f32>()
+                + self.gap * (self.movable.len() as f32 - 1.).max(0.)
+        }
+
+        /// Everything on one line, each at the least it keeps: the core and
+        /// the movable parts, of which only the chip, the Refreshing word and
+        /// the summary are children of their own (the name is in the button).
+        fn full(&self) -> f32 {
+            self.core()
+                + self.movable.iter().map(|(_, _, kept)| kept).sum::<f32>()
+                + self.gap * (self.movable.len() as f32 - 1.).max(0.)
+        }
+
+        fn report(&self, body: f32) -> String {
+            format!(
+                "body {body}px; first-line core {}px (lead {}, trail {}, switch margins {}, gap {} \
+                 between each of {} children, subject floor {}, fixed {:?}); second line with every tier on it \
+                 {}px; everything on one line at the least each keeps {}px; movable (whole, \
+                 kept) {:?}",
+                self.core(),
+                self.lead,
+                self.trail,
+                self.margins,
+                self.gap,
+                self.fixed.len() + 1,
+                self.subject_floor,
+                self.fixed,
+                self.second_line(),
+                self.full(),
+                self.movable
+            )
+        }
+    }
+
+    /// The filled header with room (the window wide, the diff filling it),
+    /// measured as painted. Every native node must be drawn.
+    fn measure_wide(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        what: &str,
+        totals: bool,
+    ) -> Wide {
+        for (name, selector) in NATIVE_NODES {
+            let wanted = totals || !name.ends_with("figure");
+            assert_eq!(
+                vcx.debug_bounds(selector).is_some(),
+                wanted,
+                "{what}: the {name} ({selector}) must {}be drawn: the fixture has {}totals",
+                if wanted { "" } else { "not " },
+                if totals { "" } else { "no " }
+            );
+        }
+        let bounds = |vcx: &mut VisualTestContext, selector: &'static str| {
+            vcx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{what}: {selector} is not drawn"))
+        };
+        let width = |vcx: &mut VisualTestContext, selector: &'static str| {
+            f32::from(bounds(vcx, selector).size.width)
+        };
+        let header = bounds(vcx, "diff-overlay-header");
+        let group = bounds(vcx, "document-terminal-group");
+        let badge = bounds(vcx, "document-terminal-badge");
+        let name_box = bounds(vcx, "document-terminal-name");
+        let close = bounds(vcx, "diff-overlay-close");
+        let name = f32::from(name_box.size.width);
+        // The whole terminal group (button, divider and its margins) without
+        // the name and the gap between the badge and the name, which go
+        // together when the name leaves.
+        let name_gap = f32::from(name_box.left() - badge.right());
+        let gap = 0.5 * vcx.update(|window, _| window.rem_size().as_f32());
+        // Each switch is drawn with a margin before it, on top of the row's
+        // gap: between the two it is the painted space less the gap.
+        let (view, layout) = (
+            bounds(vcx, "diff-overlay-view"),
+            bounds(vcx, "document-layout-switch"),
+        );
+        let switch_lead = f32::from(layout.left() - view.right()) - gap;
+        let mut fixed = vec![
+            (
+                "terminal group without its name and badge gap",
+                f32::from(group.size.width) - name - name_gap,
+            ),
+            ("subject icon", width(vcx, "diff-overlay-icon")),
+        ];
+        for (label, selector) in [
+            ("added figure", "diff-overlay-added"),
+            ("removed figure", "diff-overlay-removed"),
+            ("view switch", "diff-overlay-view"),
+            ("layout switch", "document-layout-switch"),
+            ("close", "diff-overlay-close"),
+        ] {
+            if totals || !label.ends_with("figure") {
+                fixed.push((label, width(vcx, selector)));
+            }
+        }
+        let name_kept = kept_prefix(
+            app,
+            vcx,
+            TAB_TITLE,
+            crate::ui::document_column::HEADER_CELL_TEXT,
+            false,
+        );
+        let summary_text =
+            crate::ui::i18n::t_plural(crate::ui::i18n::L10nKey::DiffChangedFiles, 1, &[]);
+        let summary_kept = kept_prefix(app, vcx, &summary_text, crate::ui::right_panel::META, true);
+        let movable = vec![
+            ("Staged chip", width(vcx, "ui-chip"), width(vcx, "ui-chip")),
+            (
+                "Refreshing word",
+                width(vcx, "diff-overlay-refreshing"),
+                width(vcx, "diff-overlay-refreshing"),
+            ),
+            ("terminal name", name, name_kept),
+            ("summary", width(vcx, "diff-overlay-summary"), summary_kept),
+        ];
+        Wide {
+            lead: f32::from(group.left() - header.left()),
+            trail: f32::from(header.right() - close.right()),
+            gap,
+            margins: 2. * switch_lead,
+            name_gap,
+            summary_line_h: f32::from(bounds(vcx, "diff-overlay-summary").size.height),
+            totals,
+            fixed,
+            movable,
+            subject_floor: 0.,
+        }
+    }
+
+    /// The window put into one scene: the saved layout, the panel, and the
+    /// size, reached from a wide window so that no earlier answer is held.
+    fn put_in_scene(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        saved: DocumentLayout,
+        panel: bool,
+        width: f32,
+        height: f32,
+    ) {
+        app.update_in(vcx, |app, _, cx| app.set_document_layout(saved, cx));
+        set_right_panel(app, vcx, panel);
+        resize(vcx, 2400., 900.);
+        resize(vcx, width, height);
+    }
+
+    /// The margin before each of the two switches, as painted: the space
+    /// between what is before it and the switch, less the row's gap.
+    fn switch_leads(vcx: &mut VisualTestContext, wide: &Wide, what: &str) -> (f32, f32) {
+        let bounds = |vcx: &mut VisualTestContext, selector: &'static str| {
+            vcx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{what}: {selector} is not drawn"))
+        };
+        let removed = bounds(vcx, "diff-overlay-removed");
+        let view = bounds(vcx, "diff-overlay-view");
+        let layout = bounds(vcx, "document-layout-switch");
+        let close = bounds(vcx, "diff-overlay-close");
+        // What comes before the view switch: the Refreshing word when it is on
+        // the first line, after the totals; the totals otherwise.
+        let before = match vcx.debug_bounds("diff-overlay-refreshing") {
+            Some(word) if word.center().y <= close.bottom() => word,
+            _ => removed,
+        };
+        (
+            f32::from(view.left() - before.right()) - wide.gap,
+            f32::from(layout.left() - view.right()) - wide.gap,
+        )
+    }
+
+    /// The filled header at the largest interface font, in the window as it
+    /// is, against the body it is actually drawn in: the shell's painted
+    /// bounds. The first-line core and the second line's minima must each fit
+    /// that body (the numbers are the failure), the header and every native
+    /// node must lie inside it, and the lines are the contract of
+    /// [`assert_filled_lines`]. The body the layout models is a labelled
+    /// control. With `oracle`, the number of lines is also what the painted
+    /// minima say: two when everything on one line at the least each keeps is
+    /// wider than the body, one otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_fits_its_body(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        wide: &Wide,
+        whole: &Whole,
+        one_line: Pixels,
+        window_w: f32,
+        oracle: bool,
+        what: &str,
+    ) {
+        let modeled = vcx.update(|window, cx| app.read(cx).document_body_px(window, cx));
+        let body = vcx
+            .debug_bounds("diff-overlay-body")
+            .unwrap_or_else(|| panic!("{what}: the overlay's body is not drawn"));
+        let body_w = f32::from(body.size.width);
+        let report = format!(
+            "{}; modeled body (a control) {modeled}px; painted widths: {}",
+            wide.report(body_w),
+            diff_widths(vcx)
+        );
+        // The switches' margins yield to what the first line lacks, so what
+        // has to fit is the core with them at nothing.
+        let zero_lead_core = wide.core() - wide.margins;
+        assert!(
+            zero_lead_core <= body_w + 0.01,
+            "{what}: the first-line core with the switches' margins at nothing, \
+             {zero_lead_core}px, is wider than the painted body, {body_w}px; {report}"
+        );
+        assert!(
+            wide.second_line() <= body_w + 0.01,
+            "{what}: the second line's minima, {}px, are wider than the painted body, \
+             {body_w}px; {report}",
+            wide.second_line()
+        );
+        let eps = px(0.5);
+        let inside = |field: Bounds<Pixels>| {
+            field.left() >= body.left() - eps
+                && field.right() <= body.right() + eps
+                && field.top() >= body.top() - eps
+                && field.bottom() <= body.bottom() + eps
+        };
+        let h = diff_header(vcx, what);
+        assert!(
+            inside(h.header),
+            "{what}: the header {:?} is outside the painted body {body:?}; {report}",
+            h.header
+        );
+        for (name, selector) in NATIVE_NODES {
+            let field = vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{what}: the {name} ({selector}) is not drawn"));
+            assert!(
+                inside(field),
+                "{what}: the {name} {field:?} is outside the painted body {body:?}; {report}"
+            );
+        }
+        let lines = header_lines(vcx, what);
+        // The margins are whole (8 each) wherever the last ladder level is not
+        // what is drawn or the first line fits with them, and otherwise give
+        // up what the first line is short of, half each.
+        let (lead_view, lead_layout) = switch_leads(vcx, wide, what);
+        let all_moved = lines == 2 && tiers_moved(vcx, what) == 3;
+        let short = (wide.core() - body_w).max(0.);
+        let combined = if all_moved {
+            (wide.margins - short).clamp(0., wide.margins)
+        } else {
+            wide.margins
+        };
+        // Whole margins are whole pixels and are checked exactly. A margin that
+        // has yielded is not a whole device pixel, and the layout snaps each
+        // edge to the device grid: it is painted as planned to within one
+        // device pixel (0.5px at 2x, 1px at 1x), and that is the whole allowance.
+        let device_px = 1. / vcx.update(|window, _| window.scale_factor());
+        let allowed = if all_moved && short > 0. {
+            device_px + 0.01
+        } else {
+            0.01
+        };
+        assert!(
+            (lead_view - combined / 2.).abs() <= allowed
+                && (lead_layout - combined / 2.).abs() <= allowed,
+            "{what}: the switches' margins are {lead_view}px and {lead_layout}px, not {}px each \
+             to within {allowed}px (the first line is {short}px short of the body, all tiers \
+             moved: {all_moved}); {report}",
+            combined / 2.
+        );
+        // The owner's case, the Russian 442px body: the core is 1.5px over it,
+        // so the two margins have 14.5px between them.
+        if (body_w - 442.).abs() <= 0.5 && all_moved {
+            assert!(
+                (lead_view + lead_layout - 14.5).abs() <= device_px + 0.01,
+                "{what}: at the 442px body the margins add up to {}px, not 14.5px to within one \
+                 device pixel, {device_px}px; {report}",
+                lead_view + lead_layout
+            );
+        }
+        if oracle {
+            let expected = if body_w < wide.full() { 2 } else { 1 };
+            assert_eq!(
+                lines,
+                expected,
+                "{what}: the header is on {lines} line(s); the painted minima ({}px on one \
+                 line, against a {body_w}px body) say {expected}. The native capture's two \
+                 rows at 1440px are a native-text fact, proven by the capture; the test \
+                 backend's glyphs are 0.6 em; {report}",
+                wide.full()
+            );
+        }
+        assert!(
+            (modeled - body_w).abs() <= 1.,
+            "{what}: the modeled body {modeled}px is not the painted body {body_w}px (a \
+             control of the layout's arithmetic); {report}"
+        );
+        assert_filled_lines(vcx, whole, window_w, one_line, lines, what);
+    }
+
+    /// The scenes of the native capture at the largest interface font, in the
+    /// order the narrowest comes first: 1000px with the panel open (saved
+    /// layout the column, so the diff fills by fallback), then 1440px with the
+    /// panel open and closed (saved layout Fill).
+    const NATIVE_SCENES: [(DocumentLayout, f32, f32, bool); 3] = [
+        (DocumentLayout::Dock, 1000., 700., true),
+        (DocumentLayout::Fill, 1440., 900., true),
+        (DocumentLayout::Fill, 1440., 900., false),
+    ];
+
+    /// A UI24 window in Russian with the native capture's diff open: Staged,
+    /// reading, over one file of 50000 added and 50000 removed.
+    fn native_ui24_diff(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        std::sync::Arc<crate::terminal::git_diff::DiffSnapshot>,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        use crate::ui::tab_strip::overflow_gpui_tests::{set_ui_font_size, use_locale};
+        let (app, mut vcx, streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Dock);
+        set_right_panel(&app, &mut vcx, false);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.set_document_ratio(0.5, cx);
+            app.tabs[0].name = Some(TAB_TITLE.to_string());
+            cx.notify();
+        });
+        set_ui_font_size(&app, &mut vcx, 24.);
+        use_locale(&app, &mut vcx, "ru-RU", "Агенты");
+        resize(&mut vcx, 2400., 900.);
+        let held = open_staged_counts(&app, &mut vcx, true, 50_000, 50_000);
+        (app, vcx, held, streams)
+    }
+
+    /// The Staged, reading header at the largest interface font in Russian,
+    /// with the native capture's totals (50000 and 50000): at 1000px with the
+    /// panel open (a body that natively measures about 437px) and at 1440px
+    /// with it open and closed, every action, total, chip, word and name is
+    /// inside the body the shell paints. All the measurements are printed
+    /// before the first assertion, the narrowest scene first, so a failure at
+    /// 1440px cannot hide the numbers of 1000px. The seven-digit totals are
+    /// covered, at the default font, by the tests above.
+    #[gpui::test]
+    fn at_the_largest_font_a_filled_staged_header_stays_inside_its_body(cx: &mut TestAppContext) {
+        use crate::ui::tab_strip::overflow_gpui_tests::{set_ui_font_size, use_locale};
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, held, _streams) = native_ui24_diff(cx);
+        let state = "UI24 ru-RU Staged reading, native 50000/50000";
+        put_in_scene(&app, &mut vcx, DocumentLayout::Fill, false, 2400., 900.);
+        assert!(docked_px(&app, &mut vcx).is_none(), "{state}: filled");
+        let whole = diff_whole(&mut vcx, state);
+        let one_line = diff_header(&mut vcx, state).header.size.height;
+        let wide = measure_wide(&app, &mut vcx, state, true);
+        // With room the margins are whole: 8px each, as they always were.
+        let (lead_view, lead_layout) = switch_leads(&mut vcx, &wide, state);
+        assert!(
+            (lead_view - 8.).abs() <= 0.01 && (lead_layout - 8.).abs() <= 0.01,
+            "{state}: with room the switches' margins are {lead_view}px and {lead_layout}px, not 8"
+        );
+
+        // The numbers first, for every scene, before anything is asserted.
+        for (saved, width, height, panel) in NATIVE_SCENES {
+            put_in_scene(&app, &mut vcx, saved, panel, width, height);
+            let body = vcx
+                .debug_bounds("diff-overlay-body")
+                .map(|b| f32::from(b.size.width));
+            let lines = header_lines(&mut vcx, state);
+            eprintln!(
+                "{state} at {width}px panel {panel}: {lines} line(s), painted body {body:?}; {}; \
+                 painted widths: {}",
+                wide.report(body.unwrap_or(f32::NAN)),
+                diff_widths(&mut vcx)
+            );
+        }
+
+        for (saved, width, height, panel) in NATIVE_SCENES {
+            put_in_scene(&app, &mut vcx, saved, panel, width, height);
+            let what = format!("{state} at {width}px panel {panel}");
+            assert!(
+                docked_px(&app, &mut vcx).is_none(),
+                "{what}: the diff fills the workspace"
+            );
+            assert_holds(&app, &mut vcx, &held, &what);
+            assert_fits_its_body(&app, &mut vcx, &wide, &whole, one_line, width, true, &what);
+        }
+        set_right_panel(&app, &mut vcx, false);
+        set_ui_font_size(&app, &mut vcx, 16.);
+        use_locale(&app, &mut vcx, "en", "Agents");
+    }
+
+    /// Narrowing the window at the largest interface font, from 2400px down to
+    /// 1000px (the narrowest scene of the native capture) with the panel open
+    /// and closed, the filled header gives up its secondary text in order: the
+    /// chip with the Refreshing word first, then the terminal's name, then the
+    /// summary, the actions and the totals never; once a tier has left it
+    /// stays away, and every width is drawn whole and inside the painted body.
+    /// The bands and the order are read from painted bounds.
+    #[gpui::test]
+    fn at_the_largest_font_the_filled_header_gives_up_its_secondary_text_in_order(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::tab_strip::overflow_gpui_tests::{set_ui_font_size, use_locale};
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, held, _streams) = native_ui24_diff(cx);
+        let mut saw_two = false;
+        for panel in [false, true] {
+            put_in_scene(&app, &mut vcx, DocumentLayout::Fill, panel, 2400., 900.);
+            let state = format!("UI24 ru-RU Staged reading, panel {panel}");
+            assert_holds(&app, &mut vcx, &held, &state);
+            let whole = diff_whole(&mut vcx, &state);
+            let one_line = diff_header(&mut vcx, &state).header.size.height;
+            let wide = measure_wide(&app, &mut vcx, &state, true);
+            let summary = summary_text(1, 0);
+            let threshold = wide.ladder_threshold();
+            let mut width = 2400.;
+            let mut gone = 0;
+            while width >= 1000. {
+                resize(&mut vcx, width, 900.);
+                let what = format!("{state} at {width}px");
+                // Below the least body any ladder level fits both lines in (the
+                // painted one, with the switches' margins at nothing) the header
+                // is in the overflow rows, and every bound of those is checked
+                // strictly; at and above it, it is the ladder, as it always was.
+                if painted_body(&mut vcx, &what) < threshold {
+                    assert_overflow_rows(&app, &mut vcx, &wide, &whole, one_line, &summary, &what);
+                    width -= 5.;
+                    continue;
+                }
+                assert_fits_its_body(&app, &mut vcx, &wide, &whole, one_line, width, false, &what);
+                let tiers = tiers_lower(&mut vcx, &what);
+                assert_tier_order(tiers, &what);
+                let now = tiers.iter().filter(|tier| **tier == Some(true)).count();
+                assert!(
+                    now >= gone,
+                    "{what}: narrowing, a tier came back to the first line: {tiers:?}"
+                );
+                gone = now;
+                saw_two |= header_lines(&mut vcx, &what) == 2;
+                width -= 5.;
+            }
+        }
+        assert!(
+            saw_two,
+            "the walk never saw the header on two lines, so it showed nothing about the order"
+        );
+        set_ui_font_size(&app, &mut vcx, 16.);
+        use_locale(&app, &mut vcx, "en", "Agents");
+    }
+
+    /// How many tiers of the filled header's secondary parts are on its second
+    /// line, from painted bounds.
+    fn tiers_moved(vcx: &mut VisualTestContext, what: &str) -> usize {
+        tiers_lower(vcx, what)
+            .iter()
+            .filter(|tier| **tier == Some(true))
+            .count()
+    }
+
+    /// Each level the filled header goes through at the largest interface
+    /// font has the editor's margin, in both histories, in a real render:
+    /// narrowing one point at a time from 2400px to 1000px a tier is added to
+    /// the second line at some width, and widening back from 1000px it is
+    /// taken off again only `HEADER_HYSTERESIS` past the last width that kept
+    /// it, for every level, with the panel closed and open. Levels only ever
+    /// add tiers while narrowing and take them off while widening.
+    #[gpui::test]
+    fn at_the_largest_font_each_level_has_the_editors_margin_through_both_histories(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::tab_strip::overflow_gpui_tests::{set_ui_font_size, use_locale};
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, held, _streams) = native_ui24_diff(cx);
+        for panel in [false, true] {
+            put_in_scene(&app, &mut vcx, DocumentLayout::Fill, panel, 2400., 900.);
+            let state = format!("UI24 ru-RU Staged reading, panel {panel}");
+            assert_holds(&app, &mut vcx, &held, &state);
+            let mut down: [Option<f32>; 3] = [None; 3];
+            let (mut width, mut prev) = (2400., 0);
+            while width >= 1000. {
+                resize(&mut vcx, width, 900.);
+                let now = tiers_moved(&mut vcx, &state);
+                assert!(
+                    now >= prev,
+                    "{state}: narrowing, at {width}px a tier came back to the first line"
+                );
+                down[prev..now].iter_mut().for_each(|at| *at = Some(width));
+                prev = now;
+                width -= 1.;
+            }
+            let mut up: [Option<f32>; 3] = [None; 3];
+            let mut width = 1000.;
+            while width <= 2400. {
+                resize(&mut vcx, width, 900.);
+                let now = tiers_moved(&mut vcx, &state);
+                assert!(
+                    now <= prev,
+                    "{state}: widening, at {width}px a tier left the first line"
+                );
+                up[now..prev].iter_mut().for_each(|at| *at = Some(width));
+                prev = now;
+                width += 1.;
+            }
+            assert!(
+                down[0].is_some(),
+                "{state}: no tier left the first line between 2400px and 1000px, so no margin \
+                 was observed"
+            );
+            for (level, (down, up)) in down.iter().zip(up.iter()).enumerate() {
+                let what = format!("{state}, level {}", level + 1);
+                match (down, up) {
+                    (None, None) => {}
+                    (Some(down), Some(up)) => {
+                        // The last width that kept the tier on the first line
+                        // is a point wider than the first that moved it.
+                        let kept = down + 1.;
+                        assert!(
+                            *up - kept >= HEADER_HYSTERESIS - 0.01
+                                && *up - kept <= HEADER_HYSTERESIS + 1.,
+                            "{what}: moved at {down}px (last kept at {kept}px), back at {up}px: \
+                             not the margin of {HEADER_HYSTERESIS}"
+                        );
+                    }
+                    other => panic!("{what}: moved and returned unevenly: {other:?}"),
+                }
+            }
+        }
+        set_ui_font_size(&app, &mut vcx, 16.);
+        use_locale(&app, &mut vcx, "en", "Agents");
+    }
+
+    /// The native minimum-body capture: for each language and interface size
+    /// the body, in logical pixels, the filled header has at the 720px window
+    /// minimum with the sidebar and the right panel open (the same at 1x and
+    /// 2x). Seeded from the capture, not computed.
+    const NATIVE_MINIMA: [(&str, f32, f32); 8] = [
+        ("en", 16., 300.),
+        ("ja-JP", 16., 300.),
+        ("ru-RU", 16., 263.),
+        ("zh-CN", 16., 300.),
+        ("en", 24., 263.),
+        ("ja-JP", 24., 264.),
+        ("ru-RU", 24., 157.),
+        ("zh-CN", 24., 300.),
+    ];
+
+    /// The order the parts read in once the header has more rows than the
+    /// ladder gives it: what the diff is of, the totals, the two switches, the
+    /// chip, the Refreshing word, the terminal's name, the summary.
+    const OVERFLOW_ORDER: [(&str, &str); 9] = [
+        ("subject icon", "diff-overlay-icon"),
+        ("added figure", "diff-overlay-added"),
+        ("removed figure", "diff-overlay-removed"),
+        ("view switch", "diff-overlay-view"),
+        ("layout switch", "document-layout-switch"),
+        ("Staged chip", "ui-chip"),
+        ("Refreshing word", "diff-overlay-refreshing"),
+        ("terminal name", "document-terminal-name"),
+        ("summary", "diff-overlay-summary"),
+    ];
+
+    /// The summary's words, as the overflow rows draw them: one element each.
+    const SUMMARY_WORDS: [&str; 16] = [
+        "diff-overlay-summary-word-0",
+        "diff-overlay-summary-word-1",
+        "diff-overlay-summary-word-2",
+        "diff-overlay-summary-word-3",
+        "diff-overlay-summary-word-4",
+        "diff-overlay-summary-word-5",
+        "diff-overlay-summary-word-6",
+        "diff-overlay-summary-word-7",
+        "diff-overlay-summary-word-8",
+        "diff-overlay-summary-word-9",
+        "diff-overlay-summary-word-10",
+        "diff-overlay-summary-word-11",
+        "diff-overlay-summary-word-12",
+        "diff-overlay-summary-word-13",
+        "diff-overlay-summary-word-14",
+        "diff-overlay-summary-word-15",
+    ];
+
+    /// The height of a row after the first, which the filled header's second
+    /// line has always been (`SECOND_LINE_H`).
+    const EXTRA_ROW_H: f32 = 36.;
+
+    /// The language and the interface size for a native context.
+    fn set_native_context(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        locale: &str,
+        size: f32,
+    ) {
+        use crate::ui::tab_strip::overflow_gpui_tests::{set_ui_font_size, use_locale};
+        set_ui_font_size(app, vcx, size);
+        crate::ui::i18n::set_locale(locale);
+        let agents = crate::ui::i18n::t(crate::ui::i18n::L10nKey::VisionAgents).to_string();
+        use_locale(app, vcx, locale, &agents);
+    }
+
+    /// The window width at which the painted body is `body`, the sidebar and
+    /// the panel open: the panels' drawn widths at the 720px minimum, which
+    /// is where both sit on their floors. A fixture: the test backend's panel
+    /// floors differ from the native ones, so the window is not always 720.
+    fn window_for_body(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, body: f32) -> f32 {
+        resize(vcx, 720., 520.);
+        let (sidebar, panel) = vcx.update(|window, cx| {
+            let app = app.read(cx);
+            (app.sidebar_px(window, cx), app.right_panel_px(window, cx))
+        });
+        body + sidebar + panel
+    }
+
+    /// The painted body's width.
+    fn painted_body(vcx: &mut VisualTestContext, what: &str) -> f32 {
+        f32::from(
+            vcx.debug_bounds("diff-overlay-body")
+                .unwrap_or_else(|| panic!("{what}: the overlay's body is not drawn"))
+                .size
+                .width,
+        )
+    }
+
+    /// The distinct lines the header's parts are on, top to bottom, from
+    /// painted bounds: centres within 4px are one line.
+    fn header_bands(vcx: &mut VisualTestContext) -> Vec<f32> {
+        let mut centres: Vec<f32> = NATIVE_NODES
+            .iter()
+            .filter_map(|(_, selector)| vcx.debug_bounds(selector))
+            .map(|field| f32::from(field.center().y))
+            .collect();
+        centres.sort_by(|a, b| a.total_cmp(b));
+        let mut bands: Vec<f32> = Vec::new();
+        for y in centres {
+            if !bands.last().is_some_and(|last| y - *last <= 4.) {
+                bands.push(y);
+            }
+        }
+        bands
+    }
+
+    /// Every part of the header the fixture has is drawn, at least a pixel
+    /// wide and tall, and inside the body the shell paints, header included.
+    fn assert_inside_body(vcx: &mut VisualTestContext, wide: &Wide, what: &str) {
+        let body = vcx
+            .debug_bounds("diff-overlay-body")
+            .unwrap_or_else(|| panic!("{what}: the overlay's body is not drawn"));
+        let widths = diff_widths(vcx);
+        let eps = px(0.5);
+        let inside = |field: Bounds<Pixels>| {
+            field.left() >= body.left() - eps
+                && field.right() <= body.right() + eps
+                && field.top() >= body.top() - eps
+                && field.bottom() <= body.bottom() + eps
+        };
+        let header = diff_header(vcx, what).header;
+        assert!(
+            inside(header),
+            "{what}: the header {header:?} is outside the painted body {body:?}; {widths}"
+        );
+        for (name, selector) in wide.nodes() {
+            let field = vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{what}: the {name} ({selector}) is not drawn"));
+            assert!(
+                field.size.width >= px(1.) && field.size.height >= px(1.),
+                "{what}: the {name} {field:?} is hidden"
+            );
+            assert!(
+                inside(field),
+                "{what}: the {name} {field:?} is outside the painted body {body:?}; {widths}"
+            );
+        }
+    }
+
+    /// No row is empty: the header is as tall as its first row and one extra
+    /// row for each other line its parts are on.
+    fn assert_rows_tight(vcx: &mut VisualTestContext, one_line: Pixels, what: &str) -> usize {
+        let rows = header_bands(vcx).len();
+        let height = f32::from(diff_header(vcx, what).header.size.height);
+        let expected = f32::from(one_line) + (rows as f32 - 1.) * EXTRA_ROW_H;
+        assert!(
+            (height - expected).abs() <= 0.5,
+            "{what}: {rows} line(s) of parts and a header {height}px tall, not {expected}px: \
+             a row is empty or missing"
+        );
+        rows
+    }
+
+    /// The summary as the header says it for a diff of `files` files and
+    /// `untracked` untracked ones.
+    fn summary_text(files: usize, untracked: usize) -> String {
+        let mut text =
+            crate::ui::i18n::t_plural(crate::ui::i18n::L10nKey::DiffChangedFiles, files, &[]);
+        if untracked > 0 {
+            text.push_str(&crate::ui::i18n::t_plural(
+                crate::ui::i18n::L10nKey::DiffUntrackedCount,
+                untracked,
+                &[],
+            ));
+        }
+        text
+    }
+
+    /// How many lines `text` takes in `width` pixels broken only between
+    /// words, each word shaped by the real text system as the summary draws
+    /// it and rounded up the way a drawn run is (every word is an element of
+    /// its own, so each rounds up on its own, not the paragraph as a whole),
+    /// the gap between words the raw width of a space. A word wider than `width` on its own is a capped word (ellipsis and
+    /// a tooltip) on a line of its own: the words before it end their line, the
+    /// words after it begin a new one.
+    fn words_in(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        text: &str,
+        width: f32,
+    ) -> usize {
+        let meta = crate::ui::right_panel::META;
+        let space = shaped_ui(app, vcx, " ", meta, true);
+        let (mut lines, mut used) = (0, 0.);
+        for word in text.split_whitespace() {
+            let w = shaped_ui(app, vcx, word, meta, true).ceil();
+            if w > width + 0.01 {
+                lines += 1;
+                used = 0.;
+            } else if used == 0. {
+                lines += 1;
+                used = w;
+            } else if used + space + w <= width + 0.01 {
+                used += space + w;
+            } else {
+                lines += 1;
+                used = w;
+            }
+        }
+        lines.max(1)
+    }
+
+    /// The header with more rows than the ladder gives it: row 1 is the
+    /// terminal's badge group and the close tile at the trailing end and
+    /// nothing else; every other part is whole, in order, on the rows below,
+    /// nothing hidden or past the body. The terminal's name keeps its
+    /// single-line ellipsis and tooltip, never under its minimum. The summary
+    /// is prose on a row of its own: every word is visible and broken only
+    /// between words, with no ellipsis unless one word is wider than the body
+    /// by itself; its row is as tall as its lines need, which the header's own
+    /// height has room for.
+    fn assert_overflow_rows(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        wide: &Wide,
+        whole: &Whole,
+        one_line: Pixels,
+        summary: &str,
+        what: &str,
+    ) {
+        assert_inside_body(vcx, wide, what);
+        let report = format!(
+            "{}; painted widths: {}",
+            wide.report(painted_body(vcx, what)),
+            diff_widths(vcx)
+        );
+        assert_eq!(
+            diff_whole(vcx, what),
+            *whole,
+            "{what}: a control, figure or word is squeezed or gone; {report}"
+        );
+        let bands = header_bands(vcx);
+        let rows = bands.len();
+        assert!(
+            rows >= 3,
+            "{what}: {rows} row(s), where the ladder cannot fit; {report}"
+        );
+        let bounds = |vcx: &mut VisualTestContext, selector: &'static str| {
+            vcx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{what}: {selector} is not drawn"))
+        };
+        let body = bounds(vcx, "diff-overlay-body");
+        let nodes = wide.nodes();
+        let order_items = wide.order();
+        let mut first: Vec<&str> = nodes
+            .iter()
+            .filter(|(_, selector)| bounds(vcx, selector).center().y <= px(bands[0] + 4.))
+            .map(|(name, _)| *name)
+            .collect();
+        first.sort_unstable();
+        assert_eq!(
+            first,
+            ["close", "terminal button"],
+            "{what}: the first row is the terminal button and the close tile only; {report}"
+        );
+        let (group, close) = (
+            bounds(vcx, "document-terminal-group"),
+            bounds(vcx, "diff-overlay-close"),
+        );
+        assert!(
+            (f32::from(group.left() - body.left()) - wide.lead).abs() <= 0.5
+                && (f32::from(body.right() - close.right()) - wide.trail).abs() <= 0.5,
+            "{what}: the badge group {group:?} and the close tile {close:?} are not at the \
+             leading and trailing ends of the body {body:?}; {report}"
+        );
+        // The rest, read row by row and left to right, in order.
+        let mut seq: Vec<(usize, f32, &str)> = order_items
+            .iter()
+            .map(|(name, selector)| {
+                let field = bounds(vcx, selector);
+                let y = f32::from(field.center().y);
+                let band = bands
+                    .iter()
+                    .position(|band| (band - y).abs() <= 4.)
+                    .unwrap_or_else(|| panic!("{what}: the {name} is on no line"));
+                (band, f32::from(field.left()), *name)
+            })
+            .collect();
+        seq.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let order: Vec<&str> = seq.iter().map(|(_, _, name)| *name).collect();
+        let wanted: Vec<&str> = order_items.iter().map(|(name, _)| *name).collect();
+        assert_eq!(
+            order, wanted,
+            "{what}: the parts are not in order; {report}"
+        );
+        assert!(
+            seq.iter().all(|(band, _, _)| *band >= 1),
+            "{what}: a part is on the first row; {report}"
+        );
+        // The terminal's name: one line, under its cap, over its minimum.
+        let name = bounds(vcx, "document-terminal-name");
+        let name_kept = wide
+            .movable
+            .iter()
+            .find(|(label, _, _)| *label == "terminal name")
+            .map(|(_, _, kept)| *kept)
+            .unwrap_or_else(|| panic!("{what}: no name was measured with room"));
+        assert!(
+            f32::from(name.size.width) >= name_kept - 0.01
+                && f32::from(name.size.width)
+                    <= crate::ui::document_column::HEADER_CELL_MAX_W + 0.5
+                && f32::from(name.size.height) <= EXTRA_ROW_H,
+            "{what}: the name {name:?} is not one line of {name_kept}px to its cap; {report}"
+        );
+        // The summary: on a row of its own, as tall as its lines.
+        let summary_box = bounds(vcx, "diff-overlay-summary");
+        let summary_band = bands
+            .iter()
+            .position(|band| (band - f32::from(summary_box.center().y)).abs() <= 4.)
+            .unwrap_or_else(|| panic!("{what}: the summary is on no line"));
+        assert!(
+            seq.iter()
+                .all(|(band, _, label)| *label == "summary" || *band != summary_band),
+            "{what}: the summary shares its row with another part; {report}"
+        );
+        let lines = words_in(app, vcx, summary, f32::from(summary_box.size.width));
+        let line_h = wide.summary_line_h;
+        let header_h = f32::from(diff_header(vcx, what).header.size.height);
+        let summary_row_h = header_h - f32::from(one_line) - (rows as f32 - 2.) * EXTRA_ROW_H;
+        let word_boxes: Vec<String> = SUMMARY_WORDS
+            .iter()
+            .enumerate()
+            .filter_map(|(i, selector)| {
+                vcx.debug_bounds(selector)
+                    .map(|word| format!("word {i}: {word:?}"))
+            })
+            .collect();
+        assert!(
+            (f32::from(summary_box.size.height) - lines as f32 * line_h).abs() <= 1.,
+            "{what}: the summary {summary_box:?} is {}px tall; {lines} whole-word line(s) of \
+             {line_h}px need {}px, so a word is cut or the text is not wrapped; the words are \
+             {}; the header is {header_h}px over a {one_line:?} first row and {} other rows of \
+             {EXTRA_ROW_H}px, leaving {summary_row_h}px for the summary's row; {report}",
+            summary_box.size.height,
+            lines as f32 * line_h,
+            word_boxes.join("; "),
+            rows - 2
+        );
+        // The header is as tall as its first row, a standard extra row for
+        // each other row, and the summary's row: which holds the summary and,
+        // for a single line, is the standard row.
+        let header = f32::from(diff_header(vcx, what).header.size.height);
+        let summary_row = header - f32::from(one_line) - (rows as f32 - 2.) * EXTRA_ROW_H;
+        let summary_h = f32::from(summary_box.size.height);
+        assert!(
+            summary_row >= summary_h - 0.5
+                && summary_row <= summary_h.max(EXTRA_ROW_H) + EXTRA_ROW_H
+                && (lines > 1 || (summary_row - EXTRA_ROW_H).abs() <= 0.5),
+            "{what}: {rows} rows and a {header}px header leave {summary_row}px for the summary's \
+             row, which holds a {summary_h}px summary of {lines} line(s); {report}"
+        );
+        // Nothing is painted over anything else.
+        let all: Vec<(&str, Bounds<Pixels>)> = nodes
+            .iter()
+            .map(|(name, selector)| (*name, bounds(vcx, selector)))
+            .collect();
+        for (i, (a_name, a)) in all.iter().enumerate() {
+            for (b_name, b) in &all[i + 1..] {
+                let name_in_button = [*a_name, *b_name].contains(&"terminal name")
+                    && [*a_name, *b_name].contains(&"terminal button");
+                assert!(
+                    name_in_button || !overlaps(*a, *b),
+                    "{what}: the {a_name} {a:?} is painted over the {b_name} {b:?}; {report}"
+                );
+            }
+        }
+    }
+
+    /// The header in the window as it is, against the body it is painted in.
+    /// Every part is inside that body and no row is empty whatever the width.
+    /// Where the painted minima say no ladder level fits both lines (the
+    /// least any level needs, the last with its switches' margins at nothing,
+    /// exceeds the body by more than 3px, a band for the measurements' own
+    /// rounding) the rows are the overflow rows; where they say one does (by
+    /// more than 3px) the lines are the contract of [`assert_filled_lines`].
+    #[allow(clippy::too_many_arguments)]
+    fn assert_contract_at(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        wide: &Wide,
+        whole: &Whole,
+        one_line: Pixels,
+        window_w: f32,
+        summary: &str,
+        what: &str,
+    ) {
+        let body = painted_body(vcx, what);
+        let threshold = wide.ladder_threshold();
+        if threshold - 3. > body {
+            assert_overflow_rows(app, vcx, wide, whole, one_line, summary, what);
+        } else if threshold + 3. <= body {
+            assert_inside_body(vcx, wide, what);
+            let lines = header_lines(vcx, what);
+            assert_filled_lines(vcx, whole, window_w, one_line, lines, what);
+        } else {
+            assert_inside_body(vcx, wide, what);
+            assert_rows_tight(vcx, one_line, what);
+        }
+    }
+
+    /// At the 720px window minimum, in every native context (each language at
+    /// each interface size) the filled Staged, reading header with the native
+    /// capture's 50000 and 50000 keeps every part and every control inside the
+    /// painted body: as the test backend lays the window out, and with the
+    /// window solved so that the painted body is exactly the native minimum
+    /// body (the 157px Russian one at the largest size among them).
+    #[gpui::test]
+    fn at_the_native_minimum_bodies_every_part_and_control_is_inside_the_body(
+        cx: &mut TestAppContext,
+    ) {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, held, _streams) = native_ui24_diff(cx);
+        for (locale, size, native) in NATIVE_MINIMA {
+            set_native_context(&app, &mut vcx, locale, size);
+            put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 2400., 900.);
+            let state = format!("{locale} UI{size} Staged reading, native 50000/50000");
+            assert_holds(&app, &mut vcx, &held, &state);
+            let whole = diff_whole(&mut vcx, &state);
+            let one_line = diff_header(&mut vcx, &state).header.size.height;
+            let wide = measure_wide(&app, &mut vcx, &state, true);
+            let summary = summary_text(1, 0);
+
+            // The window as it is at its minimum, the test backend's panels.
+            put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 720., 520.);
+            let what = format!("{state}, the 720px window as laid out");
+            assert_holds(&app, &mut vcx, &held, &what);
+            assert_contract_at(
+                &app, &mut vcx, &wide, &whole, one_line, 720., &summary, &what,
+            );
+
+            // The window that paints the native minimum body.
+            let width = window_for_body(&app, &mut vcx, native);
+            put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, width, 520.);
+            let what = format!("{state}, the native {native}px body in a {width}px window");
+            assert_holds(&app, &mut vcx, &held, &what);
+            let body = painted_body(&mut vcx, &what);
+            assert!(
+                (body - native).abs() <= 0.5,
+                "{what}: the fixture's window paints a {body}px body, not the native {native}px"
+            );
+            assert_contract_at(
+                &app, &mut vcx, &wide, &whole, one_line, width, &summary, &what,
+            );
+        }
+        set_native_context(&app, &mut vcx, "en", 16.);
+    }
+
+    /// The one ordered state of the filled header, from painted bounds: 0 for
+    /// one row; 1 to 3 for the ladder's two rows with that many tiers on the
+    /// second; then one more than the rows for each overflow row (4 for three
+    /// rows). Narrowing only raises it and widening only lowers it.
+    fn header_level(vcx: &mut VisualTestContext, what: &str) -> usize {
+        match header_bands(vcx).len() {
+            1 => 0,
+            2 => tiers_moved(vcx, what),
+            rows => rows + 1,
+        }
+    }
+
+    /// The summary with room, on one line, is the ladder's single text element,
+    /// as wide as the text system shapes the whole run (rounded up as a run is)
+    /// with the interface font at the summary's size and the metrics' tabular
+    /// features: what the lexicon's words and digits are measured in is what
+    /// is drawn. The overflow rows' per-word elements are checked by
+    /// [`words_in`]. The test backend's glyphs all advance the
+    /// same, so this cannot tell tabular figures from proportional ones; a
+    /// native capture does.
+    fn assert_summary_features(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        summary: &str,
+        what: &str,
+    ) {
+        let painted = f32::from(
+            vcx.debug_bounds("diff-overlay-summary")
+                .unwrap_or_else(|| panic!("{what}: the summary is not drawn"))
+                .size
+                .width,
+        );
+        // With room the summary is the ladder's: one text element, a single
+        // run rounded up as a whole, whatever the overflow rows do with words.
+        let shaped = shaped_ui(app, vcx, summary, crate::ui::right_panel::META, true).ceil();
+        assert!(
+            (painted - shaped).abs() <= 1.5,
+            "{what}: the summary is painted {painted}px wide with room and shaped {shaped}px as \
+             one run with the tabular features it is measured in: {summary:?}"
+        );
+    }
+
+    /// How many lines the summary is drawn on, from its painted height over
+    /// the painted height of one line.
+    fn summary_lines(vcx: &mut VisualTestContext, wide: &Wide, what: &str) -> usize {
+        let height = vcx
+            .debug_bounds("diff-overlay-summary")
+            .unwrap_or_else(|| panic!("{what}: the summary is not drawn"))
+            .size
+            .height;
+        (f32::from(height) / wide.summary_line_h).round() as usize
+    }
+
+    /// Each value a component reached while narrowing is lost again while
+    /// widening only `HEADER_HYSTERESIS` past the last width that held it,
+    /// measured in the painted body (the panels' widths change with the window,
+    /// so window widths are not comparable): the body at the last width that
+    /// kept the value (`kept`) and at the first width that lost it (`up`).
+    fn assert_margins(kept: &[Option<f32>], up: &[Option<f32>], first: usize, what: &str) {
+        for (value, (kept, up)) in kept.iter().zip(up.iter()).enumerate().skip(first) {
+            let what = format!("{what}, value {value}");
+            match (kept, up) {
+                (None, None) => {}
+                (Some(kept), Some(up)) => {
+                    assert!(
+                        *up - kept >= HEADER_HYSTERESIS - 0.01
+                            && *up - kept <= HEADER_HYSTERESIS + 1.,
+                        "{what}: the last body that kept it was {kept}px, it was lost at a {up}px \
+                         body: not the margin of {HEADER_HYSTERESIS}"
+                    );
+                }
+                other => panic!("{what}: reached and lost unevenly: {other:?}"),
+            }
+        }
+    }
+
+    /// The other history for each value of a component: from just past the
+    /// width it was lost at, narrowing holds it until the width it was first
+    /// reached at, and not before; every part stays inside the body.
+    fn assert_history_two(
+        vcx: &mut VisualTestContext,
+        wide: &Wide,
+        down: &[Option<f32>],
+        up: &[Option<f32>],
+        observe: impl Fn(&mut VisualTestContext, &str) -> usize,
+        what: &str,
+    ) {
+        for (value, (down, up)) in down.iter().zip(up.iter()).enumerate().skip(1) {
+            let (Some(down), Some(up)) = (down, up) else {
+                continue;
+            };
+            resize(vcx, 2400., 900.);
+            resize(vcx, *up, 700.);
+            let what = format!("{what}, value {value}, history two");
+            assert!(
+                observe(vcx, &what) < value,
+                "{what}: reached at the width it was lost, {up}px"
+            );
+            let mut width = up - 1.;
+            let regained = loop {
+                resize(vcx, width, 700.);
+                assert_inside_body(vcx, wide, &what);
+                if observe(vcx, &what) >= value {
+                    break width;
+                }
+                width -= 1.;
+                assert!(width > down - 3., "{what}: never regained, below {down}px");
+            };
+            assert_eq!(
+                regained, *down,
+                "{what}: from inside the margin it must be regained where it was first reached"
+            );
+        }
+    }
+
+    /// Narrowing from 2400px to the native 157px body at the largest size in
+    /// Russian, one point at a time, the header only ever grows: its state
+    /// (rows and ladder tiers), the lines of its summary and its height each
+    /// only rise; widening back each only falls, and each value either
+    /// component reached is lost again only 8px past the last width that held
+    /// it, and from there narrowing again does not regain it before the first
+    /// width it was reached at, in a real render. Entering the overflow rows
+    /// is at the least body some ladder level fits both lines in (the
+    /// measured one, with the switches' margins at nothing), and leaving them
+    /// is 8px past it, not past a restored margin. Every part is inside the
+    /// body at every width.
+    #[gpui::test]
+    fn at_the_native_ui24_minimum_the_header_only_grows_while_narrowing_and_keeps_the_margin(
+        cx: &mut TestAppContext,
+    ) {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, held, _streams) = native_ui24_diff(cx);
+        put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 2400., 900.);
+        let state = "UI24 ru-RU Staged reading, native 50000/50000";
+        let whole = diff_whole(&mut vcx, state);
+        let one_line = diff_header(&mut vcx, state).header.size.height;
+        let wide = measure_wide(&app, &mut vcx, state, true);
+        let summary = summary_text(1, 0);
+        let narrowest = window_for_body(&app, &mut vcx, 157.);
+        put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 2400., 900.);
+
+        let mut down: [Option<f32>; 16] = [None; 16];
+        let mut down_lines: [Option<f32>; 16] = [None; 16];
+        // The painted body at the last width that kept each value.
+        let mut kept: [Option<f32>; 16] = [None; 16];
+        let mut kept_lines: [Option<f32>; 16] = [None; 16];
+        let (mut width, mut prev, mut prev_lines, mut prev_height) = (2400., 0, 0, 0.);
+        let mut prev_body = painted_body(&mut vcx, state);
+        while width >= narrowest {
+            resize(&mut vcx, width, 700.);
+            let what = format!("{state} narrowing at {width}px");
+            assert_holds(&app, &mut vcx, &held, &what);
+            assert_contract_at(
+                &app, &mut vcx, &wide, &whole, one_line, width, &summary, &what,
+            );
+            let level = header_level(&mut vcx, &what);
+            let lines = summary_lines(&mut vcx, &wide, &what);
+            let height = f32::from(diff_header(&mut vcx, &what).header.size.height);
+            let body = painted_body(&mut vcx, &what);
+            assert!(
+                level >= prev && lines >= prev_lines && height >= prev_height - 0.5,
+                "{what}: state {level} after {prev}, summary lines {lines} after {prev_lines}, \
+                 height {height} after {prev_height}: something shrank while narrowing"
+            );
+            down[prev + 1..=level]
+                .iter_mut()
+                .for_each(|at| *at = Some(width));
+            down_lines[prev_lines + 1..=lines]
+                .iter_mut()
+                .for_each(|at| *at = Some(width));
+            kept[prev + 1..=level]
+                .iter_mut()
+                .for_each(|at| *at = Some(prev_body));
+            kept_lines[prev_lines + 1..=lines]
+                .iter_mut()
+                .for_each(|at| *at = Some(prev_body));
+            (prev, prev_lines, prev_height, prev_body) = (level, lines, height, body);
+            width -= 1.;
+        }
+        assert!(
+            prev >= 4,
+            "narrowing to the native 157px body the header never went past the ladder: state {prev}"
+        );
+        assert!(
+            prev_lines >= 2,
+            "narrowing to the native 157px body the summary never took a second line"
+        );
+        let mut up: [Option<f32>; 16] = [None; 16];
+        let mut up_lines: [Option<f32>; 16] = [None; 16];
+        let mut up_body: [Option<f32>; 16] = [None; 16];
+        let mut up_body_lines: [Option<f32>; 16] = [None; 16];
+        let mut width = narrowest;
+        while width <= 2400. {
+            resize(&mut vcx, width, 700.);
+            let what = format!("{state} widening at {width}px");
+            assert_inside_body(&mut vcx, &wide, &what);
+            let level = header_level(&mut vcx, &what);
+            let lines = summary_lines(&mut vcx, &wide, &what);
+            let height = f32::from(diff_header(&mut vcx, &what).header.size.height);
+            let body = painted_body(&mut vcx, &what);
+            assert!(
+                level <= prev && lines <= prev_lines && height <= prev_height + 0.5,
+                "{what}: state {level} after {prev}, summary lines {lines} after {prev_lines}, \
+                 height {height} after {prev_height}: something grew while widening"
+            );
+            up[level + 1..=prev]
+                .iter_mut()
+                .for_each(|at| *at = Some(width));
+            up_lines[lines + 1..=prev_lines]
+                .iter_mut()
+                .for_each(|at| *at = Some(width));
+            up_body[level + 1..=prev]
+                .iter_mut()
+                .for_each(|at| *at = Some(body));
+            up_body_lines[lines + 1..=prev_lines]
+                .iter_mut()
+                .for_each(|at| *at = Some(body));
+            (prev, prev_lines, prev_height) = (level, lines, height);
+            width += 1.;
+        }
+        assert_margins(&kept, &up_body, 1, &format!("{state}, state"));
+        assert_margins(
+            &kept_lines,
+            &up_body_lines,
+            2,
+            &format!("{state}, summary lines"),
+        );
+
+        // The overflow rows begin where the ladder stops fitting and end 8px
+        // past it: against the painted body at the last width without them.
+        let threshold = wide.ladder_threshold();
+        let (Some(kept_body), Some(left_body)) = (kept[4], up_body[4]) else {
+            panic!("{state}: the overflow rows were never entered and left");
+        };
+        assert!(
+            (kept_body - threshold).abs() <= 3.,
+            "{state}: the last painted body without the overflow rows is {kept_body}px; the least \
+             a ladder level fits is {threshold}px: {}",
+            wide.report(kept_body)
+        );
+        assert!(
+            (left_body - threshold - HEADER_HYSTERESIS).abs() <= 4.,
+            "{state}: the overflow rows ended at a {left_body}px body; that is {threshold}px plus \
+             the margin of {HEADER_HYSTERESIS}, not a restored switch margin plus it ({}px)",
+            threshold + wide.margins + HEADER_HYSTERESIS
+        );
+
+        assert_history_two(
+            &mut vcx,
+            &wide,
+            &down,
+            &up,
+            |vcx, what| header_level(vcx, what),
+            &format!("{state}, state"),
+        );
+        assert_history_two(
+            &mut vcx,
+            &wide,
+            &down_lines,
+            &up_lines,
+            |vcx, what| summary_lines(vcx, &wide, what),
+            &format!("{state}, summary lines"),
+        );
+        set_native_context(&app, &mut vcx, "en", 16.);
+    }
+
+    /// A Staged, reading diff over `files` files and `untracked` untracked
+    /// ones, with the native capture's totals (50000 and 50000) all in the
+    /// first file.
+    fn open_staged_files(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        files: usize,
+        untracked: usize,
+    ) -> std::sync::Arc<crate::terminal::git_diff::DiffSnapshot> {
+        use crate::terminal::git_diff::{DiffSnapshot, DiffSource, FileDiff, FileStatus};
+        let snapshot = std::sync::Arc::new(DiffSnapshot {
+            root: std::path::PathBuf::from("/no/such/tty59/repo"),
+            source: DiffSource::Staged,
+            branch: "move-tab-keybind".into(),
+            files: (0..files)
+                .map(|n| FileDiff {
+                    path: format!("a{n}.rs"),
+                    old_path: None,
+                    status: FileStatus::Modified,
+                    added: if n == 0 { 50_000 } else { 0 },
+                    removed: if n == 0 { 50_000 } else { 0 },
+                    binary: false,
+                    truncated: None,
+                    hunks: Vec::new(),
+                })
+                .collect(),
+            untracked: (0..untracked).map(|n| format!("u{n}.txt")).collect(),
+            ..Default::default()
+        });
+        let held = std::sync::Arc::clone(&snapshot);
+        app.update_in(vcx, |app, window, cx| {
+            app.open_loaded_diff_for_test(snapshot, true, window, cx);
+        });
+        vcx.run_until_parked();
+        assert_holds(
+            app,
+            vcx,
+            &held,
+            "a Staged diff over several files, freshly opened",
+        );
+        held
+    }
+
+    /// The summary follows its counts, in a real render at the native minimum
+    /// window of the largest size (height 520) in all four languages: for
+    /// the counts below, which exercise these plural forms of the changed
+    /// files, in Russian zero, one (1, 21), few (2), many (5, 12) and in the
+    /// other languages zero, one and other, and of the untracked ones, in
+    /// Russian one, few and many and in the others one and other (the zero
+    /// forms of the untracked count and Russian's `other` are not reachable
+    /// from a diff). With no changed files there are no totals, which the
+    /// fixture says. Each diff is a new one opened in the same window:
+    /// nothing is keyed by the text, so a stale measurement would show. The
+    /// summary's words are all visible on a row of its own, broken only
+    /// between words, with no ellipsis but for a word wider than the body, and
+    /// every part is inside the painted body, the header tall enough for the
+    /// summary's lines.
+    #[gpui::test]
+    fn the_summary_follows_its_counts_at_the_native_ui24_minimum_bodies(cx: &mut TestAppContext) {
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, _held, _streams) = native_ui24_diff(cx);
+        for (locale, size, native) in NATIVE_MINIMA.iter().filter(|(_, size, _)| *size == 24.) {
+            set_native_context(&app, &mut vcx, locale, *size);
+            for (files, untracked) in [
+                (1, 0),
+                (2, 0),
+                (5, 0),
+                (12, 0),
+                (21, 0),
+                (0, 3),
+                (0, 1),
+                (1, 1),
+                (2, 2),
+                (5, 5),
+                (25, 7),
+            ] {
+                let held = open_staged_files(&app, &mut vcx, files, untracked);
+                let state =
+                    format!("{locale} UI{size}, {files} file(s), {untracked} untracked, native");
+                put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 2400., 900.);
+                assert_holds(&app, &mut vcx, &held, &state);
+                let whole = diff_whole(&mut vcx, &state);
+                let one_line = diff_header(&mut vcx, &state).header.size.height;
+                let wide = measure_wide(&app, &mut vcx, &state, files > 0);
+                let summary = summary_text(files, untracked);
+                assert_summary_features(&app, &mut vcx, &summary, &state);
+                let width = window_for_body(&app, &mut vcx, *native);
+                put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, width, 520.);
+                let what = format!("{state} {native}px body in a {width}px window");
+                assert_holds(&app, &mut vcx, &held, &what);
+                assert_contract_at(
+                    &app, &mut vcx, &wide, &whole, one_line, width, &summary, &what,
+                );
+            }
+
+            // One untracked file and then 8888, in the same window at the same
+            // painted body, the language and the font unchanged: a measurement
+            // that kept the first count would show.
+            let (few, many) = ((1, 1), (1, 8888));
+            let state = format!("{locale} UI{size}, untracked 1 then 8888, native");
+            put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 2400., 900.);
+            let mut measured = Vec::new();
+            for (files, untracked) in [few, many] {
+                let held = open_staged_files(&app, &mut vcx, files, untracked);
+                assert_holds(&app, &mut vcx, &held, &state);
+                let summary = summary_text(files, untracked);
+                assert_summary_features(&app, &mut vcx, &summary, &state);
+                measured.push((
+                    diff_whole(&mut vcx, &state),
+                    diff_header(&mut vcx, &state).header.size.height,
+                    measure_wide(&app, &mut vcx, &state, true),
+                    summary,
+                ));
+            }
+            let width = window_for_body(&app, &mut vcx, *native);
+            put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, width, 520.);
+            let mut bodies = Vec::new();
+            for ((files, untracked), (whole, one_line, wide, summary)) in
+                [few, many].into_iter().zip(&measured)
+            {
+                let held = open_staged_files(&app, &mut vcx, files, untracked);
+                let what = format!("{state}, {untracked} untracked at {native}px");
+                assert_holds(&app, &mut vcx, &held, &what);
+                assert_contract_at(
+                    &app, &mut vcx, wide, whole, *one_line, width, summary, &what,
+                );
+                // Each word is an element of its own, and every word's box is
+                // at least the independently shaped word, rounded up: so a
+                // count priced under its digits cannot pass because both
+                // summaries still wrap onto the same number of lines. A word
+                // wider than the row is the one capped word, left out.
+                let row = f32::from(
+                    vcx.debug_bounds("diff-overlay-summary")
+                        .unwrap_or_else(|| panic!("{what}: the summary is not drawn"))
+                        .size
+                        .width,
+                );
+                for (i, token) in summary.split_whitespace().enumerate() {
+                    let shaped =
+                        shaped_ui(&app, &mut vcx, token, crate::ui::right_panel::META, true).ceil();
+                    if shaped > row {
+                        continue;
+                    }
+                    let word = vcx
+                        .debug_bounds(SUMMARY_WORDS[i])
+                        .unwrap_or_else(|| panic!("{what}: word {i} {token:?} is not drawn"));
+                    assert!(
+                        f32::from(word.size.width) >= shaped - 0.01,
+                        "{what}: word {i} {token:?} is a {:?} box, under its shaped {shaped}px",
+                        word.size.width
+                    );
+                }
+                bodies.push(painted_body(&mut vcx, &what));
+            }
+            assert_eq!(
+                bodies[0], bodies[1],
+                "{state}: the two counts were not drawn in the same painted body"
+            );
+        }
+        set_native_context(&app, &mut vcx, "en", 16.);
     }
 
     /// The keycap labels a title-bar chord can carry in these tests, each with
