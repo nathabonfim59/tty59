@@ -1649,8 +1649,10 @@ impl Tty59App {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let id = SharedString::from(format!("scm-group-{group:?}"));
         let actions = self.scm_group_actions(&id, repo, group, entries, sf.hover, cx);
+        let selector = id.clone();
         h_flex()
             .id(id.clone())
+            .debug_selector(move || selector.to_string())
             .role(gpui::Role::Button)
             .aria_label(SharedString::from(format!(
                 "{} {count}",
