@@ -1584,6 +1584,11 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelScmStatusFailed => "Не удалось прочитать статус git",
         L10nKey::PanelScmStatusRetry => "Повторить",
         L10nKey::PanelCopyError => "Скопировать ошибку",
+        L10nKey::PanelScmGitExitStatus => "git завершился со статусом {code}",
+        L10nKey::PanelScmGitSignal => "git остановлен сигналом",
+        L10nKey::PanelScmGitUnusableRoot => "git rev-parse не вернул пригодных данных",
+        L10nKey::PanelScmGitPanicked => "git status аварийно завершился",
+        L10nKey::PanelScmGitPanickedWithReason => "git status аварийно завершился: {reason}",
         L10nKey::PanelNoChanges => "Нет незакоммиченных изменений.",
         L10nKey::PanelNoChangesHint => "Рабочее дерево чистое.",
         L10nKey::PanelMoreChangedFiles => {

@@ -816,20 +816,43 @@ pub enum StatusProbe {
     NotARepo,
     /// git could not run, or ran and failed for a reason that is not "no
     /// repository": a dead link, a timeout, an `index.lock` held by someone
-    /// else. Keep what is cached and ask again later. Carries git's (or the
-    /// host's) own words, so a panel with nothing cached can say why.
-    Unreachable(String),
+    /// else. Keep what is cached and ask again later. Carries what happened
+    /// as a fact, so a panel with nothing cached can say why in its own
+    /// language.
+    Unreachable(FailureFact),
 }
 
-/// git's first stderr line, or its exit status when it said nothing, or the
-/// fact that a signal ended it. Plain diagnostic facts, like git's own
-/// English: never an empty reason for a failure that has one.
-pub fn failure_reason(out: &crate::host::Output) -> String {
+/// What went wrong when a status probe could not be answered, as data: the
+/// core has no words of its own for it. A UI turns the generated kinds into
+/// sentences in its current language; [`FailureFact::Raw`] is somebody else's
+/// text — git's, the host's, the OS's — and is shown exactly as it came.
+///
+/// The kinds are told apart by how the failure arose, never by what a message
+/// says: a stderr line that happens to read like a generated sentence is still
+/// `Raw`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FailureFact {
+    /// git's first stderr line, or the host's / OS's own error text. Verbatim.
+    Raw(String),
+    /// git failed without saying anything and exited with this status.
+    ExitStatus(i32),
+    /// git failed without saying anything and left no exit status: a signal
+    /// ended it.
+    Signal,
+    /// `rev-parse` succeeded but printed nothing a root could be read from.
+    UnusableRoot,
+    /// The probe panicked. The payload's own text, when it had one, verbatim.
+    Panicked(Option<String>),
+}
+
+/// How a failed git run is told: its first stderr line (`Raw`), else its exit
+/// status, else the signal that ended it.
+pub fn failure_fact(out: &crate::host::Output) -> FailureFact {
     let stderr = out.stderr_trimmed();
     match (stderr.lines().next(), out.status) {
-        (Some(line), _) if !line.trim().is_empty() => line.trim().to_string(),
-        (_, Some(code)) => format!("git exited with status {code}"),
-        (_, None) => "git was stopped by a signal".to_string(),
+        (Some(line), _) if !line.trim().is_empty() => FailureFact::Raw(line.trim().to_string()),
+        (_, Some(code)) => FailureFact::ExitStatus(code),
+        (_, None) => FailureFact::Signal,
     }
 }
 
@@ -850,7 +873,7 @@ pub fn probe_status(host: &dyn Host, cwd: &Path) -> StatusProbe {
         ],
     ) {
         Ok(out) => out,
-        Err(e) => return StatusProbe::Unreachable(e.to_string()),
+        Err(e) => return StatusProbe::Unreachable(FailureFact::Raw(e.to_string())),
     };
     if !out.success() {
         // Exit 128 with this phrase is the ordinary answer for an ordinary
@@ -860,12 +883,12 @@ pub fn probe_status(host: &dyn Host, cwd: &Path) -> StatusProbe {
         return if stderr.contains("not a git repository") {
             StatusProbe::NotARepo
         } else {
-            StatusProbe::Unreachable(failure_reason(&out))
+            StatusProbe::Unreachable(failure_fact(&out))
         };
     }
     let paths = String::from_utf8_lossy(&out.stdout).into_owned();
     let mut lines = paths.lines().map(|l| l.trim_end_matches(['\n', '\r']));
-    let unparsed = || StatusProbe::Unreachable("git rev-parse said nothing usable".to_string());
+    let unparsed = || StatusProbe::Unreachable(FailureFact::UnusableRoot);
     let Some(root) = lines.next().map(|l| super::git_path(host, l)) else {
         return unparsed();
     };
@@ -877,10 +900,10 @@ pub fn probe_status(host: &dyn Host, cwd: &Path) -> StatusProbe {
 
     let out = match host.git(cwd, STATUS_ARGS) {
         Ok(out) => out,
-        Err(e) => return StatusProbe::Unreachable(e.to_string()),
+        Err(e) => return StatusProbe::Unreachable(FailureFact::Raw(e.to_string())),
     };
     if !out.success() {
-        return StatusProbe::Unreachable(failure_reason(&out));
+        return StatusProbe::Unreachable(failure_fact(&out));
     }
     let mut parsed = parse_porcelain_v2(&out.stdout);
     if parsed.ahead_behind.is_none()
@@ -1793,7 +1816,7 @@ mod tests {
         assert!(
             matches!(
                 probe_status(&*host, Path::new("/no/such/tty59/path")),
-                StatusProbe::Unreachable(reason) if !reason.trim().is_empty()
+                StatusProbe::Unreachable(FailureFact::Raw(text)) if !text.trim().is_empty()
             ),
             "a cwd that cannot be entered is not an answer about a repository, \
              and the failure says why"
@@ -1808,44 +1831,67 @@ mod tests {
         }
     }
 
-    /// The reason is git's own first line; only when git said nothing does the
-    /// exit status speak, and a process ended by a signal has no status at all.
+    /// A failed git is told as a fact: git's own first line (`Raw`); only when
+    /// git said nothing, its exit status; and a process ended by a signal has
+    /// no status at all.
     #[test]
-    fn a_failed_git_gives_its_first_line_its_status_or_the_signal() {
+    fn a_failed_git_is_told_as_its_first_line_its_status_or_the_signal() {
         assert_eq!(
-            failure_reason(&output(
+            failure_fact(&output(
                 Some(128),
                 "\nfatal: index file smaller than expected\nhint: more\n"
             )),
-            "fatal: index file smaller than expected",
+            FailureFact::Raw("fatal: index file smaller than expected".into()),
             "git's first stderr line, not the whole of it"
         );
         assert_eq!(
-            failure_reason(&output(Some(3), "   \n")),
-            "git exited with status 3",
+            failure_fact(&output(Some(3), "   \n")),
+            FailureFact::ExitStatus(3),
             "a blank stderr falls back to the exit status"
         );
+        assert_eq!(failure_fact(&output(None, "")), FailureFact::Signal);
         assert_eq!(
-            failure_reason(&output(None, "")),
-            "git was stopped by a signal"
-        );
-        assert_eq!(
-            failure_reason(&output(None, "error: killed")),
-            "error: killed",
+            failure_fact(&output(None, "error: killed")),
+            FailureFact::Raw("error: killed".into()),
             "git's words win over the signal"
         );
     }
 
-    /// A host that cannot run git at all carries the host's own error, which
-    /// is never empty for an io error.
+    /// Facts are told apart by how the failure arose, never by what it says:
+    /// stderr that reads exactly like a sentence a UI would generate is git's
+    /// text, kept verbatim, and is not the generated kind.
+    #[test]
+    fn stderr_that_reads_like_a_generated_sentence_is_still_git_text() {
+        for line in [
+            "git exited with status 3",
+            "git was stopped by a signal",
+            "git rev-parse said nothing usable",
+            "git status panicked",
+            "git status panicked: boom",
+        ] {
+            assert_eq!(
+                failure_fact(&output(Some(3), line)),
+                FailureFact::Raw(line.into()),
+                "{line:?}"
+            );
+        }
+        assert_ne!(
+            failure_fact(&output(Some(3), "git exited with status 3")),
+            failure_fact(&output(Some(3), "")),
+            "the lookalike is not the exit-status fact"
+        );
+    }
+
+    /// A host that cannot run git at all carries the host's own error text,
+    /// which is never empty for an io error.
     #[test]
     fn a_host_that_cannot_run_git_reports_its_io_error() {
         let host = crate::host::local::LocalHost::new();
-        let StatusProbe::Unreachable(reason) =
+        let StatusProbe::Unreachable(FailureFact::Raw(text)) =
             probe_status(&*host, Path::new("/no/such/tty59/dir/at/all"))
         else {
-            panic!("an unenterable cwd is unreachable, not a repository answer");
+            panic!("an unenterable cwd is unreachable with the host's own words");
         };
-        assert!(!reason.trim().is_empty(), "the io error says what failed");
+        assert!(!text.trim().is_empty(), "the io error says what failed");
     }
 }

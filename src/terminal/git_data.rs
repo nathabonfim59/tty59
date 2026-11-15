@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 use gpui::{Context, Window};
 
 use crate::core::git::ops::{GitOp, GitOpError, GitOpErrorKind, GitOpOutcome, run_op};
-use crate::core::git::status::{StatusIndex, StatusProbe, WorkingTreeStatus, probe_status};
+use crate::core::git::status::{
+    FailureFact, StatusIndex, StatusProbe, WorkingTreeStatus, probe_status,
+};
 use crate::ui::app::Tty59App;
 use crate::ui::host_ops::{ByHost, Host, HostId, HostOps, InFlight, SharedHost, WatchSub};
 
@@ -344,14 +346,15 @@ impl GitSubscriptions {
 enum ProbeLanding {
     Status(Arc<WorkingTreeStatus>, Arc<StatusIndex>),
     NotARepo,
-    Unreachable(String),
+    Unreachable(FailureFact),
 }
 
 /// The last probe that could not reach git: when, so `is_stale` can rest, and
-/// what went wrong, so a panel with nothing cached can say so.
+/// what went wrong, so a panel with nothing cached can say so. The fact, not a
+/// sentence: the words are made where they are shown, in the language then.
 struct ProbeFailure {
     at: Instant,
-    reason: Arc<str>,
+    fact: Arc<FailureFact>,
 }
 
 /// What the panel can draw for a repository right now. The status wins over a
@@ -362,10 +365,10 @@ pub(crate) enum StatusRead {
     Ready(Arc<WorkingTreeStatus>),
     /// Never read, and nothing has failed since: a probe is on its way.
     Loading,
-    /// Never read, and the last probe could not reach git. The reason is
-    /// git's or the host's own words, and may be empty only when neither said
-    /// anything.
-    Failed(Arc<str>),
+    /// Never read, and the last probe could not reach git. What happened, as a
+    /// fact: a later change of language re-words the same retained `Arc`
+    /// without asking git again and without changing its identity.
+    Failed(Arc<FailureFact>),
 }
 
 impl StatusRead {
@@ -386,16 +389,14 @@ impl StatusRead {
     }
 }
 
-/// What a panicked probe said, for a reason a person can copy; never empty.
-fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
-    let message = payload
+/// What a panicked probe said, verbatim, when it said anything: the `&str` or
+/// `String` payload. `None` for an opaque payload — no words are invented for
+/// it here; the UI words the fact.
+fn panic_detail(payload: &(dyn std::any::Any + Send)) -> Option<String> {
+    payload
         .downcast_ref::<&str>()
         .map(|s| (*s).to_string())
-        .or_else(|| payload.downcast_ref::<String>().cloned());
-    match message {
-        Some(message) => format!("git status panicked: {message}"),
-        None => "git status panicked".to_string(),
-    }
+        .or_else(|| payload.downcast_ref::<String>().cloned())
 }
 
 /// One repository's `.git` watch and the burst it is feeding.
@@ -459,16 +460,16 @@ impl ScmData {
             return StatusRead::Ready(status);
         }
         match self.failed_at.get(host, root) {
-            Some(failure) => StatusRead::Failed(Arc::clone(&failure.reason)),
+            Some(failure) => StatusRead::Failed(Arc::clone(&failure.fact)),
             None => StatusRead::Loading,
         }
     }
 
-    /// Record that a probe could not reach git, with the reason it gave.
-    fn note_failure(&mut self, host: HostId, root: &Path, reason: String) {
+    /// Record that a probe could not reach git, with what happened.
+    fn note_failure(&mut self, host: HostId, root: &Path, fact: FailureFact) {
         let failure = ProbeFailure {
             at: Instant::now(),
-            reason: reason.into(),
+            fact: Arc::new(fact),
         };
         self.failed_at.insert(host, root.to_path_buf(), failure);
     }
@@ -761,8 +762,10 @@ impl Tty59App {
                         ProbeLanding::Status(Arc::new(*status), Arc::new(index))
                     }
                     Ok(StatusProbe::NotARepo) => ProbeLanding::NotARepo,
-                    Ok(StatusProbe::Unreachable(reason)) => ProbeLanding::Unreachable(reason),
-                    Err(payload) => ProbeLanding::Unreachable(panic_reason(payload.as_ref())),
+                    Ok(StatusProbe::Unreachable(fact)) => ProbeLanding::Unreachable(fact),
+                    Err(payload) => ProbeLanding::Unreachable(FailureFact::Panicked(panic_detail(
+                        payload.as_ref(),
+                    ))),
                 }
             },
             move |cx, result| {
@@ -805,8 +808,8 @@ impl Tty59App {
                     // With a status held, nothing on screen moves. Without
                     // one, the panel is drawing Loading and has to turn into
                     // the failure, so this counts as a change.
-                    ProbeLanding::Unreachable(reason) => {
-                        data.note_failure(id, &root, reason);
+                    ProbeLanding::Unreachable(fact) => {
+                        data.note_failure(id, &root, fact);
                         data.status.get(id, root.as_path()).is_none()
                     }
                 };
@@ -1508,9 +1511,11 @@ mod tests {
         let (host, root) = (HostId::LOCAL, root());
         assert!(matches!(data.status_read(host, &root), StatusRead::Loading));
 
-        data.note_failure(host, &root, "timed out".into());
+        data.note_failure(host, &root, FailureFact::Raw("timed out".into()));
         match data.status_read(host, &root) {
-            StatusRead::Failed(reason) => assert_eq!(&*reason, "timed out"),
+            StatusRead::Failed(fact) => {
+                assert_eq!(*fact, FailureFact::Raw("timed out".into()))
+            }
             other => panic!("expected a failure, got {other:?}"),
         }
         assert!(!data.is_stale(host, &root), "a failure rests");
@@ -1519,7 +1524,7 @@ mod tests {
         assert!(matches!(data.status_read(host, &root), StatusRead::Loading));
         assert!(data.is_stale(host, &root), "Retry asks again at once");
 
-        data.note_failure(host, &root, "timed out".into());
+        data.note_failure(host, &root, FailureFact::Raw("timed out".into()));
         data.status
             .insert(host, root.clone(), Arc::new(held_status()));
         assert!(
@@ -1536,7 +1541,7 @@ mod tests {
         let other_host = HostId::from_connection_key("somewhere-else");
         let (a, b) = (PathBuf::from("/repo/a"), PathBuf::from("/repo/b"));
         for (host, root) in [(HostId::LOCAL, &a), (HostId::LOCAL, &b), (other_host, &a)] {
-            data.note_failure(host, root, "down".into());
+            data.note_failure(host, root, FailureFact::Raw("down".into()));
         }
 
         data.forget_failure(HostId::LOCAL, &a);
@@ -1573,9 +1578,9 @@ mod tests {
     #[test]
     fn identity_tells_the_three_states_apart_by_allocation() {
         let status = Arc::new(held_status());
-        let reason: Arc<str> = "down".into();
+        let fact = Arc::new(FailureFact::Raw("down".into()));
         let ready = StatusRead::Ready(Arc::clone(&status));
-        let failed = StatusRead::Failed(Arc::clone(&reason));
+        let failed = StatusRead::Failed(Arc::clone(&fact));
 
         assert!(StatusRead::Loading.same_identity(&StatusRead::Loading));
         assert!(ready.same_identity(&ready.clone()));
@@ -1586,28 +1591,48 @@ mod tests {
 
         // An equal status in a new allocation is a new observation.
         assert!(!ready.same_identity(&StatusRead::Ready(Arc::new(held_status()))));
-        // So is the same reason text failing again.
-        assert!(!failed.same_identity(&StatusRead::Failed("down".into())));
+        // So is the same fact failing again.
+        assert!(
+            !failed.same_identity(&StatusRead::Failed(Arc::new(FailureFact::Raw(
+                "down".into()
+            ))))
+        );
     }
 
-    /// A panicked probe says what it panicked with, and never nothing.
+    /// The failure is retained as a fact: asking again after the language
+    /// changed returns the very same allocation, so nothing re-probes and the
+    /// panel's watcher sees no change; only the words made from it differ.
     #[test]
-    fn a_panicked_probe_keeps_its_message() {
-        assert_eq!(
-            panic_reason(&"boom"),
-            "git status panicked: boom",
-            "a &str payload"
+    fn a_retained_failure_keeps_its_identity_across_a_language_change() {
+        let mut data = ScmData::default();
+        let (host, root) = (HostId::LOCAL, root());
+        data.note_failure(host, &root, FailureFact::ExitStatus(3));
+        let before = data.status_read(host, &root);
+        crate::ui::i18n::set_locale("ru-RU");
+        let after = data.status_read(host, &root);
+        crate::ui::i18n::set_locale("en");
+        assert!(
+            before.same_identity(&after),
+            "a language change is not a new observation"
         );
-        assert_eq!(
-            panic_reason(&String::from("bang")),
-            "git status panicked: bang",
-            "a String payload"
+        assert!(matches!(&after, StatusRead::Failed(fact) if **fact == FailureFact::ExitStatus(3)));
+        assert!(
+            !data.is_stale(host, &root),
+            "and it still rests: no re-probe"
         );
+    }
+
+    /// A panicked probe hands over what it panicked with, verbatim, and no
+    /// words of its own: an opaque payload is `None`.
+    #[test]
+    fn a_panicked_probe_keeps_its_payload_text_and_invents_none() {
+        assert_eq!(panic_detail(&"boom"), Some("boom".to_string()), "a &str");
         assert_eq!(
-            panic_reason(&42_u8),
-            "git status panicked",
-            "an opaque payload still gets an honest reason"
+            panic_detail(&String::from("bang")),
+            Some("bang".to_string()),
+            "a String"
         );
+        assert_eq!(panic_detail(&42_u8), None, "an opaque payload");
     }
 
     #[test]

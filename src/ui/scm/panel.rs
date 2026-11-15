@@ -23,7 +23,8 @@ use gpui_component::{
 use tty59_core::core::git::diff::MAX_RENDERED_FILES;
 use tty59_core::core::git::ops::GitOp;
 use tty59_core::core::git::status::{
-    ChangeCode, DecoStatus, HeadState, RepoOperation, RepoPath, StatusEntry, WorkingTreeStatus,
+    ChangeCode, DecoStatus, FailureFact, HeadState, RepoOperation, RepoPath, StatusEntry,
+    WorkingTreeStatus,
 };
 
 use crate::terminal::git_data::{StatusRead, index_of, status_of, status_read_of};
@@ -170,17 +171,41 @@ pub(crate) const SCM_STATUS_RETRY: &str = "panel-scm-status-retry";
 pub(crate) const SCM_STATUS_COPY: &str = "panel-scm-status-copy";
 pub(crate) const SCM_INIT_REPO: &str = "panel-scm-init-repo";
 
+/// The words for a failure fact, in the language now. Only here, on the UI
+/// thread, when something is drawn or reported: the core and the probe's pool
+/// thread carry facts and never look a locale up.
+///
+/// `Raw` is somebody else's text — git's, the host's, the OS's — and comes
+/// back exactly as it was given, whatever it says. The generated kinds are
+/// told apart by their variant, never by comparing text.
+pub(crate) fn failure_text(fact: &FailureFact) -> String {
+    match fact {
+        FailureFact::Raw(text) => text.clone(),
+        FailureFact::ExitStatus(code) => t_fmt(
+            L10nKey::PanelScmGitExitStatus,
+            &[("code", code.to_string().as_str())],
+        ),
+        FailureFact::Signal => t(L10nKey::PanelScmGitSignal).to_string(),
+        FailureFact::UnusableRoot => t(L10nKey::PanelScmGitUnusableRoot).to_string(),
+        FailureFact::Panicked(Some(detail)) if !detail.trim().is_empty() => t_fmt(
+            L10nKey::PanelScmGitPanickedWithReason,
+            &[("reason", detail.as_str())],
+        ),
+        FailureFact::Panicked(_) => t(L10nKey::PanelScmGitPanicked).to_string(),
+    }
+}
+
 /// Where `dir` is a repository on `host`, if it is: `Ok(Some(root))` for a
 /// repository, `Ok(None)` for git's own "not a git repository", and `Err` with
-/// the reason for anything else — a host that could not run git, a repository
-/// git could not read — which is not an answer about the directory.
-fn toplevel(host: &dyn tty59_core::host::Host, dir: &Path) -> Result<Option<String>, String> {
+/// what happened for anything else — a host that could not run git, a
+/// repository git could not read — which is not an answer about the directory.
+fn toplevel(host: &dyn tty59_core::host::Host, dir: &Path) -> Result<Option<String>, FailureFact> {
     let out = host
         .git(
             dir,
             &["rev-parse", "--path-format=absolute", "--show-toplevel"],
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| FailureFact::Raw(e.to_string()))?;
     if out.success() {
         return out
             .stdout_trimmed()
@@ -189,7 +214,7 @@ fn toplevel(host: &dyn tty59_core::host::Host, dir: &Path) -> Result<Option<Stri
             .map(str::trim)
             .filter(|l| !l.is_empty())
             .map(|l| Some(l.to_string()))
-            .ok_or_else(|| "git rev-parse said nothing usable".to_string());
+            .ok_or(FailureFact::UnusableRoot);
     }
     if out
         .stderr_trimmed()
@@ -198,7 +223,7 @@ fn toplevel(host: &dyn tty59_core::host::Host, dir: &Path) -> Result<Option<Stri
     {
         return Ok(None);
     }
-    Err(tty59_core::core::git::status::failure_reason(&out))
+    Err(tty59_core::core::git::status::failure_fact(&out))
 }
 
 /// `git init` in `dir`, through the host so a remote pane's folder is made a
@@ -208,20 +233,21 @@ fn toplevel(host: &dyn tty59_core::host::Host, dir: &Path) -> Result<Option<Stri
 /// repository is never initialised again (no nested repository), and one git
 /// could not answer about is reported, not initialised over. `Ok` carries the
 /// new root as the host spells it, or `None` when git initialised but would not
-/// then say where. `Err` is always a reason: git's first line, its exit status
-/// when it said nothing, or the transport's own error.
+/// then say where. `Err` is always a fact: git's first line, its exit status
+/// when it said nothing, or the transport's own error text; it is worded only
+/// by the caller on the UI thread (`failure_text`).
 pub(crate) fn init_repo(
     host: &dyn tty59_core::host::Host,
     dir: &Path,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, FailureFact> {
     if let Some(root) = toplevel(host, dir)? {
         return Ok(Some(root));
     }
     let out = host
         .git(dir, &["init", "--quiet"])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| FailureFact::Raw(e.to_string()))?;
     if !out.success() {
-        return Err(tty59_core::core::git::status::failure_reason(&out));
+        return Err(tty59_core::core::git::status::failure_fact(&out));
     }
     toplevel(host, dir)
 }
@@ -1469,7 +1495,7 @@ impl Tty59App {
         &self,
         host: SharedHost,
         root: PathBuf,
-        reason: Arc<str>,
+        fact: Arc<FailureFact>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -1482,9 +1508,11 @@ impl Tty59App {
                 this.scm_retry_status(host.clone(), root.clone(), cx);
             }),
         );
-        // A failure that said nothing has nothing to show or copy; one that
-        // said something is shown and copied exactly as it was said.
-        let reason = (!reason.trim().is_empty()).then_some(reason);
+        // The words are made here, once, in the language now: the line shown
+        // and the line Copy error writes are this same string. A failure that
+        // said nothing has nothing to show or copy.
+        let text = failure_text(&fact);
+        let reason: Option<Arc<str>> = (!text.trim().is_empty()).then(|| Arc::from(text));
         let copy = reason.clone().map(|reason| {
             PanelAction::secondary(
                 SCM_STATUS_COPY,
@@ -1574,11 +1602,16 @@ impl Tty59App {
             move |h| init_repo(h, &dir),
             move |this, result, window, cx| match result {
                 Ok(root) => this.scm_initialized(&captured, &target, root, cx),
-                Err(reason) => {
-                    let note = gpui_component::notification::Notification::error(
-                        crate::terminal::git_data::git_reason(&reason),
-                    )
-                    .title(t_fmt(L10nKey::GitOpFailed, &[("op", "init")]));
+                Err(fact) => {
+                    // Git's own words keep the toast policy every git failure
+                    // has (severity prefix dropped, sentence case); the
+                    // generated kinds are worded by the catalog as they are.
+                    let text = match &fact {
+                        FailureFact::Raw(raw) => crate::terminal::git_data::git_reason(raw),
+                        generated => failure_text(generated),
+                    };
+                    let note = gpui_component::notification::Notification::error(text)
+                        .title(t_fmt(L10nKey::GitOpFailed, &[("op", "init")]));
                     gpui_component::WindowExt::push_notification(window, note, cx);
                     cx.notify();
                 }
@@ -6566,7 +6599,7 @@ mod status_lifecycle_witness_gpui_tests {
         );
         assert!(matches!(
             vcx.update(|_, cx| status_read_of(cx, HostId::LOCAL, &root)),
-            StatusRead::Failed(reason) if !reason.trim().is_empty()
+            StatusRead::Failed(fact) if !failure_text(&fact).trim().is_empty()
         ));
     }
 
@@ -6800,8 +6833,194 @@ mod status_lifecycle_witness_gpui_tests {
         let (_dir, dir) = scratch("tty59-init-gone-");
         let gone = dir.join("gone");
         let host = tty59_core::host::local::LocalHost::new();
-        let reason = init_repo(&*host, &gone).expect_err("there is nowhere to initialise");
-        assert!(!reason.trim().is_empty(), "the refusal says why");
+        let fact = init_repo(&*host, &gone).expect_err("there is nowhere to initialise");
+        assert!(
+            matches!(&fact, FailureFact::Raw(text) if !text.trim().is_empty()),
+            "the refusal carries the host's own words: {fact:?}"
+        );
         assert!(!gone.exists());
+    }
+
+    /// The failed body for one retained fact, in a window of its own. Helper
+    /// coverage for the words and the Copy click: that the real Changes render
+    /// routes Failed here is what the witnesses above prove.
+    struct FailedBody {
+        app: Entity<Tty59App>,
+        fact: Arc<FailureFact>,
+    }
+
+    impl gpui::Render for FailedBody {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let fact = self.fact.clone();
+            let body = self.app.update(cx, |app, cx| {
+                let host = local_host(cx);
+                app.scm_status_failed(host, PathBuf::from("/failed-body"), fact, cx)
+            });
+            div().w(px(320.)).h(px(600.)).child(body)
+        }
+    }
+
+    fn failed_body(
+        cx: &mut TestAppContext,
+        fact: FailureFact,
+    ) -> (Arc<FailureFact>, VisualTestContext) {
+        let (app, _main) = test_window::harness(cx);
+        let fact = Arc::new(fact);
+        let window = cx.add_window({
+            let (app, fact) = (app.clone(), fact.clone());
+            move |_, _| FailedBody { app, fact }
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.run_until_parked();
+        // Drawn explicitly, as the bounds tests do, so the buttons' bounds
+        // never depend on a frame the platform happens to deliver.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (fact, vcx)
+    }
+
+    /// Re-render the body after something it reads changed (the language) and
+    /// draw it, so the new frame's bounds are the ones a click lands on.
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn copied(vcx: &mut VisualTestContext) -> Option<String> {
+        vcx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    }
+
+    /// One retained fact, worded in the language of the moment: Copy error
+    /// writes the words that are drawn. The expected strings are literals
+    /// written here, in English and in Russian, not the formatter's output.
+    /// Switching language re-words the same retained fact; nothing re-probes
+    /// (the fact is held by the view, no `ScmData` is involved).
+    #[gpui::test]
+    fn copy_error_writes_a_generated_fact_in_the_language_of_the_moment(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        crate::ui::i18n::set_locale("en");
+        let (_fact, mut vcx) = failed_body(cx, FailureFact::ExitStatus(3));
+        press(&mut vcx, COPY);
+        assert_eq!(
+            copied(&mut vcx).as_deref(),
+            Some("git exited with status 3")
+        );
+
+        crate::ui::i18n::set_locale("ru-RU");
+        redraw(&mut vcx);
+        press(&mut vcx, COPY);
+        assert_eq!(
+            copied(&mut vcx).as_deref(),
+            Some("git завершился со статусом 3"),
+            "the same fact, in Russian, on the clipboard"
+        );
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// Git's own words are copied exactly, even when they read like a sentence
+    /// the app would have generated, and even in another language.
+    #[gpui::test]
+    fn copy_error_writes_raw_text_that_looks_like_a_fallback_unchanged(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        crate::ui::i18n::set_locale("ru-RU");
+        let (_fact, mut vcx) =
+            failed_body(cx, FailureFact::Raw("git exited with status 3".to_string()));
+        press(&mut vcx, COPY);
+        assert_eq!(
+            copied(&mut vcx).as_deref(),
+            Some("git exited with status 3"),
+            "raw text is not translated"
+        );
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// Every generated kind, in all four languages. The Russian expectations
+    /// are written out here as literals, not read back from the formatter or
+    /// the catalog; the others are held to what must hold of any translation:
+    /// the payload survives verbatim, no placeholder is left unreplaced, and
+    /// it is not the English sentence.
+    #[test]
+    fn generated_failure_facts_are_worded_in_every_language() {
+        let facts = [
+            FailureFact::ExitStatus(7),
+            FailureFact::Signal,
+            FailureFact::UnusableRoot,
+            FailureFact::Panicked(None),
+            FailureFact::Panicked(Some("boom".into())),
+        ];
+        crate::ui::i18n::set_locale("en");
+        let english = [
+            "git exited with status 7",
+            "git was stopped by a signal",
+            "git rev-parse said nothing usable",
+            "git status panicked",
+            "git status panicked: boom",
+        ];
+        for (fact, want) in facts.iter().zip(english) {
+            assert_eq!(failure_text(fact), want, "en {fact:?}");
+        }
+
+        crate::ui::i18n::set_locale("ru-RU");
+        let russian = [
+            "git завершился со статусом 7",
+            "git остановлен сигналом",
+            "git rev-parse не вернул пригодных данных",
+            "git status аварийно завершился",
+            "git status аварийно завершился: boom",
+        ];
+        for (fact, want) in facts.iter().zip(russian) {
+            assert_eq!(failure_text(fact), want, "ru {fact:?}");
+        }
+
+        for locale in ["ru-RU", "zh-CN", "ja-JP"] {
+            crate::ui::i18n::set_locale(locale);
+            for (fact, en) in facts.iter().zip(english) {
+                let text = failure_text(fact);
+                assert!(!text.trim().is_empty(), "{locale} {fact:?}");
+                assert!(
+                    !text.contains('{') && !text.contains('}'),
+                    "{locale} {fact:?} left a placeholder: {text:?}"
+                );
+                assert_ne!(text, en, "{locale} {fact:?} is still the English sentence");
+            }
+            assert!(
+                failure_text(&facts[0]).contains('7'),
+                "{locale} keeps the code"
+            );
+            assert!(
+                failure_text(&facts[4]).contains("boom"),
+                "{locale} keeps the panic text"
+            );
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// Somebody else's words are never reworded: raw text that reads exactly
+    /// like a sentence the app generates stays exact in every language, and so
+    /// does raw text in another script.
+    #[test]
+    fn raw_failure_text_is_exact_in_every_language() {
+        for raw in [
+            "git exited with status 3",
+            "git was stopped by a signal",
+            "git rev-parse said nothing usable",
+            "git status panicked: boom",
+            "fatal: index file smaller than expected",
+            "{code} {reason}",
+        ] {
+            for locale in ["en", "ru-RU", "zh-CN", "ja-JP"] {
+                crate::ui::i18n::set_locale(locale);
+                assert_eq!(
+                    failure_text(&FailureFact::Raw(raw.to_string())),
+                    raw,
+                    "{locale}: {raw:?}"
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
     }
 }
