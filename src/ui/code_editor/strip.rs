@@ -1319,6 +1319,136 @@ mod gpui_tests {
         assert_header(&app, &mut vcx, "other group focused");
     }
 
+    /// Editor F3 across every theme (verification gate 7): the built-ins and
+    /// the whole generated grid, light, dark and weak, with no exclusions.
+    /// Each theme is installed through `apply_theme` and the editor drawn with
+    /// a dirty active tab, a dirty inactive tab, dirty files behind `+N` and
+    /// the picker open, so every unsaved-dot site is built in the frame. The
+    /// dots' paint, read from the probe, must be the cached warning ink (so a
+    /// grey dot fails), and that ink must clear the 3:1 COMPONENT floor on
+    /// every fill the renderer puts behind a visible dot: the column surface
+    /// (inactive tab, `+N` at rest), `sidebar_accent` over it (active tab,
+    /// `+N` open or hovered), and the picker's popover and highlighted row.
+    /// A dot under the pointer is hidden for the close button, so hover fills
+    /// of tabs and picker rows are not pairs.
+    #[gpui::test]
+    fn dirty_dots_are_the_warning_ink_and_clear_3_to_1_in_every_theme(cx: &mut TestAppContext) {
+        const COMPONENT_FLOOR: f32 = 3.0;
+        crate::core::config::pin_test_config_dir();
+        let _probe = crate::ui::paint_probe::scope();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Dock);
+        resize(&mut vcx, 1440., 900.);
+        let ids: Vec<_> = (0..6)
+            .map(|i| open_rs(&app, &mut vcx, &format!("/sweep/dirty-file-{i}.rs")))
+            .collect();
+        app.update_in(&mut vcx, |app, window, cx| {
+            for id in &ids {
+                app.buffer_mut(*id).unwrap().dirty = true;
+            }
+            app.editor_toggle_strip_picker(window, cx);
+        });
+        vcx.run_until_parked();
+
+        let mut themes = crate::ui::presets::builtins();
+        themes.extend(crate::ui::presets::generated_theme_grid());
+        let total = themes.len();
+        let theme_ids: Vec<String> = themes.iter().map(|t| t.id.clone()).collect();
+        vcx.update(|_, cx| cx.set_global(crate::ui::presets::Themes(themes)));
+
+        let mut misses = Vec::new();
+        for id in &theme_ids {
+            vcx.update(|window, cx| {
+                let mut cfg = cx.global::<Config>().clone();
+                cfg.theme_follow_system = false;
+                cfg.theme_preset = id.clone();
+                cx.set_global(cfg);
+                crate::ui::theme::apply_theme(Some(window), cx);
+            });
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+            crate::ui::paint_probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+
+            let active_pos = app.read_with(&vcx, |app, _| app.tab_code().unwrap().active);
+            let inactive_drawn = TAB_DOT_SELECTORS
+                .iter()
+                .enumerate()
+                .any(|(pos, sel)| pos != active_pos && vcx.debug_bounds(sel).is_some());
+            for (site, drawn) in [
+                (
+                    "active tab dot",
+                    vcx.debug_bounds(TAB_DOT_SELECTORS[active_pos]).is_some(),
+                ),
+                ("inactive tab dot", inactive_drawn),
+                (
+                    "+N dot",
+                    vcx.debug_bounds("editor-strip-more-dot").is_some(),
+                ),
+                (
+                    "picker row dot",
+                    vcx.debug_bounds("editor-strip-row-dot-0").is_some(),
+                ),
+            ] {
+                assert!(drawn, "{id}: the {site} was not drawn");
+            }
+
+            let (warning, fills) = vcx.update(|_, cx| {
+                let hex = crate::ui::paint_probe::hsla24;
+                let column = crate::ui::theme::workspace_surface_color(cx);
+                let popover = column.blend(cx.theme().popover);
+                let row_hi: gpui::Hsla =
+                    gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().popover.hover).into();
+                (
+                    crate::ui::theme::semantics(cx).warning.ink,
+                    [
+                        ("column surface", hex(column)),
+                        (
+                            "sidebar_accent",
+                            hex(column.blend(cx.theme().sidebar_accent)),
+                        ),
+                        ("picker popover", hex(popover)),
+                        ("picker highlighted row", hex(popover.blend(row_hi))),
+                    ],
+                )
+            });
+            let dots = crate::ui::paint_probe::all("editor-dirty-dot");
+            if dots.len() < 4 {
+                misses.push(format!("{id}: {} dirty dots built, want >= 4", dots.len()));
+            }
+            for dot in &dots {
+                if dot.fill != Some(warning) || dot.fill_alpha != Some(1.) {
+                    misses.push(format!(
+                        "{id}: dot paint {:?} alpha {:?}, want the warning ink {warning:06x}",
+                        dot.fill, dot.fill_alpha
+                    ));
+                }
+            }
+            for (name, fill) in fills {
+                let ratio = crate::ui::presets::contrast(warning, fill);
+                if ratio < COMPONENT_FLOOR {
+                    misses.push(format!(
+                        "{id}: dot {warning:06x} on {name} {fill:06x} = {ratio:.2}:1"
+                    ));
+                }
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "{} misses over {total} themes, first 12:\n{}",
+            misses.len(),
+            misses
+                .iter()
+                .take(12)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
     /// The unsaved mark's paint, as the builders put it: every dirty dot
     /// drawn since the last clear is filled with the theme's cached warning
     /// ink (editor F3), none in the grey it used to be.
