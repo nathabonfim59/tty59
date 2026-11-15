@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A zoomed pane says so**: it wears a "Zoomed · 1 of N panes" badge in
+  its top-right corner with the zoom shortcut beside it, and clicking the
+  badge brings the other panes back. The pane's right-click menu reads
+  Unzoom Pane while it is zoomed.
+
 ## [26.14.1] - 2026-11-15
 
 ### Fixed
