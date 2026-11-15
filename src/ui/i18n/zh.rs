@@ -235,6 +235,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirLoading => "读取中…",
         L10nKey::TreeDirEmpty => "空",
         L10nKey::TreeDirHiddenOnly => "只有隐藏文件",
+        L10nKey::TreeDirShowHidden => "显示",
         L10nKey::TreeDirUnreadable => "无法读取",
         L10nKey::TreeSearchCapped => "只显示前 {n} 个匹配",
         L10nKey::TreeSearchFailed => "搜索失败",
@@ -1122,6 +1123,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpEditPermissions => "权限 · {mode}",
         L10nKey::SftpLoading => "加载中…",
         L10nKey::SftpEmptyDirectory => "空文件夹。",
+        L10nKey::SftpListRetry => "重试",
+        L10nKey::SftpListGoUp => "返回上级",
         L10nKey::SftpContextOpen => "打开",
         L10nKey::SftpContextEdit => "编辑",
         L10nKey::SftpContextFollowSymlink => "跟随符号链接",
@@ -1184,8 +1187,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextNewFolder => "新建文件夹",
         L10nKey::FileTreeContextRename => "重命名",
         L10nKey::FileTreeContextCopyPath => "复制路径",
+        L10nKey::FileTreeContextCopyHostPath => "复制为 host:path",
         L10nKey::FileTreeContextHideDotfiles => "隐藏点文件",
         L10nKey::FileTreeContextShowDotfiles => "显示点文件",
+        L10nKey::FileTreeTooltipRefresh => "刷新",
+        L10nKey::FileTreeNotAutoRefreshing => "未自动刷新",
+        L10nKey::FileTreeWatchRetry => "重试",
         L10nKey::FileDropIntoItself => "文件夹不能复制到它自己里面。",
         L10nKey::FileDropNotHere => "不在这台机器上。",
         L10nKey::FileDropNameTaken => "同一次拖放里已经有另一项用了这个名字。",
@@ -1298,6 +1305,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchEditorZoomKeywords => {
             "缩放 文字大小 字体大小 放大 缩小 编辑器 markdown 预览 zoom"
+        }
+        L10nKey::SettingsFilesShowHidden => "显示隐藏文件",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            "在文件树及其名称搜索中列出以点开头的文件和文件夹，例如 .git 和 .env。"
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "隐藏 隐藏文件 点文件 文件树 显示 hidden dotfiles"
         }
         L10nKey::EditorGoToLinePlaceholder => "行号，或 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "跳转到编辑器中的符号…",
@@ -1497,6 +1511,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffTruncatedBudget => {
             "内容未加载——已超出 tty59 的 diff 预算。在终端运行 git diff 查看此文件。"
         }
+        L10nKey::DiffNoContentChanges => "内容无变化",
         L10nKey::DiffUntrackedHeader => "未跟踪文件 ({count})",
         L10nKey::DiffMoreUntracked => "…还有 {count} 个——在终端中运行 git status 查看。",
         L10nKey::DiffLines => "{count} 行 diff",

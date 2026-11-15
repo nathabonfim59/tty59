@@ -269,6 +269,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirLoading => "読み込み中…",
         L10nKey::TreeDirEmpty => "空",
         L10nKey::TreeDirHiddenOnly => "隠しファイルのみ",
+        L10nKey::TreeDirShowHidden => "表示",
         L10nKey::TreeDirUnreadable => "読み取れません",
         L10nKey::TreeSearchCapped => "最初の {n} 件のみ",
         L10nKey::TreeSearchFailed => "検索に失敗しました",
@@ -1262,6 +1263,8 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpEditPermissions => "権限 · {mode}",
         L10nKey::SftpLoading => "読み込み中…",
         L10nKey::SftpEmptyDirectory => "空のディレクトリです",
+        L10nKey::SftpListRetry => "再試行",
+        L10nKey::SftpListGoUp => "上の階層へ",
         L10nKey::SftpContextOpen => "開く",
         L10nKey::SftpContextEdit => "編集",
         L10nKey::SftpContextFollowSymlink => "シンボリックリンクを辿る",
@@ -1332,8 +1335,12 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextNewFolder => "新しいフォルダ",
         L10nKey::FileTreeContextRename => "名前を変更",
         L10nKey::FileTreeContextCopyPath => "パスをコピー",
+        L10nKey::FileTreeContextCopyHostPath => "host:path 形式でコピー",
         L10nKey::FileTreeContextHideDotfiles => "ドットファイルを非表示",
         L10nKey::FileTreeContextShowDotfiles => "ドットファイルを表示",
+        L10nKey::FileTreeTooltipRefresh => "更新",
+        L10nKey::FileTreeNotAutoRefreshing => "自動更新されていません",
+        L10nKey::FileTreeWatchRetry => "再試行",
         L10nKey::FileDropIntoItself => "フォルダを自分自身の中にはコピーできません",
         L10nKey::FileDropNotHere => "このマシンにはありません",
         L10nKey::FileDropNameTaken => "同じドロップ内の別の項目がすでにこの名前を使っています",
@@ -1456,6 +1463,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchEditorZoomKeywords => {
             "ズーム 文字サイズ フォントサイズ 拡大 縮小 エディタ markdown プレビュー zoom"
+        }
+        L10nKey::SettingsFilesShowHidden => "隠しファイルを表示",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            ".git や .env など、名前がドットで始まるファイルとフォルダをファイルツリーと名前検索に表示します。"
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "隠しファイル ドットファイル ファイルツリー 表示 hidden dotfiles"
         }
         L10nKey::EditorGoToLinePlaceholder => "行番号、または 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "エディタ内のシンボルへ移動…",
@@ -1680,6 +1694,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffTruncatedBudget => {
             "内容は読み込まれていません — tty59 の Diff 予算を超えています。ターミナルで `git diff` を実行してください"
         }
+        L10nKey::DiffNoContentChanges => "内容の変更はありません",
         L10nKey::DiffUntrackedHeader => "未追跡ファイル ({count})",
         L10nKey::DiffMoreUntracked => {
             "… さらに {count} 個 — ターミナルで `git status` を実行して確認してください"

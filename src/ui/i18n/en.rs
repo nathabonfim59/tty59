@@ -256,6 +256,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::TreeDirLoading => "Reading…",
         L10nKey::TreeDirEmpty => "Empty",
         L10nKey::TreeDirHiddenOnly => "Only hidden files",
+        L10nKey::TreeDirShowHidden => "Show",
         L10nKey::TreeDirUnreadable => "Could not be read",
         L10nKey::TreeSearchCapped => "First {n} matches",
         L10nKey::TreeSearchFailed => "Search failed",
@@ -1199,6 +1200,8 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SftpEditPermissions => "Permissions · {mode}",
         L10nKey::SftpLoading => "Loading…",
         L10nKey::SftpEmptyDirectory => "Empty directory.",
+        L10nKey::SftpListRetry => "Retry",
+        L10nKey::SftpListGoUp => "Go Up",
         L10nKey::SftpContextOpen => "Open",
         L10nKey::SftpContextEdit => "Edit",
         L10nKey::SftpContextFollowSymlink => "Follow Symlink",
@@ -1267,8 +1270,12 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::FileTreeContextNewFolder => "New Folder",
         L10nKey::FileTreeContextRename => "Rename",
         L10nKey::FileTreeContextCopyPath => "Copy Path",
+        L10nKey::FileTreeContextCopyHostPath => "Copy as host:path",
         L10nKey::FileTreeContextHideDotfiles => "Hide Dotfiles",
         L10nKey::FileTreeContextShowDotfiles => "Show Dotfiles",
+        L10nKey::FileTreeTooltipRefresh => "Refresh",
+        L10nKey::FileTreeNotAutoRefreshing => "Not refreshing automatically",
+        L10nKey::FileTreeWatchRetry => "Retry",
         L10nKey::FileDropIntoItself => "A folder cannot be copied into itself.",
         L10nKey::FileDropNotHere => "Not on this machine.",
         L10nKey::FileDropNameTaken => "Another item in the same drop already has that name.",
@@ -1394,6 +1401,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         }
         L10nKey::SettingsSearchEditorZoomKeywords => {
             "zoom text size font size scale editor markdown preview bigger smaller"
+        }
+        L10nKey::SettingsFilesShowHidden => "Show hidden files",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            "List files and folders whose names start with a dot, such as .git and .env, in the Files tree and its name search."
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "hidden dotfiles dot files folders tree sidebar gitignore env show"
         }
         L10nKey::EditorGoToLinePlaceholder => "Line, or line:column (1–{total})",
         L10nKey::EditorGoToSymbolAction => "Go to Symbol in Editor…",
@@ -1608,6 +1622,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::DiffTruncatedBudget => {
             "Body not loaded — past tty59's diff budget. Run git diff in the terminal for this file."
         }
+        L10nKey::DiffNoContentChanges => "No content changes",
         L10nKey::DiffUntrackedHeader => "Untracked files ({count})",
         L10nKey::DiffMoreUntracked => {
             "… and {count} more — run git status in the terminal to see them."

@@ -1474,10 +1474,17 @@ impl Tty59App {
                     // way into another tab's layout must not put itself on
                     // screen on the way there.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, ev, window, cx| {
                         cx.stop_propagation();
-                        this.activate(i, window, cx);
+                        this.click_tab(i, ev, window, cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_tab(i, window, cx);
+                        }),
+                    )
                     .child(self.tab_avatar_plain(
                         ("sidebar-avatar", i),
                         agent,
@@ -4700,6 +4707,28 @@ mod fold_tests {
         });
     }
 
+    /// A middle click closes the row under it, wherever on the row it lands,
+    /// and leaves the others and the active tab alone.
+    #[gpui::test]
+    fn a_middle_click_closes_the_row_under_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        vcx.run_until_parked();
+
+        let (row, kept) = app.update(&mut vcx, |app, _| {
+            assert!(drawn(app, 1), "the row is on screen to be clicked");
+            let kept = [app.tabs[0].tree_id.get(), app.tabs[2].tree_id.get()];
+            (app.sidebar_slots.borrow()[1], kept)
+        });
+        vcx.simulate_mouse_down(row.center(), MouseButton::Middle, gpui::Modifiers::none());
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, _| {
+            let left: Vec<_> = app.tabs.iter().map(|t| t.tree_id.get()).collect();
+            assert_eq!(left, kept, "only the middle-clicked tab is gone");
+            assert_eq!(app.active, 0, "the active tab stays active");
+        });
+    }
+
     #[gpui::test]
     fn a_search_outranks_a_fold(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
@@ -5010,6 +5039,36 @@ mod fold_tests {
                 desired[0].last_auto,
                 Some(AutoKey::Repo(PathBuf::from("/w/beta"))),
                 "and is what goes up as the next launch's hint"
+            );
+        });
+    }
+
+    /// Double-clicking a row opens the same rename box the context menu does,
+    /// on that row's tab. The box has to survive the click that opened it: a
+    /// focus left behind on the terminal would blur it shut straight away.
+    #[gpui::test]
+    fn double_clicking_a_row_renames_its_tab(cx: &mut TestAppContext) {
+        use crate::ui::app::test_window::double_click;
+        use gpui::Focusable;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        vcx.run_until_parked();
+
+        let (row, id) = app.update(&mut vcx, |app, _| {
+            assert!(drawn(app, 1), "the sidebar row is on screen to click");
+            assert!(app.renaming.is_none());
+            (app.sidebar_slots.borrow()[1], app.tabs[1].tree_id.get())
+        });
+        double_click(&mut vcx, row.center());
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.active, 1, "the first click put the tab on screen");
+            let renaming = app.renaming.as_ref().expect("the second opened a rename");
+            assert_eq!(renaming.tab, id, "on the row that was clicked");
+            assert!(
+                renaming.input.focus_handle(cx).is_focused(window),
+                "with the box focused for typing"
             );
         });
     }

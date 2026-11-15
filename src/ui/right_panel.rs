@@ -1,9 +1,9 @@
 use gpui::{AnyElement, Context, Window, div, prelude::*, px, rems};
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, WindowExt as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Selectable as _, Sizable as _,
+    WindowExt as _, h_flex, v_flex,
 };
 use std::path::PathBuf;
 
@@ -855,6 +855,11 @@ impl Tty59App {
     pub(crate) fn panel_scroll(&self, inner: AnyElement, title: AnyElement) -> AnyElement {
         let body = div()
             .id("right-panel-body")
+            // A flex column, not the default block: as a block this box left its
+            // child at the child's own width, so the content clipped or sat
+            // narrow whatever the panel's width.
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
@@ -1603,7 +1608,7 @@ impl Tty59App {
                                 .items_center()
                                 .text_size(rems(TEXT))
                                 .text_color(cx.theme().muted_foreground)
-                                .child(t(key)),
+                                .child(div().flex_1().min_w_0().child(t(key))),
                         )
                     },
                 )
@@ -1992,8 +1997,18 @@ impl Tty59App {
         }
         let title = self.panel_title(t(L10nKey::PanelFilesTitle), None, None, window, cx);
         // One field for names and text alike. The switches only shape the
-        // text search; names are always matched loosely.
-        let toggles = self.panel_search_toggles(cx);
+        // text search; names are always matched loosely. The dotfiles eye and
+        // Refresh ride at the end of the same row: given to the heading
+        // instead, they would raise a heading row on macOS, where the panel's
+        // tabs are the heading.
+        let toggles = h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.))
+            .child(self.panel_search_toggles(cx))
+            .child(self.files_show_hidden_button(cx))
+            .child(self.files_refresh_button(cx))
+            .into_any_element();
         let search = self.panel_search_with(&self.file_search.clone(), Some(toggles), cx);
         let rows = self.render_file_tree_rows(window, cx);
         v_flex()
@@ -2005,6 +2020,43 @@ impl Tty59App {
             // between its pinned parts.
             .child(div().flex_none().pb(px(FILES_SEARCH_GAP)).child(search))
             .child(rows)
+            .into_any_element()
+    }
+
+    /// Shows or hides dotfiles. A toggle, so it wears its state like the
+    /// search switches beside it: pressed while dotfiles are listed. The
+    /// tooltip names what a click does, the same words as the row menu's item.
+    fn files_show_hidden_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let shown = self.file_tree.show_hidden;
+        let tip = match shown {
+            true => t(L10nKey::FileTreeContextHideDotfiles),
+            false => t(L10nKey::FileTreeContextShowDotfiles),
+        };
+        Button::new("files-show-hidden")
+            .icon(Icon::empty().path("icons/eye.svg"))
+            .ghost()
+            .xsmall()
+            .selected(shown)
+            .when(!shown, |b| b.text_color(cx.theme().muted_foreground))
+            .accessible_label(tip)
+            .tooltip(tip)
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.set_files_show_hidden(!shown, cx);
+            }))
+            .into_any_element()
+    }
+
+    /// Re-reads every folder the tree is showing, beside the search
+    /// switches and drawn like them.
+    fn files_refresh_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        Button::new("panel-files-refresh")
+            .icon(Icon::empty().path("icons/refresh.svg"))
+            .ghost()
+            .xsmall()
+            .text_color(cx.theme().muted_foreground)
+            .accessible_label(t(L10nKey::FileTreeTooltipRefresh))
+            .tooltip(t(L10nKey::FileTreeTooltipRefresh))
+            .on_click(cx.listener(|this, _, _w, cx| this.file_tree_refresh(cx)))
             .into_any_element()
     }
 
