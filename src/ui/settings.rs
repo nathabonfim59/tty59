@@ -1320,8 +1320,10 @@ pub(crate) struct SettingsState {
     /// to the two, which on a long page start well below the fold.
     pub(crate) content_scroll: gpui::ScrollHandle,
     pub(crate) search_anchor: gpui::ScrollAnchor,
-    /// Set when the query or the section changes, and spent by the next render
-    /// that has somewhere to go. A `Cell` because that render only holds `&self`.
+    /// Set when the section changes with a setting to find on it, and spent by
+    /// the next render that has somewhere to go. The results page never uses
+    /// it: moving through results scrolls through `content_scroll` instead. A
+    /// `Cell` because that render only holds `&self`.
     pub(crate) reveal_first_hit: Cell<bool>,
     /// The families the font menus list, read once when the page opens.
     pub(crate) font_names: std::rc::Rc<Vec<String>>,

@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use tty59_gateway::state::{State, Status};
 
 use super::kit::{self, BtnKind, Tk, fs};
+use super::shell::inline_control;
 use super::*;
 
 /// How long a pairing code on screen stays good.
@@ -302,13 +303,14 @@ impl Tty59App {
         let access = access(on, starting, state.as_ref());
         let serving = state.as_ref().is_some_and(State::serving);
 
-        let switch = kit::switch("mobile-access")
-            .checked(matches!(access, Access::On | Access::Starting))
-            .disabled(matches!(access, Access::Starting))
-            .on_click(
-                cx.listener(|this, on: &bool, window, cx| this.set_mobile_access(*on, window, cx)),
-            )
-            .into_any_element();
+        let switch = inline_control(
+            kit::switch("mobile-access")
+                .checked(matches!(access, Access::On | Access::Starting))
+                .disabled(matches!(access, Access::Starting))
+                .on_click(cx.listener(|this, on: &bool, window, cx| {
+                    this.set_mobile_access(*on, window, cx)
+                })),
+        );
         let access_desc = match &access {
             Access::Off | Access::On => t(L10nKey::SettingsMobileAccessDesc).to_string(),
             Access::Starting => t(L10nKey::SettingsMobileStatusStarting).to_string(),

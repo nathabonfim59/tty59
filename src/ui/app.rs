@@ -7790,9 +7790,6 @@ impl Tty59App {
             cx.subscribe_in(&settings_search, window, |this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
                     this.autoselect_settings_search(cx);
-                    if let Some(s) = this.active_settings_mut() {
-                        s.reveal_first_hit.set(true);
-                    }
                     cx.notify();
                 }
             }),

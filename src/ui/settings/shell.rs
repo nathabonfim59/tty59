@@ -14,6 +14,17 @@ pub(crate) type PickFn = Rc<dyn Fn(&mut Tty59App, &mut Window, &mut Context<Tty5
 /// The settings page's own close tile, hung in the top band's right corner.
 const CLOSE_TILE: f32 = 26.;
 
+/// The results page puts the title and notices in the scroll pane's first
+/// child; result number `n` is child `SEARCH_LEADING_CHILDREN + n`.
+const SEARCH_LEADING_CHILDREN: usize = 1;
+
+/// What fills the scroll pane under the header: a page, framed as one column,
+/// or the search results, one scroll child each.
+enum PageBody {
+    Page(AnyElement),
+    Results(Vec<AnyElement>),
+}
+
 /// One line of a dropdown's menu.
 pub(crate) enum MenuEntry {
     Item {
@@ -44,6 +55,37 @@ impl MenuEntry {
             trailing: None,
             on_pick: Rc::new(on_pick),
         }
+    }
+}
+
+/// A control built to stay at most 140px wide (a switch, a stepper). Its row
+/// keeps it beside the label instead of stacking it under, however narrow the
+/// page or large the interface font.
+pub(crate) struct InlineControl(AnyElement);
+
+/// Marks `control` as one of those small fixed-size controls. The size itself
+/// is the control's own; a row never measures it.
+pub(crate) fn inline_control(control: impl IntoElement) -> InlineControl {
+    InlineControl(control.into_any_element())
+}
+
+/// What a row is given for its right-hand side. A bare element may be wider
+/// than the label column can spare, so the row stacks it on a narrow page; an
+/// [`InlineControl`] never does.
+pub(crate) enum RowControl {
+    Free(AnyElement),
+    Inline(AnyElement),
+}
+
+impl From<AnyElement> for RowControl {
+    fn from(control: AnyElement) -> Self {
+        RowControl::Free(control)
+    }
+}
+
+impl From<InlineControl> for RowControl {
+    fn from(control: InlineControl) -> Self {
+        RowControl::Inline(control.0)
     }
 }
 
@@ -407,6 +449,22 @@ impl Tty59App {
             .into_any_element()
     }
 
+    /// A slice of the page column: the side padding, the reading width and the
+    /// forty-point gap between what it holds. Every page and every piece of the
+    /// results page is framed here, so they line up.
+    ///
+    /// A block, not a flex box: as a flex item it would negotiate a height with
+    /// the pane and leave most of the page outside the scroll range.
+    fn settings_column(children: impl IntoIterator<Item = AnyElement>, scale: f32) -> Div {
+        div().w_full().px(px(56.)).child(
+            v_flex()
+                .w_full()
+                .max_w(px(READING_COLUMN * scale))
+                .gap(px(40.))
+                .children(children),
+        )
+    }
+
     /// A page: its groups, forty points apart.
     pub(crate) fn settings_page(groups: impl IntoIterator<Item = AnyElement>) -> AnyElement {
         v_flex().gap(px(40.)).children(groups).into_any_element()
@@ -416,7 +474,7 @@ impl Tty59App {
         &self,
         label: impl Into<String>,
         desc: impl Into<String>,
-        control: AnyElement,
+        control: impl Into<RowControl>,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         self.settings_row_gated_when(label, desc, control, false, cx)
@@ -430,10 +488,14 @@ impl Tty59App {
         &self,
         label: impl Into<String>,
         desc: impl Into<String>,
-        control: AnyElement,
+        control: impl Into<RowControl>,
         gated: bool,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        let (control, inline) = match control.into() {
+            RowControl::Free(control) => (control, false),
+            RowControl::Inline(control) => (control, true),
+        };
         let tk = Tk::of(cx);
         let label = label.into();
         let desc = desc.into();
@@ -477,8 +539,9 @@ impl Tty59App {
         let first_hit_anchor = self.first_hit_anchor(&label, cx);
         // The control never shrinks, so on a narrow pane it would squeeze the
         // label column to a letter per line. Below the width where both still
-        // fit, the control goes on a line of its own instead.
-        let stacked = self.settings_row_under(STACK_ROW_BELOW, cx);
+        // fit, the control goes on a line of its own instead — unless it is
+        // small enough to fit anywhere.
+        let stacked = !inline && self.settings_row_under(STACK_ROW_BELOW, cx);
         // The reset sits on the label's own line, beside the name it resets,
         // so a changed row keeps the height of an unchanged one. Rows the
         // catalog cannot reset in place still say they differ.
@@ -764,11 +827,12 @@ impl Tty59App {
         on: bool,
         cx: &mut Context<Self>,
         set: impl Fn(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
-        kit::switch(id)
-            .checked(on)
-            .on_click(cx.listener(move |this, on: &bool, window, cx| set(this, *on, window, cx)))
-            .into_any_element()
+    ) -> InlineControl {
+        inline_control(
+            kit::switch(id).checked(on).on_click(
+                cx.listener(move |this, on: &bool, window, cx| set(this, *on, window, cx)),
+            ),
+        )
     }
 
     pub(crate) fn settings_button(
@@ -815,15 +879,10 @@ impl Tty59App {
             .set(settings_row_width(viewport_w, scale));
         self.settings_hit_anchored.set(false);
 
-        // A query that matched here has to be reachable, not just counted: the
-        // anchor lands on the first matching row, and `scroll_to` reads where
-        // it ended up on the frame after this one.
-        if searching
-            && let Some(s) = self.active_settings()
-            && s.reveal_first_hit.replace(false)
-        {
-            s.search_anchor.scroll_to(window, cx);
-        }
+        // Arriving on a page to look for a setting has to take the page to it:
+        // the anchor lands on the setting, and `scroll_to` reads where it
+        // ended up on the frame after this one. The results page is not that:
+        // a query keeps the title and the first page heading in view.
         if let Some(s) = self.active_settings()
             && !searching
             && s.reveal_first_hit.get()
@@ -842,7 +901,8 @@ impl Tty59App {
         let nav = self.render_settings_nav(nav_width(viewport_w, scale), searching, cx);
 
         let (title, subtitle, content) = if searching {
-            self.render_settings_results(cx)
+            let (title, subtitle, results) = self.render_settings_results(cx);
+            (title, subtitle, PageBody::Results(results))
         } else {
             let content = match section {
                 SettingsSection::General => self.render_settings_general(cx),
@@ -855,7 +915,11 @@ impl Tty59App {
                 SettingsSection::Keybindings => self.render_settings_keybindings(cx),
                 SettingsSection::About => self.render_settings_about(cx),
             };
-            (t(section.title()).to_string(), None, content)
+            (
+                t(section.title()).to_string(),
+                None,
+                PageBody::Page(content),
+            )
         };
 
         // Up in the title-bar band, where the window's own chrome sits, and
@@ -901,27 +965,35 @@ impl Tty59App {
 
         let notices = self.render_settings_notices(cx);
 
-        let body = v_flex()
+        let head = std::iter::once(header.into_any_element()).chain(notices);
+        let pane = v_flex()
             .id("settings-content")
             .size_full()
             .overflow_y_scroll()
             .when_some(self.active_settings(), |pane, s| {
                 pane.track_scroll(&s.content_scroll)
-            })
-            .child(
-                // A block, not a flex box: as a flex item it would negotiate a
-                // height with the pane and leave most of the page outside the
-                // scroll range.
-                div().w_full().px(px(56.)).pb(px(48.)).child(
-                    v_flex()
-                        .w_full()
-                        .max_w(px(READING_COLUMN * scale))
-                        .gap(px(40.))
-                        .child(header)
-                        .children(notices)
-                        .child(content),
-                ),
-            );
+            });
+        let body = match content {
+            // One scroll child per result, so the keyboard can ask the scroll
+            // handle to reveal the selected one (`scroll_to_item`): the header
+            // is child 0, the results follow.
+            PageBody::Results(content) => {
+                let last = content.len().saturating_sub(1);
+                pane.child(
+                    Self::settings_column(head, scale)
+                        .flex_shrink_0()
+                        .pb(px(40.)),
+                )
+                .children(content.into_iter().enumerate().map(|(i, result)| {
+                    Self::settings_column([result], scale)
+                        .flex_shrink_0()
+                        .when(i == last, |c| c.pb(px(48.)))
+                }))
+            }
+            PageBody::Page(content) => pane.child(
+                Self::settings_column(head.chain(std::iter::once(content)), scale).pb(px(48.)),
+            ),
+        };
         let main = v_flex()
             .flex_1()
             .min_w_0()
@@ -1389,7 +1461,11 @@ impl Tty59App {
                 } else {
                     index.saturating_sub(1)
                 };
-                s.reveal_first_hit.set(true);
+                // Only a move by key scrolls, and only when the new row is
+                // outside the view: the pane brings it in with the least
+                // movement and leaves an in-view row where it is.
+                s.content_scroll
+                    .scroll_to_item(SEARCH_LEADING_CHILDREN + s.search_selection);
                 cx.notify();
             }
         }
@@ -1429,10 +1505,10 @@ impl Tty59App {
     fn render_settings_results(
         &self,
         cx: &mut Context<Self>,
-    ) -> (String, Option<String>, AnyElement) {
+    ) -> (String, Option<String>, Vec<AnyElement>) {
         let tk = Tk::of(cx);
         let Some(state) = self.active_settings() else {
-            return (String::new(), None, div().into_any_element());
+            return (String::new(), None, vec![div().into_any_element()]);
         };
         let query = state.search.read(cx).value().trim().to_lowercase();
         let modified_only = state.modified_only;
@@ -1487,101 +1563,85 @@ impl Tty59App {
         let matches = search_result_order(&query, modified_only, cx.global::<Config>());
         let actions = search_result_actions(&query, modified_only);
 
-        let mut groups: Vec<AnyElement> = Vec::new();
-        let mut index = 0usize;
-        for section in SettingsSection::ALL {
-            let here: Vec<&&SearchEntry> =
-                matches.iter().filter(|e| e.section == section).collect();
-            if here.is_empty() {
-                continue;
-            }
-            let mut rows = Vec::new();
-            for entry in here {
-                let title = entry.title;
-                let target = if title == L10nKey::SettingsSearchKeybindingsTitle {
-                    SettingsSection::Keybindings
-                } else {
-                    entry.section
-                };
-                let control = controls
-                    .iter()
-                    .position(|(key, _)| *key == title)
-                    .map(|i| controls.remove(i).1);
-                let selected = index == selection;
-                let row = control.unwrap_or_else(|| {
-                    self.settings_row(
-                        t(title),
-                        entry.description(),
-                        kit::button(
-                            SharedString::from(format!("search-open-{title:?}")),
-                            t(L10nKey::SettingsOpenSetting),
-                            BtnKind::Secondary,
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.navigate_settings(target, Some(title), window, cx)
-                        }))
-                        .into_any_element(),
-                        cx,
+        // One chunk per result, each a child of the scroll pane: the keyboard
+        // reveals the selected result by its child position, which is
+        // `SEARCH_LEADING_CHILDREN + index`. A page's heading travels with the
+        // first result under it, so revealing that result reveals the heading.
+        let mut chunks: Vec<AnyElement> = Vec::with_capacity(matches.len() + actions.len() + 1);
+        for (index, entry) in matches.iter().enumerate() {
+            let title = entry.title;
+            let section = entry.section;
+            let target = if title == L10nKey::SettingsSearchKeybindingsTitle {
+                SettingsSection::Keybindings
+            } else {
+                section
+            };
+            let control = controls
+                .iter()
+                .position(|(key, _)| *key == title)
+                .map(|i| controls.remove(i).1);
+            let selected = index == selection;
+            let row = control.unwrap_or_else(|| {
+                self.settings_row(
+                    t(title),
+                    entry.description(),
+                    kit::button(
+                        SharedString::from(format!("search-open-{title:?}")),
+                        t(L10nKey::SettingsOpenSetting),
+                        BtnKind::Secondary,
                     )
-                    .into_any_element()
-                });
-                // The wrapper is what carries a selected result's highlight
-                // background, so tests measure it too, by the same id it
-                // already carries.
-                #[cfg(test)]
-                let wrapper_debug_id = format!("search-result-{title:?}");
-                let wrapper = div()
-                    .id(SharedString::from(format!("search-result-{title:?}")))
-                    .when(selected, |d| {
-                        d.bg(tk.k04).rounded(px(7.)).mx(px(-8.)).px(px(8.))
-                    })
-                    .when_some(
-                        self.active_settings()
-                            .filter(|_| selected)
-                            .map(|s| s.search_anchor.clone()),
-                        |d, anchor| d.anchor_scroll(Some(anchor)),
-                    )
-                    .child(row);
-                #[cfg(test)]
-                let wrapper = match selected {
-                    true => kit::probe("settings.search-row-selected", wrapper),
-                    false => wrapper,
-                };
-                #[cfg(test)]
-                let wrapper = wrapper.debug_selector(move || wrapper_debug_id.clone());
-                rows.push(wrapper.into_any_element());
-                index += 1;
-            }
-            groups.push(
-                v_flex()
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "search-page-{}",
-                                section.profile_label()
-                            )))
-                            .pb(px(8.))
-                            .text_size(fs(11.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(tk.heading)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(tk.fg))
-                            .child(t(section.title()))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.navigate_settings(section, None, window, cx)
-                            })),
-                    )
-                    .children(rows)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.navigate_settings(target, Some(title), window, cx)
+                    }))
                     .into_any_element(),
-            );
+                    cx,
+                )
+                .into_any_element()
+            });
+            // The wrapper is what carries a selected result's highlight
+            // background, so tests measure it too, by the same id it
+            // already carries.
+            #[cfg(test)]
+            let wrapper_debug_id = format!("search-result-{title:?}");
+            let wrapper = div()
+                .id(SharedString::from(format!("search-result-{title:?}")))
+                .when(selected, |d| {
+                    d.bg(tk.k04).rounded(px(7.)).mx(px(-8.)).px(px(8.))
+                })
+                .child(row);
+            #[cfg(test)]
+            let wrapper = match selected {
+                true => kit::probe("settings.search-row-selected", wrapper),
+                false => wrapper,
+            };
+            #[cfg(test)]
+            let wrapper = wrapper.debug_selector(move || wrapper_debug_id.clone());
+            let heading = (index == 0 || matches[index - 1].section != section).then(|| {
+                div()
+                    // Static prefix + result index: unique per result, and no
+                    // string is built per frame.
+                    .id(("search-page", index))
+                    .pb(px(8.))
+                    .text_size(fs(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(tk.heading)
+                    .cursor_pointer()
+                    .hover(move |s| s.text_color(tk.fg))
+                    .child(t(section.title()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.navigate_settings(section, None, window, cx)
+                    }))
+                    .into_any_element()
+            });
+            chunks.push(Self::search_result_chunk(heading, index, wrapper));
         }
 
         // Action names stay searchable without a whole shortcut editor in the
         // results: each one is a row that opens the editor on it.
         if !actions.is_empty() {
             let effective = crate::ui::keymap::effective_chords(cx);
-            let mut rows = Vec::new();
-            for action in actions.iter() {
+            for (n, action) in actions.iter().enumerate() {
+                let index = matches.len() + n;
                 let (_, label) = crate::ui::keymap::action_entry(action);
                 let chords = effective
                     .iter()
@@ -1590,46 +1650,31 @@ impl Tty59App {
                     .unwrap_or_default();
                 let selected = index == selection;
                 let action = action.clone();
-                rows.push(
-                    h_flex()
-                        .id(SharedString::from(format!("search-shortcut-{index}")))
-                        .h(px(34.))
-                        .mx(px(-8.))
-                        .px(px(8.))
-                        .gap(px(16.))
-                        .items_center()
-                        .rounded(px(7.))
-                        .cursor_pointer()
-                        .when(selected, |d| d.bg(tk.k04))
-                        .hover(move |s| s.bg(tk.k04))
-                        .when_some(
-                            self.active_settings()
-                                .filter(|_| selected)
-                                .map(|s| s.search_anchor.clone()),
-                            |d, anchor| d.anchor_scroll(Some(anchor)),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(label))
-                        .child(Self::keycap_row(&chords, &tk))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_shortcut_search(action.clone(), window, cx)
-                        }))
-                        .into_any_element(),
-                );
-                index += 1;
+                let row = h_flex()
+                    .id(SharedString::from(format!("search-shortcut-{index}")))
+                    .h(px(34.))
+                    .mx(px(-8.))
+                    .px(px(8.))
+                    .gap(px(16.))
+                    .items_center()
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(tk.k04))
+                    .hover(move |s| s.bg(tk.k04))
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(Self::keycap_row(&chords, &tk))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_shortcut_search(action.clone(), window, cx)
+                    }));
+                let heading = (n == 0).then(|| {
+                    kit::section_head(t(L10nKey::SettingsSearchKeybindingsTitle), None, &tk)
+                        .into_any_element()
+                });
+                chunks.push(Self::search_result_chunk(heading, index, row));
             }
-            groups.push(
-                v_flex()
-                    .child(kit::section_head(
-                        t(L10nKey::SettingsSearchKeybindingsTitle),
-                        None,
-                        &tk,
-                    ))
-                    .children(rows)
-                    .into_any_element(),
-            );
         }
 
-        let total = index;
+        let total = matches.len() + actions.len();
         let title = if modified_only && query.is_empty() {
             t(L10nKey::SettingsModifiedTitle).to_string()
         } else {
@@ -1637,7 +1682,7 @@ impl Tty59App {
         };
         let subtitle = (!(modified_only && query.is_empty()) && total > 0)
             .then(|| t_plural(L10nKey::SettingsMatchCount, total, &[]));
-        if groups.is_empty() {
+        if chunks.is_empty() {
             let text = if modified_only && query.is_empty() {
                 t(L10nKey::SettingsNothingModified).to_string()
             } else if modified_only {
@@ -1669,9 +1714,24 @@ impl Tty59App {
             let empty = kit::probe("settings.search-empty", empty);
             #[cfg(test)]
             let empty = empty.debug_selector(|| "settings-search-empty".to_string());
-            groups.push(empty.into_any_element());
+            chunks.push(empty.into_any_element());
         }
-        (title, subtitle, Self::settings_page(groups))
+        (title, subtitle, chunks)
+    }
+
+    /// One result as a scroll child: the heading of its page when it is the
+    /// first under that page (set apart from the page above), then the row.
+    fn search_result_chunk(
+        heading: Option<AnyElement>,
+        index: usize,
+        row: impl IntoElement,
+    ) -> AnyElement {
+        v_flex()
+            .when_some(heading, |chunk, heading| {
+                chunk.when(index > 0, |c| c.pt(px(40.))).child(heading)
+            })
+            .child(row)
+            .into_any_element()
     }
 
     /// A shortcut as keycaps: `⌘ T`, `⌃B then X`.
@@ -1702,8 +1762,9 @@ impl Tty59App {
     }
 }
 
-/// The search results in the order the page draws them: grouped by page in
-/// nav order, best match first within each.
+/// The search results in the order the page draws them: best match first
+/// (exact title, then prefix, then keyword), pages in nav order within a rank.
+/// A page's heading is drawn wherever its run of results begins.
 pub(crate) fn search_result_order<'a>(
     query: &str,
     modified_only: bool,
@@ -1715,11 +1776,11 @@ pub(crate) fn search_result_order<'a>(
         .collect();
     matches.sort_by_key(|entry| {
         (
+            entry.rank(query),
             SettingsSection::ALL
                 .iter()
                 .position(|&s| s == entry.section)
                 .unwrap_or(0),
-            entry.rank(query),
         )
     });
     matches
@@ -1753,6 +1814,37 @@ mod tests {
             app.autoselect_settings_search(cx);
         });
         vcx.run_until_parked();
+    }
+
+    /// Types into the focused search field with real keystrokes, so the
+    /// field's own `Change` event reaches the app's subscriber the way it
+    /// does for a user (`set_query` goes through `set_value`, which emits no
+    /// event). Returns how many `Change` events the field emitted.
+    fn type_query(
+        app: &gpui::Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        text: &str,
+    ) -> Rc<std::cell::Cell<usize>> {
+        focus_search(app, vcx);
+        let changes = Rc::new(std::cell::Cell::new(0));
+        let search = app.read_with(&*vcx, |app, _| {
+            app.active_settings().unwrap().search.clone()
+        });
+        let seen = changes.clone();
+        vcx.update(|_, cx| {
+            cx.subscribe(
+                &search,
+                move |_, ev: &gpui_component::input::InputEvent, _| {
+                    if matches!(ev, gpui_component::input::InputEvent::Change) {
+                        seen.set(seen.get() + 1);
+                    }
+                },
+            )
+            .detach();
+        });
+        vcx.simulate_input(text);
+        vcx.run_until_parked();
+        changes
     }
 
     /// F2: a search nothing matches says so once, in the quoted-query form,
@@ -2077,5 +2169,357 @@ mod tests {
             }
         }
         crate::ui::i18n::set_locale("en");
+    }
+
+    /// Paints twice: scroll requests and bounds land on the frame after the
+    /// event that asked.
+    fn settle(vcx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    fn content_scroll(app: &gpui::Entity<Tty59App>, vcx: &VisualTestContext) -> gpui::ScrollHandle {
+        app.read_with(vcx, |app, _| {
+            app.active_settings().unwrap().content_scroll.clone()
+        })
+    }
+
+    fn focus_search(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| {
+            let handle = app
+                .active_settings()
+                .unwrap()
+                .search
+                .read(cx)
+                .focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+    }
+
+    /// Whether child `ix` of the scrolling pane is fully inside its viewport.
+    fn child_in_view(scroll: &gpui::ScrollHandle, ix: usize) -> bool {
+        let child = scroll
+            .bounds_for_item(ix)
+            .expect("the result is a pane child");
+        let view = scroll.bounds();
+        let shift = scroll.offset().y;
+        child.top() + shift >= view.top() - px(1.)
+            && child.bottom() + shift <= view.bottom() + px(1.)
+    }
+
+    /// F10: best match first, whatever page it is on. Each query is the title
+    /// of a setting and each word of one; the results must be ordered by
+    /// (rank, page), and at least one query must have a better match on a
+    /// later page than a worse one — otherwise this could not tell the two
+    /// orders apart.
+    #[test]
+    fn search_results_put_the_better_match_first_whatever_its_page() {
+        crate::ui::i18n::set_locale("en");
+        let cfg = Config::default();
+        let page = |e: &SearchEntry| {
+            SettingsSection::ALL
+                .iter()
+                .position(|&s| s == e.section)
+                .unwrap_or(0)
+        };
+        let mut queries: Vec<String> = Vec::new();
+        for entry in settings_search_entries() {
+            let title = t(entry.title).to_lowercase();
+            queries.extend(title.split_whitespace().map(str::to_string));
+            queries.push(title);
+        }
+        let mut told_apart = 0;
+        for query in &queries {
+            let order = search_result_order(query, false, &cfg);
+            let keys: Vec<(u8, usize)> = order.iter().map(|e| (e.rank(query), page(e))).collect();
+            assert!(
+                keys.windows(2).all(|w| w[0] <= w[1]),
+                "{query:?}: results are not ordered by (rank, page): {keys:?}"
+            );
+            if keys.windows(2).any(|w| w[0].0 < w[1].0 && w[0].1 > w[1].1) {
+                told_apart += 1;
+            }
+        }
+        assert!(
+            told_apart > 0,
+            "no query has a better match on a later page, so the order is untested"
+        );
+    }
+
+    /// F10: typing a query leaves the page where the user is looking: the
+    /// results page starts at the top, with its title and count and the first
+    /// page's heading in view, and every result is its own scroll child.
+    #[gpui::test]
+    fn typing_a_query_keeps_the_results_title_and_first_heading_in_view(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Terminal, window, cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(480.)));
+        settle(&mut vcx);
+        let scroll = content_scroll(&app, &vcx);
+        scroll.set_offset(gpui::point(px(0.), px(-120.)));
+        settle(&mut vcx);
+
+        // Real keystrokes into the focused field: the entry path a user takes,
+        // through the field's `Change` event and the app's subscriber.
+        let changes = type_query(&app, &mut vcx, "e");
+        settle(&mut vcx);
+        assert_eq!(
+            app.read_with(&vcx, |app, cx| app
+                .active_settings()
+                .unwrap()
+                .search
+                .read(cx)
+                .value()
+                .to_string()),
+            "e",
+            "the keystroke reached the search field"
+        );
+        assert!(
+            changes.get() >= 1,
+            "typing emitted a Change event, so the app's subscriber ran"
+        );
+
+        let results = app.read_with(&vcx, |_, cx| {
+            let cfg = cx.global::<Config>();
+            search_result_order("e", false, cfg).len() + search_result_actions("e", false).len()
+        });
+        assert!(
+            results > 10,
+            "a broad query has many results, got {results}"
+        );
+        assert_eq!(
+            scroll.children_count(),
+            SEARCH_LEADING_CHILDREN + results,
+            "the header and one child per result"
+        );
+        assert_eq!(scroll.offset().y, px(0.), "entry does not scroll the page");
+        let view = scroll.bounds();
+        let subtitle = vcx
+            .debug_bounds("settings-results-subtitle")
+            .expect("the match count is drawn");
+        assert!(
+            subtitle.top() >= view.top() && subtitle.bottom() <= view.bottom(),
+            "the title area is in view: {subtitle:?} in {view:?}"
+        );
+        assert!(
+            child_in_view(&scroll, SEARCH_LEADING_CHILDREN),
+            "the first result, with its page heading, is in view"
+        );
+    }
+
+    /// F10: the results page and every other page are framed by the one
+    /// `settings_column`: a normal page is still a single child, and a result
+    /// has the same left edge and width as that page's content.
+    #[gpui::test]
+    fn results_and_pages_share_the_column_frame(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        settle(&mut vcx);
+        let scroll = content_scroll(&app, &vcx);
+        assert_eq!(scroll.children_count(), 1, "a page is one scroll child");
+        let page = scroll.bounds_for_item(0).unwrap();
+
+        set_query(&app, &mut vcx, "e");
+        settle(&mut vcx);
+        assert!(scroll.children_count() > 2);
+        for ix in 0..scroll.children_count() {
+            let child = scroll.bounds_for_item(ix).unwrap();
+            assert_eq!(child.origin.x, page.origin.x, "child {ix} left edge");
+            assert_eq!(child.size.width, page.size.width, "child {ix} width");
+        }
+    }
+
+    /// F10: ↑/↓ move the selection, and the pane scrolls only when the
+    /// selected result is outside the view — by the least that shows it. A
+    /// move to a result already in view leaves the scroll position alone.
+    #[gpui::test]
+    fn arrow_keys_scroll_only_to_reveal_an_offscreen_result(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(480.)));
+        settle(&mut vcx);
+        set_query(&app, &mut vcx, "e");
+        focus_search(&app, &mut vcx);
+        settle(&mut vcx);
+        let scroll = content_scroll(&app, &vcx);
+        let results = scroll.children_count() - SEARCH_LEADING_CHILDREN;
+        assert!(results > 10);
+
+        let mut press = |key: &str, selected: usize| {
+            let target = SEARCH_LEADING_CHILDREN + selected;
+            let was_in_view = child_in_view(&scroll, target);
+            let before = scroll.offset().y;
+            vcx.simulate_keystrokes(key);
+            settle(&mut vcx);
+            let now = app.read_with(&vcx, |app, _| {
+                app.active_settings().unwrap().search_selection
+            });
+            assert_eq!(now, selected, "{key} moves the selection");
+            assert!(
+                child_in_view(&scroll, target),
+                "{key} to result {selected} leaves it in view"
+            );
+            match was_in_view {
+                true => assert_eq!(
+                    scroll.offset().y,
+                    before,
+                    "{key} to result {selected}, already in view, must not scroll"
+                ),
+                false => assert_ne!(scroll.offset().y, before, "{key} reveals result {selected}"),
+            }
+            was_in_view
+        };
+
+        let mut revealed = false;
+        for selected in 1..results.min(25) {
+            revealed |= !press("down", selected);
+        }
+        assert!(revealed, "some result was below the fold and got revealed");
+        // Back up: the neighbours just passed are in view, so nothing moves
+        // until the selection reaches one that is not.
+        let top = results.min(25) - 1;
+        for selected in (top.saturating_sub(3)..top).rev() {
+            press("up", selected);
+        }
+    }
+
+    /// The row and its label column, by selector: a control that stays beside
+    /// the label leaves the row as tall as its text; a stacked one adds a line.
+    fn row_is_stacked(
+        vcx: &mut VisualTestContext,
+        row: &'static str,
+        labels: &'static str,
+    ) -> bool {
+        let row = vcx.debug_bounds(row).expect("the row is drawn");
+        let labels = vcx.debug_bounds(labels).expect("its label column is drawn");
+        let inline_height = (labels.size.height + px(24.)).max(px(52.));
+        row.size.height > inline_height + px(20.)
+    }
+
+    /// F16: at the smallest window, at the default and the largest interface
+    /// font, a switch and a stepper stay beside their label, while a wide
+    /// control (the language dropdown) still goes under it.
+    #[gpui::test]
+    fn small_controls_stay_inline_and_wide_ones_stack_at_minimum_size(cx: &mut TestAppContext) {
+        use crate::core::config::{UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX};
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(480.)));
+        for font in [UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX] {
+            app.update_in(&mut vcx, |_, _, cx| {
+                cx.global_mut::<Config>().ui_font_size = font;
+            });
+            let query = |key: L10nKey| t(key).to_string();
+
+            set_query(&app, &mut vcx, &query(L10nKey::SettingsRememberWindowSize));
+            settle(&mut vcx);
+            assert!(
+                !row_is_stacked(
+                    &mut vcx,
+                    "settings-row-SettingsRememberWindowSize",
+                    "settings-row-SettingsRememberWindowSize-labels"
+                ),
+                "{font}pt: the switch row is not stacked"
+            );
+            let labels = vcx
+                .debug_bounds("settings-row-SettingsRememberWindowSize-labels")
+                .unwrap();
+            let switch = vcx.debug_bounds("wt-remember-window").expect("the switch");
+            assert!(
+                switch.top() < labels.bottom() && switch.left() >= labels.right(),
+                "{font}pt: the switch {switch:?} sits beside its label {labels:?}"
+            );
+
+            set_query(&app, &mut vcx, &query(L10nKey::SettingsUiFontSize));
+            settle(&mut vcx);
+            assert!(
+                !row_is_stacked(
+                    &mut vcx,
+                    "settings-row-SettingsUiFontSize",
+                    "settings-row-SettingsUiFontSize-labels"
+                ),
+                "{font}pt: the stepper row is not stacked"
+            );
+
+            set_query(&app, &mut vcx, &query(L10nKey::SettingsLanguage));
+            settle(&mut vcx);
+            assert!(
+                row_is_stacked(
+                    &mut vcx,
+                    "settings-row-SettingsLanguage",
+                    "settings-row-SettingsLanguage-labels"
+                ),
+                "{font}pt: a wide control still goes under its label"
+            );
+        }
+    }
+
+    /// F16: the host filter never gets squeezed below 160px, and the import
+    /// link goes on its own line under a toolbar narrower than 560px but sits
+    /// beside the filter on a wide page.
+    #[gpui::test]
+    fn the_host_filter_stays_usable_and_import_wraps_below_when_narrow(cx: &mut TestAppContext) {
+        use crate::core::config::{UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX};
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+        });
+        let toolbar = |vcx: &mut VisualTestContext| {
+            settle(vcx);
+            let mut get = |selector: &'static str| {
+                vcx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} is drawn"))
+            };
+            (
+                get("ssh-host-filter"),
+                get("ssh-import-config"),
+                get("ssh-add-host"),
+            )
+        };
+
+        for font in [UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX] {
+            app.update_in(&mut vcx, |_, _, cx| {
+                cx.global_mut::<Config>().ui_font_size = font;
+            });
+            vcx.simulate_resize(size(px(720.), px(480.)));
+            let (filter, import, add) = toolbar(&mut vcx);
+            assert!(
+                filter.size.width >= px(160.),
+                "{font}pt: the filter is {:?} wide",
+                filter.size.width
+            );
+            assert!(
+                import.top() >= filter.bottom(),
+                "{font}pt: the import link {import:?} wraps below the filter {filter:?}"
+            );
+            assert!(
+                add.top() < filter.bottom(),
+                "{font}pt: Add host stays beside the filter"
+            );
+        }
+
+        app.update_in(&mut vcx, |_, _, cx| {
+            cx.global_mut::<Config>().ui_font_size = UI_FONT_SIZE_DEFAULT;
+        });
+        vcx.simulate_resize(size(px(1200.), px(800.)));
+        let (filter, import, add) = toolbar(&mut vcx);
+        assert!(
+            import.top() < filter.bottom() && filter.right() <= import.left(),
+            "on a wide page the import link {import:?} is beside the filter {filter:?}"
+        );
+        assert!(import.right() <= add.left(), "import precedes Add host");
     }
 }

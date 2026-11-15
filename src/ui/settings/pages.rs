@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use super::kit::{self, BtnKind, Stepper, Tk, fs};
-use super::shell::{MenuEntry, SearchOption};
+use super::shell::{InlineControl, MenuEntry, SearchOption, inline_control};
 use super::*;
 
 /// The chord the live keymap has on Copy Raw, spelled the way the rest of the
@@ -336,11 +336,11 @@ impl Tty59App {
         (can_dec, can_inc): (bool, bool),
         cx: &mut Context<Self>,
         step: impl Fn(&mut Self, f32, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
+    ) -> InlineControl {
         let tk = Tk::of(cx);
         let step = Rc::new(step);
         let (dec, inc) = (step.clone(), step);
-        kit::stepper(
+        inline_control(kit::stepper(
             id,
             Stepper {
                 value,
@@ -351,7 +351,7 @@ impl Tty59App {
             &tk,
             cx.listener(move |this, _, _w, cx| dec(this, -1., cx)),
             cx.listener(move |this, _, _w, cx| inc(this, 1., cx)),
-        )
+        ))
     }
 
     pub(crate) fn render_settings_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1198,16 +1198,18 @@ impl Tty59App {
             cx,
             |this, on, _, cx| this.set_prompt_editor(on, cx),
         );
-        let completion = kit::switch("term-tab-completion")
-            .checked(tab_completion)
-            .disabled(!prompt_editor)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_tab_completion(*on, cx)))
-            .into_any_element();
-        let history = kit::switch("term-history-search")
-            .checked(history_search)
-            .disabled(!prompt_editor)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_history_search(*on, cx)))
-            .into_any_element();
+        let completion = inline_control(
+            kit::switch("term-tab-completion")
+                .checked(tab_completion)
+                .disabled(!prompt_editor)
+                .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_tab_completion(*on, cx))),
+        );
+        let history = inline_control(
+            kit::switch("term-history-search")
+                .checked(history_search)
+                .disabled(!prompt_editor)
+                .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_history_search(*on, cx))),
+        );
         let per_pane = self.settings_switch(
             "term-per-pane-history",
             per_pane_history,

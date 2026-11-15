@@ -8,6 +8,14 @@ use super::*;
 /// How many hosts the page shows before "Show all".
 const RECENT_HOSTS: usize = 5;
 
+/// The host filter never narrows below this; it grows into what the toolbar's
+/// buttons leave.
+const HOST_FILTER_MIN_W: f32 = 160.;
+
+/// Below this row width, at the default interface font, the "Import from
+/// ~/.ssh/config" link moves under the filter instead of squeezing it.
+const HOST_TOOLBAR_WRAP_BELOW: f32 = 560.;
+
 /// A list line: a group's heading, or a host.
 enum HostLine {
     Head {
@@ -138,86 +146,94 @@ impl Tty59App {
             .len();
         let rest = total.saturating_sub(recent.len());
 
-        let toolbar = h_flex()
-            .gap(px(12.))
-            .items_center()
+        let filter_field = kit::search_field(&filter, &tk)
+            .flex_1()
+            .min_w(px(HOST_FILTER_MIN_W))
+            .capture_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                let key = ev.keystroke.key.as_str();
+                match key {
+                    "down" | "up" if !visible.is_empty() => {
+                        let current = this.active_settings().and_then(|s| s.ssh_open);
+                        let at = current.and_then(|id| visible.iter().position(|v| *v == id));
+                        let next = match (at, key) {
+                            (None, _) => 0,
+                            (Some(i), "down") => (i + 1).min(visible.len() - 1),
+                            (Some(i), _) => i.saturating_sub(1),
+                        };
+                        if this.active_settings().is_some_and(|s| s.ssh_form.is_none()) {
+                            if let Some(s) = this.active_settings_mut() {
+                                s.ssh_open = Some(visible[next]);
+                            }
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    "escape" => {
+                        let filter = this.active_settings().map(|s| s.ssh_filter.clone());
+                        if let Some(filter) = filter
+                            && !filter.read(cx).value().is_empty()
+                        {
+                            filter.update(cx, |f, cx| f.set_value("", window, cx));
+                            cx.stop_propagation();
+                        }
+                    }
+                    _ => {}
+                }
+            }));
+        #[cfg(test)]
+        let filter_field = filter_field.debug_selector(|| "ssh-host-filter".to_string());
+        let import_link = kit::button(
+            "ssh-import-config",
+            t(L10nKey::SettingsImportFromSshConfig),
+            BtnKind::Link,
+        )
+        .text_size(fs(12.5))
+        .on_click(cx.listener(|this, _, window, cx| this.import_ssh_config_profiles(window, cx)));
+        let add_host = kit::button(
+            "ssh-add-host",
+            t(L10nKey::SettingsAddHost),
+            BtnKind::Secondary,
+        )
+        .icon("icons/settings/plus.svg")
+        .dimmed(adding.is_some())
+        .on_click(cx.listener(|this, _, window, cx| {
+            if this
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .is_some_and(|f| {
+                    !cx.global::<Config>()
+                        .ssh_profiles
+                        .iter()
+                        .any(|p| p.id == f.editing)
+                })
+            {
+                return;
+            }
+            let filter = this.active_settings().map(|s| s.ssh_filter.clone());
+            if let Some(filter) = filter {
+                filter.update(cx, |f, cx| f.set_value("", window, cx));
+            }
+            this.add_new_profile(window, cx);
+        }));
+        // The filter takes whatever the buttons leave, never less than
+        // HOST_FILTER_MIN_W. When the page is too narrow to hold the import
+        // link beside it, the link goes on its own line below.
+        let (beside, below) = match self.settings_row_under(HOST_TOOLBAR_WRAP_BELOW, cx) {
+            true => (None, Some(import_link)),
+            false => (Some(import_link), None),
+        };
+        let toolbar = v_flex()
+            .gap(px(8.))
             .pb(px(8.))
             .child(
-                kit::search_field(&filter, &tk)
-                    .w(px(240.))
-                    .capture_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
-                        let key = ev.keystroke.key.as_str();
-                        match key {
-                            "down" | "up" if !visible.is_empty() => {
-                                let current = this.active_settings().and_then(|s| s.ssh_open);
-                                let at =
-                                    current.and_then(|id| visible.iter().position(|v| *v == id));
-                                let next = match (at, key) {
-                                    (None, _) => 0,
-                                    (Some(i), "down") => (i + 1).min(visible.len() - 1),
-                                    (Some(i), _) => i.saturating_sub(1),
-                                };
-                                if this.active_settings().is_some_and(|s| s.ssh_form.is_none()) {
-                                    if let Some(s) = this.active_settings_mut() {
-                                        s.ssh_open = Some(visible[next]);
-                                    }
-                                }
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            "escape" => {
-                                let filter = this.active_settings().map(|s| s.ssh_filter.clone());
-                                if let Some(filter) = filter
-                                    && !filter.read(cx).value().is_empty()
-                                {
-                                    filter.update(cx, |f, cx| f.set_value("", window, cx));
-                                    cx.stop_propagation();
-                                }
-                            }
-                            _ => {}
-                        }
-                    })),
+                h_flex()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(filter_field)
+                    .children(beside)
+                    .child(add_host),
             )
-            .child(div().flex_1())
-            .child(
-                kit::button(
-                    "ssh-import-config",
-                    t(L10nKey::SettingsImportFromSshConfig),
-                    BtnKind::Link,
-                )
-                .text_size(fs(12.5))
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.import_ssh_config_profiles(window, cx)),
-                ),
-            )
-            .child(
-                kit::button(
-                    "ssh-add-host",
-                    t(L10nKey::SettingsAddHost),
-                    BtnKind::Secondary,
-                )
-                .icon("icons/settings/plus.svg")
-                .dimmed(adding.is_some())
-                .on_click(cx.listener(|this, _, window, cx| {
-                    if this
-                        .active_settings()
-                        .and_then(|s| s.ssh_form.as_ref())
-                        .is_some_and(|f| {
-                            !cx.global::<Config>()
-                                .ssh_profiles
-                                .iter()
-                                .any(|p| p.id == f.editing)
-                        })
-                    {
-                        return;
-                    }
-                    let filter = this.active_settings().map(|s| s.ssh_filter.clone());
-                    if let Some(filter) = filter {
-                        filter.update(cx, |f, cx| f.set_value("", window, cx));
-                    }
-                    this.add_new_profile(window, cx);
-                })),
-            );
+            .children(below.map(|link| h_flex().child(link)));
 
         let bounded = !query.is_empty() || show_all;
         let mut list = v_flex()
