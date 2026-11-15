@@ -7383,6 +7383,7 @@ mod tests {
                 readout: Default::default(),
                 since_ms: None,
                 detection: None,
+                prompt: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -7448,6 +7449,7 @@ mod tests {
             readout: Default::default(),
             since_ms: None,
             detection: None,
+            prompt: None,
         }))
         .encode(&mut daemon_side)
         .unwrap();
@@ -7502,6 +7504,7 @@ mod tests {
             readout: Default::default(),
             since_ms: None,
             detection: None,
+            prompt: None,
         }))
         .encode(&mut daemon_side)
         .unwrap();

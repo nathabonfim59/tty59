@@ -11473,6 +11473,7 @@ mod gpui_tests {
                 readout: Default::default(),
                 since_ms: None,
                 detection: None,
+                prompt: None,
             }))
             .encode(daemon)
             .unwrap();
@@ -11615,6 +11616,7 @@ mod gpui_tests {
             readout: Default::default(),
             since_ms: None,
             detection: None,
+            prompt: None,
         }))
         .encode(&mut daemon)
         .unwrap();
@@ -11686,6 +11688,7 @@ mod gpui_tests {
             readout: Default::default(),
             since_ms: None,
             detection: None,
+            prompt: None,
         };
         DaemonMsg::AgentStatus(Some(state.clone()))
             .encode(daemon)
@@ -12147,6 +12150,7 @@ mod gpui_tests {
             readout: Default::default(),
             since_ms: None,
             detection: None,
+            prompt: None,
         }))
         .encode(&mut daemon)
         .unwrap();
