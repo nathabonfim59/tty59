@@ -2104,15 +2104,20 @@ impl Tty59App {
 }
 
 /// Width of the fixed cell a git status letter is centred in: the widest
-/// letter at `META_MONO`, and nothing more, so the name after it starts
-/// `ROW_INSET + 10 + 8` = 18px past the row's fill edge.
+/// letter at `META_MONO`, with room for a [`DISCLOSURE_CHEVRON`] where a
+/// directory row puts its fold in the same cell, so the name after it starts
+/// `ROW_INSET + 12 + 8` = 28px past the row's fill edge.
 ///
-/// Load-bearing beyond this function: `scm/panel.rs` sets its group-header
-/// chevron in a box no wider than this, flush with the cell's leading edge, so
-/// the group arrows sit over the status letters, and it keeps its own
-/// `BADGE_W` in step. Changing it here without changing it there breaks that
-/// column.
-pub(crate) const BADGE_W: f32 = 10.;
+/// Load-bearing beyond this function: `scm/panel.rs` reads it for its
+/// directory rows' chevron cell and checks its group-header chevron against
+/// it, so the arrows stand over the status letters.
+pub(crate) const BADGE_W: f32 = 12.;
+
+/// Every disclosure chevron in the panel: the change groups, History, and the
+/// directories of both trees. One size, so a fold reads as the same control
+/// wherever it is. The commit button's caret is a menu, not a fold, and keeps
+/// its own size.
+pub(crate) const DISCLOSURE_CHEVRON: f32 = 10.;
 
 /// A single-letter git status marker in a fixed-width cell.
 ///

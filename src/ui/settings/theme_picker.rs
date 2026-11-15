@@ -502,6 +502,7 @@ impl Tty59App {
                             t(L10nKey::SettingsDuplicateToEdit),
                             BtnKind::Link,
                         )
+                        .min_hit_height()
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.close_settings_menu(window, cx);
@@ -515,6 +516,7 @@ impl Tty59App {
                             t(L10nKey::SettingsOpenThemesFolder),
                             BtnKind::Link,
                         )
+                        .min_hit_height()
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.close_settings_menu(window, cx);
                             this.open_themes_folder(window, cx);
@@ -668,21 +670,10 @@ impl Tty59App {
                     .children(chunk.iter().map(|state| ColorPicker::new(state).small()))
             }))
             .into_any_element();
+        // Duplicate to edit and Open themes folder live in the theme
+        // popover's footer only; the editor does not repeat them.
         rows.push(
             self.settings_row(t(L10nKey::SettingsAnsiColors), "", ansi_grid, cx)
-                .into_any_element(),
-        );
-        rows.push(
-            h_flex()
-                .pt(px(4.))
-                .child(
-                    kit::button(
-                        "open-themes-folder",
-                        t(L10nKey::SettingsOpenThemesFolder),
-                        BtnKind::Link,
-                    )
-                    .on_click(cx.listener(|this, _, w, cx| this.open_themes_folder(w, cx))),
-                )
                 .into_any_element(),
         );
         Some(self.settings_group(
@@ -691,5 +682,234 @@ impl Tty59App {
             rows,
             cx,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::paint_probe;
+    use gpui::{AbsoluteLength, Entity, Modifiers, TestAppContext, VisualTestContext, point, size};
+    use kit::test_support::harness;
+
+    /// Opens `section` and the popover `menu` on it, the way its trigger does.
+    fn open_menu(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        section: SettingsSection,
+        menu: &'static str,
+        with_query: bool,
+    ) {
+        app.update_in(vcx, |app, window, cx| {
+            app.open_settings_section(section, window, cx);
+            app.toggle_settings_menu(menu.into(), 0, with_query, window, cx);
+        });
+        vcx.run_until_parked();
+        let open = app.update(vcx, |app, _| {
+            app.active_settings()
+                .and_then(|s| s.menu.clone())
+                .is_some_and(|m| m.as_ref() == menu)
+        });
+        assert!(open, "{menu} is open");
+    }
+
+    /// Drops every note from earlier frames and draws one more, so what the
+    /// probe holds afterwards was built by this frame alone.
+    fn fresh_frame(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        paint_probe::clear();
+        app.update(vcx, |_, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+
+    /// Every corner each `key` element set this frame. Expected values are
+    /// written out in the tests, not read back from the builders' tokens.
+    fn corners(key: &'static str) -> Vec<[Option<AbsoluteLength>; 4]> {
+        let painted = paint_probe::all(key);
+        assert!(!painted.is_empty(), "{key}: nothing was built this frame");
+        painted.into_iter().map(|p| p.corners).collect()
+    }
+
+    fn all_px(r: f32) -> [Option<AbsoluteLength>; 4] {
+        [Some(AbsoluteLength::Pixels(px(r))); 4]
+    }
+
+    fn selected_preset(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> String {
+        app.update(vcx, |_, cx| cx.global::<Config>().theme_preset.clone())
+    }
+
+    /// Duplicate to edit ran: the slot moved off `before` onto a theme the
+    /// registry holds under exactly that id (looked up directly, not through
+    /// `by_id`, which falls back to the default), backed by a file that
+    /// exists in the pinned config's themes folder. Says nothing about how
+    /// the copy is named: the folder is shared by the process's tests, so a
+    /// second copy is numbered.
+    fn assert_duplicated(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, before: &str) {
+        let preset = selected_preset(app, vcx);
+        assert_ne!(preset, before, "the slot still holds the theme it had");
+        let dir = presets::themes_dir().expect("the pinned test config has a themes folder");
+        let path = app.update(vcx, |_, cx| {
+            presets::all(cx)
+                .into_iter()
+                .find(|t| t.id == preset)
+                .unwrap_or_else(|| panic!("no registry entry has the picked id {preset}"))
+                .path
+        });
+        let path = path.unwrap_or_else(|| panic!("{preset} is not backed by a file"));
+        assert_eq!(
+            path.parent(),
+            Some(dir.as_path()),
+            "{preset} lives at {}, outside the themes folder {}",
+            path.display(),
+            dir.display()
+        );
+        assert!(path.is_file(), "{} does not exist", path.display());
+    }
+
+    /// F18: the theme popover and a settings dropdown are both 10px
+    /// surfaces, read from the frame drawn with each one open.
+    #[gpui::test]
+    fn settings_popovers_have_10px_corners(cx: &mut TestAppContext) {
+        let _probe = paint_probe::scope();
+        let (app, mut vcx) = harness(cx);
+        vcx.simulate_resize(size(px(960.), px(1600.)));
+
+        open_menu(
+            &app,
+            &mut vcx,
+            SettingsSection::Appearance,
+            "theme-slot-light",
+            true,
+        );
+        fresh_frame(&app, &mut vcx);
+        for c in corners("settings.menu-panel") {
+            assert_eq!(c, all_px(10.), "theme popover corners");
+        }
+
+        open_menu(
+            &app,
+            &mut vcx,
+            SettingsSection::General,
+            "settings-language",
+            false,
+        );
+        fresh_frame(&app, &mut vcx);
+        for c in corners("settings.menu-panel") {
+            assert_eq!(c, all_px(10.), "dropdown corners");
+        }
+    }
+
+    /// F18: a dropdown's rows are 6px, concentric with the 10px panel across
+    /// its 4px padding.
+    #[gpui::test]
+    fn settings_menu_rows_have_6px_corners(cx: &mut TestAppContext) {
+        let _probe = paint_probe::scope();
+        let (app, mut vcx) = harness(cx);
+        vcx.simulate_resize(size(px(960.), px(700.)));
+
+        open_menu(
+            &app,
+            &mut vcx,
+            SettingsSection::General,
+            "settings-language",
+            false,
+        );
+        fresh_frame(&app, &mut vcx);
+        for c in corners("settings.menu-row") {
+            assert_eq!(c, all_px(6.), "menu row corners");
+        }
+    }
+
+    /// F18: the theme popover's two footer links are 28px tall to the
+    /// pointer, and a click 13px above Duplicate to edit's centre, inside a
+    /// 28px target and outside a line of 12px text, runs the action.
+    #[gpui::test]
+    fn theme_popover_footer_links_take_clicks_across_a_28px_target(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        vcx.simulate_resize(size(px(960.), px(1600.)));
+        open_menu(
+            &app,
+            &mut vcx,
+            SettingsSection::Appearance,
+            "theme-slot-light",
+            true,
+        );
+        let before = selected_preset(&app, &mut vcx);
+
+        for id in ["theme-duplicate", "theme-open-folder"] {
+            let b = vcx
+                .debug_bounds(id)
+                .unwrap_or_else(|| panic!("{id}: the popover footer draws it"));
+            assert!(
+                b.size.height >= px(28.),
+                "{id}: hit target is {:?} tall, under 28px",
+                b.size.height
+            );
+        }
+
+        let c = vcx
+            .debug_bounds("theme-duplicate")
+            .expect("the popover footer draws Duplicate to edit")
+            .center();
+        vcx.simulate_click(point(c.x, c.y - px(13.)), Modifiers::default());
+        vcx.run_until_parked();
+        let closed = app.update(&mut vcx, |app, _| {
+            app.active_settings().is_some_and(|s| s.menu.is_none())
+        });
+        assert!(
+            closed,
+            "the edge click reached the action, which closes the popover"
+        );
+        assert_duplicated(&app, &mut vcx, &before);
+    }
+
+    /// F18: Duplicate to edit opens the editor, which does not repeat Open
+    /// themes folder; the popover keeps both actions. Clicks the link's
+    /// centre, so this does not depend on the grown hit target.
+    #[gpui::test]
+    fn the_theme_editor_leaves_the_popover_actions_to_the_popover(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        vcx.simulate_resize(size(px(960.), px(1600.)));
+        open_menu(
+            &app,
+            &mut vcx,
+            SettingsSection::Appearance,
+            "theme-slot-light",
+            true,
+        );
+        assert!(
+            vcx.debug_bounds("pick-theme-image").is_none(),
+            "a built-in theme opens no editor"
+        );
+        let before = selected_preset(&app, &mut vcx);
+
+        let c = vcx
+            .debug_bounds("theme-duplicate")
+            .expect("the popover footer draws Duplicate to edit")
+            .center();
+        vcx.simulate_click(c, Modifiers::default());
+        vcx.run_until_parked();
+        assert_duplicated(&app, &mut vcx, &before);
+        assert!(
+            vcx.debug_bounds("pick-theme-image").is_some(),
+            "the duplicate opens the theme editor"
+        );
+        assert!(
+            vcx.debug_bounds("open-themes-folder").is_none(),
+            "the editor does not repeat Open themes folder"
+        );
+
+        open_menu(
+            &app,
+            &mut vcx,
+            SettingsSection::Appearance,
+            "theme-slot-light",
+            true,
+        );
+        for id in ["theme-duplicate", "theme-open-folder"] {
+            assert!(
+                vcx.debug_bounds(id).is_some(),
+                "{id}: still in the popover footer with a custom theme picked"
+            );
+        }
     }
 }

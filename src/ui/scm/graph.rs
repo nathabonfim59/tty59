@@ -1369,11 +1369,11 @@ impl Tty59App {
                     .flex_1()
                     .min_w(px(0.))
                     .cursor_pointer()
-                    .child(
+                    .child({
                         // The change groups' own chevron, in their own box: the
                         // same mark on the same text column, so "History" starts
                         // where "Staged Changes" and "Untracked" do above it.
-                        div()
+                        let cell = div()
                             .flex_none()
                             .w(px(GROUP_CHEVRON))
                             .flex()
@@ -1385,15 +1385,21 @@ impl Tty59App {
                                     false => IconName::ChevronRight,
                                 })
                                 .size(px(GROUP_CHEVRON)),
-                            ),
-                    )
-                    .child(
-                        div()
+                            );
+                        #[cfg(test)]
+                        let cell = cell.debug_selector(|| "scm-graph-chevron".into());
+                        cell
+                    })
+                    .child({
+                        let title = div()
                             .text_size(rems(META))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(muted)
-                            .child(SharedString::from(t(L10nKey::ScmGraphTitle))),
-                    )
+                            .child(SharedString::from(t(L10nKey::ScmGraphTitle)));
+                        #[cfg(test)]
+                        let title = title.debug_selector(|| "scm-graph-title".into());
+                        title
+                    })
                     // The count reads as part of the title, so it sits with it
                     // rather than at the far end of the row — a step smaller
                     // and at normal weight, which is the whole difference
@@ -2810,6 +2816,84 @@ mod render_idle_gpui_tests {
             assert!(app.scm.graph.page().is_some());
             assert!(!app.scm.graph.loading);
         });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Panels F20 on the drawn panel: History folds with the change groups'
+    /// own 10px chevron, on their column, its title as far past the arrow as
+    /// theirs (10px chevron + 6px gap), open and folded. Offsets are the
+    /// finding's numbers, not the constants the header is drawn from.
+    #[gpui::test]
+    fn the_history_chevron_is_the_groups_10px_fold_on_their_column(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let root = scratch("fold");
+        assert!(
+            git(&root, &["init", "--quiet"]),
+            "this test needs `git` to build its repository"
+        );
+        std::fs::write(root.join("f.txt"), "f\n").unwrap();
+        assert!(git(&root, &["add", "-A"]));
+        assert!(git(&root, &["commit", "--quiet", "-m", "feat: base"]));
+        std::fs::write(root.join("loose.txt"), "l\n").unwrap();
+
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        crate::daemon::protocol::DaemonMsg::Cwd(root.clone())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Scm;
+            app.scm.graph.expanded = true;
+            cx.notify();
+        });
+        assert!(
+            settle_graph(&app, &mut vcx).is_some(),
+            "no page landed for {}",
+            root.display()
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while vcx.debug_bounds("scm-group-chevron-Untracked").is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the Untracked group was never drawn"
+            );
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.background_executor.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let eps = 0.01;
+        for expanded in [true, false] {
+            app.update_in(&mut vcx, |app, _, cx| {
+                app.scm.graph.expanded = expanded;
+                cx.notify();
+            });
+            vcx.run_until_parked();
+            let history = vcx
+                .debug_bounds("scm-graph-chevron")
+                .expect("the History chevron was drawn");
+            let title = vcx
+                .debug_bounds("scm-graph-title")
+                .expect("the History title was drawn");
+            let group = vcx
+                .debug_bounds("scm-group-chevron-Untracked")
+                .expect("the Untracked chevron was drawn");
+            assert_eq!(
+                history.size,
+                gpui::size(px(10.), px(10.)),
+                "History chevron is 10px (expanded={expanded})"
+            );
+            assert_eq!(history.size, group.size, "one fold size in the panel");
+            assert!(
+                (history.left() - group.left()).as_f32().abs() < eps,
+                "History's arrow on the groups' column: {history:?} vs {group:?}"
+            );
+            assert!(
+                ((title.left() - history.left()).as_f32() - 16.).abs() < eps,
+                "History title 10 + 6 = 16px past its arrow: {title:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

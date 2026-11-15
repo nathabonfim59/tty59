@@ -348,29 +348,15 @@ impl Tty59App {
                 reason: reason.clone(),
             });
         });
-        let status = match pane.state {
-            State::Exited => None,
-            State::Idle => Some(
-                div()
-                    .size(px(6.))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(cx.theme().muted_foreground)
-                    .bg(cx.theme().muted_foreground)
-                    .map(|dot| {
-                        #[cfg(test)]
-                        let dot = dot.debug_selector(move || {
-                            format!("agent-row-dot-{}-{}", key.host.0, key.pane)
-                        });
-                        dot
-                    })
-                    .into_any_element(),
-            ),
-            state => Some(
-                self.row_status_dot(Some(state.status()), 0, rgb(paints.rungs.base).into(), cx)
-                    .unwrap_or_else(|| div().into_any_element()),
-            ),
-        };
+        // The rail's mark, so one agent reads the same in both places: Idle
+        // and Exited have no status role and so no dot (the reason line says
+        // the state), and the hollow ring stays Waiting's alone.
+        let status = self.row_status_dot(
+            Some(pane.state.status()),
+            0,
+            rgb(paints.rungs.base).into(),
+            cx,
+        );
         let row = h_flex()
             .id(SharedString::from(format!(
                 "agent-{}-{}",

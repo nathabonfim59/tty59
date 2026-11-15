@@ -15,7 +15,9 @@ use std::collections::HashMap;
 /// `0xRRGGBB` values (alpha dropped, the way `contrast` reads only RGB);
 /// `*_alpha` carry each paint's own alpha and `opacity` the element's
 /// container opacity, so a dimmed-but-present paint is not mistaken for a
-/// solid one. `None` where the element set none.
+/// solid one. `corners` are the radii the element set, top-left, top-right,
+/// bottom-right, bottom-left, as the builder wrote them (px or rems). `None`
+/// where the element set none.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Painted {
     pub fill: Option<u32>,
@@ -25,6 +27,7 @@ pub(crate) struct Painted {
     pub text_alpha: Option<f32>,
     pub border_alpha: Option<f32>,
     pub opacity: Option<f32>,
+    pub corners: [Option<gpui::AbsoluteLength>; 4],
 }
 
 thread_local! {
@@ -59,6 +62,12 @@ pub(crate) fn note<E: gpui::Styled>(key: &'static str, element: &mut E) {
         text_alpha: style.text.color.map(|c| c.a),
         border_alpha: style.border_color.map(|c| c.a),
         opacity: style.opacity,
+        corners: [
+            style.corner_radii.top_left,
+            style.corner_radii.top_right,
+            style.corner_radii.bottom_right,
+            style.corner_radii.bottom_left,
+        ],
     };
     PAINTED.with(|p| p.borrow_mut().entry(key).or_default().push(painted));
 }

@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, Div, ElementId, FontWeight, Hsla, IntoElement,
-    MouseButton, Rems, SharedString, Stateful, Window, div, point, prelude::*, px, rems,
+    MouseButton, Pixels, Rems, SharedString, Stateful, Window, div, point, prelude::*, px, rems,
 };
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, h_flex, v_flex};
@@ -325,8 +325,13 @@ pub(crate) struct Btn {
     icon: Option<SharedString>,
     size: Option<Rems>,
     announced: bool,
+    min_hit: bool,
     handler: Option<ClickHandler>,
 }
+
+/// The shortest a link may be to the pointer where it stands alone in a bar
+/// (a popover's footer), rather than inline beside other text.
+pub(crate) const LINK_HIT_HEIGHT: Pixels = px(28.);
 
 pub(crate) fn button(
     id: impl Into<ElementId>,
@@ -342,6 +347,7 @@ pub(crate) fn button(
         icon: None,
         size: None,
         announced: false,
+        min_hit: false,
         handler: None,
     }
 }
@@ -351,6 +357,13 @@ impl Btn {
     /// default so buttons that have not been audited keep the tree they had.
     pub(crate) fn announced(mut self) -> Self {
         self.announced = true;
+        self
+    }
+    /// Grows the click target to [`LINK_HIT_HEIGHT`] without moving the
+    /// label, for a link alone in a bar. Off by default, so inline links keep
+    /// the height of their text.
+    pub(crate) fn min_hit_height(mut self) -> Self {
+        self.min_hit = true;
         self
     }
     pub(crate) fn disabled(mut self, disabled: bool) -> Self {
@@ -443,6 +456,7 @@ impl RenderOnce for Btn {
         };
         let fades = kind != BtnKind::Primary;
         let button = el
+            .when(self.min_hit, |b| b.min_h(LINK_HIT_HEIGHT))
             .when(self.announced, |b| {
                 b.role(gpui::Role::Button).aria_label(self.label.clone())
             })
@@ -708,19 +722,23 @@ pub(crate) fn check_mark(visible: bool, tk: &Tk) -> Div {
 
 /// A popover's surface.
 pub(crate) fn menu_panel(tk: &Tk) -> Div {
-    v_flex()
+    let panel = v_flex()
         .p(px(4.))
         .gap(px(1.))
-        .rounded(px(8.))
+        .rounded(crate::ui::rounding::POPOVER_RADIUS)
         .bg(tk.menu)
         .shadow(tk.popover())
         .text_size(fs(12.5))
-        .text_color(tk.fg)
+        .text_color(tk.fg);
+    #[cfg(test)]
+    let panel = probe("settings.menu-panel", panel);
+    panel
 }
 
-/// One pickable row in a popover menu.
+/// One pickable row in a popover menu. Its 6px corners sit concentric inside
+/// the panel's 10px ones, across the panel's 4px padding.
 pub(crate) fn menu_row(id: impl Into<ElementId>, highlighted: bool, tk: &Tk) -> Stateful<Div> {
-    h_flex()
+    let row = h_flex()
         .id(id)
         .flex_shrink_0()
         .h(px(26.))
@@ -728,11 +746,14 @@ pub(crate) fn menu_row(id: impl Into<ElementId>, highlighted: bool, tk: &Tk) -> 
         .pr(px(12.))
         .gap(px(6.))
         .items_center()
-        .rounded(px(5.))
+        .rounded(px(6.))
         .whitespace_nowrap()
         .cursor_pointer()
         .when(highlighted, |r| r.bg(tk.k06))
-        .hover(move |s| s.bg(tk.k06))
+        .hover(move |s| s.bg(tk.k06));
+    #[cfg(test)]
+    let row = probe("settings.menu-row", row);
+    row
 }
 
 pub(crate) fn menu_heading(label: impl Into<SharedString>, tk: &Tk) -> Div {
