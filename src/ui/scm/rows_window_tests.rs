@@ -685,11 +685,27 @@ fn a_scrolled_long_list_goes_quiet(cx: &mut TestAppContext) {
     scroll_to(&app, &mut vcx, 200. * p);
     test_window::quiesce(&mut vcx, None);
     render_probe::arm(200);
+    let asked = crate::ui::scm::rows_window::REDRAWS.with(|n| n.get());
     for _ in 0..20 {
         vcx.executor()
             .advance_clock(std::time::Duration::from_millis(500));
         vcx.background_executor.run_until_parked();
     }
     assert_eq!(render_probe::draws(), 0, "20 parked frames drew nothing");
+    assert_eq!(
+        crate::ui::scm::rows_window::REDRAWS.with(|n| n.get()),
+        asked,
+        "and no run asked for another frame"
+    );
+    // Forcing frames with nothing moved: the range already covers the
+    // viewport, so not one of them asks for a follow-up.
+    for _ in 0..20 {
+        draw(&app, &mut vcx);
+    }
+    assert_eq!(
+        crate::ui::scm::rows_window::REDRAWS.with(|n| n.get()),
+        asked,
+        "a converged range never asks again"
+    );
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
 }
