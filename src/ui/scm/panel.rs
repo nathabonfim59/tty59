@@ -2372,7 +2372,7 @@ fn verb_row(
     reason: Option<&'static str>,
     cx: &gpui::App,
 ) -> impl IntoElement + use<> {
-    let muted = cx.theme().muted_foreground;
+    let muted: gpui::Hsla = gpui::rgb(crate::ui::theme::chrome_ink(cx).unpicked_meta).into();
     let top = h_flex()
         .w_full()
         .items_center()

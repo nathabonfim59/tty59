@@ -1255,7 +1255,7 @@ pub(crate) fn menu_row(
     note: SharedString,
     cx: &gpui::App,
 ) -> impl IntoElement + use<> {
-    let muted = cx.theme().muted_foreground;
+    let muted: gpui::Hsla = gpui::rgb(crate::ui::theme::chrome_ink(cx).unpicked_meta).into();
     // What a test finds the row's two halves by: their text, in the selector.
     #[cfg(test)]
     let test_name = label.clone();
