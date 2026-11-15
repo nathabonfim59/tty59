@@ -1135,6 +1135,9 @@ pub struct Tty59App {
     /// What the strip's Agents pill measures at the current font and language.
     /// Drawing only reads it; it is measured again when one of those changes.
     pub(crate) strip_metrics: crate::ui::tab_strip::StripMetrics,
+    /// What the right panel's tab row measures: its labels and the widest
+    /// Changes count. Kept current by `strip_metrics_refresh`.
+    pub(crate) right_tab_metrics: crate::ui::tab_strip::RightTabMetrics,
     pub(crate) sidebar_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     /// Where each pinned group's block was drawn last frame, so a tab held
     /// over one can be told which group it is over. Only pinned groups are
@@ -1611,6 +1614,7 @@ impl Tty59App {
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
         let strip_metrics = crate::ui::tab_strip::StripMetrics::new(window, cx);
+        let right_tab_metrics = crate::ui::tab_strip::RightTabMetrics::measure(window, cx);
         let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
@@ -1819,6 +1823,7 @@ impl Tty59App {
             pane_detach: Cell::new(None),
             strip_slots: Rc::new(RefCell::new(Vec::new())),
             strip_metrics,
+            right_tab_metrics,
             sidebar_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_group_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_divider: Rc::new(Cell::new(None)),
@@ -6851,6 +6856,21 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_search_with(tab, query, ssh_config::import_profiles, window, cx)
+            .detach();
+    }
+
+    /// [`Self::open_search`] with the `~/.ssh/config` import given, and the task
+    /// that lands it returned: a test points the import at a fixture of its own
+    /// and awaits the task before it looks at the rows.
+    pub(crate) fn open_search_with(
+        &mut self,
+        tab: SearchTab,
+        query: &str,
+        import: impl FnOnce() -> Vec<ssh_config::ImportedProfile> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<()> {
         let catalog = self.search_catalog(window, cx);
         let view = cx.new(|cx| SearchView::new(catalog, tab, query, window, cx));
         if tab.in_editor_row() {
@@ -6859,9 +6879,55 @@ impl Tty59App {
         }
         self.search_sub = Some(cx.subscribe_in(&view, window, Self::on_search_event));
         self.search = Some(view.clone());
-        self.refresh_search_sessions(view, window, cx);
+        self.refresh_search_sessions(view.clone(), window, cx);
+        let aliases = self.refresh_search_host_aliases(view, import, window, cx);
         self.refresh_file_index(window, cx);
         cx.notify();
+        aliases
+    }
+
+    /// Stops the window acting on what the open search emits, so a test can
+    /// observe a confirm without the command it names running.
+    #[cfg(test)]
+    pub(crate) fn drop_search_event_handler(&mut self) {
+        self.search_sub = None;
+    }
+
+    /// Reads the `~/.ssh/config` aliases off the window's thread and hands the
+    /// Hosts tab its rows when they are ready. Listing connects to nothing: a
+    /// row's alias is resolved when the row is taken.
+    ///
+    /// `import` is a parameter so a test can point it at a config of its own
+    /// instead of the real home.
+    pub(crate) fn refresh_search_host_aliases(
+        &mut self,
+        view: Entity<SearchView>,
+        import: impl FnOnce() -> Vec<ssh_config::ImportedProfile> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<()> {
+        // Weak: a slow read must not keep a closed search alive.
+        let view = view.downgrade();
+        cx.spawn_in(window, async move |this, cx| {
+            let imported = cx
+                .background_executor()
+                .spawn(async move { import() })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // Closed, or closed and opened again, since: nothing to update.
+                let Some(view) = view
+                    .upgrade()
+                    .filter(|view| this.search.as_ref() == Some(view))
+                else {
+                    return;
+                };
+                let items = crate::ui::search::alias_host_items(
+                    &cx.global::<Config>().ssh_profiles,
+                    imported,
+                );
+                view.update(cx, |view, cx| view.set_host_aliases(items, window, cx));
+            });
+        })
     }
 
     /// Asks the machine this window's workspace is on — this one, or a
@@ -7847,9 +7913,7 @@ impl Tty59App {
         self.agent_vision.input.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::VisionSearch), window, cx)
         });
-        self.sidebar_search.update(cx, |state, cx| {
-            state.set_placeholder(t(L10nKey::SearchTabs), window, cx)
-        });
+        self.sync_sidebar_search_placeholder(window, cx);
         self.file_search.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::SearchFiles), window, cx)
         });
@@ -8284,6 +8348,9 @@ impl Tty59App {
 
     fn reload_from_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         apply_theme(Some(window), cx);
+        // The Agents list can be switched off from the file or the settings
+        // page; the rail's search field has to stop calling itself agents' search.
+        self.sync_sidebar_search_placeholder(window, cx);
         let config = cx.global::<Config>().clone();
         if config.cursor_style != self.terminal_cursor_style
             || config.scrollback_limit != self.terminal_scrollback_limit

@@ -938,6 +938,11 @@ l10n_keys! {
     SftpTransferSummaryRunning,
     SftpTransferSummaryFailed,
     SftpTransferSummaryIdle,
+    // B3-R: finished-transfer summaries.
+    SftpTransferSummaryDownloads,
+    SftpTransferSummaryUploads,
+    SftpTransferSummaryBoth,
+    SearchHostsHelper,
     SftpTransferProgress,
     SftpTransferDone,
     SftpTransferCancelled,
@@ -1127,6 +1132,9 @@ l10n_keys! {
     PanelInfoTitle,
     PanelChangesTitle,
     PanelScmTitle,
+    // B3-P: the Changes tab's accessible name and tooltip.
+    PanelChangesTabCount,
+    PanelChangesTabCapped,
     PanelFilesTitle,
     PanelSearchTitle,
     PanelGitHubTitle,
@@ -1934,11 +1942,33 @@ l10n_keys! {
     SettingsCopyJoinWrapped,
     SettingsCopyJoinWrappedDesc,
     SettingsSearchCopyJoinWrappedKeywords,
+    // B3-L: settings terminology and host/source counts.
+    SettingsCopyJoinWrappedWithKey,
+    SettingsCopyJoinWrappedUnbound,
+    SettingsPort,
+    SettingsKeyFile,
+    SettingsSearchVisionDefaultKeywords,
+    SettingsHostCount,
+    SettingsSourceCount,
+    // B3-A: the agents rail's empty and no-match states.
+    SidebarAgentsEmptyHint,
+    SidebarNewAgent,
+    SidebarNothingMatches,
     MermaidRendering,
     MermaidViewerFullScreen,
     MermaidViewerFit,
     MermaidViewerExit,
     MermaidRenderError,
+    // B3-E: editor status, empty hint and gutter peek.
+    LspMissingBody,
+    LspErrorCount,
+    LspWarningCount,
+    EditorEmptyOpenHint,
+    EditorEmptyTreeAlt,
+    EditorEmptyOpenUnbound,
+    EditorGitPeekLinesAdded,
+    EditorGitPeekLinesRemoved,
+    EditorGitPeekChanges,
 }
 
 /// The source control strings that are translated but not yet displayed.
@@ -2136,6 +2166,8 @@ mod tests {
             // Pure templates: every word in them is a placeholder.
             L10nKey::AppCmdShellTitle,
             L10nKey::SftpTransferProgress,
+            L10nKey::LspProblemsTooltip,
+            L10nKey::EditorGitPeekChanges,
             // Product names.
             L10nKey::SettingsServer,
             L10nKey::SettingsAgentClaudeCode,
@@ -2190,6 +2222,7 @@ mod tests {
             // Russian keeps this punctuation separator and product-name template.
             L10nKey::TrayAgentSep,
             L10nKey::TrayTooltipAgents,
+            L10nKey::SftpTransferSummaryBoth,
         ];
 
         for &key in KEPT_IN_ENGLISH {
@@ -2251,6 +2284,33 @@ mod tests {
                 assert!(!copy.contains('⌘'), "{code} copy-on-select: {copy:?}");
                 assert!(!x11.contains("XQuartz"), "{code} x11: {x11:?}");
             }
+        }
+        set_locale(default_language_code());
+    }
+
+    /// The shortcut helper sentences say "Backspace", the word the keycaps and
+    /// the other shortcut copy use, not the ⌫ glyph; and the button that opens
+    /// the shortcuts page is a navigation, so it carries no "…" that would
+    /// promise a dialog.
+    #[test]
+    fn shortcut_copy_names_keys_in_words_and_the_page_link_has_no_ellipsis() {
+        for lang in SUPPORTED_LANGUAGES {
+            set_locale(lang.code);
+            let code = lang.code;
+            for key in [
+                L10nKey::SettingsShortcutsHint,
+                L10nKey::SettingsShortcutsHintTmux,
+                L10nKey::SettingsPressKeys,
+            ] {
+                let text = t(key);
+                assert!(!text.contains('⌫'), "{code} {key:?}: {text:?}");
+                assert!(text.contains("Backspace"), "{code} {key:?}: {text:?}");
+            }
+            let edit = t(L10nKey::SettingsEditShortcuts);
+            assert!(
+                !edit.ends_with('…') && !edit.ends_with("..."),
+                "{code} edit shortcuts: {edit:?}"
+            );
         }
         set_locale(default_language_code());
     }
@@ -2323,6 +2383,12 @@ mod tests {
             L10nKey::SettingsAliasesLinked,
             L10nKey::SettingsMoreAgents,
             L10nKey::SettingsMoreHosts,
+            L10nKey::SettingsHostCount,
+            L10nKey::SettingsSourceCount,
+            L10nKey::LspErrorCount,
+            L10nKey::LspWarningCount,
+            L10nKey::EditorGitPeekLinesAdded,
+            L10nKey::EditorGitPeekLinesRemoved,
             L10nKey::SettingsRestoreChanged,
             L10nKey::SettingsMatchCount,
             L10nKey::SettingsImportSummary,
@@ -2355,8 +2421,11 @@ mod tests {
             L10nKey::GitHubShowAllFiles,
             L10nKey::GitHubPassedCount,
             L10nKey::GitHubSkippedCount,
+            L10nKey::PanelChangesTabCount,
             L10nKey::GitHubShowHiddenComments,
             L10nKey::GitHubShowAllReviewers,
+            L10nKey::SftpTransferSummaryDownloads,
+            L10nKey::SftpTransferSummaryUploads,
             L10nKey::TabStripHiddenTabs,
         ];
         for key in plural_keys {

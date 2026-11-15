@@ -826,6 +826,8 @@ impl Tty59App {
                     .child(title),
                 cx,
             ));
+        #[cfg(test)]
+        let card = gpui::InteractiveElement::debug_selector(card, || "ssh-prompt-card".into());
 
         let (body, footer) = match model {
             PromptModel::Password { rejected, .. } => {
@@ -957,7 +959,10 @@ impl Tty59App {
                 let can_override = changed_confirmed(&typed);
                 let body = dialog::body()
                     .child(line(
-                        t(L10nKey::SshPromptHostKeyChangedBody).to_string(),
+                        t_fmt(
+                            L10nKey::SshPromptHostKeyChangedBody,
+                            &[("host", host), ("port", &port.to_string())],
+                        ),
                         danger,
                     ))
                     .child(
@@ -979,16 +984,7 @@ impl Tty59App {
                         v_flex()
                             .gap(px(6.))
                             .child(line(t(L10nKey::HostKeyOverrideMessage).to_string(), fg))
-                            .child(self.render_ssh_input(0, cx))
-                            // Only once they have typed something: an empty
-                            // field is not a mistake to be corrected, it is
-                            // where everyone starts.
-                            .when(!typed.trim().is_empty() && !can_override, |c| {
-                                c.child(line(
-                                    t(L10nKey::SshPromptTypeYesToOverride).to_string(),
-                                    muted,
-                                ))
-                            }),
+                            .child(self.render_ssh_input(0, cx)),
                     );
                 // Abort stays the emphasized one and also sits where the eye
                 // lands last: a changed host key is the one prompt where the
@@ -1516,6 +1512,118 @@ mod focus_tests {
                 .update(cx, |_, window, _| pane_focus.is_focused(window))
                 .unwrap(),
             "dismissing the last prompt must hand focus back to the app"
+        );
+    }
+}
+
+/// The changed-key sheet in the real app tree: its height while the user
+/// types the confirmation, and that "yes" still arms Override exactly as it
+/// always did.
+#[cfg(test)]
+mod changed_card_tests {
+    use super::*;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty59App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        cx.background_executor.run_until_parked();
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty59App>()
+                    .unwrap_or_else(|_| panic!("window root wraps a Tty59App"))
+            })
+            .unwrap();
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        (app, vcx)
+    }
+
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+    }
+
+    fn type_into_sheet(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, text: &'static str) {
+        app.update_in(vcx, |app, window, cx| {
+            let input = app.ssh_prompt.inputs[0].clone();
+            input.update(cx, |s, cx| s.set_value(text, window, cx));
+        });
+        settle(vcx);
+    }
+
+    fn card_height(vcx: &mut VisualTestContext) -> f32 {
+        let bounds = vcx
+            .debug_bounds("ssh-prompt-card")
+            .expect("the changed-key sheet is drawn by the app's render");
+        f32::from(bounds.size.height)
+    }
+
+    #[gpui::test]
+    fn the_changed_key_card_keeps_its_height_and_yes_still_arms_override(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        let (pending, rx, _asker) = crate::ui::remote_connect::PendingAuth::for_test(
+            tty59_core::host::HostId(0x14),
+            AuthPromptKind::HostKeyChanged {
+                host: "127.0.0.1".into(),
+                port: 2222,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:new".into(),
+                old_fingerprint_sha256: "SHA256:old".into(),
+            },
+        );
+        app.update_in(&mut vcx, |app, window, cx| {
+            let outcome = app.raise_routed_auth(pending, window, cx);
+            assert!(matches!(
+                outcome,
+                crate::ui::remote_workspace::SheetOutcome::Raised
+            ));
+        });
+        settle(&mut vcx);
+
+        let empty = card_height(&mut vcx);
+        for typed in ["y", "ye", "yes"] {
+            type_into_sheet(&app, &mut vcx, typed);
+            assert_eq!(
+                card_height(&mut vcx),
+                empty,
+                "typing {typed:?} must not grow or shrink the card"
+            );
+        }
+
+        // Override is armed by exactly "yes", as before: half a word, Enter
+        // and nothing is sent and the sheet stays up.
+        type_into_sheet(&app, &mut vcx, "ye");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.submit_ssh_prompt(window, cx)
+        });
+        assert!(rx.try_recv().is_err(), "\"ye\" must not answer the prompt");
+        assert!(app.read_with(&vcx, |app, _| app.ssh_prompt.model.is_some()));
+
+        type_into_sheet(&app, &mut vcx, "yes");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.submit_ssh_prompt(window, cx)
+        });
+        assert_eq!(
+            rx.try_recv().expect("\"yes\" answers the prompt"),
+            AuthResponse::HostKeyDecision {
+                accept: true,
+                remember: true
+            }
         );
     }
 }

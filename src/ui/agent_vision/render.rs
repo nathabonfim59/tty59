@@ -591,12 +591,23 @@ impl Tty59App {
                 .agent_vision
                 .state
                 .inbox_rows(&panes, &self.agent_vision.reads);
+            // Whether the list shows nothing at all, project filter included.
+            // A search that matched nothing says so, and an empty list has no
+            // "select an agent" instruction to give. (The selection itself is
+            // already cleared by the focus reconcile that runs every frame.)
+            let list_empty = rows.attention.is_empty() && rows.other.is_empty();
+            let searching = !self.agent_vision.input.read(cx).value().trim().is_empty();
             let selected = self.agent_vision.state.selected().and_then(|key| {
                 self.agent_vision
                     .panes
                     .iter()
                     .find(|pane| pane.location.key == key)
             });
+            let empty_text = if list_empty && searching {
+                L10nKey::VisionNoAgents
+            } else {
+                L10nKey::VisionEmpty
+            };
             let other_count = rows.other.len();
             let list = v_flex()
                 .w(px(320.))
@@ -632,13 +643,16 @@ impl Tty59App {
                                 .child(t(L10nKey::VisionNeedsYou)),
                         )
                         .when(rows.attention.is_empty(), |list| {
-                            list.child(
-                                div()
-                                    .p_3()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(t(L10nKey::VisionEmpty)),
-                            )
+                            let empty = div()
+                                .p_3()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t(empty_text));
+                            #[cfg(test)]
+                            let empty = empty.debug_selector(move || {
+                                format!("agent-inbox-empty-{empty_text:?}")
+                            });
+                            list.child(empty)
                         })
                         .children(
                             rows.attention
@@ -758,14 +772,15 @@ impl Tty59App {
                                 }),
                         )
                 })
-                .when(selected.is_none(), |reader| {
-                    reader.child(
-                        div()
-                            .p_4()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(t(L10nKey::VisionSelect)),
-                    )
+                .when(selected.is_none() && !list_empty, |reader| {
+                    let hint = div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(t(L10nKey::VisionSelect));
+                    #[cfg(test)]
+                    let hint = hint.debug_selector(|| "agent-reader-hint".into());
+                    reader.child(hint)
                 });
             h_flex()
                 .size_full()

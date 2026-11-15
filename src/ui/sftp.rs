@@ -21,7 +21,7 @@ use crate::daemon::protocol::{
 use crate::daemon::ssh::sftp::{remote_basename, remote_join, remote_parent, safe_local_name};
 use crate::terminal::RemoteTerminal;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty59App};
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
     HEADING, META, ROW_FILL_RADIUS, ROW_GLYPH, ROW_INSET, TEXT, TEXT_INSET,
 };
@@ -275,6 +275,47 @@ fn apply_poll(
         Ok(jobs) => (jobs, None),
         Err(e) => (previous, Some(e)),
     }
+}
+
+/// How many of the transfers on show finished (not failed, not cancelled), as
+/// (downloads, uploads).
+fn finished_counts(jobs: &[&SftpJobProgress]) -> (usize, usize) {
+    let finished = |kind: SftpTransferKind| {
+        jobs.iter()
+            .filter(|j| j.state == SftpJobState::Done && j.kind == kind)
+            .count()
+    };
+    (
+        finished(SftpTransferKind::Download),
+        finished(SftpTransferKind::Upload),
+    )
+}
+
+/// What the collapsed tray says once nothing is running and nothing failed:
+/// what finished, in counts and nouns, rather than a bare "Transfers" that
+/// reads the same whether anything happened or not. Only cancelled work left
+/// has nothing to count and keeps the bare word.
+fn finished_summary(downloads: usize, uploads: usize) -> String {
+    let down = || t_plural(L10nKey::SftpTransferSummaryDownloads, downloads, &[]);
+    let up = || t_plural(L10nKey::SftpTransferSummaryUploads, uploads, &[]);
+    match (downloads, uploads) {
+        (0, 0) => t(L10nKey::SftpTransferSummaryIdle).to_string(),
+        (_, 0) => down(),
+        (0, _) => up(),
+        _ => t_fmt(
+            L10nKey::SftpTransferSummaryBoth,
+            &[("downloads", &down()), ("uploads", &up())],
+        ),
+    }
+}
+
+/// A finished, unfiltered listing of a folder below the root with nothing in
+/// it: the `..` row is drawn (`show_go_up` is only true for an unfiltered
+/// non-root listing) and the Empty folder note goes under it. The root, a
+/// filter that matched nothing and a listing still loading keep their own
+/// notes (`render_sftp_list`).
+fn is_empty_folder_below_parent(entries_empty: bool, loading: bool, show_go_up: bool) -> bool {
+    entries_empty && !loading && show_go_up
 }
 
 fn is_dir_like(e: &SftpEntry) -> bool {
@@ -1496,12 +1537,15 @@ impl Tty59App {
             .pb(px(4.));
 
         let note = |text: gpui::SharedString, color| {
-            div()
+            let note = div()
                 .px(px(ROW_INSET))
                 .py(px(4.))
                 .text_size(rems(TEXT))
                 .text_color(color)
-                .child(text)
+                .child(text);
+            #[cfg(test)]
+            let note = gpui::InteractiveElement::debug_selector(note, || "sftp-note".into());
+            note
         };
 
         if let Some(err) = &self.sftp_panel.error {
@@ -1531,6 +1575,11 @@ impl Tty59App {
         if show_go_up {
             list = list.child(self.render_sftp_go_up_row(cx));
         }
+        // `..` is a way out, not content: a folder with nothing but it is empty,
+        // and says so under it. A listing still loading is not one.
+        if is_empty_folder_below_parent(entries.is_empty(), self.sftp_panel.loading, show_go_up) {
+            list = list.child(note(t(L10nKey::SftpEmptyDirectory).into(), muted));
+        }
         for entry in entries {
             list = list.child(self.render_sftp_row(entry, cx));
         }
@@ -1541,7 +1590,7 @@ impl Tty59App {
         let theme = cx.theme();
         let (name_ink, muted) = (theme.sidebar_foreground, theme.muted_foreground);
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
-        h_flex()
+        let row = h_flex()
             .id("sftp-go-up")
             .items_center()
             .gap(px(SFTP_ROW_GAP))
@@ -1563,8 +1612,10 @@ impl Tty59App {
                     .text_color(name_ink)
                     .child(".."),
             )
-            .on_click(cx.listener(|this, _, _w, cx| this.sftp_up(cx)))
-            .into_any_element()
+            .on_click(cx.listener(|this, _, _w, cx| this.sftp_up(cx)));
+        #[cfg(test)]
+        let row = gpui::InteractiveElement::debug_selector(row, || "sftp-go-up-row".into());
+        row.into_any_element()
     }
 
     fn render_sftp_row(&self, entry: &SftpEntry, cx: &mut Context<Self>) -> AnyElement {
@@ -1786,7 +1837,8 @@ impl Tty59App {
                 &[("count", &failed.to_string())],
             )
         } else {
-            t(L10nKey::SftpTransferSummaryIdle).to_string()
+            let (downloads, uploads) = finished_counts(&jobs);
+            finished_summary(downloads, uploads)
         };
         let summary_color = if jobs_error.is_some() || (running == 0 && failed > 0) {
             danger
@@ -2092,6 +2144,59 @@ mod tests {
             local: "/here/note.txt".into(),
             remote: "/there/note.txt".into(),
         }
+    }
+
+    /// (entries empty, loading, show_go_up) -> the Empty folder note under `..`.
+    /// Only a finished, unfiltered, non-root listing with no entries has it;
+    /// every other empty state keeps the note it already had.
+    #[test]
+    fn an_empty_folder_below_the_root_says_so_under_its_parent_row() {
+        assert!(is_empty_folder_below_parent(true, false, true));
+        assert!(
+            !is_empty_folder_below_parent(true, true, true),
+            "a listing still loading is not an empty folder"
+        );
+        assert!(
+            !is_empty_folder_below_parent(true, false, false),
+            "the root, or a filter that matched nothing, has its own note"
+        );
+        assert!(
+            !is_empty_folder_below_parent(false, false, true),
+            "a folder with entries has no empty note"
+        );
+    }
+
+    /// What the tray says after work: counts and nouns for what finished;
+    /// failed and cancelled jobs are not finished work and are not counted.
+    #[test]
+    fn a_finished_tray_counts_downloads_and_uploads_by_name() {
+        crate::ui::i18n::set_locale("en");
+        let mut download = upload(1, SftpJobState::Done);
+        download.kind = SftpTransferKind::Download;
+        let jobs = [
+            download.clone(),
+            upload(2, SftpJobState::Done),
+            upload(3, SftpJobState::Done),
+            upload(4, SftpJobState::Error),
+            upload(5, SftpJobState::Cancelled),
+        ];
+        let shown: Vec<&SftpJobProgress> = jobs.iter().collect();
+        assert_eq!(finished_counts(&shown), (1, 2));
+        assert_eq!(finished_counts(&shown[3..]), (0, 0));
+
+        assert_eq!(finished_summary(1, 0), "1 download finished");
+        assert_eq!(finished_summary(3, 0), "3 downloads finished");
+        assert_eq!(finished_summary(0, 1), "1 upload finished");
+        assert_eq!(finished_summary(0, 2), "2 uploads finished");
+        assert_eq!(
+            finished_summary(1, 2),
+            "1 download finished · 2 uploads finished"
+        );
+        assert_eq!(
+            finished_summary(0, 0),
+            "Transfers",
+            "only cancelled work left has nothing to count"
+        );
     }
 
     #[test]
@@ -2406,6 +2511,99 @@ mod gpui_tests {
                 "the focus the box held must have gone somewhere still on screen"
             );
         });
+    }
+
+    /// A window of its own whose one view is the list the app renders. The list
+    /// has hover and scroll handling, which ask the window for the view being
+    /// drawn, so it has to be drawn as a view's content and not as a bare
+    /// element handed to `VisualTestContext::draw`.
+    struct ListHost(Entity<Tty59App>);
+
+    impl gpui::Render for ListHost {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            self.0
+                .clone()
+                .update(cx, |app, cx| app.render_sftp_list(cx))
+        }
+    }
+
+    /// Sets the listing's state and draws the real list in `host` (the window
+    /// of a [`ListHost`]), returning the bounds of its `..` row and of its note,
+    /// if each was drawn.
+    fn drawn_list(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        host: &mut VisualTestContext,
+        cwd: &str,
+        loading: bool,
+        error: Option<&str>,
+        filter: &'static str,
+    ) -> (
+        Option<gpui::Bounds<gpui::Pixels>>,
+        Option<gpui::Bounds<gpui::Pixels>>,
+    ) {
+        app.update_in(vcx, |app, window, cx| {
+            app.sftp_panel.cwd = cwd.to_string();
+            app.sftp_panel.entries.clear();
+            app.sftp_panel.loading = loading;
+            app.sftp_panel.error = error.map(str::to_string);
+            let input = app.sftp_panel.filter_input.clone();
+            input.update(cx, |s, cx| s.set_value(filter, window, cx));
+        });
+        host.update(|window, _| window.refresh());
+        host.run_until_parked();
+        host.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (
+            host.debug_bounds("sftp-go-up-row"),
+            host.debug_bounds("sftp-note"),
+        )
+    }
+
+    /// A folder below the root with nothing in it draws its `..` row and, under
+    /// it, the note that it is empty. Every other empty state keeps what it
+    /// drew before: no note while the listing loads (the `..` row alone), only a
+    /// note at the root, for a filter that matched nothing or for an error.
+    #[gpui::test]
+    fn an_empty_folder_draws_its_parent_row_then_its_note(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        crate::ui::i18n::set_locale("en");
+        let (_host_view, host) = cx.add_window_view(|_, _| ListHost(app.clone()));
+
+        let (up, note) = drawn_list(&app, &mut vcx, host, "/srv/empty", false, None, "");
+        let (up, note) = (up.expect("the parent row"), note.expect("the empty note"));
+        assert!(
+            note.top() >= up.bottom(),
+            "the note sits under the parent row: {up:?} then {note:?}"
+        );
+
+        let (up, note) = drawn_list(&app, &mut vcx, host, "/srv/empty", true, None, "");
+        assert!(up.is_some() && note.is_none(), "loading: `..` alone");
+
+        let (up, note) = drawn_list(&app, &mut vcx, host, "/", false, None, "");
+        assert!(up.is_none() && note.is_some(), "the root: the note alone");
+
+        let (up, note) = drawn_list(&app, &mut vcx, host, "/srv/empty", false, None, "zz");
+        assert!(
+            up.is_none() && note.is_some(),
+            "a filter that matched nothing: its own note, no `..`"
+        );
+
+        let (up, note) = drawn_list(
+            &app,
+            &mut vcx,
+            host,
+            "/srv/empty",
+            false,
+            Some("denied"),
+            "",
+        );
+        assert!(up.is_none() && note.is_some(), "an error: the error alone");
     }
 
     #[gpui::test]

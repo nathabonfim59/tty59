@@ -303,7 +303,7 @@ pub struct Config {
     /// either way.
     #[serde(default = "default_true")]
     pub sidebar_auto_grouping: bool,
-    /// Show the Terminal | Agents selector at the bottom of the workbench sidebar.
+    /// Show the Terminal / Agents switch at the bottom of the workbench sidebar.
     #[serde(default = "default_true")]
     pub sidebar_agents_toggle: bool,
     /// Whether tab number shortcuts (`ActivateTab1`…`ActivateTab9`) are scoped
@@ -411,7 +411,8 @@ pub struct Config {
     pub mouse_zoom_modifier: MouseZoomModifier,
     pub clipboard_trim_trailing_spaces: bool,
     /// In a Claude Code pane, copy joins the rows Claude wrapped itself, so a
-    /// paragraph pastes as one line. ⌘⌥C and Copy Raw copy the rows as is.
+    /// paragraph pastes as one line. The Copy Raw command, on whatever shortcut
+    /// the keymap gives it, copies the rows as is.
     #[serde(default)]
     pub copy_join_wrapped: bool,
     pub copy_on_select: bool,

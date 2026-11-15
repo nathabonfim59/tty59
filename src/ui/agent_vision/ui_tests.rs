@@ -13,10 +13,23 @@ fn agents(
     VisualTestContext,
     Vec<crate::daemon::transport::Stream>,
 ) {
+    agents_in(cx, AgentStatus::Waiting)
+}
+
+/// Two agents that are all in `status`: Waiting ones need attention and fill
+/// the Inbox's top group, Working ones sit in Other.
+fn agents_in(
+    cx: &mut TestAppContext,
+    status: AgentStatus,
+) -> (
+    Entity<Tty59App>,
+    VisualTestContext,
+    Vec<crate::daemon::transport::Stream>,
+) {
     let (app, mut vcx, mut streams) = crate::ui::app::test_window::harness_with_tabs(cx, 3);
     for (index, stream) in streams.iter_mut().take(2).enumerate() {
         DaemonMsg::AgentStatus(Some(AgentSessionState {
-            status: AgentStatus::Waiting,
+            status,
             since_ms: Some(index as u64 + 1),
             message: Some(format!("Approve task {index}")),
             detection: Some(AgentDetectionSession {
@@ -684,4 +697,130 @@ fn one_agent_through_every_state_dots_only_working_waiting_and_done(cx: &mut Tes
             }
         }
     }
+}
+
+fn draw_inbox(vcx: &mut VisualTestContext) {
+    let _ = take_rendered_headers();
+    for _ in 0..2 {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+}
+
+fn search(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, text: &str) {
+    app.update_in(vcx, |app, window, cx| {
+        let input = app.agent_vision.input.clone();
+        input.update(cx, |input, cx| input.set_value(text, window, cx));
+    });
+}
+
+/// A query nothing matches, over agents that exist and one of which is still
+/// selected: the list says "No matching agents", never the false "No agents
+/// need you here", and nothing is left open to read.
+#[gpui::test]
+fn an_inbox_search_with_no_match_says_so_and_opens_no_reader(cx: &mut TestAppContext) {
+    let (app, mut vcx, _streams) = agents(cx);
+    assert!(
+        app.update_in(&mut vcx, |app, _, _| app.agent_vision.state.selected())
+            .is_some(),
+        "the fixture starts with a selection that the query will filter out"
+    );
+    search(&app, &mut vcx, "zzzz");
+    draw_inbox(&mut vcx);
+    assert!(
+        vcx.debug_bounds("agent-inbox-empty-VisionNoAgents")
+            .is_some()
+    );
+    assert!(vcx.debug_bounds("agent-inbox-empty-VisionEmpty").is_none());
+    assert!(
+        vcx.debug_bounds("agent-reader-hint").is_none(),
+        "there is nothing to select, so no instruction to select"
+    );
+    assert!(
+        take_rendered_headers().is_empty(),
+        "a stale selection must not keep a reader open beside an empty list"
+    );
+}
+
+#[gpui::test]
+fn a_query_that_matches_a_real_prompt_keeps_it_and_its_reader(cx: &mut TestAppContext) {
+    let (app, mut vcx, _streams) = agents(cx);
+    search(&app, &mut vcx, "task 0");
+    draw_inbox(&mut vcx);
+    assert!(vcx.debug_bounds("agent-row-frame-0-1").is_some());
+    assert!(
+        vcx.debug_bounds("agent-inbox-empty-VisionNoAgents")
+            .is_none()
+    );
+    assert!(vcx.debug_bounds("agent-inbox-empty-VisionEmpty").is_none());
+    assert!(vcx.debug_bounds("agent-reader-hint").is_none());
+    assert!(
+        !take_rendered_headers().is_empty(),
+        "the matching prompt is still readable"
+    );
+}
+
+/// No agents at all: the existing empty message, and no reader hint.
+#[gpui::test]
+fn a_truly_empty_inbox_keeps_its_message_and_hides_the_reader_hint(cx: &mut TestAppContext) {
+    let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+    app.update_in(&mut vcx, |app, window, cx| {
+        app.set_agent_mode(ViewMode::Inbox, window, cx)
+    });
+    draw_inbox(&mut vcx);
+    assert!(vcx.debug_bounds("agent-inbox-empty-VisionEmpty").is_some());
+    assert!(
+        vcx.debug_bounds("agent-inbox-empty-VisionNoAgents")
+            .is_none()
+    );
+    assert!(vcx.debug_bounds("agent-reader-hint").is_none());
+    assert!(take_rendered_headers().is_empty());
+}
+
+/// A project that holds none of the agents, with no query: the filter, not a
+/// search, emptied the list, so the empty message stays and the stale
+/// selection opens no reader. The project is a real pinned group: every
+/// frame's refresh reconciles the filter against the projects that exist and
+/// resets one that names none of them.
+#[gpui::test]
+fn a_project_filter_that_empties_the_inbox_keeps_its_message(cx: &mut TestAppContext) {
+    use crate::core::group_key::{GroupKey, PinnedGroup};
+    let (app, mut vcx, _streams) = agents(cx);
+    let empty = PinnedGroup::label("Empty");
+    let filter = super::ProjectFilter::Group(Some(GroupKey::Pinned(empty.id)));
+    app.update_in(&mut vcx, |app, _, _| {
+        app.sidebar_groups.pinned.push(empty);
+        app.agent_vision.state.set_project_filter(filter.clone());
+    });
+    draw_inbox(&mut vcx);
+    app.update_in(&mut vcx, |app, _, _| {
+        assert_eq!(
+            app.agent_vision.state.project_filter(),
+            &filter,
+            "the filter survived the frame's reconcile, so the list is empty because of it"
+        );
+    });
+    assert!(vcx.debug_bounds("agent-inbox-empty-VisionEmpty").is_some());
+    assert!(
+        vcx.debug_bounds("agent-inbox-empty-VisionNoAgents")
+            .is_none()
+    );
+    assert!(vcx.debug_bounds("agent-reader-hint").is_none());
+    assert!(take_rendered_headers().is_empty());
+}
+
+/// Nothing needs attention but the query still matches agents in Other: the
+/// list is not empty, so it keeps the true "No agents need you here".
+#[gpui::test]
+fn a_query_matching_only_other_agents_is_not_no_matching_agents(cx: &mut TestAppContext) {
+    let (app, mut vcx, _streams) = agents_in(cx, AgentStatus::Working);
+    search(&app, &mut vcx, "codex");
+    draw_inbox(&mut vcx);
+    assert!(vcx.debug_bounds("agent-inbox-empty-VisionEmpty").is_some());
+    assert!(
+        vcx.debug_bounds("agent-inbox-empty-VisionNoAgents")
+            .is_none()
+    );
 }

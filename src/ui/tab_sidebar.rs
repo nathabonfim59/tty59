@@ -6,6 +6,7 @@ use gpui::{
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent};
+use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenu, ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
@@ -52,6 +53,47 @@ std::thread_local! {
 #[cfg(test)]
 fn take_rendered_sidebar_agent_rows() -> Vec<RenderedSidebarAgentRow> {
     RENDERED_SIDEBAR_AGENT_ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()))
+}
+
+// The "nothing matches" sentences handed to the rail's elements, exactly as
+// handed: the text a user would read, not the selector it was found by.
+#[cfg(test)]
+std::thread_local! {
+    static RENDERED_SIDEBAR_NOTHING_MATCHES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_rendered_sidebar_nothing_matches() -> Vec<String> {
+    RENDERED_SIDEBAR_NOTHING_MATCHES.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
+}
+
+/// What the rail's search field is called: agents' search only while the
+/// Agents list is both enabled and the one showing.
+fn sidebar_search_placeholder(agents_enabled: bool, list: SidebarList) -> L10nKey {
+    match (agents_enabled, list) {
+        (true, SidebarList::Agents) => L10nKey::VisionSearch,
+        _ => L10nKey::SearchTabs,
+    }
+}
+
+/// The strokes the keymap has for New Agent Tab, first binding only, in the
+/// order they are typed; empty when the action is unbound. Read from the
+/// keymap's per-action index rather than by resolving the whole table.
+fn new_agent_chord(cx: &gpui::App) -> Vec<gpui::Keystroke> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    keymap
+        .bindings_for_action(&crate::core::actions::NewAgentTab)
+        .next()
+        .map(|binding| {
+            binding
+                .keystrokes()
+                .iter()
+                .map(|stroke| stroke.inner().clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -304,12 +346,36 @@ impl Tty59App {
         build_agent_rows(self.workspace, &layout, summaries)
     }
 
-    fn select_sidebar_list(&mut self, mode: SidebarList, cx: &mut Context<Self>) {
+    fn select_sidebar_list(
+        &mut self,
+        mode: SidebarList,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar_list = mode;
         self.sidebar_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.sidebar_reveal.set(None);
         self.sidebar_agent_reveal.set(None);
+        self.sync_sidebar_search_placeholder(window, cx);
         cx.notify();
+    }
+
+    /// The rail's search field names what it searches: agents while the
+    /// Agents list is the one showing, tabs otherwise. It is written from the
+    /// events that change that — the list switch, a language change and a
+    /// config reload (the toggle can be turned off from the file) — because
+    /// setting a placeholder notifies the field, which a render must not do.
+    pub(crate) fn sync_sidebar_search_placeholder(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = sidebar_search_placeholder(
+            cx.global::<Config>().sidebar_agents_toggle,
+            self.sidebar_list,
+        );
+        self.sidebar_search
+            .update(cx, |state, cx| state.set_placeholder(t(key), window, cx));
     }
 
     fn sidebar_list_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -331,7 +397,9 @@ impl Tty59App {
                     .min_w_0()
                     .h(px(HEAD_CONTROL_HEIGHT))
                     .rounded(px(HEAD_CONTROL_RADIUS))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_sidebar_list(mode, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_sidebar_list(mode, window, cx)
+                    }))
             }),
         );
         #[cfg(test)]
@@ -533,7 +601,9 @@ impl Tty59App {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
         let width = self.sidebar_px(window, cx);
-        let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
+        // As typed, for the "nothing matches" line; matching uses the lowered copy.
+        let query_text = self.sidebar_search.read(cx).value().trim().to_string();
+        let query = query_text.to_lowercase();
         let agents_mode = self.sidebar_agents_mode(cx);
         let agent_rows = if agents_mode {
             self.sidebar_agent_rows(&self.agent_pane_summaries(cx), cx)
@@ -1942,6 +2012,71 @@ impl Tty59App {
             list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
         }
 
+        // An empty list says so where its first row would be, so it goes in
+        // before the filler below: appended after it, the filler's `flex_1`
+        // pushed the message to the bottom edge of the rail.
+        let muted = cx.theme().muted_foreground;
+        let empty_state = if agents_mode && agent_rows.is_empty() && query.is_empty() {
+            let chord = new_agent_chord(cx);
+            let cta = div().pt_1().child(
+                Button::new("sidebar-new-agent")
+                    .ghost()
+                    .small()
+                    .accessible_label(t(L10nKey::SidebarNewAgent))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(t(L10nKey::SidebarNewAgent))
+                            .children((!chord.is_empty()).then(|| {
+                                let caps =
+                                    h_flex().gap_1().children(chord.into_iter().map(Kbd::new));
+                                #[cfg(test)]
+                                let caps = caps.debug_selector(|| "sidebar-new-agent-chord".into());
+                                caps
+                            })),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.new_agent_tab(window, cx))),
+            );
+            #[cfg(test)]
+            let cta = cta.debug_selector(|| "sidebar-new-agent-cta".into());
+            let state = v_flex()
+                .items_start()
+                .px_2()
+                .py_2()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(t(L10nKey::SidebarNoAgents)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(t(L10nKey::SidebarAgentsEmptyHint)),
+                )
+                .child(cta);
+            #[cfg(test)]
+            let state = state.debug_selector(|| "sidebar-empty-state".into());
+            Some(state)
+        } else if !any_rows && !query.is_empty() {
+            let line = t_fmt(L10nKey::SidebarNothingMatches, &[("query", &query_text)]);
+            #[cfg(test)]
+            RENDERED_SIDEBAR_NOTHING_MATCHES.with(|lines| lines.borrow_mut().push(line.clone()));
+            let state = v_flex()
+                .px_2()
+                .py_2()
+                .child(div().text_sm().text_color(muted).child(line));
+            #[cfg(test)]
+            let state = state.debug_selector(|| "sidebar-nothing-matches".into());
+            Some(state)
+        } else {
+            None
+        };
+        list = list.children(empty_state);
+
         // The room under the last row. Right-clicking a row opens that tab's
         // menu, so the list's own — new tab, new group — lives here rather
         // than on the list, where it would open over every row's as well.
@@ -1972,30 +2107,6 @@ impl Tty59App {
                     }
                 }),
         );
-
-        if agents_mode && agent_rows.is_empty() && query.is_empty() {
-            list = list.child(
-                div()
-                    .px_2()
-                    .py_3()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t(L10nKey::SidebarNoAgents)),
-            );
-        }
-        if !any_rows && !query.is_empty() {
-            list = list.child(
-                div()
-                    .px_2()
-                    .py_3()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::ui::i18n::t_fmt(
-                        crate::ui::i18n::L10nKey::SettingsNothingMatches,
-                        &[("query", &query)],
-                    )),
-            );
-        }
 
         // On screen at rest unless the Appearance switch says otherwise; then
         // these two tiles wait for the pointer to reach the rail. The mark
@@ -2080,6 +2191,8 @@ impl Tty59App {
                         .pl_0(),
                 ),
             );
+        #[cfg(test)]
+        let search = search.debug_selector(|| "sidebar-search".into());
         let workspace_head = v_flex()
             .w(px(width - 1.))
             .flex_shrink_0()
@@ -5478,6 +5591,7 @@ mod agent_tests {
     use crate::ui::agent_vision::PaneLocation;
     use crate::ui::app::test_window::harness_with_tabs;
     use crate::ui::host_ops::HostId;
+    use gpui::Entity;
     use tty59_core::core::machine::TabId;
 
     fn summary(workspace: WorkspaceId, tab: TabId, host: HostId, pane: u64) -> PaneSummary {
@@ -5618,17 +5732,17 @@ mod agent_tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (first, mut vcx, _streams) = harness_with_tabs(cx, 1);
-        first.update_in(&mut vcx, |app, _, cx| {
+        first.update_in(&mut vcx, |app, window, cx| {
             assert_eq!(app.sidebar_list, SidebarList::Terminal);
             assert!(!app.sidebar_agents_mode(cx));
-            app.select_sidebar_list(SidebarList::Agents, cx);
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
             assert!(app.sidebar_agents_mode(cx));
             app.set_sidebar_agents_toggle(false, cx);
             assert_eq!(app.sidebar_list, SidebarList::Terminal);
             assert!(!app.sidebar_agents_mode(cx));
             app.set_sidebar_agents_toggle(true, cx);
             assert!(!app.sidebar_agents_mode(cx));
-            app.select_sidebar_list(SidebarList::Agents, cx);
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
         });
         let (second, mut second_vcx, _other_streams) = harness_with_tabs(cx, 1);
         second.update_in(&mut second_vcx, |app, _, _| {
@@ -5638,6 +5752,416 @@ mod agent_tests {
             first.read_with(&vcx, |app, _| app.sidebar_list),
             SidebarList::Agents
         );
+    }
+
+    fn settle_and_draw(vcx: &mut gpui::VisualTestContext) {
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    /// A window on the Agents list with no agent running, the keymap's
+    /// New Agent Tab binding replaced by `binding` when one is given.
+    fn empty_agents_rail(
+        cx: &mut gpui::TestAppContext,
+        binding: Option<crate::core::config::KeybindingOverride>,
+    ) -> (
+        Entity<Tty59App>,
+        gpui::VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |cfg| {
+                if let Some(binding) = binding {
+                    cfg.keybindings.insert("NewAgentTab".to_string(), binding);
+                }
+            });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        settle_and_draw(&mut vcx);
+        (app, vcx, streams)
+    }
+
+    fn strokes(specs: &[&str]) -> Vec<(String, gpui::Modifiers)> {
+        specs
+            .iter()
+            .map(|spec| {
+                let stroke = gpui::Keystroke::parse(spec).expect("the expected stroke parses");
+                (stroke.key, stroke.modifiers)
+            })
+            .collect()
+    }
+
+    fn rail_chord(
+        app: &Entity<Tty59App>,
+        vcx: &mut gpui::VisualTestContext,
+    ) -> Vec<(String, gpui::Modifiers)> {
+        app.update_in(vcx, |_, _, cx| {
+            new_agent_chord(cx)
+                .into_iter()
+                .map(|stroke| (stroke.key, stroke.modifiers))
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn an_empty_agents_rail_says_so_under_the_search_field(cx: &mut gpui::TestAppContext) {
+        let (_app, mut vcx, _streams) = empty_agents_rail(cx, None);
+        let search = vcx
+            .debug_bounds("sidebar-search")
+            .expect("the search field");
+        let empty = vcx
+            .debug_bounds("sidebar-empty-state")
+            .expect("an empty Agents list paints its message");
+        let toggle = vcx.debug_bounds("sidebar-list-toggle").expect("the switch");
+        assert!(
+            empty.top() >= search.bottom(),
+            "the message starts below the search field: {empty:?} vs {search:?}"
+        );
+        assert!(
+            empty.top() - search.bottom() < px(ROW_HEIGHT * 3.),
+            "the message sits where the first row would, not at the bottom: {empty:?} vs {search:?}"
+        );
+        assert!(
+            toggle.top() - empty.bottom() > px(ROW_HEIGHT * 3.),
+            "the Terminal/Agents switch is far below it: {empty:?} vs {toggle:?}"
+        );
+        assert!(
+            vcx.debug_bounds("sidebar-new-agent-cta").is_some(),
+            "an empty list offers the way out"
+        );
+    }
+
+    #[gpui::test]
+    fn an_exact_binding_replaces_the_chord_on_the_new_agent_row(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::KeybindingOverride::Exact;
+        let (app, mut vcx, _streams) =
+            empty_agents_rail(cx, Some(Exact(vec!["ctrl-alt-n".into()])));
+        assert_eq!(rail_chord(&app, &mut vcx), strokes(&["ctrl-alt-n"]));
+        assert!(vcx.debug_bounds("sidebar-new-agent-chord").is_some());
+    }
+
+    #[gpui::test]
+    fn a_two_stroke_binding_shows_every_stroke_in_order(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::KeybindingOverride::Exact;
+        let (app, mut vcx, _streams) = empty_agents_rail(
+            cx,
+            Some(Exact(vec!["ctrl-b a".into(), "ctrl-alt-n".into()])),
+        );
+        assert_eq!(
+            rail_chord(&app, &mut vcx),
+            strokes(&["ctrl-b", "a"]),
+            "every stroke of the first binding, in order"
+        );
+        assert!(vcx.debug_bounds("sidebar-new-agent-chord").is_some());
+    }
+
+    #[gpui::test]
+    fn a_string_override_adds_a_chord_beside_the_default(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::KeybindingOverride::Add;
+        let (app, mut vcx, _streams) = empty_agents_rail(cx, Some(Add("ctrl-alt-m".into())));
+        let chord = rail_chord(&app, &mut vcx);
+        // macOS ships New Agent Tab on cmd-shift-a and the added chord comes
+        // after it; elsewhere the action ships unbound and the added one leads.
+        let expected = if cfg!(target_os = "macos") {
+            strokes(&["cmd-shift-a"])
+        } else {
+            strokes(&["ctrl-alt-m"])
+        };
+        assert_eq!(chord, expected, "the first binding the keymap holds");
+        assert!(vcx.debug_bounds("sidebar-new-agent-chord").is_some());
+    }
+
+    #[gpui::test]
+    fn an_unbound_new_agent_row_advertises_no_chord(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::KeybindingOverride::Exact;
+        let (app, mut vcx, _streams) = empty_agents_rail(cx, Some(Exact(Vec::new())));
+        assert!(rail_chord(&app, &mut vcx).is_empty());
+        assert!(
+            vcx.debug_bounds("sidebar-new-agent-cta").is_some(),
+            "the action stays when it has no chord"
+        );
+        assert!(
+            vcx.debug_bounds("sidebar-new-agent-chord").is_none(),
+            "an unbound action advertises no chord"
+        );
+    }
+
+    #[gpui::test]
+    fn the_new_agent_row_follows_the_shipped_default(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx, _streams) = empty_agents_rail(cx, None);
+        let expected = if cfg!(target_os = "macos") {
+            strokes(&["cmd-shift-a"])
+        } else {
+            Vec::new()
+        };
+        assert_eq!(rail_chord(&app, &mut vcx), expected);
+        assert_eq!(
+            vcx.debug_bounds("sidebar-new-agent-chord").is_some(),
+            cfg!(target_os = "macos"),
+            "Linux and Windows ship New Agent Tab unbound, so no chord is drawn"
+        );
+    }
+
+    /// With no agent installed, New agent says so and opens nothing. The
+    /// fixture makes that true on any machine without touching the process
+    /// environment: an agent is looked up by the program its `agent_launch`
+    /// entry runs, so pointing every entry at a program that does not exist
+    /// leaves nothing installed. A plain New Tab would open a shell (a new
+    /// tab, or `startup_error` if the spawn failed) and say nothing; installing
+    /// an agent and actually launching it needs a real shell spawn, which this
+    /// harness does not verify.
+    #[gpui::test]
+    fn the_new_agent_row_runs_new_agent_tab_not_new_tab(cx: &mut gpui::TestAppContext) {
+        use gpui_component::WindowExt as _;
+        let (app, mut vcx, _streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |cfg| {
+                for agent in CLIAgent::ALL {
+                    cfg.agent_launch.insert(
+                        agent.slug().to_string(),
+                        "tty59-test-no-such-agent".to_string(),
+                    );
+                }
+            });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        settle_and_draw(&mut vcx);
+        let (tabs, notices) = app.update_in(&mut vcx, |app, window, cx| {
+            assert!(
+                app.offered_agents(cx).is_empty(),
+                "the fixture leaves no agent installed"
+            );
+            assert!(app.startup_error.is_none());
+            (app.tabs.len(), window.notifications(cx).len())
+        });
+        let cta = vcx.debug_bounds("sidebar-new-agent-cta").expect("the row");
+        vcx.simulate_click(cta.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(
+                window.notifications(cx).len(),
+                notices + 1,
+                "the existing no-agent notice appears"
+            );
+            assert_eq!(app.tabs.len(), tabs, "no agent, so no tab opened");
+            assert!(
+                app.startup_error.is_none(),
+                "and no shell was attempted either"
+            );
+        });
+    }
+
+    /// Two agents are installed and the one launched last is not the one the
+    /// list offers first: a click on New agent has to ask for the last one,
+    /// in a new tab, with the command its `agent_launch` entry gives. The
+    /// request is read where `launch_agent` is entered, before any shell is
+    /// opened, so the shell spawn, the typed command and the frecency stamp
+    /// are not covered here.
+    #[gpui::test]
+    fn the_new_agent_row_launches_the_most_recent_installed_agent(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::{ProfileUsage, unix_now};
+        use gpui_component::WindowExt as _;
+        let exe = std::env::current_exe()
+            .expect("the test binary has a path")
+            .display()
+            .to_string();
+        assert!(
+            !exe.contains(char::is_whitespace),
+            "the stub program is typed as a command line: {exe}"
+        );
+        let (offered_first, last_launched) = (CLIAgent::Claude, CLIAgent::Codex);
+        let now = unix_now();
+        let (app, mut vcx, _streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |cfg| {
+                for agent in CLIAgent::ALL {
+                    cfg.agent_launch.insert(
+                        agent.slug().to_string(),
+                        "tty59-test-no-such-agent".to_string(),
+                    );
+                }
+                cfg.agent_launch
+                    .insert(offered_first.slug().to_string(), format!("{exe} --stub-a"));
+                cfg.agent_launch
+                    .insert(last_launched.slug().to_string(), format!("{exe} --stub-b"));
+                // Used a lot, a minute ago: the most frecent, so offered first.
+                cfg.agent_frecency.insert(
+                    offered_first.slug().to_string(),
+                    ProfileUsage {
+                        count: 100,
+                        last_used: now - 60,
+                    },
+                );
+                // Used once, just now: the most recent.
+                cfg.agent_frecency.insert(
+                    last_launched.slug().to_string(),
+                    ProfileUsage {
+                        count: 1,
+                        last_used: now,
+                    },
+                );
+            });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        settle_and_draw(&mut vcx);
+        let (tabs, notices) = app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(
+                app.offered_agents(cx),
+                [offered_first, last_launched],
+                "the list offers the most frecent first, which is not the most recent"
+            );
+            assert!(app.startup_error.is_none());
+            (app.tabs.len(), window.notifications(cx).len())
+        });
+        let launches = crate::ui::agent_launch::intercept_launches();
+        let cta = vcx.debug_bounds("sidebar-new-agent-cta").expect("the row");
+        vcx.simulate_click(cta.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        let requests = launches.requests();
+        assert_eq!(requests.len(), 1, "one launch request: {requests:?}");
+        let (agent, at, command) = &requests[0];
+        assert_eq!(
+            *agent, last_launched,
+            "the most recent agent, not the first offered"
+        );
+        assert!(
+            matches!(at, crate::ui::app::SpawnWhere::NewTab),
+            "in a new tab: {at:?}"
+        );
+        assert_eq!(
+            command,
+            &format!("{exe} --stub-b"),
+            "its configured command"
+        );
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.tabs.len(), tabs, "the request stopped before any shell");
+            assert_eq!(window.notifications(cx).len(), notices, "no notice");
+            assert!(app.startup_error.is_none());
+        });
+    }
+
+    fn nothing_matches_is_top_aligned_and_quotes_the_query_as_typed(
+        cx: &mut gpui::TestAppContext,
+        agents: bool,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, window, cx| {
+            if agents {
+                app.select_sidebar_list(SidebarList::Agents, window, cx);
+            }
+            app.sidebar_search
+                .update(cx, |state, cx| state.set_value("ZzQ", window, cx));
+        });
+        let _ = take_rendered_sidebar_nothing_matches();
+        settle_and_draw(&mut vcx);
+        let lines = take_rendered_sidebar_nothing_matches();
+        assert!(!lines.is_empty(), "the rail drew its no-match sentence");
+        for line in &lines {
+            assert!(
+                line.contains("ZzQ") && !line.contains("zzq"),
+                "the sentence quotes what was typed, case kept: {line:?}"
+            );
+            assert!(
+                line.contains('\u{201c}') && line.contains('\u{201d}'),
+                "the typed text sits in real quotes: {line:?}"
+            );
+        }
+        let search = vcx
+            .debug_bounds("sidebar-search")
+            .expect("the search field");
+        let empty = vcx
+            .debug_bounds("sidebar-nothing-matches")
+            .expect("the no-match line is painted");
+        let toggle = vcx.debug_bounds("sidebar-list-toggle").expect("the switch");
+        assert!(
+            empty.top() - search.bottom() < px(ROW_HEIGHT * 3.),
+            "top-aligned under the search: {empty:?} vs {search:?}"
+        );
+        assert!(
+            toggle.top() - empty.bottom() > px(ROW_HEIGHT * 3.),
+            "not jammed against the switch: {empty:?} vs {toggle:?}"
+        );
+        assert!(
+            vcx.debug_bounds("sidebar-new-agent-cta").is_none(),
+            "a failed search offers no launch row"
+        );
+        assert!(vcx.debug_bounds("sidebar-empty-state").is_none());
+    }
+
+    #[gpui::test]
+    fn an_agents_search_with_no_match_is_top_aligned_and_quoted(cx: &mut gpui::TestAppContext) {
+        nothing_matches_is_top_aligned_and_quotes_the_query_as_typed(cx, true);
+    }
+
+    #[gpui::test]
+    fn a_tabs_search_with_no_match_is_top_aligned_and_quoted(cx: &mut gpui::TestAppContext) {
+        nothing_matches_is_top_aligned_and_quotes_the_query_as_typed(cx, false);
+    }
+
+    #[test]
+    fn the_rail_search_is_agents_search_only_on_an_enabled_agents_list() {
+        for (enabled, list, expected) in [
+            (true, SidebarList::Agents, L10nKey::VisionSearch),
+            (true, SidebarList::Terminal, L10nKey::SearchTabs),
+            (false, SidebarList::Agents, L10nKey::SearchTabs),
+            (false, SidebarList::Terminal, L10nKey::SearchTabs),
+        ] {
+            assert_eq!(
+                sidebar_search_placeholder(enabled, list),
+                expected,
+                "enabled={enabled} list={list:?}"
+            );
+        }
+    }
+
+    /// The field's placeholder is written from events, and `set_placeholder`
+    /// notifies the field, so a notification is the witness that each event
+    /// reached it. A frame that only draws must not write it.
+    #[gpui::test]
+    fn the_rail_placeholder_is_written_by_events_and_never_by_a_draw(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let writes = Rc::new(Cell::new(0usize));
+        let input = app.read_with(&vcx, |app, _| app.sidebar_search.clone());
+        vcx.update(|_, cx| {
+            let writes = writes.clone();
+            cx.observe(&input, move |_, _| writes.set(writes.get() + 1))
+                .detach();
+        });
+        settle_and_draw(&mut vcx);
+        let idle = writes.get();
+        settle_and_draw(&mut vcx);
+        assert_eq!(writes.get(), idle, "drawing writes no placeholder");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        vcx.run_until_parked();
+        assert!(writes.get() > idle, "the list switch writes it");
+
+        let before = writes.get();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.refresh_locale_state(window, cx)
+        });
+        vcx.run_until_parked();
+        assert!(writes.get() > before, "a language change writes it");
+
+        // Turned off from the file: the list is still Agents, but the rail
+        // is not in agent mode, so the name has to go back.
+        let before = writes.get();
+        vcx.update(|_, cx| cx.global_mut::<Config>().sidebar_agents_toggle = false);
+        vcx.run_until_parked();
+        app.read_with(&vcx, |app, cx| {
+            assert_eq!(app.sidebar_list, SidebarList::Agents);
+            assert!(!app.sidebar_agents_mode(cx));
+        });
+        assert!(writes.get() > before, "an external config change writes it");
     }
 
     #[gpui::test]
@@ -5719,7 +6243,7 @@ mod agent_tests {
             app.sidebar_groups
                 .pinned
                 .extend([shell_project, agent_project]);
-            app.select_sidebar_list(SidebarList::Agents, cx);
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
             stream
         });
         report_agent(&mut streams[0], AgentStatus::Working);
@@ -5854,8 +6378,8 @@ mod agent_tests {
         use crate::core::cli_agent::AgentDetectionSession;
         use crate::daemon::protocol::DaemonMsg;
         let (app, mut vcx, mut streams) = harness_with_tabs(cx, 2);
-        app.update_in(&mut vcx, |app, _, cx| {
-            app.select_sidebar_list(SidebarList::Agents, cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
         });
         for (stream, (dir, agent, kind)) in streams.iter_mut().zip([
             ("/tmp/billing-service", CLIAgent::Codex, "codex"),

@@ -405,7 +405,7 @@ impl Tty59App {
             Some(id) if same => (None, self.render_editor_same_file(id, focus_left, cx)),
             Some(id) => (
                 self.render_editor_breadcrumbs_for(id, other_slot, false, window, cx),
-                self.render_editor_body(Some(id), other_slot, cx),
+                self.render_editor_body(Some(id), other_slot, window, cx),
             ),
             None => (None, self.render_editor_empty(cx).into_any_element()),
         };

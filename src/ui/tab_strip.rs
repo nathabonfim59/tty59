@@ -478,6 +478,11 @@ impl Tty59App {
         if !self.strip_metrics.is_for(cx) {
             self.strip_metrics = StripMetrics::measure(window, cx);
         }
+        // The right panel's tab row is kept current by the same observers: a
+        // size, font, theme or language change reaches both through them.
+        if !self.right_tab_metrics.is_for(cx) {
+            self.right_tab_metrics = RightTabMetrics::measure(window, cx);
+        }
     }
 }
 
@@ -539,10 +544,6 @@ const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 4] = [
     (RightPanelTab::GitHub, L10nKey::PanelGitHubTitle),
 ];
 
-fn right_panel_tab_size(window: &Window) -> f32 {
-    window.rem_size().as_f32() * crate::ui::right_panel::TAB_TEXT
-}
-
 fn right_panel_tab_font(cx: &gpui::App) -> gpui::Font {
     gpui::Font {
         family: cx.theme().font_family.clone(),
@@ -554,18 +555,131 @@ fn right_panel_tab_font(cx: &gpui::App) -> gpui::Font {
     }
 }
 
-/// What the bare tab labels take, padding included. The panel's floor is
-/// built on it, so the chrome tiles beside them always fit.
-pub(crate) fn right_panel_tab_labels_w(window: &Window, cx: &gpui::App) -> f32 {
-    let size = right_panel_tab_size(window);
-    let font = right_panel_tab_font(cx);
-    RIGHT_PANEL_TABS
-        .iter()
-        .map(|(_, key)| {
-            measure_text(window.text_system(), &font, size, t(*key))
-                + 2. * (TAB_OUTER_PAD + TAB_INNER_PAD)
-        })
-        .sum()
+/// The Changes count's font: regular weight, because a count is data hanging
+/// off the label rather than part of it, and tabular figures so the digits keep
+/// one width. The tab draws the count with exactly this, and
+/// [`RightTabMetrics`] measures it with exactly this: the figures are built
+/// once, in the metrics, and both take them from there.
+fn right_panel_count_font(cx: &gpui::App, features: gpui::FontFeatures) -> gpui::Font {
+    gpui::Font {
+        family: cx.theme().font_family.clone(),
+        features,
+        fallbacks: None,
+        weight: FontWeight::NORMAL,
+        style: Default::default(),
+    }
+}
+
+/// The gap between the Changes label and its count.
+pub(crate) const TAB_COUNT_GAP: f32 = 4.;
+
+/// What the right panel's tab row measures at the current font, size and
+/// language: the four labels, and the widest count the Changes tab can draw.
+///
+/// Measured once and kept, the way [`StripMetrics`] keeps the Agents pill's
+/// words: the panel's floor is asked for many times a frame, and shaping text
+/// each time it was asked is what this replaces. [`Self::is_for`] is the whole
+/// key — the size the tab text is drawn at, both fonts in full, and the label
+/// words — and a hit measures nothing.
+#[derive(Clone)]
+pub(crate) struct RightTabMetrics {
+    size: f32,
+    label_font: gpui::Font,
+    count_font: gpui::Font,
+    /// The tabular figures the count is drawn with, built once: what is
+    /// measured is what is on screen.
+    features: gpui::FontFeatures,
+    labels: [&'static str; 4],
+    /// What the bare tab labels take, padding included. The panel's floor is
+    /// built on it, so the chrome tiles beside them always fit.
+    labels_w: f32,
+    /// The widest count the tab draws (`ChangesCount::OVERFLOW`, which is
+    /// wider than any number under it) in the count's font.
+    count_slot: f32,
+}
+
+// How many times `RightTabMetrics::measure` has run on this thread: what a
+// test reads to tell a frame that measured from one that did not.
+#[cfg(test)]
+thread_local! {
+    static RIGHT_TAB_MEASURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl RightTabMetrics {
+    fn key_size(cx: &App) -> f32 {
+        cx.global::<Config>().ui_font_size * crate::ui::right_panel::TAB_TEXT
+    }
+
+    fn key_labels() -> [&'static str; 4] {
+        std::array::from_fn(|i| t(RIGHT_PANEL_TABS[i].1))
+    }
+
+    pub(crate) fn measure(window: &Window, cx: &App) -> Self {
+        #[cfg(test)]
+        RIGHT_TAB_MEASURES.with(|n| n.set(n.get() + 1));
+        let size = Self::key_size(cx);
+        let features = crate::ui::theme::tabular_figures();
+        let label_font = right_panel_tab_font(cx);
+        let count_font = right_panel_count_font(cx, features.clone());
+        let labels = Self::key_labels();
+        let text_system = window.text_system();
+        // Each text node is laid out at its width rounded up (gpui's text
+        // element does `width.ceil()` per node), so each is measured that way:
+        // summing the fractions would leave the floor short of what is drawn.
+        let labels_w: f32 = labels
+            .iter()
+            .map(|label| {
+                measure_text(text_system, &label_font, size, label).ceil()
+                    + 2. * (TAB_OUTER_PAD + TAB_INNER_PAD)
+            })
+            .sum();
+        let count_slot = measure_text(
+            text_system,
+            &count_font,
+            size,
+            crate::ui::scm::panel::ChangesCount::OVERFLOW,
+        )
+        .ceil();
+        Self {
+            size,
+            label_font,
+            count_font,
+            features,
+            labels,
+            labels_w,
+            count_slot,
+        }
+    }
+
+    /// Whether this was measured for what is on screen now.
+    pub(crate) fn is_for(&self, cx: &App) -> bool {
+        self.size == Self::key_size(cx)
+            && self.label_font == right_panel_tab_font(cx)
+            && self.count_font == right_panel_count_font(cx, self.features.clone())
+            && self.labels == Self::key_labels()
+    }
+
+    /// The pixel size the tab text is measured at, and so drawn at.
+    pub(crate) fn size(&self) -> f32 {
+        self.size
+    }
+
+    /// The face a tab label is measured in (its widest weight), and so drawn in.
+    pub(crate) fn label_font(&self) -> &gpui::Font {
+        &self.label_font
+    }
+
+    /// The face the Changes count is measured in, and so drawn in.
+    pub(crate) fn count_font(&self) -> &gpui::Font {
+        &self.count_font
+    }
+
+    /// What the tab labels need, with room for the widest Changes count held
+    /// all the time — also while there is none, so the panel's minimum width
+    /// does not move as the number does.
+    pub(crate) fn tabs_w(&self) -> f32 {
+        self.labels_w + TAB_COUNT_GAP + self.count_slot
+    }
 }
 
 /// Right panel tab geometry: each tab's click target reaches this far past
@@ -1136,35 +1250,44 @@ fn menu_hosts(
 /// An empty note drops the right half entirely rather than leaving a zero-width
 /// child to hold the `gap_3` open — the name is then free to use the full row,
 /// still eliding at the panel edge.
-fn menu_row(label: SharedString, note: SharedString, cx: &gpui::App) -> impl IntoElement + use<> {
+pub(crate) fn menu_row(
+    label: SharedString,
+    note: SharedString,
+    cx: &gpui::App,
+) -> impl IntoElement + use<> {
     let muted = cx.theme().muted_foreground;
+    // What a test finds the row's two halves by: their text, in the selector.
+    #[cfg(test)]
+    let test_name = label.clone();
+    let name_el = div()
+        .flex_shrink_0()
+        .max_w(match note.is_empty() {
+            true => MENU_W - MENU_ROW_INSET,
+            false => MENU_NAME_W,
+        })
+        .truncate()
+        .child(label);
+    #[cfg(test)]
+    let name_el = name_el.debug_selector(move || format!("menu-row-name:{test_name}"));
     h_flex()
         .w_full()
         .items_center()
         .justify_between()
         .gap_3()
-        .child(
-            div()
-                .flex_shrink_0()
-                .max_w(match note.is_empty() {
-                    true => MENU_W - MENU_ROW_INSET,
-                    false => MENU_NAME_W,
-                })
-                .truncate()
-                .child(label),
-        )
+        .child(name_el)
         .when(!note.is_empty(), |this| {
+            #[cfg(test)]
+            let test_note = note.clone();
+            let note_el = div()
+                .max_w(MENU_NOTE_W)
+                .truncate()
+                .text_color(muted)
+                .child(note);
+            #[cfg(test)]
+            let note_el = note_el.debug_selector(move || format!("menu-row-note:{test_note}"));
             // Pushed right by the cell, not by `text_right`: a line set
             // with `truncate` ignores its alignment and hugs the name.
-            this.child(
-                h_flex().flex_1().justify_end().child(
-                    div()
-                        .max_w(MENU_NOTE_W)
-                        .truncate()
-                        .text_color(muted)
-                        .child(note),
-                ),
-            )
+            this.child(h_flex().flex_1().justify_end().child(note_el))
         })
 }
 
@@ -1388,6 +1511,15 @@ impl Tty59App {
         let active_tab = self.right_panel_tab;
         let body_ink = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
+        // Read once for the row, from the status the watcher keeps current: no
+        // repository lookup and no scan of the entries.
+        let changes = self.scm_changes_count(cx);
+        // The faces the floor was measured in. The row draws with exactly
+        // these — family, features and size set on the elements themselves —
+        // so nothing an ancestor sets can change a face that was measured.
+        let size = px(self.right_tab_metrics.size());
+        let label_font = self.right_tab_metrics.label_font().clone();
+        let count_font = self.right_tab_metrics.count_font().clone();
         RIGHT_PANEL_TABS
             .into_iter()
             .map(|(tab, label_key)| {
@@ -1396,11 +1528,24 @@ impl Tty59App {
                     true => body_ink,
                     false => muted,
                 };
-                div()
+                // Only the Changes tab carries one, and none at zero. The
+                // tooltip and the accessible name say the exact figure, which
+                // the tab's own `99+` may not.
+                let count = changes.filter(|_| tab == RightPanelTab::Scm);
+                let description = count.map(|c| SharedString::from(c.description()));
+                let name = match &description {
+                    Some(text) => text.clone(),
+                    None => SharedString::from(t(label_key)),
+                };
+                let tab_el = div()
                     .id(("right-panel-tab", tab as usize))
                     .role(gpui::Role::Tab)
-                    .aria_label(t(label_key))
+                    .aria_label(name)
                     .aria_selected(current)
+                    .when_some(description, |tab_el, text| {
+                        tab_el
+                            .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                    })
                     // The press must not start a window drag from the title bar
                     // the tabs sit in.
                     .occlude()
@@ -1417,14 +1562,43 @@ impl Tty59App {
                             .py_0p5()
                             .rounded_md()
                             .when(current, |s| s.bg(cx.theme().secondary))
-                            .text_size(gpui::rems(crate::ui::right_panel::TAB_TEXT))
+                            .text_size(size)
+                            .font_family(label_font.family.clone())
+                            .font_features(label_font.features.clone())
                             .font_weight(match current {
-                                true => FontWeight::MEDIUM,
+                                true => label_font.weight,
                                 false => FontWeight::NORMAL,
                             })
                             .text_color(ink)
                             .hover(move |s| s.text_color(body_ink))
-                            .child(t(label_key)),
+                            .child(match count {
+                                None => t(label_key).into_any_element(),
+                                // A separate element, not more text in the
+                                // label: muted, regular, tabular, and set
+                                // apart by its own gap.
+                                Some(count) => {
+                                    let label_el = div().child(t(label_key));
+                                    #[cfg(test)]
+                                    let label_el =
+                                        label_el.debug_selector(|| "right-panel-tab-label".into());
+                                    let count_el = div()
+                                        .ml(px(TAB_COUNT_GAP))
+                                        .text_size(size)
+                                        .font_family(count_font.family.clone())
+                                        .font_features(count_font.features.clone())
+                                        .font_weight(count_font.weight)
+                                        .text_color(muted)
+                                        .child(count.label());
+                                    #[cfg(test)]
+                                    let count_el =
+                                        count_el.debug_selector(|| "right-panel-tab-count".into());
+                                    h_flex()
+                                        .items_baseline()
+                                        .child(label_el)
+                                        .child(count_el)
+                                        .into_any_element()
+                                }
+                            }),
                     )
                     // The current one does nothing: only ⌘J and the title-bar
                     // panel tile put the panel away.
@@ -1432,8 +1606,11 @@ impl Tty59App {
                         if this.right_panel_tab != tab {
                             this.set_right_panel_tab(tab, cx);
                         }
-                    }))
-                    .into_any_element()
+                    }));
+                #[cfg(test)]
+                let tab_el =
+                    tab_el.debug_selector(move || format!("right-panel-tab-{}", tab as usize));
+                tab_el.into_any_element()
             })
             .collect()
     }
@@ -4795,6 +4972,123 @@ mod overflow_gpui_tests {
                 live.is_none_or(|label| label.ended_tail.is_none()),
                 "a pane that has not ended has no tail"
             );
+        });
+    }
+}
+
+/// When the right panel's tab row is measured: once per key, never per frame.
+#[cfg(test)]
+mod right_tab_metrics_gpui_tests {
+    use super::*;
+    use crate::ui::app::test_window::harness;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    fn measures() -> usize {
+        RIGHT_TAB_MEASURES.with(|n| n.get())
+    }
+
+    fn refresh(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| app.strip_metrics_refresh(window, cx));
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+
+    fn tabs_w(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> f32 {
+        app.update_in(vcx, |app, _, _| app.right_tab_metrics.tabs_w())
+    }
+
+    /// Frames that change nothing the key names measure nothing, however many
+    /// of them there are — and the floor is read from the cache every time it
+    /// is asked, which is many times a frame.
+    #[gpui::test]
+    fn an_unchanged_key_measures_nothing(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        refresh(&app, &mut vcx);
+        let before = measures();
+        for _ in 0..8 {
+            refresh(&app, &mut vcx);
+            app.update_in(&mut vcx, |app, window, cx| {
+                for _ in 0..10 {
+                    let _ = app.right_panel_min_px(window, cx);
+                }
+            });
+        }
+        assert_eq!(measures(), before, "nothing the key names changed");
+    }
+
+    /// Each input the key names measures again, once: the size the tab text is
+    /// drawn at, the font family both faces are built from, and the labels'
+    /// language.
+    #[gpui::test]
+    fn each_input_of_the_key_measures_again_once(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        refresh(&app, &mut vcx);
+
+        // The interface font size.
+        let (before, wide) = (measures(), tabs_w(&app, &mut vcx));
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.ui_font_size += 2.;
+            cx.set_global(cfg);
+        });
+        refresh(&app, &mut vcx);
+        refresh(&app, &mut vcx);
+        assert_eq!(measures(), before + 1, "a size change measures once");
+        assert_ne!(tabs_w(&app, &mut vcx), wide, "and the floor follows it");
+
+        // The font family.
+        let before = measures();
+        vcx.update(|_, cx| {
+            gpui_component::Theme::global_mut(cx).font_family = "Another Sans".into();
+        });
+        refresh(&app, &mut vcx);
+        refresh(&app, &mut vcx);
+        assert_eq!(measures(), before + 1, "a family change measures once");
+
+        // The language: the labels are different words. `set_locale` falls back
+        // to English for a code it does not know (`ru` is not one; `ru-RU` is),
+        // so the language is checked by what the labels say.
+        let before = measures();
+        let english = t(L10nKey::PanelFilesTitle);
+        assert!(crate::ui::i18n::find_language("ru-RU").is_some());
+        crate::ui::i18n::set_locale("ru-RU");
+        assert_ne!(
+            t(L10nKey::PanelFilesTitle),
+            english,
+            "the labels are Russian"
+        );
+        refresh(&app, &mut vcx);
+        refresh(&app, &mut vcx);
+        assert_eq!(measures(), before + 1, "a language change measures once");
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// The faces the row is drawn with come out of the metrics, so these are
+    /// the faces it is measured in: medium labels, regular tabular counts, the
+    /// theme's family, at the size the tab text is drawn at. (The painter reads
+    /// them from here and sets them on the elements; that it does is by
+    /// construction in `right_panel_tabs`, and checked in native captures.)
+    #[gpui::test]
+    fn the_metrics_hold_the_faces_the_row_is_given(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        refresh(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            let metrics = &app.right_tab_metrics;
+            let ui = cx.global::<Config>().ui_font_size;
+            assert_eq!(metrics.size(), ui * crate::ui::right_panel::TAB_TEXT);
+            assert_eq!(metrics.label_font().weight, FontWeight::MEDIUM);
+            assert_eq!(metrics.count_font().weight, FontWeight::NORMAL);
+            assert_eq!(
+                metrics.count_font().features,
+                crate::ui::theme::tabular_figures()
+            );
+            assert_eq!(metrics.label_font().family, cx.theme().font_family);
+            assert_eq!(metrics.count_font().family, cx.theme().font_family);
         });
     }
 }

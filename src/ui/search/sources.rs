@@ -616,8 +616,14 @@ impl Source for Hosts<'_> {
         SearchTab::Hosts
     }
 
+    /// The hosts to pick from, under the line that says a host can also be
+    /// typed — helper text, where it used to be an error-looking "No results".
     fn browse(&self, _cx: &App) -> Vec<Section> {
-        by_section(self.0)
+        let mut sections = by_section(self.0);
+        if let Some(first) = sections.first_mut().filter(|s| s.title.is_none()) {
+            first.title = Some(t(L10nKey::SearchHostsHelper).into());
+        }
+        sections
     }
 
     fn highlights(&self, _cx: &App) -> Vec<Item> {
@@ -684,6 +690,44 @@ pub(crate) fn host_items(cx: &App) -> Vec<Item> {
                 item = item.with_subtitle(endpoint);
             }
             item
+        })
+        .collect()
+}
+
+/// The Hosts tab's rows for the `~/.ssh/config` aliases `imported`, listed after
+/// the saved hosts.
+///
+/// A saved host wins over an alias of the same name, the rule the machine rail
+/// uses (`remote_connect::available_hosts`), and an alias listed twice is one
+/// row. Choosing a row is `QuickConnect(alias)` — what typing the alias does:
+/// the alias is resolved against the config when the row is taken, and nothing
+/// connects before that. That only reaches the alias if the address parser
+/// reads it back as itself, which an alias with an `@`, a `:` or a `/` in it is
+/// not, so those are left off rather than listed as a row that would connect
+/// somewhere else.
+pub(crate) fn alias_host_items(
+    saved: &[crate::core::ssh_profile::SshProfile],
+    imported: Vec<crate::core::ssh_config::ImportedProfile>,
+) -> Vec<Item> {
+    let mut seen: std::collections::HashSet<String> =
+        saved.iter().map(|p| p.name.clone()).collect();
+    imported
+        .into_iter()
+        .filter_map(|imp| {
+            let alias = imp.profile.name.clone();
+            if alias.trim().is_empty() || !seen.insert(alias.clone()) {
+                return None;
+            }
+            let read_back = parse_quick_connect(&alias)?;
+            if read_back.user.is_some() || read_back.port.is_some() || read_back.host != alias {
+                return None;
+            }
+            let endpoint = crate::core::ssh_profile::to_connect_string(&imp.profile);
+            let item = Item::new(alias.clone(), CommandKind::QuickConnect(alias));
+            Some(match item.title == endpoint {
+                true => item,
+                false => item.with_subtitle(endpoint),
+            })
         })
         .collect()
 }
@@ -1162,6 +1206,82 @@ mod tests {
                 .find(|s| s.title.as_deref() == Some("Terminals"))
                 .expect("the panes' heading");
             assert_eq!(row_titles(term), vec!["zzz pane".to_string()]);
+        });
+    }
+
+    /// Reads `config` as a `~/.ssh/config` of its own, by explicit path in a
+    /// directory that goes away afterwards: the rows come back owned.
+    fn imported_from(config: &str) -> Vec<crate::core::ssh_config::ImportedProfile> {
+        let home = tempfile::Builder::new()
+            .prefix("tty59-alias-rows-")
+            .tempdir()
+            .expect("a temporary home");
+        let root = home.path().join("config");
+        std::fs::write(&root, config).expect("the temporary home is writable");
+        crate::core::ssh_config::import_profiles_from(root, home.path())
+    }
+
+    /// The Hosts tab lists the config's aliases after the saved hosts: a saved
+    /// host of the same name wins, a wildcard is not a host, and an alias the
+    /// address parser would read as another address is left off rather than
+    /// listed as a row that connects somewhere else. Each row connects by
+    /// `QuickConnect(alias)` — what typing the alias does.
+    #[test]
+    fn config_aliases_follow_saved_hosts_and_a_saved_name_wins() {
+        let imported = imported_from(
+            "Host box\n  HostName 10.0.0.9\n  User deploy\n\
+             Host prod\n  HostName prod.example.com\n\
+             Host odd:name\n  HostName 10.0.0.10\n\
+             Host a@b\n  HostName 10.0.0.11\n\
+             Host *\n  ServerAliveInterval 30\n",
+        );
+        let saved = [crate::core::ssh_profile::SshProfile::new("prod")];
+        let rows = alias_host_items(&saved, imported);
+        let kinds: Vec<CommandKind> = rows.iter().map(|i| i.kind.clone()).collect();
+        assert_eq!(kinds, vec![CommandKind::QuickConnect("box".into())]);
+        assert_eq!(rows[0].title, "box");
+        assert!(
+            rows[0]
+                .subtitle
+                .as_deref()
+                .is_some_and(|s| s.contains("10.0.0.9")),
+            "the row says where the alias goes: {:?}",
+            rows[0].subtitle
+        );
+
+        // Nothing saved: the plain aliases are all there, still without the
+        // ones that do not read back as themselves.
+        let all = alias_host_items(
+            &[],
+            imported_from("Host box\n  HostName 10.0.0.9\nHost prod\n"),
+        );
+        let titles: Vec<&str> = all.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, vec!["box", "prod"]);
+    }
+
+    /// Nothing typed: the hosts to pick from under the line that says a host
+    /// can also be typed. With no host at all there are no rows, and the view's
+    /// own empty state says the same thing instead of "No results".
+    #[gpui::test]
+    fn the_hosts_tab_with_nothing_typed_lists_hosts_under_its_helper(cx: &mut TestAppContext) {
+        with_config(cx);
+        crate::ui::i18n::set_locale("en");
+        let saved = Item::new(
+            "prod",
+            CommandKind::ConnectSavedProfile(uuid::Uuid::new_v4()),
+        );
+        let alias = Item::new("box", CommandKind::QuickConnect("box".into()));
+        let catalog = Catalog::new(Vec::new(), Vec::new(), vec![saved, alias]);
+        cx.update(|cx| {
+            let sections = catalog.sections(SearchTab::Hosts, "", cx);
+            assert_eq!(sections.len(), 1);
+            assert_eq!(
+                sections[0].title.as_deref(),
+                Some(t(L10nKey::SearchHostsHelper))
+            );
+            assert_eq!(row_titles(&sections[0]), vec!["prod", "box"]);
+            let none = Catalog::new(Vec::new(), Vec::new(), Vec::new());
+            assert!(none.sections(SearchTab::Hosts, "", cx).is_empty());
         });
     }
 
