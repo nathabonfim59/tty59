@@ -5844,6 +5844,574 @@ mod gpui_tests {
         set_native_context(&app, &mut vcx, "en", 16.);
     }
 
+    /// `text` shaped as the focused file's path is drawn: the editor font, normal
+    /// weight, the mono meta size and the features the header inherits, by the
+    /// real text system.
+    fn shaped_path(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, text: &str) -> f32 {
+        let (family, configured) = app.read_with(vcx, |app, _| {
+            (app.font_family.clone(), app.font_features.clone())
+        });
+        let features = match configured.filter(|f| !f.0.is_empty()) {
+            Some(configured) => configured,
+            None => gpui::FontFeatures(std::sync::Arc::new(vec![
+                ("calt".to_string(), 0),
+                ("liga".to_string(), 0),
+                ("clig".to_string(), 0),
+            ])),
+        };
+        vcx.update(|window, _| {
+            let font = gpui::Font {
+                family: family.into(),
+                features,
+                fallbacks: None,
+                weight: gpui::FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+            };
+            let size = window.rem_size().as_f32() * crate::ui::right_panel::META_MONO;
+            crate::ui::tab_strip::measure_text(window.text_system(), &font, size, text)
+        })
+    }
+
+    /// The least the commit's label, its byline and the focused path keep, each
+    /// shaped by the real text system in the face it is drawn in: three digits
+    /// and an ellipsis, and for the path a head, an ellipsis and a tail.
+    #[derive(Clone, Copy)]
+    struct CommitMinima {
+        label: f32,
+        byline: f32,
+        path: f32,
+    }
+
+    /// Where a commit's header is drawn at the largest interface size, as the
+    /// scenes of the native captures: the diff filling the workspace at 1440px
+    /// with the panel open, the saved column falling back at 1000px (a body of
+    /// 437px), and the native 157px minimum body.
+    #[derive(Clone, Copy)]
+    enum CommitScene {
+        Wide1440,
+        Body437,
+        Body157,
+    }
+
+    /// The commit's parts as painted: every one the header draws is whole where
+    /// it has to be and inside the painted body, none painted over another. The
+    /// short ref is drawn whole wherever its own room (the icon, a gap and the
+    /// ref) fits the body, which it does in every scene here, whatever the
+    /// path or the label: `natural` is its width with room. The focused file's
+    /// back control keeps its chevron part; the commit's label, in the overflow
+    /// rows (where it has a selector, and `require_label` says it must), is at
+    /// least a readable minimum wide, so it can be seen and hovered.
+    #[allow(clippy::too_many_arguments)]
+    fn assert_commit_fits(
+        vcx: &mut VisualTestContext,
+        focused: bool,
+        labelled: bool,
+        natural: Pixels,
+        minima: CommitMinima,
+        require: bool,
+        what: &str,
+    ) {
+        let body = vcx
+            .debug_bounds("diff-overlay-body")
+            .unwrap_or_else(|| panic!("{what}: the overlay's body is not drawn"));
+        let widths = diff_widths(vcx);
+        let mut nodes: Vec<(&str, &str)> = vec![
+            ("subject icon", "diff-overlay-icon"),
+            ("ref", "diff-overlay-rev"),
+            ("terminal group", "document-terminal-group"),
+            ("terminal name", "document-terminal-name"),
+            ("view switch", "diff-overlay-view"),
+            ("layout switch", "document-layout-switch"),
+            ("close", "diff-overlay-close"),
+        ];
+        if focused {
+            nodes.push(("back button", "diff-overlay-unfocus"));
+        }
+        let eps = px(0.5);
+        let mut found: Vec<(&str, Bounds<Pixels>)> = Vec::new();
+        for (name, selector) in &nodes {
+            let field = vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{what}: the {name} ({selector}) is not drawn"));
+            assert!(
+                field.size.width >= px(1.) && field.size.height >= px(1.),
+                "{what}: the {name} {field:?} is hidden; {widths}"
+            );
+            assert!(
+                field.left() >= body.left() - eps
+                    && field.right() <= body.right() + eps
+                    && field.top() >= body.top() - eps
+                    && field.bottom() <= body.bottom() + eps,
+                "{what}: the {name} {field:?} is outside the painted body {body:?}; {widths}"
+            );
+            found.push((*name, field));
+        }
+        let rev = found.iter().find(|(name, _)| *name == "ref").unwrap().1;
+        assert!(
+            rev.size.width + eps >= natural,
+            "{what}: the ref is {:?} wide, not its {natural:?} with room; {widths}",
+            rev.size.width
+        );
+        if focused {
+            let back = found
+                .iter()
+                .find(|(name, _)| *name == "back button")
+                .unwrap()
+                .1;
+            let chevron_part = 4. + 0.875 * 24.;
+            assert!(
+                f32::from(back.size.width) >= chevron_part,
+                "{what}: the back button {back:?} is under its {chevron_part}px chevron part; \
+                 {widths}"
+            );
+        }
+        // The overflow rows' pieces, each at no less than its readable
+        // minimum and inside the body: where they exist (they have selectors
+        // in the overflow rows only), and where `require` says they must.
+        for (name, selector, least, wanted) in [
+            (
+                "commit label",
+                "diff-overlay-label-subject",
+                minima.label,
+                labelled,
+            ),
+            (
+                "commit byline",
+                "diff-overlay-label-byline",
+                minima.byline,
+                labelled,
+            ),
+            ("path tail", "diff-overlay-path", minima.path, focused),
+        ] {
+            match vcx.debug_bounds(selector) {
+                Some(piece) => {
+                    assert!(
+                        f32::from(piece.size.width) >= least - 0.01
+                            && piece.size.height >= px(1.)
+                            && piece.left() >= body.left() - eps
+                            && piece.right() <= body.right() + eps
+                            && piece.top() >= body.top() - eps
+                            && piece.bottom() <= body.bottom() + eps,
+                        "{what}: the {name} {piece:?} is under its readable minimum, {least}px, \
+                         hidden, or outside the body {body:?}; {widths}"
+                    );
+                    // The path tail is inside its own back button.
+                    if name == "path tail" {
+                        let back = found
+                            .iter()
+                            .find(|(owner, _)| *owner == "back button")
+                            .unwrap_or_else(|| panic!("{what}: a path without its back button"))
+                            .1;
+                        assert!(
+                            piece.left() >= back.left() - eps
+                                && piece.right() <= back.right() + eps
+                                && piece.top() >= back.top() - eps
+                                && piece.bottom() <= back.bottom() + eps,
+                            "{what}: the path tail {piece:?} is outside its back button \
+                             {back:?}; {widths}"
+                        );
+                    }
+                    found.push((name, piece));
+                }
+                None => assert!(
+                    !(require && wanted),
+                    "{what}: the {name} is not drawn where the overflow rows must show it; \
+                     {widths}"
+                ),
+            }
+        }
+        for (i, (a_name, a)) in found.iter().enumerate() {
+            for (b_name, b) in &found[i + 1..] {
+                let name_in_button = [*a_name, *b_name].contains(&"terminal name")
+                    && [*a_name, *b_name].contains(&"terminal group");
+                let path_in_back = [*a_name, *b_name].contains(&"path tail")
+                    && [*a_name, *b_name].contains(&"back button");
+                assert!(
+                    name_in_button || path_in_back || !overlaps(*a, *b),
+                    "{what}: the {a_name} {a:?} is painted over the {b_name} {b:?}; {widths}"
+                );
+            }
+        }
+    }
+
+    /// The window width at which the diff filling the workspace, the panels
+    /// open, paints a body of `target` pixels, found by reading the painted
+    /// body and correcting the width by what it is off by: the panels' widths
+    /// change with the window (the test backend's are not the native ones), so
+    /// no constant offset does it. The window is left at that width.
+    fn solve_window(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        target: f32,
+        height: f32,
+        what: &str,
+    ) -> f32 {
+        let mut width = target + 560.;
+        for _ in 0..16 {
+            put_in_scene(app, vcx, DocumentLayout::Fill, true, width, height);
+            let painted = painted_body(vcx, what);
+            if (painted - target).abs() <= 0.5 {
+                return width;
+            }
+            width += target - painted;
+        }
+        panic!("{what}: no window paints a {target}px body");
+    }
+
+    /// One commit header case at the largest interface size in Russian: the
+    /// commit (with its label, or bare), plain or opened on `path`, drawn in
+    /// each of `scenes`, the short ref whole at its natural width in every one
+    /// and every part of the header inside the painted body.
+    #[allow(clippy::too_many_arguments)]
+    fn check_commit_case(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        subject: &DiffRef,
+        focused: bool,
+        path: &str,
+        scenes: &[CommitScene],
+        minima: CommitMinima,
+    ) {
+        let kind = if subject.labelled() {
+            "commit"
+        } else {
+            "bare ref"
+        };
+        let held = if focused {
+            open_focused_commit(app, vcx, subject, path)
+        } else {
+            open_diff(app, vcx, subject)
+        };
+        let state = format!(
+            "ru-RU UI24 {kind}{}",
+            if focused {
+                format!(" focused on {path}")
+            } else {
+                String::new()
+            }
+        );
+        put_in_scene(app, vcx, DocumentLayout::Fill, false, 2400., 900.);
+        assert_holds(app, vcx, &held, &state);
+        let natural = diff_header(vcx, &state)
+            .rev
+            .expect("a revision's subject is drawn")
+            .size
+            .width;
+        let shaped = shaped_rev(app, vcx, &subject.drawn());
+        assert!(
+            (f32::from(natural) - shaped).abs() <= 2.,
+            "{state}: the ref is {natural:?} with room, {shaped}px shaped"
+        );
+        for scene in scenes {
+            // The native bodies are solved for, and asserted, in the window that
+            // paints them.
+            let (width, painted, label_needed) = match scene {
+                CommitScene::Wide1440 => {
+                    put_in_scene(app, vcx, DocumentLayout::Fill, true, 1440., 900.);
+                    (1440., painted_body(vcx, &state), false)
+                }
+                CommitScene::Body437 => {
+                    let width = solve_window(app, vcx, 437., 700., &state);
+                    (width, painted_body(vcx, &state), false)
+                }
+                CommitScene::Body157 => {
+                    let width = solve_window(app, vcx, 157., 520., &state);
+                    (width, painted_body(vcx, &state), true)
+                }
+            };
+            let what = format!("{state} at {width}px, body {painted}px");
+            assert_holds(app, vcx, &held, &what);
+            assert_commit_fits(
+                vcx,
+                focused,
+                subject.labelled(),
+                natural,
+                minima,
+                label_needed,
+                &what,
+            );
+        }
+    }
+
+    /// A commit's header, with its label and bare, plain and opened on a file
+    /// (a short path, a long one and the native capture's), at the largest
+    /// interface size in Russian, in the three scenes of the native captures:
+    /// the short ref is whole at its natural width in every one, every control
+    /// and identity is inside the painted body and none is painted over
+    /// another, and in the 157px body the commit's label is still there. The
+    /// first case is the finding itself: the labelled commit opened on
+    /// `src/native-diff-lines.txt` in the native 437px body, whose SHA used to
+    /// vanish.
+    #[gpui::test]
+    fn a_commit_header_keeps_its_ref_whole_and_every_part_inside_at_the_largest_font(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::tab_strip::overflow_gpui_tests::{set_ui_font_size, use_locale};
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        const PATHS: [&str; 3] = [
+            "a.rs",
+            "src/ui/components/very/deep/directory/tree/with/a-file-name-that-keeps-going.rs",
+            "src/native-diff-lines.txt",
+        ];
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Dock);
+        set_right_panel(&app, &mut vcx, false);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.set_document_ratio(0.5, cx);
+            app.tabs[0].name = Some(TAB_TITLE.to_string());
+            cx.notify();
+        });
+        set_native_context(&app, &mut vcx, "ru-RU", 24.);
+        resize(&mut vcx, 2400., 900.);
+        let minima = CommitMinima {
+            label: kept_prefix(&app, &mut vcx, "feat", crate::ui::right_panel::TEXT, false),
+            byline: kept_prefix(&app, &mut vcx, "000", crate::ui::right_panel::META, true),
+            path: shaped_path(&app, &mut vcx, "000\u{2026}000").ceil(),
+        };
+        let all = [
+            CommitScene::Wide1440,
+            CommitScene::Body437,
+            CommitScene::Body157,
+        ];
+        // The finding first, so its red is the first one reported.
+        check_commit_case(
+            &app,
+            &mut vcx,
+            &DiffRef::Commit(COMMIT_SHA),
+            true,
+            PATHS[2],
+            &[CommitScene::Body437],
+            minima,
+        );
+        for subject in [DiffRef::Commit(COMMIT_SHA), DiffRef::BareCommit(COMMIT_SHA)] {
+            for focused in [false, true] {
+                for path in PATHS {
+                    if !focused && path != PATHS[0] {
+                        continue;
+                    }
+                    check_commit_case(&app, &mut vcx, &subject, focused, path, &all, minima);
+                }
+            }
+        }
+        set_ui_font_size(&app, &mut vcx, 16.);
+        use_locale(&app, &mut vcx, "en", "Agents");
+    }
+
+    /// A commit with `label_subject` as its label, opened on `path`, as the UI
+    /// opens it from a file row.
+    fn open_labelled_commit(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        label_subject: &str,
+        path: &str,
+    ) -> std::sync::Arc<crate::terminal::git_diff::DiffSnapshot> {
+        use crate::terminal::git_diff::{
+            CommitLabel, DiffSnapshot, DiffSource, FileDiff, FileStatus,
+        };
+        let snapshot = std::sync::Arc::new(DiffSnapshot {
+            root: std::path::PathBuf::from("/no/such/tty59/repo"),
+            source: DiffSource::Commit {
+                rev: COMMIT_SHA.to_string(),
+                label: Some(CommitLabel {
+                    subject: label_subject.to_string(),
+                    author: "Dev Example".into(),
+                    at: 1_700_000_000,
+                }),
+            },
+            branch: "move-tab-keybind".into(),
+            files: vec![FileDiff {
+                path: path.into(),
+                old_path: None,
+                status: FileStatus::Modified,
+                added: 12,
+                removed: 3,
+                binary: false,
+                truncated: None,
+                hunks: Vec::new(),
+            }],
+            ..Default::default()
+        });
+        let held = std::sync::Arc::clone(&snapshot);
+        app.update_in(vcx, |app, window, cx| {
+            app.open_loaded_diff_for_test(snapshot, false, window, cx);
+            let overlay = app.tabs[0].diff_overlay.as_mut().expect("the diff is open");
+            overlay.focus = Some(path.to_string());
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        assert_holds(app, vcx, &held, "a labelled commit, freshly opened");
+        held
+    }
+
+    /// The real tooltip of the actual header element `selector`: the mouse
+    /// moved onto it, the clock advanced past the show delay, a frame drawn.
+    /// Returns where the tooltip put its content, or `None` if it is not there.
+    fn hover_tooltip(
+        vcx: &mut VisualTestContext,
+        selector: &'static str,
+    ) -> Option<Bounds<Pixels>> {
+        // Off every element first, so no tooltip of an earlier hover is up.
+        vcx.simulate_mouse_move(
+            gpui::point(px(2.), px(2.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(700));
+        vcx.run_until_parked();
+        let target = vcx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is not drawn, so it cannot be hovered"));
+        vcx.simulate_mouse_move(target.center(), None, gpui::Modifiers::default());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(700));
+        vcx.run_until_parked();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.debug_bounds("diff-overlay-tooltip-text")
+    }
+
+    /// One line of the tooltip's text: the default line height at the card's
+    /// text size (0.875 of the interface size), rounded as a drawn line is.
+    fn tooltip_line_h(vcx: &mut VisualTestContext) -> f32 {
+        vcx.update(|window, _| {
+            let mut style = window.text_style();
+            style.font_size = px(0.875 * window.rem_size().as_f32()).into();
+            style.line_height_in_pixels(window.rem_size()).as_f32()
+        })
+    }
+
+    /// How many lines `text` takes in `width` pixels as the real text system
+    /// lays it out: the whole text shaped in the card's own font (the interface
+    /// family, normal weight, 0.875 of the interface size) with every byte in
+    /// one run and the width as its wrap width, which also breaks a word wider
+    /// than the width, as the drawn text does.
+    fn tooltip_lines(vcx: &mut VisualTestContext, text: &str, width: f32) -> usize {
+        use gpui_component::ActiveTheme as _;
+        vcx.update(|window, cx| {
+            let font = gpui::Font {
+                family: cx.theme().font_family.clone(),
+                features: Default::default(),
+                fallbacks: None,
+                weight: gpui::FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+            };
+            let run = gpui::TextRun {
+                len: text.len(),
+                font,
+                color: gpui::Hsla::default(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let size = px(0.875 * window.rem_size().as_f32());
+            let lines = window
+                .text_system()
+                .shape_text(
+                    gpui::SharedString::from(text.to_string()),
+                    size,
+                    &[run],
+                    Some(px(width)),
+                    None,
+                )
+                .expect("the text shapes");
+            lines
+                .iter()
+                .map(|line| line.wrap_boundaries.len() + 1)
+                .sum()
+        })
+    }
+
+    /// At the 720px window minimum, in Russian at the largest size, the
+    /// overflow header's real tooltips (the commit label, the SHA and the
+    /// focused path) hovered on the actual header with the clock advanced: the
+    /// whole visible card, its content with its padding, border and outer
+    /// margin, is inside the window, and the content is the whole text: as
+    /// tall as the lines an independent wrap of every word takes, which for a
+    /// text wider than the window is more than one. Two labels, the native
+    /// capture's 78 characters and a long Cyrillic sentence. The words
+    /// themselves are for the native capture to read.
+    #[gpui::test]
+    fn the_overflow_label_ref_and_path_tooltips_wrap_inside_the_window(cx: &mut TestAppContext) {
+        use crate::ui::tab_strip::overflow_gpui_tests::{set_ui_font_size, use_locale};
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        const NATIVE: &str =
+            "feat(checkout): add tax rate and regional VAT handling for saved payment methods";
+        const CYRILLIC: &str = "Исправление: добавлена обработка налоговой ставки и региональных \
+            вычетов для сохранённых способов оплаты при оформлении заказа в корзине покупателя";
+        const PATH: &str =
+            "src/ui/components/very/deep/directory/tree/with/a-file-name-that-keeps-going.rs";
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Dock);
+        set_right_panel(&app, &mut vcx, false);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.set_document_ratio(0.5, cx);
+            app.tabs[0].name = Some(TAB_TITLE.to_string());
+            cx.notify();
+        });
+        set_native_context(&app, &mut vcx, "ru-RU", 24.);
+        resize(&mut vcx, 2400., 900.);
+        let rem = vcx.update(|window, _| window.rem_size().as_f32());
+        // What surrounds the tooltip's content, per side, in the component's
+        // own card (`tooltip.rs`): the outer margin `m_3` (0.75 rem), the
+        // padding `px_2p5` (0.625 rem) and the 1px border.
+        let chrome = 0.75 * rem + 0.625 * rem + 1.;
+        // Above and below: the outer margin, the padding `py_1` (0.25 rem) and
+        // the border.
+        let chrome_v = 0.75 * rem + 0.25 * rem + 1.;
+        let line_h = tooltip_line_h(&mut vcx);
+        for label in [NATIVE, CYRILLIC] {
+            let held = open_labelled_commit(&app, &mut vcx, label, PATH);
+            put_in_scene(&app, &mut vcx, DocumentLayout::Fill, true, 720., 520.);
+            assert_holds(&app, &mut vcx, &held, label);
+            let (window_w, window_h) = (720., 520.);
+            for (name, selector, text) in [
+                ("commit label", "diff-overlay-label-subject", label),
+                ("ref", "diff-overlay-rev", COMMIT_SHA),
+                ("path", "diff-overlay-unfocus", PATH),
+            ] {
+                let what = format!("ru-RU UI24 at 720px, the {name} tooltip of {label:?}");
+                let content = hover_tooltip(&mut vcx, selector).unwrap_or_else(|| {
+                    panic!("{what}: no tooltip content was drawn after the hover")
+                });
+                assert!(
+                    f32::from(content.left()) - chrome >= -0.5
+                        && f32::from(content.right()) + chrome <= window_w + 0.5,
+                    "{what}: the whole card, content {content:?} and {chrome}px of padding, \
+                     border and margin each side, is not inside the {window_w}px window"
+                );
+                assert!(
+                    f32::from(content.top()) - chrome_v >= -0.5
+                        && f32::from(content.bottom()) + chrome_v <= window_h + 0.5,
+                    "{what}: the whole card, content {content:?} and {chrome_v}px of padding, \
+                     border and margin above and below, is not inside the {window_h}px window"
+                );
+                // The visible card, content with its padding and border (the
+                // outer margin is not part of it), is at most the hover maximum.
+                let width = f32::from(content.size.width);
+                let card = width + 2. * (0.625 * rem + 1.);
+                assert!(
+                    card <= 420. + 0.5,
+                    "{what}: the visible card is {card}px wide, over the 420px hover maximum"
+                );
+                let lines = tooltip_lines(&mut vcx, text, width);
+                assert!(
+                    (f32::from(content.size.height) - lines as f32 * line_h).abs() <= 1.,
+                    "{what}: the content {content:?} is not the {lines} lines of {line_h}px the \
+                     whole text takes in {width}px"
+                );
+            }
+        }
+        set_ui_font_size(&app, &mut vcx, 16.);
+        use_locale(&app, &mut vcx, "en", "Agents");
+    }
+
     /// The keycap labels a title-bar chord can carry in these tests, each with
     /// the selector the keycap paints its bounds under.
     const CAP_SELECTORS: [(&str, &str); 5] = [

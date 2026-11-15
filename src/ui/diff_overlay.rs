@@ -836,10 +836,40 @@ impl Tty59App {
             // In the overflow rows the path yields, so the whole of it is the
             // tooltip there; nowhere else is anything about it changed.
             let path_tip = overflow.then(|| SharedString::from(name.clone()));
+            let back_min = need.map_or(0., |n| n.piece_min(Item::Back));
+            let path_el = if overflow {
+                // The path in the overflow rows is cut by the one measured
+                // elision the UI has, keeping both ends, in the width layout
+                // gives it, which is never less than the planned tail.
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(rems(META_MONO))
+                    .font_family(self.font_family.clone())
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-path".into())
+                    })
+                    .child(crate::ui::text_elision::ElidedLabel::new(
+                        "diff-overlay-path-text",
+                        SharedString::from(name.clone()),
+                        crate::ui::text_elision::Mode::Middle,
+                    ))
+                    .into_any_element()
+            } else {
+                h_flex()
+                    .min_w_0()
+                    .text_size(rems(META_MONO))
+                    .font_family(self.font_family.clone())
+                    .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
+                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
+                    .painted("header-path")
+                    .into_any_element()
+            };
             back = Some(
                 div()
                     .occlude()
-                    .min_w_0()
+                    .when(!overflow, |d| d.min_w_0())
+                    .when(overflow, |d| d.min_w(px(back_min)))
                     .flex_shrink(999.)
                     .child(
                         h_flex()
@@ -868,10 +898,7 @@ impl Tty59App {
                                 }
                             }))
                             .when_some(path_tip, |d, tip| {
-                                d.tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(tip.clone())
-                                        .build(window, cx)
-                                })
+                                d.tooltip(move |window, cx| text_tooltip(tip.clone(), window, cx))
                             })
                             .child(
                                 Icon::new(IconName::ChevronLeft)
@@ -879,15 +906,7 @@ impl Tty59App {
                                     .flex_shrink_0()
                                     .text_color(cx.theme().muted_foreground),
                             )
-                            .child(
-                                h_flex()
-                                    .min_w_0()
-                                    .text_size(rems(META_MONO))
-                                    .font_family(self.font_family.clone())
-                                    .child(div().min_w_0().flex_shrink(999.).truncate().child(head))
-                                    .child(div().min_w_0().flex_shrink(1.).truncate().child(leaf))
-                                    .painted("header-path"),
-                            ),
+                            .child(path_el),
                     )
                     .into_any_element(),
             );
@@ -1021,7 +1040,13 @@ impl Tty59App {
                 .font_weight(FontWeight::MEDIUM)
                 .font_family(self.font_family.clone())
                 .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                    // The ref is shared with the ladder, which keeps the plain
+                    // tooltip; the overflow rows' is the observable text one.
+                    if overflow {
+                        text_tooltip(full.clone(), window, cx)
+                    } else {
+                        gpui_component::tooltip::Tooltip::new(full.clone()).build(window, cx)
+                    }
                 })
                 .child(subject.text)
                 .when(cfg!(test), |d| {
@@ -1081,49 +1106,77 @@ impl Tty59App {
         // none of its own: the ref gives way to nothing but a deficit that
         // is its own to take, and the label and byline are squeezed first.
         // Inside the group their order is what it was.
-        let label_el = subject.label.as_ref().map(|label| {
-            let whole = SharedString::from(label.subject.clone());
-            let group = h_flex()
-                .flex_1()
-                .min_w(rems(HEADER_GAP_REM))
-                .items_center()
-                .gap(rems(HEADER_GAP_REM));
-            let words = div().flex_auto().min_w_0().truncate().text_size(rems(TEXT));
-            // Yielding in the overflow rows, the commit's subject carries its
-            // whole text there.
-            let group = if overflow {
+        let (label_el, label_piece, byline_piece) = match subject.label.as_ref() {
+            None => (None, None, None),
+            Some(label) if !overflow => {
+                let whole = SharedString::from(label.subject.clone());
+                let group = h_flex()
+                    .flex_1()
+                    .min_w(rems(HEADER_GAP_REM))
+                    .items_center()
+                    .gap(rems(HEADER_GAP_REM))
+                    .child(
+                        div()
+                            .flex_auto()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(rems(TEXT))
+                            .child(whole),
+                    )
+                    // Yields before the subject does, for the same reason
+                    // the path below it does: an author name is unbounded
+                    // too, and of the three things on this strip it is the
+                    // one nobody reads twice.
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_shrink(999.)
+                            .truncate()
+                            .text_size(rems(META))
+                            .font_features(tabular())
+                            .text_color(cx.theme().muted_foreground)
+                            .child(label_byline(label, now_unix())),
+                    )
+                    .into_any_element();
+                (Some(group), None, None)
+            }
+            Some(label) => {
+                // In the overflow rows the label and the byline are pieces of
+                // their own, each drawn at no less than its planned minimum, so
+                // neither can be laid out at nothing; the commit's subject
+                // carries its whole text.
+                let whole = SharedString::from(label.subject.clone());
                 let tip = whole.clone();
-                group.child(
-                    words
-                        .id("diff-overlay-label-subject")
-                        .when(cfg!(test), |d| {
-                            d.debug_selector(|| "diff-overlay-label-subject".into())
-                        })
-                        .tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
-                        })
-                        .child(whole),
-                )
-            } else {
-                group.child(words.child(whole))
-            };
-            group
-                // Yields before the subject does, for the same reason
-                // the path below it does: an author name is unbounded
-                // too, and of the three things on this strip it is the
-                // one nobody reads twice.
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex_shrink(999.)
-                        .truncate()
-                        .text_size(rems(META))
-                        .font_features(tabular())
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label_byline(label, now_unix())),
-                )
-                .into_any_element()
-        });
+                let (label_min, byline_min) = need.map_or((0., 0.), |n| {
+                    (n.piece_min(Item::Label), n.piece_min(Item::Byline))
+                });
+                let words = div()
+                    .id("diff-overlay-label-subject")
+                    .flex_1()
+                    .min_w(px(label_min))
+                    .truncate()
+                    .text_size(rems(TEXT))
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-label-subject".into())
+                    })
+                    .tooltip(move |window, cx| text_tooltip(tip.clone(), window, cx))
+                    .child(whole)
+                    .into_any_element();
+                let byline = div()
+                    .min_w(px(byline_min))
+                    .flex_shrink(999.)
+                    .truncate()
+                    .text_size(rems(META))
+                    .font_features(tabular())
+                    .text_color(cx.theme().muted_foreground)
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "diff-overlay-label-byline".into())
+                    })
+                    .child(label_byline(label, now_unix()))
+                    .into_any_element();
+                (None, Some(words), Some(byline))
+            }
+        };
         let view_el = div()
             .occlude()
             .flex_shrink_0()
@@ -1261,19 +1314,22 @@ impl Tty59App {
             ))
             .child(div().flex_1())
             .child(close_el);
-        let cluster = h_flex()
-            .flex_1()
-            .min_w_0()
+        // The icon with the ref or the branch name: drawn at no less than the
+        // planned minimum, so the ref never gives way below its floor.
+        let ref_el = h_flex()
             .items_center()
             .gap(rems(HEADER_GAP_REM))
+            .min_w(px(need.piece_min(Item::Ref)))
+            .flex_shrink(1.)
             .child(icon_el)
             .child(subject_el)
-            .children(label_el)
             .into_any_element();
         let name_el =
             self.render_document_terminal_name(Some(need.overflow_name_cap(&plan)), window, cx);
         // The pieces, in the order the plan packed them.
-        let mut pieces: Vec<AnyElement> = vec![cluster];
+        let mut pieces: Vec<AnyElement> = vec![ref_el];
+        pieces.extend(label_piece);
+        pieces.extend(byline_piece);
         pieces.extend(back);
         pieces.extend(added_el);
         pieces.extend(removed_el);
@@ -2022,6 +2078,14 @@ pub(crate) struct DiffHeaderMetrics {
     /// of any glyphs.
     summary_min: f32,
     name_min: f32,
+    /// The least a commit's label and its byline keep in the overflow rows, in
+    /// the fonts and sizes they are drawn at (three digits and an ellipsis,
+    /// like the minima above), and the least the focused file's path keeps
+    /// beside its chevron: a head, an ellipsis and a tail in the path's own
+    /// monospace face. Measured here, with the others, and nowhere else.
+    label_min: f32,
+    byline_min: f32,
+    path_min: f32,
     /// The ten templates the summary can be made of in the current language,
     /// and every word of them, measured: the language and the summary's font
     /// are what the words depend on, never the counts.
@@ -2088,6 +2152,22 @@ impl DiffHeaderMetrics {
                 &word_font,
                 rem * crate::ui::document_column::HEADER_CELL_TEXT,
                 "000\u{2026}",
+            )
+            .ceil(),
+            label_min: crate::ui::tab_strip::measure_text(
+                text,
+                &word_font,
+                rem * TEXT,
+                "000\u{2026}",
+            )
+            .ceil(),
+            byline_min: crate::ui::tab_strip::measure_text(text, &figures, meta, "000\u{2026}")
+                .ceil(),
+            path_min: crate::ui::tab_strip::measure_text(
+                text,
+                &chip_font,
+                meta_mono,
+                "000\u{2026}000",
             )
             .ceil(),
             templates,
@@ -2240,26 +2320,30 @@ impl Tty59App {
                 flex: true,
             },
         ];
-        // What the overflow rows pack, in the order they read: the subject
-        // with its icon, the way back, the totals, the two switches (with
-        // their margins), the chip, the Refreshing word, the terminal's name.
-        let subject_min = SUBJECT_ICON
+        // What the overflow rows pack, in the order they read: the icon with
+        // the ref or the branch name, the commit's label and its byline, the
+        // way back with a readable tail of the path, the totals, the two
+        // switches (with their margins), the chip, the Refreshing word, the
+        // terminal's name. Each is packed at the least it keeps, and drawn at no
+        // less: the same number.
+        let ref_min = SUBJECT_ICON
             + gap
             + if shape.is_rev {
                 m.rev_floor
             } else {
                 m.name_min
-            }
-            + if parts.labelled { 2. * gap } else { 0. };
+            };
         let switch_w = crate::ui::document_column::layout_switch_w();
         let mut items = [ItemSpec {
-            item: Item::Subject,
+            item: Item::Ref,
             w: 0.,
         }; ITEM_MAX];
         let mut n_items = 0;
         for (present, item, w) in [
-            (true, Item::Subject, subject_min),
-            (parts.focused, Item::Back, back_w),
+            (true, Item::Ref, ref_min),
+            (parts.labelled, Item::Label, m.label_min),
+            (parts.labelled, Item::Byline, m.byline_min),
+            (parts.focused, Item::Back, back_w + m.path_min),
             (parts.added, Item::Added, added_w),
             (parts.removed, Item::Removed, removed_w),
             (true, Item::View, switch_w),
@@ -2336,7 +2420,11 @@ fn summary_templates() -> [&'static str; 10] {
 /// What a header's pieces are, in the order the overflow rows read them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Item {
-    Subject,
+    /// The icon and the ref or the branch name.
+    Ref,
+    /// A commit's or a pull request's label, and its byline.
+    Label,
+    Byline,
     Back,
     Added,
     Removed,
@@ -2348,7 +2436,7 @@ pub(crate) enum Item {
 }
 
 /// How many pieces the overflow rows pack.
-const ITEM_MAX: usize = 9;
+const ITEM_MAX: usize = 11;
 
 #[derive(Clone, Copy)]
 struct ItemSpec {
@@ -2983,6 +3071,15 @@ impl DiffNeed {
             rows,
             summary_h: self.summary_height(lines),
         }
+    }
+
+    /// The least `item` is packed at, and drawn at: what its row was planned
+    /// with, so that what is drawn is never narrower than what was planned.
+    pub(crate) fn piece_min(&self, item: Item) -> f32 {
+        self.items[..self.n_items]
+            .iter()
+            .find(|spec| spec.item == item)
+            .map_or(0., |spec| spec.w)
     }
 
     /// The pieces the overflow rows pack, in the order they read.
@@ -3810,6 +3907,43 @@ fn source_shape(source: &DiffSource) -> SourceShape {
         },
     }
 }
+
+/// A tooltip that is the plain text, in the card every tooltip is, with a
+/// selector on its content so a test can find where the real tooltip put it.
+fn text_tooltip(text: SharedString, window: &mut Window, cx: &mut gpui::App) -> gpui::AnyView {
+    // The card is at most the UI's hover maximum, and with its outer margin
+    // (`m_3`, 0.75 rem a side) at most the window less a gutter: read when the
+    // tooltip is shown, so a resized window is honored. It wraps by words and
+    // loses none of them.
+    let margin = 0.75 * window.rem_size().as_f32();
+    let limit = OVERFLOW_TOOLTIP_MAX_W
+        .min(window.viewport_size().width.as_f32() - OVERFLOW_TOOLTIP_GUTTER - 2. * margin)
+        .max(0.);
+    // Text only wraps at a width it is given, and reports its whole unwrapped
+    // width as its smallest, so the card's cap alone leaves the content wider
+    // than the card: the content gets the card's inner cap, the card's border
+    // box less its padding (`px_2p5`, 0.625 rem a side) and border.
+    let content_limit = (limit - 2. * (0.625 * window.rem_size().as_f32() + 1.)).max(0.);
+    gpui_component::tooltip::Tooltip::element(move |_, _| {
+        div()
+            .max_w(px(content_limit))
+            .whitespace_normal()
+            .when(cfg!(test), |d| {
+                d.debug_selector(|| "diff-overlay-tooltip-text".into())
+            })
+            .child(text.clone())
+    })
+    .max_w(px(limit))
+    .whitespace_normal()
+    .build(window, cx)
+}
+
+/// The widest an overflow tooltip's visible card is: the hover maximum.
+const OVERFLOW_TOOLTIP_MAX_W: f32 = 420.;
+
+/// What an overflow tooltip leaves of the window's width, its outer margins
+/// included.
+const OVERFLOW_TOOLTIP_GUTTER: f32 = 16.;
 
 /// `Ada · 2h`, the byline under a commit's subject.
 ///
