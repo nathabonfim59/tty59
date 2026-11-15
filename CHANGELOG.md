@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Middle-click a tab to close it**, in the sidebar or the top strip. It
+  goes through the usual close, so an unsaved editor or a busy pane still
+  asks first.
+- **Copy Path and Copy as host:path for remote files**: the SFTP browser's
+  row menu and a remote workspace's Files tree copy a file's or folder's
+  remote path, or the `user@host:/path` form `scp` and `rsync` take. The
+  login comes from the pane's SSH session or the workspace's route; IPv6
+  addresses are bracketed, and WSL and `--stdio` machines offer only the
+  plain path.
+- **Tap to click on mobile**: in a program that reports the mouse (htop,
+  lazygit, vim with `mouse=a`), a quick tap on the live screen clicks the
+  cell under it instead of raising the keyboard, and a brief mark shows
+  where it landed.
+
+### Fixed
+
+- **bash marks the first command of a new pane again** on distributions
+  whose `/etc/profile.d` extends `PROMPT_COMMAND`, as systemd 258's
+  `80-systemd-osc-context.sh` does (Ubuntu 26.04). That first line had no
+  command-start or command-end mark, so `tty59 exec` reported a command the
+  shell never ran.
+- **macOS no longer crashes when the system proxy store is unavailable**:
+  configd can refuse the store during sleep/wake or a VPN change, and the
+  proxy lookup now treats that as no proxy instead of panicking.
+- **A restored Codex session survives a second restart**: the pane takes
+  the session id from the `codex resume <id>` it was restored with (Trae
+  Code and Muse too), so it no longer comes back as a plain shell when the
+  app restarts before the agent's first turn. An id the agent reports
+  itself still wins.
+- **The GitHub and Info tabs use the panel's width** on Linux, instead of
+  clipping their text or sitting in a narrow column, and the Info tab's
+  Ports message wraps.
+- **Search follows the Files tree's Show Dotfiles switch**: with dotfiles
+  shown, content search finds matches in `.env`, `.github/` and ignored
+  paths too, and flipping the switch searches again.
+- **The Files tree keeps refreshing when its watcher fails**: a watcher
+  that could not open, or went away, is retried with a growing wait (2 s
+  up to a minute), and meanwhile a "Not refreshing automatically" note with
+  a Retry link sits under the tree. A dotfile created while dotfiles were
+  hidden shows up once they are shown, and changes from several machines
+  in the same moment are all applied. The search row gains a Refresh
+  button.
+- **An untracked file's preview lands in the diff that asked for it**:
+  switching tabs while it was being read left that diff on "Reading…" for
+  good, and could show the file in another tab's diff.
+- **Picking a file in the Changes panel opens it at its top**, expanded
+  even if it was collapsed in the full list, and a file with no line
+  changes (a rename, a mode change, an empty file) says "No content
+  changes" instead of showing a bare header.
+- **A failed SFTP action keeps the listing**: a download, upload or rename
+  that fails says why in a dismissible strip above the rows, which stay
+  where they were. A folder that cannot be listed offers Retry and Go Up.
+- **Oh My Pi's avatar uses its current brand mark** and colours.
+- **Mobile**: the keyboard key closes a keyboard opened from the message
+  box; a QR scan that hangs on Android gives the page back after 20
+  seconds, with Try again and Paste code instead; and tapping an agent's
+  choice sends its keys one at a time, ignoring taps on choices that have
+  already left the screen.
+
 ## [26.14.1] - 2026-11-15
 
 ### Fixed
