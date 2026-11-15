@@ -344,7 +344,58 @@ impl GitSubscriptions {
 enum ProbeLanding {
     Status(Arc<WorkingTreeStatus>, Arc<StatusIndex>),
     NotARepo,
-    Unreachable,
+    Unreachable(String),
+}
+
+/// The last probe that could not reach git: when, so `is_stale` can rest, and
+/// what went wrong, so a panel with nothing cached can say so.
+struct ProbeFailure {
+    at: Instant,
+    reason: Arc<str>,
+}
+
+/// What the panel can draw for a repository right now. The status wins over a
+/// failure: a held status is stale-but-useful, and the panel keeps showing it
+/// while the link is down.
+#[derive(Clone, Debug)]
+pub(crate) enum StatusRead {
+    Ready(Arc<WorkingTreeStatus>),
+    /// Never read, and nothing has failed since: a probe is on its way.
+    Loading,
+    /// Never read, and the last probe could not reach git. The reason is
+    /// git's or the host's own words, and may be empty only when neither said
+    /// anything.
+    Failed(Arc<str>),
+}
+
+impl StatusRead {
+    /// Whether what a frame drew is still what is held: the same state, and for
+    /// `Ready` and `Failed` the same allocation.
+    ///
+    /// The comparison is by `Arc::ptr_eq`, never by address value. A caller
+    /// that remembers a `StatusRead` keeps that allocation alive, so a freed
+    /// status or reason cannot hand its address to a different state and read
+    /// as "unchanged". A different kind is always a change.
+    pub(crate) fn same_identity(&self, other: &StatusRead) -> bool {
+        match (self, other) {
+            (StatusRead::Ready(a), StatusRead::Ready(b)) => Arc::ptr_eq(a, b),
+            (StatusRead::Loading, StatusRead::Loading) => true,
+            (StatusRead::Failed(a), StatusRead::Failed(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+}
+
+/// What a panicked probe said, for a reason a person can copy; never empty.
+fn panic_reason(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned());
+    match message {
+        Some(message) => format!("git status panicked: {message}"),
+        None => "git status panicked".to_string(),
+    }
 }
 
 /// One repository's `.git` watch and the burst it is feeding.
@@ -375,7 +426,7 @@ pub struct ScmData {
     /// repository", but "the question could not be asked". The held status
     /// stays (stale beats blank), and `is_stale` sits out
     /// [`PROBE_FAILURE_RETRY`] so a dead link is not probed at frame rate.
-    failed_at: ByHost<PathBuf, Instant>,
+    failed_at: ByHost<PathBuf, ProbeFailure>,
     probes: InFlight<(HostId, PathBuf)>,
     network: ByHost<PathBuf, Arc<AtomicUsize>>,
     /// repo root → its `.git` watch, once someone is looking. A plain map
@@ -401,6 +452,33 @@ impl ScmData {
         self.index.get(host, root).cloned()
     }
 
+    /// Ready, loading or failed — see [`StatusRead`]. A held status always
+    /// wins: it is stale-but-useful, and a failed later probe does not blank it.
+    pub fn status_read(&self, host: HostId, root: &Path) -> StatusRead {
+        if let Some(status) = self.status_for(host, root) {
+            return StatusRead::Ready(status);
+        }
+        match self.failed_at.get(host, root) {
+            Some(failure) => StatusRead::Failed(Arc::clone(&failure.reason)),
+            None => StatusRead::Loading,
+        }
+    }
+
+    /// Record that a probe could not reach git, with the reason it gave.
+    fn note_failure(&mut self, host: HostId, root: &Path, reason: String) {
+        let failure = ProbeFailure {
+            at: Instant::now(),
+            reason: reason.into(),
+        };
+        self.failed_at.insert(host, root.to_path_buf(), failure);
+    }
+
+    /// Drop one repository's failure and its rest, so the next look asks again
+    /// at once: the user pressed Retry. Only that host's, only that root's.
+    pub fn forget_failure(&mut self, host: HostId, root: &Path) {
+        self.failed_at.remove(host, root);
+    }
+
     /// Three-valued, and the middle value is the one that matters: `None` for
     /// "never looked", `Some(None)` for "looked, and there is no repository
     /// there". A directory that is not a repository is a perfectly normal
@@ -423,6 +501,14 @@ impl ScmData {
         self.index.remove(host, root);
     }
 
+    /// Keep `.git` from being watched for a while, so a fixture that mends a
+    /// repository on disk is not healed by the watcher's invalidation: the
+    /// only way back from a failed probe is then the one under test.
+    #[cfg(test)]
+    pub fn hold_watch_closed(&mut self, host: HostId, root: &Path) {
+        self.watch_mut(host, root).retry_at = Some(Instant::now() + Duration::from_secs(3600));
+    }
+
     pub fn epoch(&self, host: HostId, root: &Path) -> u64 {
         self.epoch.get(host, root).copied().unwrap_or(0)
     }
@@ -439,7 +525,7 @@ impl ScmData {
             && !self
                 .failed_at
                 .get(host, root)
-                .is_some_and(|at| at.elapsed() < PROBE_FAILURE_RETRY)
+                .is_some_and(|failure| failure.at.elapsed() < PROBE_FAILURE_RETRY)
     }
 
     /// Mark a repository changed. Every write, every `.git` watcher event and
@@ -630,6 +716,14 @@ pub(crate) fn status_of(
     cx.try_global::<ScmData>()?.status_for(host, root)
 }
 
+/// [`status_of`] with the reason it is missing: still loading, or failed. For
+/// the one reader that has to tell the two apart — the Changes panel. The
+/// decorations and the count keep reading [`status_of`].
+pub(crate) fn status_read_of(cx: &gpui::App, host: HostId, root: &Path) -> StatusRead {
+    cx.try_global::<ScmData>()
+        .map_or(StatusRead::Loading, |data| data.status_read(host, root))
+}
+
 /// The per-path decoration index the file tree looks up during `render`.
 pub(crate) fn index_of(cx: &gpui::App, host: HostId, root: &Path) -> Option<Arc<StatusIndex>> {
     cx.try_global::<ScmData>()?.index_for(host, root)
@@ -667,7 +761,8 @@ impl Tty59App {
                         ProbeLanding::Status(Arc::new(*status), Arc::new(index))
                     }
                     Ok(StatusProbe::NotARepo) => ProbeLanding::NotARepo,
-                    Ok(StatusProbe::Unreachable) | Err(_) => ProbeLanding::Unreachable,
+                    Ok(StatusProbe::Unreachable(reason)) => ProbeLanding::Unreachable(reason),
+                    Err(payload) => ProbeLanding::Unreachable(panic_reason(payload.as_ref())),
                 }
             },
             move |cx, result| {
@@ -684,7 +779,7 @@ impl Tty59App {
                 // Only a definitive answer counts as a read; an unreachable
                 // host leaves what is cached (stale beats blank) and rests
                 // before the next try — see `is_stale`.
-                let definitive = !matches!(result, ProbeLanding::Unreachable);
+                let definitive = !matches!(result, ProbeLanding::Unreachable(_));
                 let mut not_a_repo = false;
                 let changed = match result {
                     ProbeLanding::Status(status, index) => {
@@ -707,9 +802,12 @@ impl Tty59App {
                         data.index.remove(id, root.as_path());
                         held
                     }
-                    ProbeLanding::Unreachable => {
-                        data.failed_at.insert(id, root.clone(), Instant::now());
-                        false
+                    // With a status held, nothing on screen moves. Without
+                    // one, the panel is drawing Loading and has to turn into
+                    // the failure, so this counts as a change.
+                    ProbeLanding::Unreachable(reason) => {
+                        data.note_failure(id, &root, reason);
+                        data.status.get(id, root.as_path()).is_none()
                     }
                 };
                 if definitive {
@@ -1237,7 +1335,7 @@ impl Tty59App {
 
 /// Git's one-line reason, without the `fatal:` / `error:` severity prefix the
 /// toast's icon and title already carry, and starting as a sentence.
-fn git_reason(message: &str) -> String {
+pub(crate) fn git_reason(message: &str) -> String {
     let trimmed = message.trim();
     let rest = ["fatal:", "error:"]
         .iter()
@@ -1380,6 +1478,135 @@ mod tests {
         assert!(
             data.is_stale(HostId::LOCAL, &root()),
             "a reconnect must not show the state from before the drop"
+        );
+    }
+
+    fn held_status() -> WorkingTreeStatus {
+        WorkingTreeStatus {
+            root: root(),
+            home: root(),
+            head: crate::core::git::status::HeadState::Unborn {
+                branch: "main".into(),
+            },
+            upstream: None,
+            ahead_behind: None,
+            entries: Vec::new(),
+            total_entries: 0,
+            truncated: false,
+            stash_count: 0,
+            operation: None,
+            prefilled_message: None,
+        }
+    }
+
+    /// Nothing read and nothing failed is Loading; a failure with nothing
+    /// cached is Failed, carrying the reason; a held status beats a failure;
+    /// Retry's `forget_failure` puts it back to Loading and ends the rest.
+    #[test]
+    fn a_status_read_tells_loading_from_failed_and_ready_wins() {
+        let mut data = ScmData::default();
+        let (host, root) = (HostId::LOCAL, root());
+        assert!(matches!(data.status_read(host, &root), StatusRead::Loading));
+
+        data.note_failure(host, &root, "timed out".into());
+        match data.status_read(host, &root) {
+            StatusRead::Failed(reason) => assert_eq!(&*reason, "timed out"),
+            other => panic!("expected a failure, got {other:?}"),
+        }
+        assert!(!data.is_stale(host, &root), "a failure rests");
+
+        data.forget_failure(host, &root);
+        assert!(matches!(data.status_read(host, &root), StatusRead::Loading));
+        assert!(data.is_stale(host, &root), "Retry asks again at once");
+
+        data.note_failure(host, &root, "timed out".into());
+        data.status
+            .insert(host, root.clone(), Arc::new(held_status()));
+        assert!(
+            matches!(data.status_read(host, &root), StatusRead::Ready(_)),
+            "stale beats blank: a held status is still drawn over a failure"
+        );
+    }
+
+    /// A failure belongs to one host's one root; Retry on it, a bump or a
+    /// dropped host does not reach any other.
+    #[test]
+    fn a_failure_is_one_hosts_one_roots_and_ends_with_a_bump_or_the_host() {
+        let mut data = ScmData::default();
+        let other_host = HostId::from_connection_key("somewhere-else");
+        let (a, b) = (PathBuf::from("/repo/a"), PathBuf::from("/repo/b"));
+        for (host, root) in [(HostId::LOCAL, &a), (HostId::LOCAL, &b), (other_host, &a)] {
+            data.note_failure(host, root, "down".into());
+        }
+
+        data.forget_failure(HostId::LOCAL, &a);
+        assert!(matches!(
+            data.status_read(HostId::LOCAL, &a),
+            StatusRead::Loading
+        ));
+        assert!(matches!(
+            data.status_read(HostId::LOCAL, &b),
+            StatusRead::Failed(_)
+        ));
+        assert!(
+            matches!(data.status_read(other_host, &a), StatusRead::Failed(_)),
+            "the same path on another machine is another repository"
+        );
+
+        // Evidence the host is alive again ends the rest too, as before.
+        data.bump(HostId::LOCAL, &b);
+        assert!(matches!(
+            data.status_read(HostId::LOCAL, &b),
+            StatusRead::Loading
+        ));
+
+        data.clear_host(other_host);
+        assert!(matches!(
+            data.status_read(other_host, &a),
+            StatusRead::Loading
+        ));
+    }
+
+    /// What the panel's watcher compares. Different kinds are different even
+    /// if an address were ever reused; the same kind needs the same allocation;
+    /// a retained clone keeps its allocation alive.
+    #[test]
+    fn identity_tells_the_three_states_apart_by_allocation() {
+        let status = Arc::new(held_status());
+        let reason: Arc<str> = "down".into();
+        let ready = StatusRead::Ready(Arc::clone(&status));
+        let failed = StatusRead::Failed(Arc::clone(&reason));
+
+        assert!(StatusRead::Loading.same_identity(&StatusRead::Loading));
+        assert!(ready.same_identity(&ready.clone()));
+        assert!(failed.same_identity(&failed.clone()));
+        assert!(!ready.same_identity(&failed));
+        assert!(!failed.same_identity(&StatusRead::Loading));
+        assert!(!StatusRead::Loading.same_identity(&ready));
+
+        // An equal status in a new allocation is a new observation.
+        assert!(!ready.same_identity(&StatusRead::Ready(Arc::new(held_status()))));
+        // So is the same reason text failing again.
+        assert!(!failed.same_identity(&StatusRead::Failed("down".into())));
+    }
+
+    /// A panicked probe says what it panicked with, and never nothing.
+    #[test]
+    fn a_panicked_probe_keeps_its_message() {
+        assert_eq!(
+            panic_reason(&"boom"),
+            "git status panicked: boom",
+            "a &str payload"
+        );
+        assert_eq!(
+            panic_reason(&String::from("bang")),
+            "git status panicked: bang",
+            "a String payload"
+        );
+        assert_eq!(
+            panic_reason(&42_u8),
+            "git status panicked",
+            "an opaque payload still gets an honest reason"
         );
     }
 

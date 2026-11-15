@@ -121,10 +121,6 @@ pub(crate) struct ScmPanelState {
     pub(crate) root_lookups: HashSet<(HostId, PathBuf)>,
     /// When the panel last asked for a status that it did not get back.
     pub(crate) probe_attempt: HashMap<(HostId, PathBuf), std::time::Instant>,
-    /// The status the last frame drew, as (cache key, `Arc` identity). The
-    /// watcher compares against it so a global write that changed nothing does
-    /// not ask for another frame.
-    pub(crate) seen: Option<((HostId, PathBuf), usize)>,
     pub(crate) watch: Option<gpui::Subscription>,
     /// The cheap per-tab git status the panel last reacted to. A change in it
     /// means a command touched the repository and the expensive status is due
@@ -146,6 +142,12 @@ pub(crate) struct ScmPanelState {
     /// the menu is built, cleared when it is dismissed.
     pub(crate) menu_row: Option<(ScmGroup, String)>,
     pub(crate) menu_sub: Option<gpui::Subscription>,
+    /// What the last frame drew for a repository — Ready, Loading or Failed —
+    /// with the cache key. The watcher compares against it
+    /// (`StatusRead::same_identity`) so a global write that changed nothing
+    /// does not ask for another frame. It is a clone, not an address: holding
+    /// the `Arc` keeps its allocation from being reused for another state.
+    pub(crate) seen: Option<((HostId, PathBuf), crate::terminal::git_data::StatusRead)>,
 }
 
 impl ScmPanelState {

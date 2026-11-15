@@ -26,14 +26,14 @@ use tty59_core::core::git::status::{
     ChangeCode, DecoStatus, HeadState, RepoOperation, RepoPath, StatusEntry, WorkingTreeStatus,
 };
 
-use crate::terminal::git_data::{index_of, status_of};
+use crate::terminal::git_data::{StatusRead, index_of, status_of, status_read_of};
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    BADGE_W, DISCLOSURE_CHEVRON, META, META_MONO, ROW_INSET, SEARCH_H, action_strip,
-    action_strip_reserve, git_badge, info_chip,
+    BADGE_W, DISCLOSURE_CHEVRON, META, META_MONO, PANEL_ACTION_GAP, PanelAction, ROW_INSET,
+    SEARCH_H, TEXT, TEXT_INSET, action_strip, action_strip_reserve, git_badge, info_chip,
 };
 use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
@@ -165,6 +165,67 @@ const PROBE_RETRY: Duration = Duration::from_secs(2);
 /// below shows up without touching anything.
 const NOT_A_REPO_RETRY: Duration = Duration::from_secs(10);
 
+/// Debug selectors for the Changes tab's recovery buttons.
+pub(crate) const SCM_STATUS_RETRY: &str = "panel-scm-status-retry";
+pub(crate) const SCM_STATUS_COPY: &str = "panel-scm-status-copy";
+pub(crate) const SCM_INIT_REPO: &str = "panel-scm-init-repo";
+
+/// Where `dir` is a repository on `host`, if it is: `Ok(Some(root))` for a
+/// repository, `Ok(None)` for git's own "not a git repository", and `Err` with
+/// the reason for anything else — a host that could not run git, a repository
+/// git could not read — which is not an answer about the directory.
+fn toplevel(host: &dyn tty59_core::host::Host, dir: &Path) -> Result<Option<String>, String> {
+    let out = host
+        .git(
+            dir,
+            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        )
+        .map_err(|e| e.to_string())?;
+    if out.success() {
+        return out
+            .stdout_trimmed()
+            .lines()
+            .next()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| Some(l.to_string()))
+            .ok_or_else(|| "git rev-parse said nothing usable".to_string());
+    }
+    if out
+        .stderr_trimmed()
+        .to_ascii_lowercase()
+        .contains("not a git repository")
+    {
+        return Ok(None);
+    }
+    Err(tty59_core::core::git::status::failure_reason(&out))
+}
+
+/// `git init` in `dir`, through the host so a remote pane's folder is made a
+/// repository on its own machine.
+///
+/// Asked first whether `dir` already is one: a directory git can read as a
+/// repository is never initialised again (no nested repository), and one git
+/// could not answer about is reported, not initialised over. `Ok` carries the
+/// new root as the host spells it, or `None` when git initialised but would not
+/// then say where. `Err` is always a reason: git's first line, its exit status
+/// when it said nothing, or the transport's own error.
+pub(crate) fn init_repo(
+    host: &dyn tty59_core::host::Host,
+    dir: &Path,
+) -> Result<Option<String>, String> {
+    if let Some(root) = toplevel(host, dir)? {
+        return Ok(Some(root));
+    }
+    let out = host
+        .git(dir, &["init", "--quiet"])
+        .map_err(|e| e.to_string())?;
+    if !out.success() {
+        return Err(tty59_core::core::git::status::failure_reason(&out));
+    }
+    toplevel(host, dir)
+}
+
 /// What the panel knows about the directory the active pane is sitting in.
 pub(crate) enum RepoLookup {
     /// Nothing has answered yet — the tab's own probe is still out.
@@ -205,11 +266,22 @@ impl Tty59App {
             }
             RepoLookup::NotARepo => {
                 let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
-                let body = self.panel_empty(
-                    t(L10nKey::PanelNotAGitRepo),
-                    Some(t(L10nKey::PanelNotAGitRepoHint)),
-                    cx,
+                // Secondary: `cd` into an existing repository is as likely an
+                // answer as making a new one here. An explicit click on the
+                // pane's own host and directory, captured now.
+                let init = PanelAction::secondary(
+                    SCM_INIT_REPO,
+                    t(L10nKey::PanelInitRepo),
+                    cx.listener(move |this, _, window, cx| {
+                        this.scm_init_repo(host.clone(), cwd.clone(), window, cx);
+                    }),
                 );
+                // Plain words: the panel helper owns the hint's typography.
+                let hint = t(L10nKey::PanelNotAGitRepoHint)
+                    .to_string()
+                    .into_any_element();
+                let body =
+                    self.panel_empty_with(t(L10nKey::PanelNotAGitRepo), Some(hint), Some(init), cx);
                 return self.scm_shell(title, body);
             }
             RepoLookup::Root(root) => root,
@@ -244,10 +316,18 @@ impl Tty59App {
             None => host,
         };
         self.scm_probe(&host, &repo.root, cx);
-        let Some(status) = self.scm_seen_status(repo.host, &repo.root, cx) else {
-            let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
-            let body = self.panel_empty(t(L10nKey::PanelLoading), None, cx);
-            return self.scm_shell(title, body);
+        let status = match self.scm_seen_status(repo.host, &repo.root, cx) {
+            StatusRead::Ready(status) => status,
+            StatusRead::Loading => {
+                let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
+                let body = self.panel_empty(t(L10nKey::PanelLoading), None, cx);
+                return self.scm_shell(title, body);
+            }
+            StatusRead::Failed(reason) => {
+                let title = self.panel_title(t(L10nKey::PanelScmTitle), None, None, window, cx);
+                let body = self.scm_status_failed(host, repo.root.clone(), reason, cx);
+                return self.scm_shell(title, body);
+            }
         };
 
         // The count lives on the Changes tab now; the heading slot this used to
@@ -1372,18 +1452,175 @@ impl Tty59App {
 
     /// Read the status and record which one this frame drew, so the watcher
     /// below can tell a real change from its own noise.
-    fn scm_seen_status(
-        &mut self,
-        host: HostId,
-        root: &Path,
+    fn scm_seen_status(&mut self, host: HostId, root: &Path, cx: &mut Context<Self>) -> StatusRead {
+        let read = status_read_of(cx, host, root);
+        self.scm.seen = Some(((host, root.to_path_buf()), read.clone()));
+        read
+    }
+
+    /// The Changes tab when git could not be asked and nothing is cached: the
+    /// failure in the danger tone, git's own words under it, and the way out.
+    ///
+    /// Inks: the dot is a mark, `theme.danger` (3:1); the heading is the body
+    /// ink; the reason is 12px text in the cached `ChromeInk.tab_count` role,
+    /// derived over the sidebar's own fills. Nothing is measured here and
+    /// nothing is read from disk: the reason arrived with the failure.
+    pub(crate) fn scm_status_failed(
+        &self,
+        host: SharedHost,
+        root: PathBuf,
+        reason: Arc<str>,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<WorkingTreeStatus>> {
-        let status = status_of(cx, host, root);
-        self.scm.seen = Some((
-            (host, root.to_path_buf()),
-            status.as_ref().map_or(0, |s| Arc::as_ptr(s) as usize),
-        ));
-        status
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let (danger, muted, fg) = (theme.danger, theme.muted_foreground, theme.foreground);
+        let reason_ink: gpui::Hsla = gpui::rgb(crate::ui::theme::chrome_ink(cx).tab_count).into();
+        let retry = PanelAction::primary(
+            SCM_STATUS_RETRY,
+            t(L10nKey::PanelScmStatusRetry),
+            cx.listener(move |this, _, _, cx| {
+                this.scm_retry_status(host.clone(), root.clone(), cx);
+            }),
+        );
+        // A failure that said nothing has nothing to show or copy; one that
+        // said something is shown and copied exactly as it was said.
+        let reason = (!reason.trim().is_empty()).then_some(reason);
+        let copy = reason.clone().map(|reason| {
+            PanelAction::secondary(
+                SCM_STATUS_COPY,
+                t(L10nKey::PanelCopyError),
+                move |_, _, cx| {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(reason.to_string()));
+                },
+            )
+        });
+        v_flex()
+            .px(px(TEXT_INSET))
+            .py(px(4.))
+            .gap(px(3.))
+            .text_size(rems(TEXT))
+            .text_color(muted)
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(div().flex_shrink_0().size(px(6.)).rounded_full().bg(danger))
+                    .child(
+                        div()
+                            // Wraps inside the column instead of running past
+                            // it: a long translation still shows in full.
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(fg)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child(t(L10nKey::PanelScmStatusFailed).to_string()),
+                    ),
+            )
+            .children(reason.map(|reason| {
+                div()
+                    .text_size(rems(META))
+                    .text_color(reason_ink)
+                    .child(reason.to_string())
+            }))
+            .child(
+                h_flex()
+                    .pt(px(PANEL_ACTION_GAP))
+                    .gap(px(8.))
+                    // Retry and Copy error stack when the panel is too narrow
+                    // for both labels side by side, rather than clipping.
+                    .flex_wrap()
+                    .child(retry.render(cx))
+                    .children(copy.map(|copy| copy.render(cx))),
+            )
+            .into_any_element()
+    }
+
+    /// Retry: end this repository's failure and its rest and the panel's own
+    /// probe floor, then ask git again through the ordinary off-thread
+    /// refresh. The panel reads Loading until the answer lands, and a late
+    /// answer still answers to the host, epoch and subscription checks.
+    pub(crate) fn scm_retry_status(
+        &mut self,
+        host: SharedHost,
+        root: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let id = host.id();
+        cx.default_global::<crate::terminal::git_data::ScmData>()
+            .forget_failure(id, &root);
+        self.scm.probe_attempt.remove(&(id, root.clone()));
+        self.scm_refresh(host, root, cx);
+        cx.notify();
+    }
+
+    /// `git init` in `dir` on the host the pane is on, off the UI thread.
+    ///
+    /// Only an explicit click gets here. The landing acts on the host and
+    /// directory captured at the click and on nothing the panel shows now, so
+    /// a late answer after the pane moved elsewhere changes nothing about the
+    /// new target. A refusal is reported and leaves every answer as it was.
+    pub(crate) fn scm_init_repo(
+        &mut self,
+        host: SharedHost,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = dir.clone();
+        let captured = host.clone();
+        crate::ui::host_ops::HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |h| init_repo(h, &dir),
+            move |this, result, window, cx| match result {
+                Ok(root) => this.scm_initialized(&captured, &target, root, cx),
+                Err(reason) => {
+                    let note = gpui_component::notification::Notification::error(
+                        crate::terminal::git_data::git_reason(&reason),
+                    )
+                    .title(t_fmt(L10nKey::GitOpFailed, &[("op", "init")]));
+                    gpui_component::WindowExt::push_notification(window, note, cx);
+                    cx.notify();
+                }
+            },
+        );
+    }
+
+    /// A repository now exists in `dir` on the host that ran `git init`:
+    /// forget the negative answers about exactly that directory — the panel's
+    /// root lookup and the cheap per-tab cache's, including a probe still in
+    /// flight — and mark the new root changed, so the panel, the Changes count
+    /// and the cache each resolve it through their own producers. Nothing
+    /// else is erased.
+    ///
+    /// Only for the same, still connected host: a `HostId` is stable across
+    /// reconnects, so an entry for the id proves nothing, and being registered
+    /// is not being connected. The registry must hold the very connection the
+    /// click captured (`Arc::ptr_eq`) and that connection must still report
+    /// `Host::is_connected`, or the caches would take answers about a machine
+    /// that is not the one that was initialised.
+    fn scm_initialized(
+        &mut self,
+        captured: &SharedHost,
+        dir: &Path,
+        root: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let id = captured.id();
+        let still_here = crate::ui::host_registry::HostRegistry::get(cx, id)
+            .is_some_and(|now| Arc::ptr_eq(&now, captured) && now.is_connected());
+        if !still_here {
+            return;
+        }
+        self.scm.roots.remove(&(id, dir.to_path_buf()));
+        cx.default_global::<crate::terminal::git_status::GitStatusCache>()
+            .forget_cwd(id, dir);
+        if let Some(root) = root {
+            let root = tty59_core::core::path_spelling::spelling_on_buf(id, &root);
+            self.scm.probe_attempt.remove(&(id, root.clone()));
+            self.scm_invalidate(id, &root, cx);
+        }
+        cx.notify();
     }
 
     /// Re-render when a probe lands.
@@ -1402,8 +1639,8 @@ impl Tty59App {
                 let Some((key, seen)) = this.scm.seen.clone() else {
                     return;
                 };
-                let now = status_of(cx, key.0, &key.1).map_or(0, |s| Arc::as_ptr(&s) as usize);
-                if now != seen {
+                let now = status_read_of(cx, key.0, &key.1);
+                if !now.same_identity(&seen) {
                     this.scm.seen = Some((key, now));
                     cx.notify();
                 }
@@ -5863,5 +6100,708 @@ mod changes_count_gpui_tests {
             shown(&mut vcx, "scm-menu-count:Pull:1".into()),
             "Pull is not blocked by a detached HEAD"
         );
+    }
+}
+
+/// B3b witnesses, written against c70043c7 with literal selectors only: a
+/// repository whose full status cannot be read must reach a Retry on the real
+/// Changes render, and a folder that is not a repository must offer
+/// Initialize repository through its real body. Each fails on c700 because the
+/// button is absent, not because an API is.
+#[cfg(all(test, unix))]
+mod status_lifecycle_witness_gpui_tests {
+    use super::*;
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::terminal::git_data::ScmData;
+    use crate::terminal::git_status::GitStatusCache;
+    use crate::ui::app::test_window;
+    use gpui::{
+        Entity, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+        PlatformInput, TestAppContext, VisualTestContext,
+    };
+    use gpui_component::WindowExt as _;
+    use tty59_core::core::config::RightPanelTab;
+
+    const RETRY: &str = "panel-scm-status-retry";
+    const COPY: &str = "panel-scm-status-copy";
+    const INIT: &str = "panel-scm-init-repo";
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    fn scratch(prefix: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("a scratch directory");
+        let root = std::fs::canonicalize(dir.path()).expect("it resolves");
+        (dir, root)
+    }
+
+    /// A real repository that `git rev-parse` answers for and `git status`
+    /// cannot: its index is not an index. Nothing here depends on how the
+    /// failure is worded, only that the first full read cannot succeed and
+    /// that deleting the file mends it.
+    fn repository_with_a_broken_index() -> (tempfile::TempDir, PathBuf) {
+        let (dir, root) = scratch("tty59-status-failed-");
+        git(&root, &["init", "--quiet"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        std::fs::write(root.join(".git/index"), b"not an index").unwrap();
+        (dir, root)
+    }
+
+    fn mend(root: &Path) {
+        std::fs::remove_file(root.join(".git/index")).expect("the broken index is there");
+    }
+
+    /// The pane is really in `root` and the Changes tab is open. With `hold`,
+    /// the `.git` watch of `root` is kept closed so nothing but the code under
+    /// test can re-ask after the fixture mends the repository.
+    fn open_changes(
+        cx: &mut TestAppContext,
+        root: &Path,
+        hold: bool,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        crate::daemon::transport::Stream,
+    ) {
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        if hold {
+            vcx.update(|_, cx| {
+                cx.default_global::<ScmData>()
+                    .hold_watch_closed(HostId::LOCAL, root)
+            });
+        }
+        DaemonMsg::Cwd(root.to_path_buf())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Scm;
+            cx.notify();
+        });
+        (app, vcx, pane)
+    }
+
+    /// Frames and the executor, on the real clock, until `until` holds or
+    /// `secs` have passed. `advance` also moves the executor clock, which the
+    /// pane's own poll and the repository's debounce run on.
+    fn wait(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        secs: u64,
+        advance: bool,
+        until: impl Fn(&Tty59App, &gpui::App) -> bool,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            if advance {
+                vcx.executor().advance_clock(Duration::from_millis(300));
+            }
+            vcx.run_until_parked();
+            if app.update_in(vcx, |app, _, cx| until(app, cx)) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Whether `id` shows up with nothing asking for a frame but the code
+    /// under test: only the executor is pumped, the app is never notified.
+    fn drawn_unprompted(vcx: &mut VisualTestContext, id: &'static str, secs: u64) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            vcx.run_until_parked();
+            if vcx.debug_bounds(id).is_some() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Wait for `id` to be drawn, pumping frames as the panel's own tests do.
+    fn appears(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        id: &'static str,
+        secs: u64,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+            if vcx.debug_bounds(id).is_some() {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn click(vcx: &mut VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+        vcx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: at,
+                    pressed_button: None,
+                    modifiers: Modifiers::none(),
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: at,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+            window.refresh();
+        });
+        vcx.run_until_parked();
+    }
+
+    fn press(vcx: &mut VisualTestContext, id: &'static str) {
+        let at = vcx
+            .debug_bounds(id)
+            .unwrap_or_else(|| panic!("{id} is not drawn"))
+            .center();
+        click(vcx, at);
+    }
+
+    fn full_status(vcx: &mut VisualTestContext, root: &Path) -> Option<Arc<WorkingTreeStatus>> {
+        vcx.update(|_, cx| crate::terminal::git_data::status_of(cx, HostId::LOCAL, root))
+    }
+
+    /// The first full read of a known repository cannot succeed. The real
+    /// Changes render must say so with a Retry instead of "Loading…" for ever,
+    /// the failure rests rather than being re-asked every frame, and Retry
+    /// reads the mended repository again at once, well inside the failure's
+    /// ten-second rest.
+    #[gpui::test]
+    fn a_status_that_cannot_be_read_offers_retry_and_retry_reads_it_again(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository_with_a_broken_index();
+        let (app, mut vcx, _pane) = open_changes(cx, &root, true);
+
+        assert!(
+            appears(&app, &mut vcx, RETRY, 20),
+            "the first full status failed and the Changes tab never offered Retry \
+             (it is still on Loading)"
+        );
+        assert!(
+            full_status(&mut vcx, &root).is_none(),
+            "nothing was ever read, so nothing is cached"
+        );
+        assert!(
+            vcx.debug_bounds(COPY).is_some(),
+            "the failure carried a reason, so it can be copied"
+        );
+
+        mend(&root);
+        // Frames keep coming while the user looks at the error; none of them
+        // may re-ask before Retry is pressed.
+        wait(&app, &mut vcx, 2, false, |_, _| false);
+        assert!(
+            full_status(&mut vcx, &root).is_none(),
+            "a failed probe rests instead of being re-asked at frame rate"
+        );
+        assert!(
+            vcx.debug_bounds(RETRY).is_some(),
+            "the error is still what the panel shows"
+        );
+
+        press(&mut vcx, RETRY);
+        let read = wait(&app, &mut vcx, 6, false, |_, cx| {
+            crate::terminal::git_data::status_of(cx, HostId::LOCAL, &root).is_some()
+        });
+        assert!(
+            read,
+            "Retry did not read the mended repository within the failure's rest"
+        );
+        let status = full_status(&mut vcx, &root).expect("read");
+        assert_eq!(status.untracked().count(), 1, "a.txt is untracked");
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds(RETRY).is_none(),
+            "a repository that reads is no longer drawn as an error"
+        );
+    }
+
+    /// Nothing but the landing itself asks for the frame that turns Loading
+    /// into the error: no unrelated input, no notify from the test.
+    #[gpui::test]
+    fn the_first_failure_repaints_by_itself(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository_with_a_broken_index();
+        let (_app, mut vcx, _pane) = open_changes(cx, &root, true);
+        // One frame so the panel starts and asks; after that nobody notifies.
+        vcx.run_until_parked();
+        assert!(
+            drawn_unprompted(&mut vcx, RETRY, 20),
+            "the probe failed and the panel stayed on Loading until something else repainted"
+        );
+    }
+
+    /// Copy error puts the reason the host or git gave on the clipboard, as
+    /// one line, and nothing synthetic: not a status code made up for it.
+    #[gpui::test]
+    fn copy_error_puts_the_reason_on_the_clipboard(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository_with_a_broken_index();
+        let (app, mut vcx, _pane) = open_changes(cx, &root, true);
+        assert!(
+            appears(&app, &mut vcx, COPY, 20),
+            "no Copy error: the failure never reached the panel"
+        );
+        press(&mut vcx, COPY);
+        let copied = vcx
+            .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .expect("Copy error wrote to the clipboard");
+        assert!(!copied.trim().is_empty(), "an empty reason was copied");
+        assert!(
+            !copied.contains('\n'),
+            "the reason is git's first line, not its whole stderr: {copied:?}"
+        );
+        assert!(
+            copied.to_lowercase().contains("index"),
+            "git said what is wrong with the index, and that is what was copied: {copied:?}"
+        );
+    }
+
+    /// A folder that is not a repository: its real body offers Initialize
+    /// repository, and pressing it makes the folder a repository that the
+    /// panel reads, the Changes count counts and the cheap cache knows,
+    /// promptly, while an unrelated cached root survives.
+    #[gpui::test]
+    fn initializing_a_repository_converges_the_panel_and_the_count(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, plain) = scratch("tty59-init-");
+        std::fs::write(plain.join("note.txt"), "x\n").unwrap();
+        let (app, mut vcx, _pane) = open_changes(cx, &plain, false);
+
+        let negative = wait(&app, &mut vcx, 30, true, |_, cx| {
+            cx.global::<GitStatusCache>()
+                .known_repo_for(HostId::LOCAL, &plain)
+                == Some(None)
+        });
+        assert!(
+            negative,
+            "precondition: the cheap probe answered 'not a repository' for the pane's directory"
+        );
+        assert!(
+            appears(&app, &mut vcx, INIT, 20),
+            "a folder that is not a repository offers no way to make it one"
+        );
+
+        let unrelated = (HostId::LOCAL, PathBuf::from("/unrelated/cwd"));
+        app.update_in(&mut vcx, |app, _, _| {
+            app.scm.roots.insert(
+                unrelated.clone(),
+                (Instant::now(), Some(PathBuf::from("/unrelated/root"))),
+            );
+        });
+
+        press(&mut vcx, INIT);
+        let panel = wait(&app, &mut vcx, 4, true, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| r.root == plain)
+                && crate::terminal::git_data::status_of(cx, HostId::LOCAL, &plain).is_some()
+        });
+        assert!(plain.join(".git").is_dir(), "git init ran in the folder");
+        assert!(
+            panel,
+            "the Changes panel did not pick up the new repository promptly"
+        );
+        let counted = wait(&app, &mut vcx, 4, true, |app, cx| {
+            app.scm_changes_count(cx) == Some(ChangesCount::Files(1))
+        });
+        assert!(
+            counted,
+            "the Changes count did not converge: the cheap negative answer for the folder \
+             outlived the initialization"
+        );
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app.scm.roots.contains_key(&unrelated)),
+            "an unrelated cached root was erased"
+        );
+    }
+
+    /// A refused initialization says so and creates nothing: the folder is
+    /// removed under the panel after it drew its button, so git cannot run
+    /// there.
+    #[gpui::test]
+    fn a_refused_initialization_is_reported_and_leaves_the_state_alone(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, plain) = scratch("tty59-init-refused-");
+        let (app, mut vcx, _pane) = open_changes(cx, &plain, false);
+        assert!(
+            appears(&app, &mut vcx, INIT, 30),
+            "a folder that is not a repository offers no way to make it one"
+        );
+        let toasts = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |_, window, cx| window.notifications(cx).len())
+        };
+        assert_eq!(toasts(&app, &mut vcx), 0, "nothing was reported yet");
+
+        std::fs::remove_dir_all(&plain).expect("the folder goes");
+        press(&mut vcx, INIT);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while toasts(&app, &mut vcx) == 0 && Instant::now() < deadline {
+            app.update_in(&mut vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            toasts(&app, &mut vcx),
+            1,
+            "a refused git init has to be reported, once"
+        );
+        assert!(
+            !plain.exists(),
+            "nothing was created where git could not run"
+        );
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| {
+                app.scm
+                    .roots
+                    .get(&(HostId::LOCAL, plain.clone()))
+                    .is_some_and(|(_, root)| root.is_none())
+            }),
+            "a failed initialization leaves the not-a-repository answer in place"
+        );
+    }
+
+    // ---- added with the production change: these use the new API ----
+
+    fn local_host(cx: &gpui::App) -> SharedHost {
+        crate::ui::host_registry::HostRegistry::lookup(cx, HostId::LOCAL)
+            .expect("the local host is registered")
+    }
+
+    /// Pump until `ScmData` says the repository's last probe left a failure to
+    /// rest on (`is_stale` is false only then, for a repository never read).
+    fn failure_rests(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, root: &Path) -> bool {
+        wait(app, vcx, 20, false, |_, cx| {
+            cx.try_global::<ScmData>()
+                .is_some_and(|data| !data.is_stale(HostId::LOCAL, root))
+        })
+    }
+
+    /// The probe of a host that was wiped while it ran answers to nobody: its
+    /// failure is not recorded, and the next ask is a fresh one that is.
+    #[gpui::test]
+    fn a_failure_that_lands_after_the_host_was_wiped_is_not_recorded(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository_with_a_broken_index();
+        let (app, mut vcx) = test_window::harness(cx);
+        app.update(&mut vcx, |app, cx| {
+            let host = local_host(cx);
+            app.scm_refresh(host, root.clone(), cx);
+            cx.default_global::<ScmData>().clear_host(HostId::LOCAL);
+        });
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            vcx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        vcx.update(|_, cx| {
+            let data = cx.default_global::<ScmData>();
+            assert!(
+                data.is_stale(HostId::LOCAL, &root),
+                "a stale landing left a failure to rest on"
+            );
+            assert!(matches!(
+                data.status_read(HostId::LOCAL, &root),
+                StatusRead::Loading
+            ));
+        });
+
+        // The same fixture does land a failure when nothing wiped it.
+        app.update(&mut vcx, |app, cx| {
+            let host = local_host(cx);
+            app.scm_refresh(host, root.clone(), cx);
+        });
+        assert!(
+            failure_rests(&app, &mut vcx, &root),
+            "control: no failure landed"
+        );
+        assert!(matches!(
+            vcx.update(|_, cx| status_read_of(cx, HostId::LOCAL, &root)),
+            StatusRead::Failed(reason) if !reason.trim().is_empty()
+        ));
+    }
+
+    /// A failure that lands after something marked the repository changed is
+    /// still recorded, and the invalidation the landing then asks for ends its
+    /// rest through the existing bump. This documents that existing policy: a
+    /// late failure is followed by an immediate re-ask, not a ten-second rest.
+    #[gpui::test]
+    fn a_failure_from_a_superseded_epoch_is_followed_by_a_fresh_ask(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository_with_a_broken_index();
+        let (app, mut vcx) = test_window::harness(cx);
+        app.update(&mut vcx, |app, cx| {
+            let host = local_host(cx);
+            app.scm_refresh(host, root.clone(), cx);
+            cx.default_global::<ScmData>().bump(HostId::LOCAL, &root);
+        });
+        // Our bump is epoch 1; the landing's own invalidation is epoch 2.
+        let landed = wait(&app, &mut vcx, 20, false, |_, cx| {
+            cx.try_global::<ScmData>()
+                .is_some_and(|data| data.epoch(HostId::LOCAL, &root) >= 2)
+        });
+        assert!(landed, "the superseded probe never landed");
+        vcx.update(|_, cx| {
+            let data = cx.default_global::<ScmData>();
+            assert!(
+                data.is_stale(HostId::LOCAL, &root),
+                "the bump the landing asked for ended the failure's rest"
+            );
+            assert!(matches!(
+                data.status_read(HostId::LOCAL, &root),
+                StatusRead::Loading
+            ));
+        });
+    }
+
+    /// A held status wins over a failed later probe: the panel keeps the very
+    /// status it had, with no error drawn over it.
+    #[gpui::test]
+    fn a_failed_later_probe_leaves_the_held_status_on_screen(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = scratch("tty59-status-retained-");
+        git(&root, &["init", "--quiet"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        let (app, mut vcx, _pane) = open_changes(cx, &root, true);
+        assert!(
+            wait(&app, &mut vcx, 20, false, |_, cx| {
+                crate::terminal::git_data::status_of(cx, HostId::LOCAL, &root).is_some()
+            }),
+            "the first read never landed"
+        );
+        let held = full_status(&mut vcx, &root).expect("read");
+
+        std::fs::write(root.join(".git/index"), b"not an index").unwrap();
+        app.update_in(&mut vcx, |app, _, cx| {
+            let host = local_host(cx);
+            cx.default_global::<ScmData>().bump(HostId::LOCAL, &root);
+            app.scm_refresh(host, root.clone(), cx);
+        });
+        assert!(
+            failure_rests(&app, &mut vcx, &root),
+            "the failure never landed"
+        );
+        match vcx.update(|_, cx| status_read_of(cx, HostId::LOCAL, &root)) {
+            StatusRead::Ready(status) => assert!(
+                Arc::ptr_eq(&status, &held),
+                "the held status is the one still drawn"
+            ),
+            other => panic!("a failed later probe replaced the held status with {other:?}"),
+        }
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds(RETRY).is_none(),
+            "no error is drawn over a status the panel holds"
+        );
+    }
+
+    /// Retry's own effects, checked without waiting on a clock: the failure is
+    /// gone at once (so the next look is not resting) and so is the panel's own
+    /// probe floor, which the failed first look had set.
+    #[gpui::test]
+    fn retry_ends_the_failure_and_the_panels_probe_floor_at_once(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository_with_a_broken_index();
+        let (app, mut vcx, _pane) = open_changes(cx, &root, true);
+        assert!(appears(&app, &mut vcx, RETRY, 20), "no Retry to press");
+        let key = (HostId::LOCAL, root.clone());
+        app.update_in(&mut vcx, |app, _, cx| {
+            assert!(
+                matches!(
+                    status_read_of(cx, HostId::LOCAL, &root),
+                    StatusRead::Failed(_)
+                ),
+                "the panel is showing a failure"
+            );
+            assert!(
+                app.scm.probe_attempt.contains_key(&key),
+                "the failed first look set the panel's probe floor"
+            );
+            let host = local_host(cx);
+            app.scm_retry_status(host, root.clone(), cx);
+            assert!(
+                !app.scm.probe_attempt.contains_key(&key),
+                "Retry left the panel's probe floor in place"
+            );
+            assert!(
+                matches!(
+                    status_read_of(cx, HostId::LOCAL, &root),
+                    StatusRead::Loading
+                ),
+                "Retry left the failure and its rest in place"
+            );
+        });
+    }
+
+    /// The init landing, driven directly. With the host the click captured
+    /// still registered, the directory's negative answers go and its new root
+    /// is marked changed. With another host registered under the same id (a
+    /// reconnect) the caches, the panel's root answers and the epoch are left
+    /// exactly as they were. A host that is gone from the registry takes the
+    /// same branch: nothing registered under the id is not the captured host
+    /// (the local host cannot be unregistered, so only the replacement is
+    /// driven here).
+    #[gpui::test]
+    fn an_init_landing_invalidates_only_for_the_host_that_was_captured(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = test_window::harness(cx);
+        let dir = PathBuf::from("/init-landing/plain");
+        let root = dir.clone();
+        let key = (HostId::LOCAL, dir.clone());
+
+        let plant = |app: &mut Tty59App, cx: &mut gpui::App| {
+            app.scm.roots.insert(key.clone(), (Instant::now(), None));
+            cx.update_global::<GitStatusCache, _>(|cache, _| {
+                cache.finish_probe(HostId::LOCAL, &dir, None);
+            });
+        };
+        let state = |app: &Tty59App, cx: &gpui::App| {
+            (
+                app.scm.roots.contains_key(&key),
+                cx.global::<GitStatusCache>()
+                    .known_repo_for(HostId::LOCAL, &dir),
+                cx.try_global::<ScmData>()
+                    .map_or(0, |data| data.epoch(HostId::LOCAL, &root)),
+            )
+        };
+        let landing =
+            |app: &mut Tty59App, captured: &SharedHost, cx: &mut gpui::Context<Tty59App>| {
+                app.scm_initialized(captured, &dir, Some(root.display().to_string()), cx)
+            };
+
+        // Control: the captured host is the registered one.
+        app.update(&mut vcx, |app, cx| {
+            plant(app, cx);
+            let (had_root, known, epoch) = state(app, cx);
+            assert!(had_root && known == Some(None), "precondition");
+            let captured = local_host(cx);
+            landing(app, &captured, cx);
+            let (has_root, known, after) = state(app, cx);
+            assert!(!has_root, "the panel's negative root answer went");
+            assert_eq!(known, None, "so did the cheap cache's");
+            assert_eq!(after, epoch + 1, "and the new root was marked changed");
+        });
+
+        // A reconnect: another host answers to the same id.
+        app.update(&mut vcx, |app, cx| {
+            plant(app, cx);
+            let before = state(app, cx);
+            let captured = local_host(cx);
+            crate::ui::host_registry::HostRegistry::insert(
+                cx,
+                tty59_core::host::local::LocalHost::new(),
+            );
+            let now = local_host(cx);
+            assert!(
+                !Arc::ptr_eq(&captured, &now),
+                "precondition: a different host"
+            );
+            landing(app, &captured, cx);
+            assert_eq!(
+                state(app, cx),
+                before,
+                "a landing for a replaced host touched the caches"
+            );
+            crate::ui::host_registry::HostRegistry::insert(cx, captured);
+        });
+    }
+
+    #[test]
+    fn init_repo_makes_the_folder_a_repository_and_names_its_root() {
+        let (_dir, dir) = scratch("tty59-init-repo-");
+        let host = tty59_core::host::local::LocalHost::new();
+        let root = init_repo(&*host, &dir)
+            .expect("git init in an empty folder succeeds")
+            .expect("and says where the repository is");
+        assert!(dir.join(".git").is_dir());
+        assert_eq!(
+            std::fs::canonicalize(&root).expect("the root exists"),
+            dir,
+            "the repository is the folder itself, not one above it"
+        );
+    }
+
+    /// A folder inside a repository is already one: it is never initialised
+    /// again, so no repository is nested in another.
+    #[test]
+    fn init_repo_never_nests_a_repository() {
+        let (_dir, outer) = scratch("tty59-init-nested-");
+        git(&outer, &["init", "--quiet"]);
+        let inner = outer.join("sub");
+        std::fs::create_dir_all(&inner).unwrap();
+        let host = tty59_core::host::local::LocalHost::new();
+        let root = init_repo(&*host, &inner)
+            .expect("an existing repository is not an error")
+            .expect("it names the repository that holds the folder");
+        assert_eq!(std::fs::canonicalize(&root).expect("it exists"), outer);
+        assert!(
+            !inner.join(".git").exists(),
+            "a repository was nested inside another"
+        );
+    }
+
+    /// A folder git cannot run in is an error with a reason, and nothing is
+    /// created where it could not run.
+    #[test]
+    fn init_repo_reports_a_folder_git_cannot_run_in() {
+        let (_dir, dir) = scratch("tty59-init-gone-");
+        let gone = dir.join("gone");
+        let host = tty59_core::host::local::LocalHost::new();
+        let reason = init_repo(&*host, &gone).expect_err("there is nowhere to initialise");
+        assert!(!reason.trim().is_empty(), "the refusal says why");
+        assert!(!gone.exists());
     }
 }
