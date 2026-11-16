@@ -7288,3 +7288,113 @@ mod agent_tests {
         assert!(vcx.debug_bounds("row-status-circle-0").is_none());
     }
 }
+
+/// A5.1 agents F2 in the rail's Agents list.
+#[cfg(test)]
+mod a51_sidebar_tests {
+    use super::*;
+    use crate::core::cli_agent::{AgentDetectionSession, AgentSessionState, AgentStatus, CLIAgent};
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn report(stream: &mut crate::daemon::transport::Stream, agent: CLIAgent, status: AgentStatus) {
+        DaemonMsg::Agent(Some(agent)).encode(stream).unwrap();
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status,
+            detection: Some(AgentDetectionSession {
+                kind: agent.slug().into(),
+                epoch: 1,
+                exited: false,
+                source: None,
+                rule: None,
+            }),
+            ..Default::default()
+        }))
+        .encode(stream)
+        .unwrap();
+    }
+
+    /// One tab split `[Claude | shell | Codex]`: the rail's Agents list titles
+    /// each pane by its own agent and numbers the Codex pane 3/3, counting
+    /// the shell, with the marker as the row's separate muted span.
+    #[gpui::test]
+    fn a51_agents_list_titles_each_split_pane_by_its_agent(cx: &mut gpui::TestAppContext) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (shell, shell_stream) = quiet_test_pane(10, window, cx);
+            let (sibling, sibling_stream) = quiet_test_pane(9, window, cx);
+            streams.push(shell_stream);
+            streams.push(sibling_stream);
+            let first = app.tabs[0].pane.first_leaf().unwrap();
+            app.tabs[0].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::split_node(
+                    gpui::Axis::Vertical,
+                    0.5,
+                    Pane::leaf(PaneSlot::Ready(shell)),
+                    Pane::leaf(PaneSlot::Ready(sibling)),
+                ),
+            );
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
+        });
+        report(&mut streams[0], CLIAgent::Claude, AgentStatus::Working);
+        report(&mut streams[2], CLIAgent::Codex, AgentStatus::Waiting);
+        let mut ready = false;
+        for _ in 0..200 {
+            ready = app.read_with(&vcx, |app, cx| app.agent_pane_summaries(cx).len() == 2);
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready, "both agent reports reached the collector");
+        let _ = take_rendered_sidebar_agent_rows();
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let rendered = take_rendered_sidebar_agent_rows();
+        let mut failures = Vec::new();
+        for (pane, want) in [
+            (1, CLIAgent::Claude.display_name()),
+            (9, CLIAgent::Codex.display_name()),
+        ] {
+            match rendered.iter().rfind(|row| row.key.pane == pane) {
+                Some(row) if row.title == want => {}
+                Some(row) => failures.push(format!(
+                    "pane {pane} rail title {:?}, want {want:?}",
+                    row.title
+                )),
+                None => failures.push(format!("pane {pane} drew no rail row")),
+            }
+        }
+        let markers = app.read_with(&vcx, |app, cx| {
+            app.sidebar_agent_rows(&app.agent_pane_summaries(cx), cx)
+                .iter()
+                .map(|row| (row.summary.location.key.pane, row.marker()))
+                .collect::<Vec<_>>()
+        });
+        for (pane, want) in [(1, "pane 1/3"), (9, "pane 3/3")] {
+            let got = markers
+                .iter()
+                .find(|(p, _)| *p == pane)
+                .and_then(|(_, marker)| marker.as_deref());
+            if got != Some(want) {
+                failures.push(format!("pane {pane} marker {got:?}, want {want:?}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} expectation(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+}

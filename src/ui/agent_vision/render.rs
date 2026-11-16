@@ -51,6 +51,18 @@ fn agent_row_paints(card: bool, selected: bool, cx: &gpui::App) -> AgentRowPaint
     }
 }
 
+/// Appends one part of a row's meta line, separated from what is already
+/// there and skipped when empty.
+fn push_meta_part(meta: &mut String, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    if !meta.is_empty() {
+        meta.push_str(" · ");
+    }
+    meta.push_str(part);
+}
+
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct RenderedAgentRow {
@@ -58,6 +70,36 @@ pub(super) struct RenderedAgentRow {
     pub card: bool,
     pub title: String,
     pub reason: String,
+}
+
+/// A secondary line of a row, recorded where its element is built, so a line
+/// the row does not build is absent rather than guessed at.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AgentLine {
+    Meta,
+    Preview,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RenderedAgentLine {
+    pub key: super::PaneKey,
+    pub card: bool,
+    pub line: AgentLine,
+    pub text: String,
+}
+
+#[cfg(test)]
+fn record_line(key: super::PaneKey, card: bool, line: AgentLine, text: &str) {
+    RENDERED_LINES.with(|lines| {
+        lines.borrow_mut().push(RenderedAgentLine {
+            key,
+            card,
+            line,
+            text: text.to_string(),
+        });
+    });
 }
 
 #[cfg(test)]
@@ -84,6 +126,8 @@ std::thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
     static RENDERED_HELP: std::cell::RefCell<Vec<Option<RenderedHelp>>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static RENDERED_LINES: std::cell::RefCell<Vec<RenderedAgentLine>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -94,6 +138,11 @@ pub(super) fn take_rendered_help() -> Vec<Option<RenderedHelp>> {
 #[cfg(test)]
 pub(super) fn take_rendered_rows() -> Vec<RenderedAgentRow> {
     RENDERED_ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()))
+}
+
+#[cfg(test)]
+pub(super) fn take_rendered_lines() -> Vec<RenderedAgentLine> {
+    RENDERED_LINES.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -341,11 +390,23 @@ impl Tty59App {
             )
             .child(
                 div()
-                    .px_4()
+                    // The project names below sit 0.75rem (list) plus 0.5rem
+                    // (row) in, so the heading starts there too.
+                    .px(gpui::rems(1.25))
                     .pb_2()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(t(L10nKey::VisionProjects)),
+                    .child({
+                        let label = t(L10nKey::VisionProjects);
+                        // Test builds box the text so its left edge is
+                        // measurable apart from the padding that insets it;
+                        // release builds keep the bare text.
+                        #[cfg(test)]
+                        let label = div()
+                            .child(label)
+                            .debug_selector(|| "agent-projects-label".into());
+                        label
+                    }),
             )
             .child(
                 v_flex()
@@ -378,7 +439,14 @@ impl Tty59App {
                                     row.text_color(rgb(sf.text_resting))
                                         .hover(|style| style.bg(rgb(sf.hover)))
                                 })
-                                .child(div().flex_1().min_w_0().truncate().child(name))
+                                .child({
+                                    let name = div().flex_1().min_w_0().truncate().child(name);
+                                    #[cfg(test)]
+                                    let name = name.debug_selector(move || {
+                                        format!("agent-project-name-{index}")
+                                    });
+                                    name
+                                })
                                 .when(count > 0, |row| {
                                     row.child(
                                         div()
@@ -397,7 +465,96 @@ impl Tty59App {
             .into_any_element()
     }
 
-    fn agent_row(&self, pane: &PaneSummary, card: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// The Inbox's "Other agents" section control: the library button, with
+    /// its stable id, focus handle and callback, drawn as a left-aligned 28px
+    /// section heading in the list's muted caption ink: the label, its count
+    /// as separate tabular figures, and a chevron that says collapsed or open.
+    fn other_agents_toggle(&self, count: usize, cx: &mut Context<Self>) -> Button {
+        let open = self.agent_vision.state.show_other;
+        // The list sits on the window fill, so it steps on the sidebar
+        // ladder like its rows; the muted ink is floored against both rungs.
+        let rungs = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let muted = cx.theme().muted_foreground;
+        let caption = |text_size: f32| gpui::rems(text_size / 16.);
+        let label = div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .text_size(caption(11.5))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(muted)
+            .child(t(L10nKey::VisionOther));
+        let tally = div()
+            .flex_none()
+            .text_size(caption(11.5))
+            .font_features(self.strip_metrics.features())
+            .text_color(muted)
+            .child(count.to_string());
+        let chevron = div().flex_none().text_color(muted).child(
+            Icon::new(if open {
+                IconName::ChevronDown
+            } else {
+                IconName::ChevronRight
+            })
+            .xsmall(),
+        );
+        #[cfg(test)]
+        let (label, tally, chevron) = (
+            label.debug_selector(|| "agent-other-toggle-label".into()),
+            tally.debug_selector(|| "agent-other-toggle-count".into()),
+            chevron.debug_selector(move || {
+                if open {
+                    "agent-other-chevron-expanded".into()
+                } else {
+                    "agent-other-chevron-collapsed".into()
+                }
+            }),
+        );
+        let toggle = Button::new("agent-other-toggle")
+            .accessible_label(SharedString::from(format!(
+                "{}, {count}",
+                t(L10nKey::VisionOther)
+            )))
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap_1()
+                    .child(label)
+                    .child(tally)
+                    .child(chevron),
+            )
+            .small()
+            .custom(
+                gpui_component::button::ButtonCustomVariant::new(cx)
+                    .color(gpui::transparent_black())
+                    .foreground(muted)
+                    .hover(rgb(rungs.hover).into())
+                    .active(rgb(rungs.selected).into()),
+            )
+            .w_full()
+            .h(px(28.))
+            .px_2()
+            .on_click(cx.listener(|app, _, window, cx| {
+                app.agent_vision.state.show_other = !app.agent_vision.state.show_other;
+                app.focus_agent_list(window, cx);
+            }));
+        #[cfg(test)]
+        let toggle = toggle.debug_selector(|| "agent-other-toggle".into());
+        toggle
+    }
+
+    /// One Inbox row (`card` false) or board card. `in_other` is true for a
+    /// row of the Inbox's Other group: like a card in its column, such a row
+    /// sits under a heading that already supplies its state.
+    fn agent_row(
+        &self,
+        pane: &PaneSummary,
+        card: bool,
+        in_other: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let key = pane.location.key;
         let selected = self.agent_vision.state.selected() == Some(key);
         let paints = agent_row_paints(card, selected, cx);
@@ -408,13 +565,22 @@ impl Tty59App {
             .find(|project| project.group == pane.location.group)
             .map_or("", |project| project.name.as_str());
         let exited = pane.state == State::Exited;
-        let title = pane.heading();
+        // The accessible name keeps the whole heading, marker included; the
+        // drawn title carries the name alone and the marker its own span.
+        let heading = pane.heading();
+        let title = pane.title().to_string();
+        let marker = pane.pane_marker();
         let now = crate::core::config::unix_now();
         let reason = pane.reason_line(now);
-        let mut meta = format!("{} · {}", pane.agent_name(), project);
+        let reason_hidden = (card || in_other) && pane.reason_is_bare_state();
+        let mut meta = String::new();
+        if !pane.title_supplies_agent() {
+            push_meta_part(&mut meta, pane.agent_name());
+        }
+        push_meta_part(&mut meta, project);
         if let Some(since) = pane.since_ms.filter(|_| !exited) {
             let age = now.saturating_sub(since / 1000);
-            meta.push_str(&format!(" · {}", crate::ui::home::compact_age(age)));
+            push_meta_part(&mut meta, &crate::ui::home::compact_age(age));
         }
         #[cfg(test)]
         RENDERED_ROWS.with(|rows| {
@@ -422,7 +588,11 @@ impl Tty59App {
                 key,
                 card,
                 title: title.clone(),
-                reason: reason.clone(),
+                reason: if reason_hidden {
+                    String::new()
+                } else {
+                    reason.clone()
+                },
             });
         });
         // The rail's mark, so one agent reads the same in both places: Idle
@@ -440,7 +610,7 @@ impl Tty59App {
                 key.host.0, key.pane
             )))
             .role(gpui::Role::ListItem)
-            .aria_label(SharedString::from(format!("{title}, {reason}")))
+            .aria_label(SharedString::from(format!("{heading}, {reason}")))
             .w_full()
             .min_w_0()
             .items_center()
@@ -499,73 +669,127 @@ impl Tty59App {
                     .flex_1()
                     .min_w_0()
                     .gap_1()
-                    .child({
-                        let title_el = div()
-                            .truncate()
-                            .text_sm()
-                            .text_color(paints.title)
-                            .when(selected, |row| row.font_weight(FontWeight::MEDIUM))
-                            .when(exited, |title| title.text_color(paints.caption))
-                            .child(title);
-                        #[cfg(test)]
-                        let title_el = {
-                            let mut title_el = title_el;
-                            crate::ui::paint_probe::note("agent-row-title", &mut title_el);
-                            title_el.debug_selector(move || {
-                                format!("agent-row-title-{}-{}", key.host.0, key.pane)
+                    // The title and, beside it, the split's pane marker as its
+                    // own muted span (the rail's recipe). Each span is bounded
+                    // by the row on its own and is sized by its text first
+                    // (the title's `flex_auto` is grow 1, shrink 1, basis
+                    // auto): when the two cannot share a line the marker wraps
+                    // under the name instead of taking the name's width, a
+                    // name longer than the row is cut at it, and the title
+                    // fills whatever line it ends up on.
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .min_w_0()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_x_1p5()
+                            .child({
+                                let title_el = div()
+                                    .flex_auto()
+                                    .min_w_0()
+                                    .max_w_full()
+                                    .truncate()
+                                    .text_sm()
+                                    .text_color(paints.title)
+                                    .when(selected, |row| row.font_weight(FontWeight::MEDIUM))
+                                    .when(exited, |title| title.text_color(paints.caption))
+                                    .child(title);
+                                #[cfg(test)]
+                                let title_el = {
+                                    let mut title_el = title_el;
+                                    crate::ui::paint_probe::note("agent-row-title", &mut title_el);
+                                    title_el.debug_selector(move || {
+                                        format!("agent-row-title-{}-{}", key.host.0, key.pane)
+                                    })
+                                };
+                                title_el
                             })
-                        };
-                        title_el
-                    })
-                    .child({
-                        let reason_el = div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(paints.caption)
-                            .child(reason);
-                        #[cfg(test)]
-                        let reason_el = {
-                            let mut reason_el = reason_el;
-                            crate::ui::paint_probe::note("agent-row-reason", &mut reason_el);
-                            crate::ui::paint_probe::note(
-                                if selected {
-                                    "agent-row-reason-sel"
-                                } else {
-                                    "agent-row-reason-plain"
-                                },
-                                &mut reason_el,
-                            );
-                            reason_el.debug_selector(move || {
-                                format!("agent-row-reason-{}-{}", key.host.0, key.pane)
-                            })
-                        };
-                        reason_el
-                    })
-                    .when(card && !exited, |column| {
-                        column.when_some(pane.last_line.clone(), |column, line| {
-                            column.child(
-                                div()
+                            .when_some(marker, |row, marker| {
+                                let marker_el = div()
+                                    .min_w_0()
+                                    .max_w_full()
                                     .truncate()
                                     .text_xs()
                                     .text_color(paints.caption)
-                                    .map(|preview| {
-                                        #[cfg(test)]
-                                        let preview = preview.debug_selector(move || {
-                                            format!("agent-row-preview-{}-{}", key.host.0, key.pane)
-                                        });
-                                        preview
-                                    })
-                                    .child(line),
-                            )
+                                    .child(marker);
+                                #[cfg(test)]
+                                let marker_el = marker_el.debug_selector(move || {
+                                    format!("agent-row-marker-{}-{}", key.host.0, key.pane)
+                                });
+                                row.child(marker_el)
+                            }),
+                    )
+                    // A bare Working, Waiting or Done is not repeated where
+                    // the column or the Other group already says it.
+                    .when(!reason_hidden, |column| {
+                        column.child({
+                            let reason_el = div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(paints.caption)
+                                .child(reason);
+                            #[cfg(test)]
+                            let reason_el = {
+                                let mut reason_el = reason_el;
+                                crate::ui::paint_probe::note("agent-row-reason", &mut reason_el);
+                                crate::ui::paint_probe::note(
+                                    if selected {
+                                        "agent-row-reason-sel"
+                                    } else {
+                                        "agent-row-reason-plain"
+                                    },
+                                    &mut reason_el,
+                                );
+                                reason_el.debug_selector(move || {
+                                    format!("agent-row-reason-{}-{}", key.host.0, key.pane)
+                                })
+                            };
+                            reason_el
                         })
                     })
-                    .child(
-                        div()
-                            .truncate()
-                            .text_xs()
-                            .text_color(paints.caption)
-                            .child(meta),
-                    ),
+                    .when(card && !exited, |column| {
+                        // A preview that is the reason again (up to layout
+                        // whitespace) says nothing new; a continuation or any
+                        // other output is kept whole.
+                        column.when_some(
+                            pane.last_line
+                                .as_deref()
+                                .filter(|line| !pane.preview_repeats_reason(line)),
+                            |column, line| {
+                                #[cfg(test)]
+                                record_line(key, card, AgentLine::Preview, line);
+                                column.child(
+                                    div()
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(paints.caption)
+                                        .map(|preview| {
+                                            #[cfg(test)]
+                                            let preview = preview.debug_selector(move || {
+                                                format!(
+                                                    "agent-row-preview-{}-{}",
+                                                    key.host.0, key.pane
+                                                )
+                                            });
+                                            preview
+                                        })
+                                        .child(SharedString::from(line.to_string())),
+                                )
+                            },
+                        )
+                    })
+                    .when(!meta.is_empty(), |column| {
+                        column.child({
+                            #[cfg(test)]
+                            record_line(key, card, AgentLine::Meta, &meta);
+                            div()
+                                .truncate()
+                                .text_xs()
+                                .text_color(paints.caption)
+                                .child(meta)
+                        })
+                    }),
             )
             // Kanban uses its column for state. Only an unseen Done card has
             // an additional status dot; Inbox always has the trailing circle.
@@ -634,14 +858,26 @@ impl Tty59App {
                                     h_flex()
                                         .items_center()
                                         .justify_between()
+                                        // The title starts where a card's
+                                        // content does: the card's own box
+                                        // model (1px border, then `p_2`) with
+                                        // the border left invisible.
+                                        .border_l_1()
+                                        .border_r_1()
+                                        .border_color(gpui::transparent_black())
                                         .px_2()
                                         .py_1()
-                                        .child(
-                                            div()
+                                        .child({
+                                            let heading = div()
                                                 .text_sm()
                                                 .font_weight(FontWeight::MEDIUM)
-                                                .child(state.label()),
-                                        )
+                                                .child(state.label());
+                                            #[cfg(test)]
+                                            let heading = heading.debug_selector(move || {
+                                                format!("agent-board-heading-{index}")
+                                            });
+                                            heading
+                                        })
                                         .child(
                                             div()
                                                 .text_xs()
@@ -660,7 +896,7 @@ impl Tty59App {
                                         .children(
                                             cards
                                                 .into_iter()
-                                                .map(|pane| self.agent_row(pane, true, cx)),
+                                                .map(|pane| self.agent_row(pane, true, false, cx)),
                                         ),
                                 )
                         }),
@@ -704,11 +940,20 @@ impl Tty59App {
                 .border_color(cx.theme().border)
                 .child(
                     div()
-                        .px_3()
+                        // One edge with "Needs you" and the avatars below:
+                        // the scroll's 0.5rem plus the row's 0.5rem.
+                        .px_4()
                         .py_3()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
-                        .child(t(L10nKey::VisionInbox)),
+                        .child({
+                            let heading = t(L10nKey::VisionInbox);
+                            #[cfg(test)]
+                            let heading = div()
+                                .child(heading)
+                                .debug_selector(|| "agent-inbox-heading".into());
+                            heading
+                        }),
                 )
                 .child(
                     v_flex()
@@ -725,7 +970,14 @@ impl Tty59App {
                                 .py_2()
                                 .text_xs()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(t(L10nKey::VisionNeedsYou)),
+                                .child({
+                                    let label = t(L10nKey::VisionNeedsYou);
+                                    #[cfg(test)]
+                                    let label = div()
+                                        .child(label)
+                                        .debug_selector(|| "agent-needs-you".into());
+                                    label
+                                }),
                         )
                         .when(rows.attention.is_empty(), |list| {
                             let empty = div()
@@ -742,29 +994,21 @@ impl Tty59App {
                         .children(
                             rows.attention
                                 .into_iter()
-                                .map(|pane| self.agent_row(pane, false, cx)),
+                                .map(|pane| self.agent_row(pane, false, false, cx)),
                         )
                         .when(other_count > 0, |list| {
-                            list.child(
-                                Button::new("agent-other-toggle")
-                                    .label(format!("{} ({other_count})", t(L10nKey::VisionOther)))
-                                    .ghost()
-                                    .small()
-                                    .on_click(cx.listener(|app, _, window, cx| {
-                                        app.agent_vision.state.show_other =
-                                            !app.agent_vision.state.show_other;
-                                        app.focus_agent_list(window, cx);
-                                    })),
-                            )
+                            list.child(self.other_agents_toggle(other_count, cx))
                         })
                         .when(self.agent_vision.state.show_other, |list| {
                             list.children(
                                 rows.other
                                     .into_iter()
-                                    .map(|pane| self.agent_row(pane, false, cx)),
+                                    .map(|pane| self.agent_row(pane, false, true, cx)),
                             )
                         }),
                 );
+            #[cfg(test)]
+            let list = list.debug_selector(|| "agent-inbox-list".into());
             let reader = v_flex()
                 .flex_1()
                 .min_w_0()
