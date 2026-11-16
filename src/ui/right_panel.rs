@@ -869,7 +869,7 @@ impl Tty59App {
     pub(crate) fn panel_title(
         &self,
         text: &str,
-        count: Option<String>,
+        count: Option<gpui::SharedString>,
         trailing: Option<AnyElement>,
         window: &mut Window,
         cx: &mut Context<Self>,

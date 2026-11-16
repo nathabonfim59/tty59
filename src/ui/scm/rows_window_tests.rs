@@ -595,24 +595,14 @@ fn a_deep_row_is_clicked_where_it_is_drawn_and_stays_selected(cx: &mut TestAppCo
 /// stays up over its row, the way it did when every row was built; Escape
 /// closes it and the panel answers the next click.
 ///
-/// A plain `#[test]` with a context it never tears down, and the only one
-/// here. gpui-component's `ContextMenu` keeps its open menu in an
-/// `Rc<RefCell<ContextMenuSharedState>>` that also holds the menu's
-/// dismiss `Subscription`, whose closure captures that same `Rc`: the cycle
-/// outlives the element state, so the `PopupMenu` is never released and
-/// `#[gpui::test]`'s leak detector fails any test that opens one — on main
-/// as much as here. See `ui-audit/bugs/gpui-component-contextmenu-leak.md`.
+/// The row owns its menu (`row_menu::RowMenu`), with nothing pointing back
+/// at it, so this is an ordinary `#[gpui::test]` under gpui's strict
+/// teardown: a menu the panel left behind would fail it as a leaked handle.
+/// The row stays built because the panel records it as the one a menu is
+/// open on (`menu_row`), and that record is what the run's pin reads.
 #[cfg(unix)]
-#[test]
-fn a_context_menu_on_a_row_scrolled_far_away_stays_with_its_row() {
-    let mut cx = TestAppContext::build(gpui::TestDispatcher::new(0), None);
-    context_menu_scrolled_far_away(&mut cx);
-    cx.run_until_parked();
-    // Never dropped, so the upstream cycle above is not reported as ours.
-    std::mem::forget(cx);
-}
-
-fn context_menu_scrolled_far_away(cx: &mut TestAppContext) {
+#[gpui::test]
+fn a_context_menu_on_a_row_scrolled_far_away_stays_with_its_row(cx: &mut TestAppContext) {
     let _serial = serial();
     let root = big_repo("menu");
     let (app, mut vcx, _pane) = panel_on(cx, &root);
@@ -620,12 +610,23 @@ fn context_menu_scrolled_far_away(cx: &mut TestAppContext) {
     let staged = flat_rows(&st, ScmGroup::Staged);
     let row = vcx.debug_bounds(staged[3]).expect("an early row is drawn");
 
+    let staged_path = staged[3].trim_start_matches("scm-row-Staged-").to_string();
+    let recorded = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+        app.update_in(vcx, |app, _, _| app.scm.menu_row.clone())
+    };
+
     let before = vcx.update(|window, cx| window.focused(cx));
     mouse(&mut vcx, MouseButton::Right, row.center());
+    draw(&app, &mut vcx);
     let open = vcx.update(|window, cx| window.focused(cx));
     assert!(
         open.is_some() && open != before,
         "the right click opened a menu"
+    );
+    assert_eq!(
+        recorded(&app, &mut vcx),
+        Some((ScmGroup::Staged, staged_path.clone())),
+        "the panel records the row the menu is open on: that is what pins it"
     );
 
     scroll_to(&app, &mut vcx, 1e7);
@@ -648,6 +649,11 @@ fn context_menu_scrolled_far_away(cx: &mut TestAppContext) {
         vcx.debug_bounds(staged[3]).is_some(),
         "over its row, which is still built"
     );
+    assert_eq!(
+        recorded(&app, &mut vcx),
+        Some((ScmGroup::Staged, staged_path)),
+        "and it is still the row on record"
+    );
 
     // And the panel is still the panel: Escape is harmless, and a click on
     // a row on screen now opens that row.
@@ -655,6 +661,11 @@ fn context_menu_scrolled_far_away(cx: &mut TestAppContext) {
     draw(&app, &mut vcx);
     let closed = vcx.update(|window, cx| window.focused(cx));
     assert_ne!(closed, open, "Escape closed the menu");
+    assert_eq!(
+        recorded(&app, &mut vcx),
+        None,
+        "and the row is no longer on record"
+    );
     let changes = flat_rows(&st, ScmGroup::Changes);
     let last = vcx
         .debug_bounds(changes[MAX_RENDERED_FILES - 1])
