@@ -13,7 +13,7 @@ pub(crate) mod panel;
 pub(crate) mod path;
 mod row_menu;
 pub(crate) mod rows_window;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod rows_window_tests;
 pub(crate) mod state;
 #[allow(dead_code)]
