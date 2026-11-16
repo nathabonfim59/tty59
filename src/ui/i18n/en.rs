@@ -2530,6 +2530,37 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::MermaidViewerFullScreen => "Full screen",
         L10nKey::MermaidViewerFit => "Fit",
         L10nKey::MermaidViewerExit => "Exit full screen (Esc)",
+        L10nKey::ImagePreviewFit => "Fit",
+        L10nKey::ImagePreviewActualSize => "Actual size (100%)",
+        L10nKey::ImagePreviewAnimated => "Animated, {frames} frames",
+        L10nKey::ImagePreviewFirstFrame => "Animation too large to keep: showing the first frame",
+        L10nKey::ImagePreviewReduced => "Shown at reduced resolution ({width} × {height} px)",
+        L10nKey::ImagePreviewCantShow => "Can't show this image",
+        L10nKey::ImagePreviewTooLarge => {
+            "\"{name}\" is {size} MiB, over the {limit} MiB limit for images"
+        }
+        L10nKey::ImagePreviewTooLargeUnknown => {
+            "\"{name}\" is over the {limit} MiB limit for images"
+        }
+        L10nKey::ImagePreviewTooManyPixels => {
+            "\"{name}\" is {width} × {height} px, over the {limit} pixel limit"
+        }
+        L10nKey::ImagePreviewOverBudget => {
+            "\"{name}\" needs more than {limit} MiB of memory to decode"
+        }
+        L10nKey::ImagePreviewCorrupt => "\"{name}\" is damaged or not a complete image",
+        L10nKey::ImagePreviewUnsupportedFormat => {
+            "\"{name}\" is a {format} image, which can't be shown here"
+        }
+        L10nKey::ImagePreviewUnsupportedFeature => {
+            "\"{name}\" uses an image feature that can't be decoded here"
+        }
+        L10nKey::ImagePreviewSvgImages => {
+            "\"{name}\" links or embeds other images, which are never loaded"
+        }
+        L10nKey::ImagePreviewNotAnImage => {
+            "\"{name}\" is named like an image but is neither an image nor text"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} could not be started. tty59 looks on PATH for: {programs}. Make sure {name} is installed and can run."

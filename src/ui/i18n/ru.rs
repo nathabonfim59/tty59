@@ -2626,6 +2626,39 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::MermaidViewerFullScreen => "Во весь экран",
         L10nKey::MermaidViewerFit => "Вместить",
         L10nKey::MermaidViewerExit => "Выйти из полноэкранного режима (Esc)",
+        L10nKey::ImagePreviewFit => "Вместить",
+        L10nKey::ImagePreviewActualSize => "Реальный размер (100%)",
+        L10nKey::ImagePreviewAnimated => "Анимация, кадров: {frames}",
+        L10nKey::ImagePreviewFirstFrame => "Анимация слишком велика: показан только первый кадр",
+        L10nKey::ImagePreviewReduced => {
+            "Показано в уменьшенном разрешении ({width} × {height} пикс.)"
+        }
+        L10nKey::ImagePreviewCantShow => "Не удаётся показать это изображение",
+        L10nKey::ImagePreviewTooLarge => {
+            "«{name}» занимает {size} МиБ, что больше предела для изображений ({limit} МиБ)"
+        }
+        L10nKey::ImagePreviewTooLargeUnknown => {
+            "«{name}» больше предела для изображений ({limit} МиБ)"
+        }
+        L10nKey::ImagePreviewTooManyPixels => {
+            "«{name}» — {width} × {height} пикс., больше предела в {limit} пикселей"
+        }
+        L10nKey::ImagePreviewOverBudget => {
+            "Для декодирования «{name}» нужно больше {limit} МиБ памяти"
+        }
+        L10nKey::ImagePreviewCorrupt => "«{name}» повреждён или не является целым изображением",
+        L10nKey::ImagePreviewUnsupportedFormat => {
+            "«{name}» — изображение {format}, его нельзя показать здесь"
+        }
+        L10nKey::ImagePreviewUnsupportedFeature => {
+            "«{name}» использует возможность изображений, которую здесь нельзя декодировать"
+        }
+        L10nKey::ImagePreviewSvgImages => {
+            "«{name}» ссылается на другие изображения или встраивает их; они не загружаются"
+        }
+        L10nKey::ImagePreviewNotAnImage => {
+            "«{name}» называется как изображение, но это не изображение и не текст"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "Не удалось запустить {name}. tty59 ищет в PATH: {programs}. Проверьте, что сервер {name} установлен и запускается."

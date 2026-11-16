@@ -2610,6 +2610,37 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::MermaidViewerFullScreen => "全画面",
         L10nKey::MermaidViewerFit => "フィット",
         L10nKey::MermaidViewerExit => "全画面を終了 (Esc)",
+        L10nKey::ImagePreviewFit => "フィット",
+        L10nKey::ImagePreviewActualSize => "実寸 (100%)",
+        L10nKey::ImagePreviewAnimated => "アニメーション、{frames} フレーム",
+        L10nKey::ImagePreviewFirstFrame => {
+            "アニメーションが大きすぎるため、最初のフレームだけを表示しています"
+        }
+        L10nKey::ImagePreviewReduced => "縮小した解像度で表示しています（{width} × {height} px）",
+        L10nKey::ImagePreviewCantShow => "この画像を表示できません",
+        L10nKey::ImagePreviewTooLarge => {
+            "「{name}」は {size} MiB で、画像の上限 {limit} MiB を超えています"
+        }
+        L10nKey::ImagePreviewTooLargeUnknown => "「{name}」は画像の上限 {limit} MiB を超えています",
+        L10nKey::ImagePreviewTooManyPixels => {
+            "「{name}」は {width} × {height} px で、上限の {limit} ピクセルを超えています"
+        }
+        L10nKey::ImagePreviewOverBudget => {
+            "「{name}」のデコードには {limit} MiB を超えるメモリが必要です"
+        }
+        L10nKey::ImagePreviewCorrupt => "「{name}」は壊れているか、完全な画像ではありません",
+        L10nKey::ImagePreviewUnsupportedFormat => {
+            "「{name}」は {format} 画像のため、ここでは表示できません"
+        }
+        L10nKey::ImagePreviewUnsupportedFeature => {
+            "「{name}」には、ここでデコードできない画像機能が使われています"
+        }
+        L10nKey::ImagePreviewSvgImages => {
+            "「{name}」は他の画像をリンクまたは埋め込んでいますが、読み込みません"
+        }
+        L10nKey::ImagePreviewNotAnImage => {
+            "「{name}」は画像のような名前ですが、画像でもテキストでもありません"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} を起動できませんでした。tty59 は PATH 上で次を探します：{programs}。{name} がインストールされ、実行できることを確認してください。"

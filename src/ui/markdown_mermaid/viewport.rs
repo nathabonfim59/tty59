@@ -7,38 +7,67 @@
 //! behaviour can be unit-tested directly.
 
 /// Fit padding: the margin kept around a fitted diagram, on each side.
-pub(super) const MARGIN: f32 = 24.;
+pub(crate) const MARGIN: f32 = 24.;
 /// The viewer's zoom floor: a large diagram still shrinks to a thumbnail,
 /// but no further than this, or it would vanish into a dot.
-pub(super) const MIN_SCALE: f32 = 0.1;
+pub(crate) const MIN_SCALE: f32 = 0.1;
 /// The viewer's zoom ceiling. Past this the raster cap makes every step
 /// softer without telling the eye anything new.
-pub(super) const MAX_SCALE: f32 = 16.;
+pub(crate) const MAX_SCALE: f32 = 16.;
 /// How much of the diagram must stay inside the area while panning, in px
 /// per axis — enough to grab it again, never stranding it off screen.
-pub(super) const KEEP_VISIBLE: f32 = 48.;
+pub(crate) const KEEP_VISIBLE: f32 = 48.;
 
 /// Where the diagram sits in the viewer's area: its top-left corner and its
 /// scale relative to the diagram's natural size.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(super) struct Viewport {
-    pub(super) scale: f32,
-    pub(super) offset: (f32, f32),
+pub(crate) struct Viewport {
+    pub(crate) scale: f32,
+    pub(crate) offset: (f32, f32),
 }
 
 /// A size, as the pure maths sees it: `(width, height)` in logical px.
-pub(super) type Size = (f32, f32);
+pub(crate) type Size = (f32, f32);
 
 /// Fit `natural` into `area` with [`MARGIN`] around it: the largest scale
 /// that fits both axes, clamped to the zoom range, centred. Small diagrams
 /// may be upscaled — "fit" means fill the area pleasantly, not preserve the
 /// intrinsic size the way the inline preview does.
 pub(super) fn fit(natural: Size, area: Size) -> Viewport {
+    fit_in(natural, area, DIAGRAM)
+}
+
+/// The zoom range a viewer works in. The diagram viewer's is [`DIAGRAM`]; the
+/// image viewer's floor follows what its picture needs to fit, because a
+/// 20000 × 100 panorama fits at a scale far below the diagram floor and a
+/// floor that stopped it short would not fit it at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Limits {
+    pub(crate) min: f32,
+    pub(crate) max: f32,
+}
+
+/// The diagram viewer's zoom range.
+pub(crate) const DIAGRAM: Limits = Limits {
+    min: MIN_SCALE,
+    max: MAX_SCALE,
+};
+
+/// The scale at which `natural` just fits `area` inside [`MARGIN`], on the
+/// axis that runs out first: not clamped to any range, and `0` for an area
+/// that has no room.
+pub(crate) fn fit_scale(natural: Size, area: Size) -> f32 {
     let (nw, nh) = clamp_size(natural);
     let (aw, ah) = area;
     let by_width = (aw - 2. * MARGIN).max(0.) / nw;
     let by_height = (ah - 2. * MARGIN).max(0.) / nh;
-    let scale = by_width.min(by_height).clamp(MIN_SCALE, MAX_SCALE);
+    by_width.min(by_height)
+}
+
+/// [`fit`] inside the zoom range `limits`: aspect ratio kept (one scale for
+/// both axes), centred.
+pub(crate) fn fit_in(natural: Size, area: Size, limits: Limits) -> Viewport {
+    let scale = fit_scale(natural, area).clamp(limits.min, limits.max);
     centre(scale, natural, area)
 }
 
@@ -47,7 +76,12 @@ pub(super) fn fit(natural: Size, area: Size) -> Viewport {
 /// a factor that would cross an end moves the offset to keep the anchor —
 /// or leaves everything alone when the scale cannot change.
 pub(super) fn zoom_about(v: Viewport, factor: f32, p: (f32, f32)) -> Viewport {
-    let scale = (v.scale * factor).clamp(MIN_SCALE, MAX_SCALE);
+    zoom_about_in(v, factor, p, DIAGRAM)
+}
+
+/// [`zoom_about`] inside the zoom range `limits`.
+pub(crate) fn zoom_about_in(v: Viewport, factor: f32, p: (f32, f32), limits: Limits) -> Viewport {
+    let scale = (v.scale * factor).clamp(limits.min, limits.max);
     if scale == v.scale {
         return v;
     }
@@ -61,7 +95,7 @@ pub(super) fn zoom_about(v: Viewport, factor: f32, p: (f32, f32)) -> Viewport {
 
 /// Pan by `delta` (area px, positive = right/down), then keep the diagram
 /// grabbable with [`clamp_pan`].
-pub(super) fn pan(v: Viewport, delta: (f32, f32), natural: Size, area: Size) -> Viewport {
+pub(crate) fn pan(v: Viewport, delta: (f32, f32), natural: Size, area: Size) -> Viewport {
     clamp_pan(
         Viewport {
             offset: (v.offset.0 + delta.0, v.offset.1 + delta.1),
@@ -76,7 +110,7 @@ pub(super) fn pan(v: Viewport, delta: (f32, f32), natural: Size, area: Size) -> 
 /// axis, however big or small it is — a diagram that fits the area can be
 /// dragged around too, just not off it. A diagram smaller than the band
 /// itself keeps all of it on screen.
-pub(super) fn clamp_pan(v: Viewport, natural: Size, area: Size) -> Viewport {
+pub(crate) fn clamp_pan(v: Viewport, natural: Size, area: Size) -> Viewport {
     let (nw, nh) = clamp_size(natural);
     let (aw, ah) = area;
     let (w, h) = (nw * v.scale, nh * v.scale);
@@ -96,7 +130,7 @@ fn clamp_axis(at: f32, size: f32, area: f32) -> f32 {
 /// 16), in gpui's sign — positive is the wheel rolled up, away from the
 /// reader, which zooms in, as it does in the terminal and the editor. (The
 /// browser's `deltaY` runs the other way; this is not that.)
-pub(super) fn wheel_factor(dy_px: f32) -> f32 {
+pub(crate) fn wheel_factor(dy_px: f32) -> f32 {
     1.0025f32.powf(dy_px)
 }
 
@@ -296,5 +330,79 @@ mod tests {
         assert!((raster_bucket(4., ws) - ws * 4.).abs() < 1e-2);
         // 8 < 10 ≤ 8·√2 ≈ 11.31: the smallest power that covers.
         assert!((raster_bucket(10., ws) - ws * 8. * SQRT_2).abs() < 1e-2);
+    }
+
+    #[test]
+    fn the_diagram_range_is_what_fit_and_zoom_always_used() {
+        assert_eq!(DIAGRAM.min, MIN_SCALE);
+        assert_eq!(DIAGRAM.max, MAX_SCALE);
+        let natural = (2000., 1000.);
+        assert_eq!(fit(natural, AREA), fit_in(natural, AREA, DIAGRAM));
+        let v = fit(natural, AREA);
+        assert_eq!(
+            zoom_about(v, 1.5, (10., 20.)),
+            zoom_about_in(v, 1.5, (10., 20.), DIAGRAM)
+        );
+    }
+
+    #[test]
+    fn a_diagram_still_stops_at_its_floor_but_an_image_range_goes_below_it() {
+        // 20000 x 100 into 1000 x 600: (1000 - 48) / 20000 = 0.0476.
+        let panorama = (20000., 100.);
+        let diagram = fit(panorama, AREA);
+        assert_eq!(diagram.scale, MIN_SCALE, "the diagram floor, unchanged");
+        let wide = fit_scale(panorama, AREA);
+        assert!((wide - 0.0476).abs() < 0.0001, "{wide}");
+        let range = Limits {
+            min: wide.min(MIN_SCALE),
+            max: MAX_SCALE,
+        };
+        let v = fit_in(panorama, AREA, range);
+        assert!((v.scale - wide).abs() < 1e-6, "fits below the floor");
+        // The whole panorama is inside the area, margin kept, centred.
+        assert!(v.offset.0 >= MARGIN - 0.01, "{:?}", v.offset);
+        assert!(v.offset.0 + 20000. * v.scale <= 1000. - MARGIN + 0.01);
+    }
+
+    #[test]
+    fn an_extremely_tall_image_fits_by_height_and_keeps_its_aspect() {
+        let tall = (50., 30000.);
+        let s = fit_scale(tall, AREA);
+        assert!((s - (600. - 48.) / 30000.).abs() < 1e-7, "{s}");
+        let v = fit_in(
+            tall,
+            AREA,
+            Limits {
+                min: s.min(MIN_SCALE),
+                max: MAX_SCALE,
+            },
+        );
+        // One scale for both axes: the aspect ratio is the image's.
+        let (w, h) = (50. * v.scale, 30000. * v.scale);
+        assert!((w / h - 50. / 30000.).abs() < 1e-6);
+        assert!(h <= 600. - 2. * MARGIN + 0.01);
+    }
+
+    #[test]
+    fn zoom_in_a_range_stops_at_its_own_ends_and_keeps_the_anchor() {
+        let range = Limits { min: 0.01, max: 4. };
+        let v = Viewport {
+            scale: 0.02,
+            offset: (100., 50.),
+        };
+        let out = zoom_about_in(v, 0.1, (300., 200.), range);
+        assert_eq!(
+            out.scale, 0.01,
+            "stops at the range floor, not the diagram's"
+        );
+        // The image point under the pointer stays under it.
+        let before = ((300. - v.offset.0) / v.scale, (200. - v.offset.1) / v.scale);
+        let after = (
+            (300. - out.offset.0) / out.scale,
+            (200. - out.offset.1) / out.scale,
+        );
+        assert!((before.0 - after.0).abs() < 0.01 && (before.1 - after.1).abs() < 0.01);
+        let top = zoom_about_in(Viewport { scale: 3., ..v }, 10., (0., 0.), range);
+        assert_eq!(top.scale, 4.);
     }
 }

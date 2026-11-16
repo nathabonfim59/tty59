@@ -2360,6 +2360,23 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::MermaidViewerFullScreen => "全屏",
         L10nKey::MermaidViewerFit => "适应",
         L10nKey::MermaidViewerExit => "退出全屏 (Esc)",
+        L10nKey::ImagePreviewFit => "适应",
+        L10nKey::ImagePreviewActualSize => "实际大小 (100%)",
+        L10nKey::ImagePreviewAnimated => "动画，共 {frames} 帧",
+        L10nKey::ImagePreviewFirstFrame => "动画过大，无法保留，仅显示第一帧",
+        L10nKey::ImagePreviewReduced => "以较低分辨率显示（{width} × {height} 像素）",
+        L10nKey::ImagePreviewCantShow => "无法显示此图片",
+        L10nKey::ImagePreviewTooLarge => "“{name}”大小为 {size} MiB，超过图片上限 {limit} MiB",
+        L10nKey::ImagePreviewTooLargeUnknown => "“{name}”超过图片上限 {limit} MiB",
+        L10nKey::ImagePreviewTooManyPixels => {
+            "“{name}”为 {width} × {height} 像素，超过 {limit} 像素的上限"
+        }
+        L10nKey::ImagePreviewOverBudget => "解码“{name}”所需内存超过 {limit} MiB",
+        L10nKey::ImagePreviewCorrupt => "“{name}”已损坏或不是完整的图片",
+        L10nKey::ImagePreviewUnsupportedFormat => "“{name}”是 {format} 图片，无法在此显示",
+        L10nKey::ImagePreviewUnsupportedFeature => "“{name}”使用了此处无法解码的图片功能",
+        L10nKey::ImagePreviewSvgImages => "“{name}”链接或嵌入了其他图片，这些图片不会被加载",
+        L10nKey::ImagePreviewNotAnImage => "“{name}”的名称像图片，但它既不是图片也不是文本",
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "无法启动 {name}。tty59 会在 PATH 中查找：{programs}。请确认 {name} 已安装且可以运行。"

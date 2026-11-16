@@ -6923,29 +6923,20 @@ impl TerminalView {
         let cfg = cx.global::<Config>();
         let mode = cfg.file_open_mode();
         let command = cfg.link_file_command.clone();
-        // A path that was just resolved on another machine means nothing to a
-        // local opener: `open` and a user's `code --goto` would both be handed
-        // a path this filesystem never had, throwing away the one thing that
-        // made the link right and silently showing this machine's copy when
-        // one happens to exist. The editor is the only one that can reach the
-        // file, so it takes the click whatever the setting says.
-        let mode = match self.host_id.is_local() {
-            true => mode,
-            false => LinkFileOpen::Internal,
-        };
         // Both external arms have to answer for a failed spawn (#542): a
         // misspelled `link_file_command` or a missing opener used to hit only
         // the log, and the link read as dead — while the path was only ever
         // underlined because it verifiably exists. The built-in editor has
         // its own error path downstream of OpenFileRequested.
-        let outcome = match (mode, command) {
-            (LinkFileOpen::Command, Some(template)) => {
+        let outcome = match (
+            file_link_route(mode, command.is_some(), self.host_id.is_local()),
+            command,
+        ) {
+            (FileLinkRoute::Command, Some(template)) => {
                 run_file_command(&template, &path, line, column)
             }
-            (LinkFileOpen::System, _) => open_file_path(&path),
-            // Told to run a command, with no command left to run: falling back
-            // to the built-in editor beats the click doing nothing.
-            (LinkFileOpen::Internal | LinkFileOpen::Command, _) => {
+            (FileLinkRoute::System, _) => open_file_path(&path),
+            (FileLinkRoute::Internal | FileLinkRoute::Command, _) => {
                 cx.emit(OpenFileRequested {
                     path,
                     line,
@@ -8633,6 +8624,37 @@ fn select_end_copy(enabled: bool, grid: bool, editor: bool) -> SelectEndCopy {
         (true, true, _) => SelectEndCopy::Grid,
         (true, false, true) => SelectEndCopy::Editor,
         (true, false, false) => SelectEndCopy::None,
+    }
+}
+
+/// Where a clicked file link goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileLinkRoute {
+    /// The built-in editor: text, and now pictures, in tty59's own tabs.
+    Internal,
+    /// The desktop's association for the file.
+    System,
+    /// The user's `link_file_command`.
+    Command,
+}
+
+/// The `link_file_open` setting applied to one click.
+///
+/// A path that was just resolved on another machine means nothing to a local
+/// opener: `open` and a user's `code --goto` would both be handed a path this
+/// filesystem never had, throwing away the one thing that made the link right
+/// and silently showing this machine's copy when one happens to exist. The
+/// editor is the only one that can reach the file, so it takes the click
+/// whatever the setting says — a picture included.
+///
+/// Told to run a command with no command left to run, the built-in editor
+/// beats the click doing nothing.
+fn file_link_route(mode: LinkFileOpen, has_command: bool, host_is_local: bool) -> FileLinkRoute {
+    match (host_is_local, mode, has_command) {
+        (false, ..) => FileLinkRoute::Internal,
+        (true, LinkFileOpen::System, _) => FileLinkRoute::System,
+        (true, LinkFileOpen::Command, true) => FileLinkRoute::Command,
+        (true, LinkFileOpen::Internal | LinkFileOpen::Command, _) => FileLinkRoute::Internal,
     }
 }
 
@@ -11197,6 +11219,33 @@ mod tests {
                 !offers_default_app_open(false, mode),
                 "a remote file has nothing here for the OS to open ({mode:?})"
             );
+        }
+    }
+
+    /// Which of the three places a clicked file link goes — pictures are files
+    /// like any other: Internal opens them in tty59's own tabs, System and
+    /// Command still hand them to the desktop or the user's command, and a
+    /// remote pane's path is never handed to a local opener at all.
+    #[test]
+    fn the_open_setting_decides_where_a_link_goes_and_a_remote_path_stays_internal() {
+        use super::{FileLinkRoute::*, LinkFileOpen as M, file_link_route as route};
+        // Local panes follow the setting.
+        assert_eq!(route(M::Internal, false, true), Internal);
+        assert_eq!(route(M::Internal, true, true), Internal);
+        assert_eq!(route(M::System, false, true), System);
+        assert_eq!(route(M::System, true, true), System);
+        assert_eq!(route(M::Command, true, true), Command);
+        // A command mode with no command falls back to the editor, not nothing.
+        assert_eq!(route(M::Command, false, true), Internal);
+        // A remote pane's path means nothing to a local opener or command.
+        for mode in [M::Internal, M::System, M::Command] {
+            for has_command in [false, true] {
+                assert_eq!(
+                    route(mode, has_command, false),
+                    Internal,
+                    "remote {mode:?} (command: {has_command})"
+                );
+            }
         }
     }
 
