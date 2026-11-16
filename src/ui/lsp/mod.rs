@@ -317,6 +317,31 @@ impl LspStore {
         });
     }
 
+    /// Hands `diagnostics` for `path` to the store the way a server's
+    /// `publishDiagnostics` does: through [`Self::publish_diagnostics`], in
+    /// UTF-16 columns, with no document version. The document has to be there
+    /// already, which is what [`Self::set_state_for_test`] puts it there for;
+    /// nothing is spawned and nothing in the store is written directly.
+    #[cfg(test)]
+    pub(crate) fn publish_diagnostics_for_test(
+        path: &Path,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+        cx: &mut App,
+    ) {
+        Self::update(cx, |store, cx| {
+            let uri = path_to_uri(path).expect("an absolute path");
+            store.publish_diagnostics(
+                lsp_types::PublishDiagnosticsParams {
+                    uri,
+                    diagnostics,
+                    version: None,
+                },
+                Encoding::Utf16,
+                cx,
+            );
+        });
+    }
+
     // ---- The editor's side ----
 
     /// Remembers how a window's editor offers its buffers, so turning the

@@ -2218,9 +2218,12 @@ impl Tty59App {
                             Some(BarKind::GoToLine | BarKind::Rename { .. })
                         ) {
                             this.editor.bar = None;
-                            cx.notify();
                         }
+                        // A Save As stays up, with its focus cue gone: the
+                        // bar draws the ring from the focus it has now.
+                        cx.notify();
                     }
+                    InputEvent::Focus => cx.notify(),
                     _ => {}
                 }
             },
@@ -3375,7 +3378,7 @@ impl Tty59App {
             .active_buffer()
             .and_then(|f| f.conflict.map(|c| (f.id(), c)))
             .map(|(id, c)| self.render_editor_conflict_banner(id, c, cx));
-        let bar = self.render_editor_bar(cx);
+        let bar = self.render_editor_bar(window, cx);
 
         // Only the hoisted header takes a trail, and it is not drawn here.
         let header = chrome
@@ -4115,37 +4118,52 @@ impl Tty59App {
             .into_any_element()
     }
 
-    fn render_editor_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_editor_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let bar = self.editor.bar.as_ref()?;
         let label = match bar.kind {
             BarKind::GoToLine => t(L10nKey::EditorGoToLine),
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAs),
             BarKind::Rename { .. } => t(L10nKey::LspRenameSymbol),
         };
+        // The bar is already a row, so an idle field inside it is not a second
+        // box: no fill, no border, no shadow. While it has the focus it is the
+        // stock field, fill and ring included: the ring is a half-opacity
+        // colour, and its contrast with the bar is measured over that fill. The
+        // border keeps its 1px of layout either way, so the field does not
+        // resize with focus.
+        let mut input = Input::new(&bar.input).small();
+        if !bar.input.read(cx).focus_handle(cx).is_focused(window) {
+            input = input
+                .bg(gpui::transparent_black())
+                .border_color(gpui::transparent_black())
+                .shadow_none();
+        }
         Some(
-            h_flex()
-                .flex_none()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .px(px(crate::ui::app::CONTENT_INSET))
-                .py_1()
-                .border_b_1()
-                .border_color(cx.theme().sidebar_border)
-                .text_sm()
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&bar.input).small()),
-                )
-                .into_any_element(),
+            status::probe(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .px(px(crate::ui::app::CONTENT_INSET))
+                    .py_1()
+                    .border_b(crate::ui::theme::hairline(window))
+                    .border_color(cx.theme().sidebar_border),
+                "editor-bar",
+            )
+            .child(status::probe(
+                div()
+                    .flex_none()
+                    .text_size(gpui::rems(crate::ui::right_panel::META))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+                "editor-bar-label",
+            ))
+            .child(status::probe(
+                div().flex_1().min_w_0().child(input),
+                "editor-bar-input",
+            ))
+            .into_any_element(),
         )
     }
 
@@ -5089,5 +5107,196 @@ mod zoom_gpui_tests {
             dragged.size.width.as_f32(),
             "wheel keeps the scale",
         );
+    }
+}
+
+/// The Go to line / Save As / Rename bar, drawn in the real app: what the
+/// F9 finding asks of it, and the input behaviour it must keep.
+#[cfg(test)]
+mod bar_gpui_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::nav::gpui_tests::{caret, open_rs};
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+    }
+
+    /// One line of text at `rems` of the interface size, as the text system
+    /// lays it out: the height a label of that size is drawn at.
+    fn line_h(vcx: &mut VisualTestContext, rems: f32) -> f32 {
+        vcx.update(|window, _| {
+            let mut style = window.text_style();
+            style.font_size = px(rems * window.rem_size().as_f32()).into();
+            style.line_height_in_pixels(window.rem_size()).as_f32()
+        })
+    }
+
+    fn open_go_to_line(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| app.editor_go_to_line(window, cx));
+        settle(vcx);
+    }
+
+    fn open_save_as(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, id: BufferId) {
+        app.update_in(vcx, |app, window, cx| {
+            app.editor_open_bar(
+                BarKind::SaveAs {
+                    id,
+                    then_close: false,
+                },
+                "a.rs".into(),
+                window,
+                cx,
+            );
+        });
+        settle(vcx);
+    }
+
+    fn bar_open(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.read_with(vcx, |app, _| app.editor.bar.is_some())
+    }
+
+    fn bar_input_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.update_in(vcx, |app, window, cx| {
+            app.editor
+                .bar
+                .as_ref()
+                .is_some_and(|b| b.input.read(cx).focus_handle(cx).is_focused(window))
+        })
+    }
+
+    fn editor_input_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.update_in(vcx, |app, window, cx| {
+            app.active_buffer()
+                .is_some_and(|f| f.input.read(cx).focus_handle(cx).is_focused(window))
+        })
+    }
+
+    /// F9: the label is the 12px token, not Tailwind's 14px `text_sm`.
+    #[gpui::test]
+    fn the_bar_label_is_the_12px_token(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let id = open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+        let want = line_h(&mut vcx, crate::ui::right_panel::META);
+        for save_as in [false, true] {
+            if save_as {
+                open_save_as(&app, &mut vcx, id);
+            } else {
+                open_go_to_line(&app, &mut vcx);
+            }
+            assert!(
+                bar_open(&app, &mut vcx),
+                "save_as={save_as}: the bar opened"
+            );
+            let label = vcx
+                .debug_bounds("editor-bar-label")
+                .expect("the bar's label is drawn");
+            assert!(
+                (label.size.height.as_f32() - want).abs() < 0.6,
+                "save_as={save_as}: the label is {:?} tall, a 12px line is {want}",
+                label.size.height
+            );
+        }
+    }
+
+    /// F9: the bar's one separator is the hairline (0.5px at the test
+    /// window's 2x), not a whole-pixel `border_b_1`. Read off the layout: what
+    /// the bar is taller than its input and its two equal paddings.
+    #[gpui::test]
+    fn the_bar_separator_is_one_hairline(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+        open_go_to_line(&app, &mut vcx);
+        let bar = vcx.debug_bounds("editor-bar").expect("the bar");
+        let input = vcx.debug_bounds("editor-bar-input").expect("its input");
+        let hairline = vcx.update(|window, _| crate::ui::theme::hairline(window).as_f32());
+        assert!(
+            (hairline - 0.5).abs() < 0.001,
+            "the test window is 2x, so a hairline is half a pixel, not {hairline}"
+        );
+        let pad = input.top().as_f32() - bar.top().as_f32();
+        let separator = bar.size.height.as_f32() - input.size.height.as_f32() - 2. * pad;
+        assert!(
+            (separator - hairline).abs() < 0.01,
+            "the bar's separator is {separator}px (bar {bar:?}, input {input:?}), not a {hairline}px hairline"
+        );
+    }
+
+    /// F9, kept: the input's box does not change when the focus leaves it, so
+    /// the idle border can go quiet without the field resizing under the
+    /// caret. A Save As is left up on blur (a Go to line is not).
+    #[gpui::test]
+    fn the_input_keeps_its_box_when_the_focus_moves_and_save_as_stays(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let id = open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+        open_save_as(&app, &mut vcx, id);
+        assert!(bar_input_focused(&app, &mut vcx), "the bar starts focused");
+        let focused = vcx.debug_bounds("editor-bar-input").expect("the input");
+
+        app.update_in(&mut vcx, |app, window, cx| app.focus_editor(window, cx));
+        settle(&mut vcx);
+        assert!(
+            bar_open(&app, &mut vcx),
+            "a half-typed Save As survives blur"
+        );
+        assert!(!bar_input_focused(&app, &mut vcx), "the focus left the bar");
+        assert!(editor_input_focused(&app, &mut vcx));
+        let idle = vcx.debug_bounds("editor-bar-input").expect("the input");
+        assert_eq!(focused, idle, "focus must not resize the field");
+    }
+
+    /// F9, kept: Go to line closes on blur; typed digits and Enter jump, close
+    /// the bar and give the focus back to the editor.
+    #[gpui::test]
+    fn go_to_line_blur_closes_and_typed_input_jumps(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+
+        open_go_to_line(&app, &mut vcx);
+        assert!(bar_input_focused(&app, &mut vcx));
+        app.update_in(&mut vcx, |app, window, cx| app.focus_editor(window, cx));
+        settle(&mut vcx);
+        assert!(!bar_open(&app, &mut vcx), "blur dismisses Go to line");
+
+        open_go_to_line(&app, &mut vcx);
+        vcx.simulate_input("5");
+        vcx.simulate_keystrokes("enter");
+        for _ in 0..3 {
+            settle(&mut vcx);
+        }
+        assert!(!bar_open(&app, &mut vcx), "Enter closes the bar");
+        assert_eq!(caret(&app, &mut vcx).line, 4, "line 5 is row 4");
+        assert!(editor_input_focused(&app, &mut vcx), "the editor has focus");
+    }
+
+    /// F9, kept: Escape dismisses the bar, not the editor, and hands the
+    /// focus back.
+    #[gpui::test]
+    fn escape_closes_the_bar_and_refocuses_the_editor(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let id = open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+        open_save_as(&app, &mut vcx, id);
+        vcx.simulate_keystrokes("escape");
+        settle(&mut vcx);
+        assert!(!bar_open(&app, &mut vcx), "Escape closes the Save As bar");
+        assert!(
+            app.read_with(&vcx, |app, _| app.code_panel_visible()),
+            "and leaves the editor open"
+        );
+        assert!(editor_input_focused(&app, &mut vcx));
     }
 }
