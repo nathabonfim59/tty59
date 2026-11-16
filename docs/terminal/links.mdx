@@ -27,6 +27,28 @@ around it — which is what makes a path a build tool printed from the workspace
 root resolve while the shell sits in a member directory. A path that matches
 nothing under either says so rather than doing nothing.
 
+A path a program wrapped across several lines itself, rather than the terminal
+wrapping it, is read back as one link when the joined text names a file or a
+folder that exists. That covers a program that breaks long paths at its own
+width, with or without an indent, a box border (`│`, `┃`, `║`) or a line-number
+gutter in front of each line; only the path itself is underlined, not the
+border or the gutter. The lines must follow one another directly, and the
+continuation must look like the rest of a name rather than the start of another
+path. The limits:
+
+- At most eight lines and 4096 characters are joined.
+- A line that is a whole, existing file is never joined to the next: two
+  files listed one under the other stay two links, even if the two names
+  glued together would also exist.
+- Prose around the path needs an indent or a border on the continuation line;
+  a path in the middle of a sentence that is broken at the program's width,
+  with nothing in front of the next line, is not joined.
+- A break that falls on a space, and a path broken across a soft wrap and a
+  hard line break at once, are not joined.
+- A web address is never read this way.
+- In a pane connected to another machine, nothing is joined until that machine
+  has answered for every part, so the underline can appear a moment later.
+
 Paths in a pane connected to another machine are resolved *on that machine*,
 so the underline appears a moment after the pointer settles rather than
 instantly. A pane running `ssh` typed into a local shell has no host that can

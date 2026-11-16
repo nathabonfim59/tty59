@@ -1,0 +1,522 @@
+{
+  "provenance": "Real PTY recordings with per-case provenance: engineered GNU formatting, and actual rustc/git/rg/ls output. No claim of Claude Code or Codex TUI captures.",
+  "fixture_root": "/home/user/path-link-fixtures-r4",
+  "fixture_sha256": {
+    "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs": "be88c9b43d26dbf88635887362fccd5cb61ff31155058699aaffdbaa3ee2fb44",
+    "sources/location.rs": "be88c9b43d26dbf88635887362fccd5cb61ff31155058699aaffdbaa3ee2fb44",
+    "sources/reports/neutral folder/quoted-preview-target.rs": "be88c9b43d26dbf88635887362fccd5cb61ff31155058699aaffdbaa3ee2fb44",
+    "notes/first.rs": "be88c9b43d26dbf88635887362fccd5cb61ff31155058699aaffdbaa3ee2fb44",
+    "notes/second.rs": "be88c9b43d26dbf88635887362fccd5cb61ff31155058699aaffdbaa3ee2fb44",
+    "notes/first.rsnotes/second.rs": "be88c9b43d26dbf88635887362fccd5cb61ff31155058699aaffdbaa3ee2fb44",
+    "notes/first.rsunrelated": "be88c9b43d26dbf88635887362fccd5cb61ff31155058699aaffdbaa3ee2fb44",
+    "read the outputnotes/second.rs": "be88c9b43d26dbf88635887362fccd5cb61ff31155058699aaffdbaa3ee2fb44"
+  },
+  "tools": {
+    "fold": "fold (GNU coreutils) 9.4",
+    "sed": "sed (GNU sed) 4.9",
+    "nl": "nl (GNU coreutils) 9.4",
+    "cat": "cat (GNU coreutils) 9.4",
+    "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+    "git": "git version 2.43.0",
+    "rg": "ripgrep 14.1.0",
+    "ls": "ls (GNU coreutils) 9.4"
+  },
+  "cases": [
+    {
+      "name": "soft-wrap",
+      "columns": 80,
+      "rows": 24,
+      "command": "cat /home/user/path-links-corpus-r4/inputs/soft-wrap.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "44cb11820d66d3c00b30df32a80b2c0a483713ccd5c84061dad9f8088872f278",
+      "bytes": 89,
+      "intent": "Control: one output line wraps at the VT width, without emitter newlines.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs",
+        ""
+      ]
+    },
+    {
+      "name": "hard-wrap-at-width",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 80 /home/user/path-links-corpus-r4/inputs/hard-wrap-at-width.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "824c0c978eab61a1c7701be50f13aa16b13b4f809de731d0e63cb6f651f89a52",
+      "bytes": 91,
+      "intent": "Control: GNU fold inserts hard breaks at the terminal width.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-ta",
+        "rget.rs",
+        ""
+      ]
+    },
+    {
+      "name": "program-wrap-before-width",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 46 /home/user/path-links-corpus-r4/inputs/program-wrap-before-width.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "ca1140fa36da094ed8271c035d458240dd4bbc92526fb9285a9c6681bda78088",
+      "bytes": 91,
+      "intent": "GNU fold wraps at 46 columns inside an 80-column PTY.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "sources/reports/component-with-a-very-long-nam",
+        "e/release-notes/neutral-preview-target.rs",
+        ""
+      ]
+    },
+    {
+      "name": "indented-continuation",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 46 /home/user/path-links-corpus-r4/inputs/indented-continuation.txt | sed '2,$s/^/    /'",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "f4f791cd173d8585d784f60c6b0d02caef23429294f7ceeb345005a862e01866",
+      "bytes": 95,
+      "intent": "The first row starts normally; following rows have four indentation spaces.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "sources/reports/component-with-a-very-long-nam",
+        "    e/release-notes/neutral-preview-target.rs",
+        ""
+      ]
+    },
+    {
+      "name": "box-inset-wrap",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 46 /home/user/path-links-corpus-r4/inputs/box-inset-wrap.txt | awk '{ printf \"│ %-66s │\\n\", $0 }'",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "767113af4da36fb1bba572d27724a124fd510d42099cb07750ce669ec0497afa",
+      "bytes": 152,
+      "intent": "Matched box columns, but the text wraps before reaching the right border.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "│ sources/reports/component-with-a-very-long-nam                     │",
+        "│ e/release-notes/neutral-preview-target.rs                          │",
+        ""
+      ]
+    },
+    {
+      "name": "left-gutter-wrap",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 46 /home/user/path-links-corpus-r4/inputs/left-gutter-wrap.txt | sed 's/^/│   /'",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "500870b946d5666b4fc37dcb19d60478d2160dcdbae8d9daaec44520536d7ed1",
+      "bytes": 103,
+      "intent": "Matched left box gutter without a right border.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "│   sources/reports/component-with-a-very-long-nam",
+        "│   e/release-notes/neutral-preview-target.rs",
+        ""
+      ]
+    },
+    {
+      "name": "numbered-gutter-wrap",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 46 /home/user/path-links-corpus-r4/inputs/numbered-gutter-wrap.txt | nl -ba -w 2 -s ' │ '",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "3303e8881f8f5ad26344fdec5c976428bda65bd7813145a4ae3c9b1eb04ccbc1",
+      "bytes": 105,
+      "intent": "GNU nl adds an actual increasing numeric gutter and a vertical divider.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        " 1 │ sources/reports/component-with-a-very-long-nam",
+        " 2 │ e/release-notes/neutral-preview-target.rs",
+        ""
+      ]
+    },
+    {
+      "name": "split-after-slash",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 62 /home/user/path-links-corpus-r4/inputs/split-after-slash.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "17cb220a4a2fa71929e59933b8f597e6fbc6acd7ca803c0204b19fe2bd819400",
+      "bytes": 91,
+      "intent": "The first fragment ends in a slash, and the slash belongs to the joined path.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "sources/reports/component-with-a-very-long-name/release-notes/",
+        "neutral-preview-target.rs",
+        ""
+      ]
+    },
+    {
+      "name": "split-after-hyphen",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 43 /home/user/path-links-corpus-r4/inputs/split-after-hyphen.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "61c5ca80ac68bf67c5c7c1225a96367b496631fd9de9e8f2525406e81e392068",
+      "sha256": "be68494f706d9062ebb4e4e2b3f46e6a7ad0234576a4512323f4cc0bffbd549f",
+      "bytes": 93,
+      "intent": "A filename component is split after a real hyphen, which must be retained.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "sources/reports/component-with-a-very-long-",
+        "name/release-notes/neutral-preview-target.r",
+        "s",
+        ""
+      ]
+    },
+    {
+      "name": "split-location-suffix",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 23 /home/user/path-links-corpus-r4/inputs/split-location-suffix.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "sources/location.rs:12:7\n",
+      "input_sha256": "411f6ba8e42106cef3e6e6cb71495e3c1fde3035cf0be6d63566d1d91785e979",
+      "sha256": "7c0c83b55d322f12498276e3ef1246c8dbc6299de9eadc67249281767736278c",
+      "bytes": 28,
+      "intent": "The column number continues on the next row; the target is line 12, column 7.",
+      "expected_paths": [
+        "sources/location.rs"
+      ],
+      "output_rows": [
+        "sources/location.rs:12:",
+        "7",
+        ""
+      ]
+    },
+    {
+      "name": "quoted-spaces-wrap",
+      "columns": 80,
+      "rows": 24,
+      "command": "fold -w 34 /home/user/path-links-corpus-r4/inputs/quoted-spaces-wrap.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "\"sources/reports/neutral folder/quoted-preview-target.rs\"\n",
+      "input_sha256": "f0d55eb8be85645e864c7ace5fc80892f2bebf568a830652b26fc6d0289380d3",
+      "sha256": "1ebc4f052e3e72568b0b9598beed34716269148d1620a197c81e254135e2a40e",
+      "bytes": 61,
+      "intent": "Explicit quotes enclose a path with a meaningful interior space; the wrap is inside a later component.",
+      "expected_paths": [
+        "sources/reports/neutral folder/quoted-preview-target.rs"
+      ],
+      "output_rows": [
+        "\"sources/reports/neutral folder/qu",
+        "oted-preview-target.rs\"",
+        ""
+      ]
+    },
+    {
+      "name": "two-independent-paths",
+      "columns": 80,
+      "rows": 24,
+      "command": "cat /home/user/path-links-corpus-r4/inputs/two-independent-paths.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "notes/first.rs\nnotes/second.rs\n",
+      "input_sha256": "2fb94323f8463f403102853aece6d72b94fc0a3407b90fcf4352421141b32f49",
+      "sha256": "99baf0b2b87befcd81942eafb03ce89c0ca30a567b02dc404f8e407ea2f8edcc",
+      "bytes": 33,
+      "intent": "Negative: both files and their raw concatenation exist; keep the two links separate.",
+      "expected_paths": [
+        "notes/first.rs",
+        "notes/second.rs"
+      ],
+      "output_rows": [
+        "notes/first.rs",
+        "notes/second.rs",
+        ""
+      ]
+    },
+    {
+      "name": "prose-before-path",
+      "columns": 80,
+      "rows": 24,
+      "command": "cat /home/user/path-links-corpus-r4/inputs/prose-before-path.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "read the output\nnotes/second.rs\n",
+      "input_sha256": "ac3e7bdefd2fb27e8b24dc63f483dd1acffc1ef5bc28743b8237852ef5ee2079",
+      "sha256": "8766c4b366e1d3835bf5f0b869762b4ee7f36aac3b5451826847ab6be6382224",
+      "bytes": 34,
+      "intent": "Negative: the prose concatenated with the path also exists, but prose is not a continuation.",
+      "expected_paths": [
+        "notes/second.rs"
+      ],
+      "output_rows": [
+        "read the output",
+        "notes/second.rs",
+        ""
+      ]
+    },
+    {
+      "name": "path-before-word",
+      "columns": 80,
+      "rows": 24,
+      "command": "cat /home/user/path-links-corpus-r4/inputs/path-before-word.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "notes/first.rs\nunrelated\n",
+      "input_sha256": "25924b3533e29a14879928ea26a1313b8d1e44003cd5f998cca545802d00bbd6",
+      "sha256": "6e89b7495286815ea03c5ce9147d1f4f42eca053ffe65ab53f9ec282a4894259",
+      "bytes": 27,
+      "intent": "Negative: the concatenated spelling also exists; unrelated prose must not extend the link.",
+      "expected_paths": [
+        "notes/first.rs"
+      ],
+      "output_rows": [
+        "notes/first.rs",
+        "unrelated",
+        ""
+      ]
+    },
+    {
+      "name": "path-before-indented-word",
+      "columns": 80,
+      "rows": 24,
+      "command": "cat /home/user/path-links-corpus-r4/inputs/path-before-indented-word.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "notes/first.rs\n    unrelated\n",
+      "input_sha256": "82a2accb553a87214e3c36e1ce940bc6815e7338c36f513a8a50be9f7dbc7f39",
+      "sha256": "b7186a4f9e43ea55b1d05c9c6ad1816df3133ef2235c011ccc37e9c8bee65c6c",
+      "bytes": 31,
+      "intent": "Negative: indentation alone does not authorize a word after an independently complete path.",
+      "expected_paths": [
+        "notes/first.rs"
+      ],
+      "output_rows": [
+        "notes/first.rs",
+        "    unrelated",
+        ""
+      ]
+    },
+    {
+      "name": "blank-row-separator",
+      "columns": 80,
+      "rows": 24,
+      "command": "cat /home/user/path-links-corpus-r4/inputs/blank-row-separator.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "notes/first.rs\n\nnotes/second.rs\n",
+      "input_sha256": "3c32078180915bc91731537cb24c412c87e569326db46e47397933843d45cc67",
+      "sha256": "170eac408832c5cbacf6af96c33b2b5c0e63dee1858e6874d9920c4ecfb103d4",
+      "bytes": 35,
+      "intent": "Negative: an empty row terminates a continuation.",
+      "expected_paths": [
+        "notes/first.rs",
+        "notes/second.rs"
+      ],
+      "output_rows": [
+        "notes/first.rs",
+        "",
+        "notes/second.rs",
+        ""
+      ]
+    },
+    {
+      "name": "mismatched-gutters",
+      "columns": 80,
+      "rows": 24,
+      "command": "cat /home/user/path-links-corpus-r4/inputs/mismatched-gutters.txt",
+      "cwd": ".",
+      "returncode": 0,
+      "provenance": "engineered formatter recording",
+      "input": "│ sources/reports/component-with-a-very-long-nam\n┃ e/release-notes/neutral-preview-target.rs\n",
+      "input_sha256": "ea8f044da1a5bc867613a4fdc5347dd2536e8aed6e3df57b4c8ebeba784cc480",
+      "sha256": "570bc5c6f7d07bdec49c268d57af4dbe3ba24fd89b2c7d661d75dc495b4b64aa",
+      "bytes": 99,
+      "intent": "Negative: differing gutter shapes must not be stripped to create a joined file link.",
+      "expected_paths": [],
+      "output_rows": [
+        "│ sources/reports/component-with-a-very-long-nam",
+        "┃ e/release-notes/neutral-preview-target.rs",
+        ""
+      ]
+    },
+    {
+      "name": "real-rustc-diagnostic",
+      "columns": 80,
+      "rows": 24,
+      "command": "rustc --color never --error-format human sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs --emit metadata -o /home/user/path-links-corpus-r4/neutral.rmeta",
+      "cwd": "real",
+      "returncode": 1,
+      "provenance": "real application trace: rustc",
+      "input": "",
+      "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "fbb7c7d5d15bfa1399d764c0d45645aa757f87b08c982f3fe38db740cc7a8c43",
+      "bytes": 415,
+      "intent": "Real rustc type-error output for an 87-character relative source path in an 80-column PTY.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "error[E0308]: mismatched types",
+        " --> sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs:2:22",
+        "  |",
+        "2 |     let value: u32 = \"neutral\";",
+        "  |                ---   ^^^^^^^^^ expected `u32`, found `&str`",
+        "  |                |",
+        "  |                expected due to this",
+        "",
+        "error: aborting due to 1 previous error",
+        "",
+        "For more information about this error, try `rustc --explain E0308`.",
+        ""
+      ]
+    },
+    {
+      "name": "real-git-status",
+      "columns": 80,
+      "rows": 24,
+      "command": "git -c color.ui=false status --short --untracked-files=all",
+      "cwd": "real",
+      "returncode": 0,
+      "provenance": "real application trace: git status",
+      "input": "",
+      "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "31f43d64eb5ef8e3644f2779d3dfed279f9fd167700761e4210b0c32d2609e8f",
+      "bytes": 92,
+      "intent": "Real git status output; a long untracked path reaches the terminal unchanged.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "?? sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs",
+        ""
+      ]
+    },
+    {
+      "name": "real-git-diff-stat",
+      "columns": 80,
+      "rows": 24,
+      "command": "git -c color.ui=false diff --no-index --stat --stat-width=48 real/before/sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs real/after/sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs",
+      "cwd": ".",
+      "returncode": 1,
+      "provenance": "real application trace: git diff --stat",
+      "input": "",
+      "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "d037b575ec885eb5e35f64713cfddc9bcc6fbd5001f08f16e444ce7bdb7600d5",
+      "bytes": 123,
+      "intent": "Real git diff --stat at 48 columns elides the path. Elision is not a continuation or an existing path.",
+      "expected_paths": [],
+      "output_rows": [
+        "\u001b[?1h\u001b=\r .../neutral-preview-target.rs          | 3 ++-\u001b[m",
+        " 1 file changed, 2 insertions(+), 1 deletion(-)\u001b[m",
+        "\r\u001b[K\u001b[?1l\u001b>"
+      ]
+    },
+    {
+      "name": "real-rg-heading",
+      "columns": 80,
+      "rows": 24,
+      "command": "rg --heading --with-filename --color never --line-number neutral sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs",
+      "cwd": "real",
+      "returncode": 0,
+      "provenance": "real application trace: ripgrep",
+      "input": "",
+      "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "51d691811380dfc3a2fd82cbb4fd0518f22efa4739eb5cfa557538b4220cad80",
+      "bytes": 124,
+      "intent": "Real rg heading and numbered match output, without caller-inserted wraps.",
+      "expected_paths": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs"
+      ],
+      "output_rows": [
+        "sources/reports/component-with-a-very-long-name/release-notes/neutral-preview-target.rs",
+        "2:    let value: u32 = \"neutral\";",
+        ""
+      ]
+    },
+    {
+      "name": "real-ls-narrow-columns",
+      "columns": 80,
+      "rows": 24,
+      "command": "ls --color=never -C --width=32",
+      "cwd": "listing",
+      "returncode": 0,
+      "provenance": "real application trace: GNU ls",
+      "input": "",
+      "input_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "cc2f9ffa00b19ff4fc6b81132ac8be291c08d7c6ab0902147f94e3890b7abb27",
+      "bytes": 116,
+      "intent": "Real ls narrow-column layout. Each filename stays whole; separate names must not be glued.",
+      "expected_paths": [
+        "a-neutral-file.txt",
+        "another-neutral-file.txt",
+        "component-with-a-very-long-name-neutral-fixture-file.rs",
+        "z-notes.txt"
+      ],
+      "output_rows": [
+        "a-neutral-file.txt",
+        "another-neutral-file.txt",
+        "component-with-a-very-long-name-neutral-fixture-file.rs",
+        "z-notes.txt",
+        ""
+      ]
+    }
+  ]
+}

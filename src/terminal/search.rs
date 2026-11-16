@@ -789,6 +789,172 @@ pub(super) fn link_at(
     None
 }
 
+/// Probes one resolution may spend on joined readings, the veto questions
+/// included. A pane that prints a long listing of path-shaped rows asks about
+/// each hover; this is what keeps that a handful of stats and not a crawl, and
+/// what bounds the paths a remote pane puts on the wire for it.
+pub(super) const MAX_JOIN_PROBES: usize = 32;
+
+/// What asking about a set of paths came to.
+enum Found {
+    Hit(PathBuf, bool),
+    Miss,
+    /// At least one answer is still on its way from the host.
+    Unknown,
+    /// The probe budget ran out. Not an answer, and not a reason to ask later.
+    Spent,
+}
+
+type Ask<'a> = dyn FnMut(&Path, bool) -> Option<Probe> + 'a;
+
+fn probe_paths(paths: Vec<PathBuf>, require_file: bool, ask: &mut Ask<'_>) -> Found {
+    let mut unknown = false;
+    for path in paths {
+        match ask(&path, require_file) {
+            None => return Found::Spent,
+            Some(Probe::Hit { is_dir }) => return Found::Hit(path, is_dir),
+            Some(Probe::Unknown) => unknown = true,
+            Some(Probe::Miss) => {}
+        }
+    }
+    match unknown {
+        true => Found::Unknown,
+        false => Found::Miss,
+    }
+}
+
+enum Veto {
+    No,
+    Yes,
+    Unknown,
+    Spent,
+}
+
+/// Whether any part of the joined path that stands on its own before a seam is
+/// itself a file.
+///
+/// A file is never the front of a longer path, so `notes/first.rs` over
+/// `notes/second.rs` is two files however real `notes/first.rsnotes/second.rs`
+/// is. A part that misses (`…/target.r` over `s`), or is a directory
+/// (`src/` over `build.rs`), says nothing against the join, and neither does
+/// the part after the seam: a file by that name in the pane's own directory
+/// must not stop `src/build.rs` from being what the text spells.
+///
+/// A seam that falls after the path, inside a written `:line:column`, is the
+/// same file with a location split in two, and is not a question at all.
+fn vetoed(
+    window: &super::path_join::Window,
+    candidate: &FileCandidate,
+    roots: &LinkRoots,
+    ask: &mut Ask<'_>,
+) -> Veto {
+    let path_len = candidate.path.chars().count();
+    let mut unknown = false;
+    for &seam in &window.seams {
+        let cut = seam - candidate.start;
+        if cut >= path_len {
+            continue;
+        }
+        let left = FileCandidate {
+            start: candidate.start,
+            end: seam - 1,
+            path: candidate.path.chars().take(cut).collect(),
+            line: None,
+            column: None,
+        };
+        match probe_paths(left.paths(roots), false, ask) {
+            Found::Spent => return Veto::Spent,
+            Found::Hit(_, false) => return Veto::Yes,
+            Found::Hit(_, true) | Found::Miss => {}
+            Found::Unknown => unknown = true,
+        }
+    }
+    match unknown {
+        true => Veto::Unknown,
+        false => Veto::No,
+    }
+}
+
+/// The file link a path a program broke across rows spells, if any, and which
+/// of `windows` it was read from.
+///
+/// Windows come longest first and each is tried with the readings of its text
+/// that reach across every one of its seams: a reading that stays on one side
+/// of a seam is the single row's business. A shorter window can ask again
+/// about a path a longer one already asked about, and nothing here
+/// remembers: a remote pane's probe cache answers a repeat from memory, a
+/// local pane stats it again, and [`MAX_JOIN_PROBES`] is what bounds both. A
+/// reading joins only when
+///
+/// - the joined path is there (a file, when it carries a line number),
+/// - and nothing that stands on its own before a seam is a file ([`vetoed`]).
+///
+/// A [`Probe::Unknown`] from the host leaves the window unjoined, and so does
+/// running out of [`MAX_JOIN_PROBES`]; only the first of those means an answer
+/// is coming, and only the probe closure's own return value says so. A window
+/// whose text carries a URL is skipped: a URL has its own reading.
+pub(super) fn joined_file_link(
+    windows: &[super::path_join::Window],
+    roots: &LinkRoots,
+    probe: &mut dyn FnMut(&Path, bool) -> Probe,
+) -> Option<(usize, LinkMatch)> {
+    let mut budget = MAX_JOIN_PROBES;
+    let mut ask = |path: &Path, require_file: bool| -> Option<Probe> {
+        budget = budget.checked_sub(1)?;
+        Some(probe(path, require_file))
+    };
+    for (index, window) in windows.iter().enumerate() {
+        if url_span_at(&window.text, window.click_idx).is_some() {
+            continue;
+        }
+        let crossing: Vec<FileCandidate> = file_candidates_at(&window.text, window.click_idx)
+            .into_iter()
+            .filter(|c| window.seams.iter().all(|&s| c.start < s && s <= c.end))
+            .take(2)
+            .collect();
+        for candidate in crossing {
+            match probe_paths(candidate.paths(roots), candidate.require_file(), &mut ask) {
+                Found::Spent => return None,
+                Found::Miss => {}
+                Found::Unknown => {
+                    // Ask the host about the parts too, so the answers that
+                    // decide the veto arrive with the one that decides the
+                    // join.
+                    if matches!(vetoed(window, &candidate, roots, &mut ask), Veto::Spent) {
+                        return None;
+                    }
+                }
+                Found::Hit(path, is_dir) => {
+                    match vetoed(window, &candidate, roots, &mut ask) {
+                        Veto::Spent => return None,
+                        Veto::Yes | Veto::Unknown => continue,
+                        Veto::No => {}
+                    }
+                    let line = match (candidate.line, is_dir) {
+                        (Some(line), _) => Some(line),
+                        (None, true) => None,
+                        (None, false) => location_after(&window.text, candidate.end + 1),
+                    };
+                    return Some((
+                        index,
+                        LinkMatch {
+                            start: candidate.start,
+                            end: candidate.end,
+                            target: LinkTarget::File {
+                                path,
+                                line,
+                                column: candidate.column,
+                                is_dir,
+                            },
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// The first of `candidate`'s possible paths that something answers for.
 ///
 /// Roots are tried in order and the first [`Probe::Hit`] wins, which is what
@@ -3018,5 +3184,241 @@ mod tests {
             let spaced: Vec<_> = asked.iter().filter(|p| p.contains(' ')).collect();
             assert_eq!(spaced.len(), 1, "{needle:?} asked {asked:?}");
         }
+    }
+}
+
+/// `joined_file_link` over hand-built windows and a scripted probe, so every
+/// answer the host can give (and the budget running out) is one line here.
+#[cfg(all(test, unix))]
+mod joined_tests {
+    use super::*;
+    use crate::terminal::path_join::{MAX_JOIN_WINDOWS, Window};
+    use std::collections::HashMap;
+    use tty59_vt::model::GridPoint;
+
+    const FILE: Probe = Probe::Hit { is_dir: false };
+    const DIR: Probe = Probe::Hit { is_dir: true };
+
+    fn window(rows: &[&str], click: usize) -> Window {
+        let mut text = String::new();
+        let mut points = Vec::new();
+        let mut seams = Vec::new();
+        for (line, row) in rows.iter().enumerate() {
+            if line > 0 {
+                seams.push(points.len());
+            }
+            for (col, c) in row.chars().enumerate() {
+                text.push(c);
+                points.push(GridPoint {
+                    line: line as i32,
+                    col: col as u16,
+                });
+            }
+        }
+        Window {
+            text,
+            points,
+            click_idx: click,
+            seams,
+        }
+    }
+
+    fn roots_at(dirs: &[&str]) -> LinkRoots {
+        LinkRoots {
+            dirs: dirs.iter().map(|d| PathBuf::from(*d)).collect(),
+            local_home: false,
+            style: PathStyle::Posix,
+        }
+    }
+
+    type Asked = Vec<(PathBuf, bool)>;
+
+    /// Runs the resolver; every path the probe was asked about comes back
+    /// beside the answer, with whether a file was required.
+    fn run(
+        windows: &[Window],
+        roots: &LinkRoots,
+        answers: &[(&str, Probe)],
+    ) -> (Option<(usize, LinkMatch)>, Asked) {
+        let known: HashMap<PathBuf, Probe> = answers
+            .iter()
+            .map(|(rel, answer)| (PathBuf::from("/r").join(rel), *answer))
+            .collect();
+        let mut asked: Asked = Vec::new();
+        let link = joined_file_link(windows, roots, &mut |path: &Path, require_file: bool| {
+            asked.push((path.to_path_buf(), require_file));
+            known.get(path).copied().unwrap_or(Probe::Miss)
+        });
+        (link, asked)
+    }
+
+    fn one_root() -> LinkRoots {
+        roots_at(&["/r"])
+    }
+
+    fn file_target(path: &str, line: Option<u32>, column: Option<u32>) -> LinkTarget {
+        LinkTarget::File {
+            path: PathBuf::from("/r").join(path),
+            line,
+            column,
+            is_dir: false,
+        }
+    }
+
+    fn was_asked(asked: &Asked, rel: &str) -> bool {
+        asked
+            .iter()
+            .any(|(p, _)| *p == PathBuf::from("/r").join(rel))
+    }
+
+    #[test]
+    fn a_joined_path_that_is_there_joins() {
+        let w = window(&["src/aaa/bb", "cc/dd.rs"], 3);
+        let (link, _) = run(&[w], &one_root(), &[("src/aaa/bbcc/dd.rs", FILE)]);
+        let (index, link) = link.expect("the join is a file");
+        assert_eq!(index, 0);
+        assert_eq!((link.start, link.end), (0, 17));
+        assert_eq!(link.target, file_target("src/aaa/bbcc/dd.rs", None, None));
+    }
+
+    #[test]
+    fn a_joined_path_that_is_not_there_does_not() {
+        let w = window(&["src/aaa/bb", "cc/dd.rs"], 3);
+        let (link, asked) = run(&[w], &one_root(), &[]);
+        assert_eq!(link, None);
+        assert!(was_asked(&asked, "src/aaa/bbcc/dd.rs"));
+    }
+
+    /// `first.rs` over `second.rs`, with `first.rssecond.rs` on disk too: a
+    /// file is never the front of a longer path.
+    #[test]
+    fn a_part_that_is_a_file_vetoes_the_join() {
+        let w = window(&["notes/first.rs", "notes/second.rs"], 3);
+        let (link, asked) = run(
+            &[w],
+            &one_root(),
+            &[
+                ("notes/first.rsnotes/second.rs", FILE),
+                ("notes/first.rs", FILE),
+            ],
+        );
+        assert_eq!(link, None);
+        assert!(was_asked(&asked, "notes/first.rs"), "the veto was asked");
+    }
+
+    /// `src/` is a directory and `build.rs` is also a file of the pane's own
+    /// directory. Neither says anything against what the text spells.
+    #[test]
+    fn a_directory_prefix_and_a_file_of_the_tail_name_do_not_veto() {
+        let w = window(&["src/aaa/", "bb.rs"], 3);
+        let (link, _) = run(
+            &[w],
+            &one_root(),
+            &[("src/aaa/bb.rs", FILE), ("src/aaa/", DIR), ("bb.rs", FILE)],
+        );
+        let (_, link) = link.expect("the joined file wins");
+        assert_eq!(link.target, file_target("src/aaa/bb.rs", None, None));
+    }
+
+    /// Three rows, the first two of which join into something that merely
+    /// looks complete (`….r`). Only the whole path is there.
+    #[test]
+    fn a_partial_window_that_misses_does_not_veto_the_whole() {
+        let w = window(&["ab/cd-", "ef/gh.r", "s"], 8);
+        assert_eq!(w.text, "ab/cd-ef/gh.rs");
+        let (link, _) = run(&[w], &one_root(), &[("ab/cd-ef/gh.rs", FILE)]);
+        let (_, link) = link.expect("the whole path is a file");
+        assert_eq!((link.start, link.end), (0, 13));
+    }
+
+    #[test]
+    fn a_longer_window_is_tried_before_a_shorter_one() {
+        let long = window(&["ab/cd-", "ef/gh.r", "s"], 8);
+        let short = window(&["ef/gh.r", "s"], 2);
+        let (link, _) = run(
+            &[long, short],
+            &one_root(),
+            &[("ab/cd-ef/gh.rs", FILE), ("ef/gh.rs", FILE)],
+        );
+        assert_eq!(link.expect("a join").0, 0);
+    }
+
+    #[test]
+    fn an_unanswered_join_stays_unjoined_and_asks_about_the_parts_too() {
+        let w = window(&["src/aaa/bb", "cc/dd.rs"], 3);
+        let (link, asked) = run(&[w], &one_root(), &[("src/aaa/bbcc/dd.rs", Probe::Unknown)]);
+        assert_eq!(link, None);
+        assert!(was_asked(&asked, "src/aaa/bbcc/dd.rs"));
+        assert!(
+            was_asked(&asked, "src/aaa/bb"),
+            "the veto's answer has to arrive with the join's"
+        );
+    }
+
+    #[test]
+    fn an_unanswered_veto_stays_unjoined() {
+        let w = window(&["src/aaa/bb", "cc/dd.rs"], 3);
+        let (link, _) = run(
+            &[w],
+            &one_root(),
+            &[("src/aaa/bbcc/dd.rs", FILE), ("src/aaa/bb", Probe::Unknown)],
+        );
+        assert_eq!(link, None, "a join that might be two files is not drawn");
+    }
+
+    #[test]
+    fn a_line_and_column_split_across_rows_navigates_and_asks_for_a_file() {
+        let w = window(&["src/loc.rs:12:", "7"], 2);
+        assert_eq!(w.text, "src/loc.rs:12:7");
+        let (link, asked) = run(&[w], &one_root(), &[("src/loc.rs", FILE)]);
+        let (_, link) = link.expect("the location joins");
+        assert_eq!(link.target, file_target("src/loc.rs", Some(12), Some(7)));
+        assert_eq!((link.start, link.end), (0, 14));
+        assert!(
+            asked.iter().all(|(_, require_file)| *require_file),
+            "a line number is a claim about a file: {asked:?}"
+        );
+        assert!(
+            asked.iter().all(|(p, _)| p.starts_with("/r/src/loc.rs")),
+            "the first row alone is the same file, not a question: {asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_quoted_path_keeps_its_spaces() {
+        let w = window(&["\"src/my dir/qu", "oted.rs\""], 2);
+        let (link, _) = run(&[w], &one_root(), &[("src/my dir/quoted.rs", FILE)]);
+        let (_, link) = link.expect("the quoted path joins");
+        assert_eq!((link.start, link.end), (1, 20));
+        assert_eq!(link.target, file_target("src/my dir/quoted.rs", None, None));
+    }
+
+    #[test]
+    fn a_window_with_a_url_in_it_is_skipped_without_a_probe() {
+        let w = window(&["https://x.test/a/", "b/c.rs"], 3);
+        let (link, asked) = run(&[w], &one_root(), &[("https://x.test/a/b/c.rs", FILE)]);
+        assert_eq!(link, None);
+        assert!(asked.is_empty(), "{asked:?}");
+    }
+
+    #[test]
+    fn a_reading_that_stays_on_one_side_of_a_seam_is_not_this_resolvers() {
+        let w = window(&["see x/y", "z more"], 0);
+        let (link, asked) = run(&[w], &one_root(), &[("see", FILE)]);
+        assert_eq!(link, None);
+        assert!(asked.is_empty(), "{asked:?}");
+    }
+
+    /// Ten roots make every reading ten questions. The ladder stops at the
+    /// budget, is not an answer, and never asks past it.
+    #[test]
+    fn the_probe_budget_bounds_the_ladder_and_is_not_an_answer() {
+        let dirs: Vec<String> = (0..10).map(|i| format!("/r{i}")).collect();
+        let refs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+        let w = window(&["ab/cd", "ef.rs"], 3);
+        let windows = vec![w; MAX_JOIN_WINDOWS];
+        let (link, asked) = run(&windows, &roots_at(&refs), &[]);
+        assert_eq!(link, None);
+        assert_eq!(asked.len(), MAX_JOIN_PROBES, "{asked:?}");
     }
 }

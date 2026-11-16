@@ -6,3 +6,5 @@ assets/windows/conpty/**/*.exe binary
 
 # include_str! fixtures are compared byte-for-byte; autocrlf would add \r on Windows.
 src/terminal/view/fixtures/*.txt -text
+# Recorded PTY bytes are replayed exactly: no line-ending rewrite on checkout.
+src/terminal/view/fixtures/path_links/*.pty -text

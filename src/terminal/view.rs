@@ -614,8 +614,9 @@ enum GridLink {
     /// one run per row.
     Hyperlink(String, Vec<(GridPoint, GridPoint)>),
     /// The logical line the cell belongs to, the grid point of every character
-    /// in it, and which of those the cell is.
-    Text(String, Vec<GridPoint>, usize),
+    /// in it, and which of those the cell is — and the multi-row readings of
+    /// the rows around it, for a path a program broke across rows itself.
+    Text(String, Vec<GridPoint>, usize, Vec<super::path_join::Window>),
 }
 
 /// The outcome of asking what a cell links to.
@@ -7194,14 +7195,14 @@ impl TerminalView {
         include_loopback: bool,
         cx: &mut Context<Self>,
     ) -> LinkAt {
-        let Some(line) = self.link_line_at(col, row) else {
+        let Some(line) = self.link_line_at(col, row, include_files) else {
             return LinkAt::None;
         };
-        let (text, points, click_idx) = match line {
+        let (text, points, click_idx, joins) = match line {
             GridLink::Hyperlink(uri, runs) => {
                 return LinkAt::Found(LinkTarget::Url(uri), runs);
             }
-            GridLink::Text(text, points, click_idx) => (text, points, click_idx),
+            GridLink::Text(text, points, click_idx, joins) => (text, points, click_idx, joins),
         };
 
         // A pane whose paths belong to neither its host nor this machine —
@@ -7229,10 +7230,30 @@ impl TerminalView {
             pending |= matches!(answer, super::search::Probe::Unknown);
             answer
         };
-        let link = super::search::link_at(&text, click_idx, &roots, files, &mut probe);
+        // A path a program broke across rows reads as one link only when the
+        // joined text is there and no part of it stands on its own as a file;
+        // otherwise the row under the pointer is read by itself, as before.
+        // `joins` is empty whenever the row has a URL, so a URL wins first.
+        let joined = match files && !joins.is_empty() {
+            true => super::search::joined_file_link(&joins, &roots, &mut probe),
+            false => None,
+        };
+        let link = match joined {
+            Some(_) => None,
+            None => super::search::link_at(&text, click_idx, &roots, files, &mut probe),
+        };
         // `probe` holds the cache borrow; nothing below touches it, so the
         // borrow ends here and `self` is whole again for the flush.
         self.flush_link_probes(cx);
+
+        if let Some((window, link)) = joined {
+            let term = self.terminal.term.lock();
+            let runs = super::smart_select::row_runs(
+                &term.view(),
+                &joins[window].points[link.start..=link.end],
+            );
+            return LinkAt::Found(link.target, runs);
+        }
 
         let link = link.or_else(|| {
             include_loopback.then(|| {
@@ -7266,7 +7287,7 @@ impl TerminalView {
 
     /// The logical line under a cell, or the OSC 8 hyperlink that cell
     /// declares — which wins outright, because the emitter said what it meant.
-    fn link_line_at(&self, col: usize, row: usize) -> Option<GridLink> {
+    fn link_line_at(&self, col: usize, row: usize, include_files: bool) -> Option<GridLink> {
         let term = self.terminal.term.lock();
         let view = term.view();
         let line = Self::grid_line(&term, row)?;
@@ -7286,7 +7307,13 @@ impl TerminalView {
         }
 
         let (text, points, click_idx) = super::smart_select::logical_line_at(&view, click, true)?;
-        Some(GridLink::Text(text, points, click_idx))
+        // A URL under the pointer is the whole answer, so nothing joined is
+        // read for it; and a pane with file links off has no use for one.
+        let joins = match include_files && super::search::url_span_at(&text, click_idx).is_none() {
+            true => super::path_join::windows_at(&view, click),
+            false => Vec::new(),
+        };
+        Some(GridLink::Text(text, points, click_idx, joins))
     }
 
     /// The directories a relative path in this pane is measured from, best
@@ -11441,6 +11468,8 @@ mod gpui_tests {
     use crate::daemon::transport::Stream;
     use crate::terminal::remote::PtySource;
     use gpui::{Entity, TestAppContext, point};
+
+    mod path_links;
 
     fn harness(cx: &mut TestAppContext) -> (gpui::WindowHandle<TerminalView>, Stream) {
         let pty = if cfg!(windows) {
