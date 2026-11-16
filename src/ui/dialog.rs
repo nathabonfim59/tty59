@@ -385,6 +385,51 @@ pub(crate) fn button(
     el
 }
 
+/// The widest an overflow tooltip's visible card is: the hover maximum.
+const TOOLTIP_MAX_W: f32 = 420.;
+
+/// What an overflow tooltip leaves of the window's width, its outer margins
+/// included.
+const TOOLTIP_GUTTER: f32 = 16.;
+
+/// An opt-in tooltip for text that may be longer than the window: the plain
+/// text, whole, in the card every tooltip is, bounded by the window. Nothing
+/// that does not call it changes; the shared tooltip's defaults are untouched.
+///
+/// The card is at most the hover maximum, and with its outer margin (`m_3`,
+/// 0.75 rem a side) at most the window less a gutter: read when the tooltip is
+/// shown, so a resized window is honored. Text only wraps at a width it is
+/// given and reports its whole unwrapped width as its smallest, so the card's
+/// cap alone leaves the content wider than the card: the content gets the
+/// card's inner cap, its border box less its padding (`px_2p5`, 0.625 rem a
+/// side) and border.
+///
+/// `selector` names the content for a test to find where the real tooltip put
+/// it; it is only attached in test builds.
+pub(crate) fn bounded_text_tooltip(
+    text: SharedString,
+    selector: &'static str,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::AnyView {
+    let rem = window.rem_size().as_f32();
+    let margin = 0.75 * rem;
+    let limit = TOOLTIP_MAX_W
+        .min(window.viewport_size().width.as_f32() - TOOLTIP_GUTTER - 2. * margin)
+        .max(0.);
+    let content_limit = (limit - 2. * (0.625 * rem + 1.)).max(0.);
+    gpui_component::tooltip::Tooltip::element(move |_, _| {
+        div()
+            .max_w(px(content_limit))
+            .whitespace_normal()
+            .when(cfg!(test), |d| d.debug_selector(|| selector.to_string()))
+            .child(text.clone())
+    })
+    .max_w(px(limit))
+    .whitespace_normal()
+    .build(window, cx)
+}
+
 /// What the real-render contrast tests of the switcher, Search Everywhere, the
 /// pane grip, the port chips and the forward rows share: the themes they run
 /// under, how a test window switches to one, and the floors the external

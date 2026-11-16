@@ -4109,39 +4109,10 @@ fn source_shape(source: &DiffSource) -> SourceShape {
 /// A tooltip that is the plain text, in the card every tooltip is, with a
 /// selector on its content so a test can find where the real tooltip put it.
 fn text_tooltip(text: SharedString, window: &mut Window, cx: &mut gpui::App) -> gpui::AnyView {
-    // The card is at most the UI's hover maximum, and with its outer margin
-    // (`m_3`, 0.75 rem a side) at most the window less a gutter: read when the
-    // tooltip is shown, so a resized window is honored. It wraps by words and
-    // loses none of them.
-    let margin = 0.75 * window.rem_size().as_f32();
-    let limit = OVERFLOW_TOOLTIP_MAX_W
-        .min(window.viewport_size().width.as_f32() - OVERFLOW_TOOLTIP_GUTTER - 2. * margin)
-        .max(0.);
-    // Text only wraps at a width it is given, and reports its whole unwrapped
-    // width as its smallest, so the card's cap alone leaves the content wider
-    // than the card: the content gets the card's inner cap, the card's border
-    // box less its padding (`px_2p5`, 0.625 rem a side) and border.
-    let content_limit = (limit - 2. * (0.625 * window.rem_size().as_f32() + 1.)).max(0.);
-    gpui_component::tooltip::Tooltip::element(move |_, _| {
-        div()
-            .max_w(px(content_limit))
-            .whitespace_normal()
-            .when(cfg!(test), |d| {
-                d.debug_selector(|| "diff-overlay-tooltip-text".into())
-            })
-            .child(text.clone())
-    })
-    .max_w(px(limit))
-    .whitespace_normal()
-    .build(window, cx)
+    // The card, its width and the content's cap are the shared recipe; only the
+    // selector is this overlay's own.
+    crate::ui::dialog::bounded_text_tooltip(text, "diff-overlay-tooltip-text", window, cx)
 }
-
-/// The widest an overflow tooltip's visible card is: the hover maximum.
-const OVERFLOW_TOOLTIP_MAX_W: f32 = 420.;
-
-/// What an overflow tooltip leaves of the window's width, its outer margins
-/// included.
-const OVERFLOW_TOOLTIP_GUTTER: f32 = 16.;
 
 /// `Ada · 2h`, the byline under a commit's subject.
 ///
