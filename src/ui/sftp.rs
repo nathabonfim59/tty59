@@ -4,14 +4,13 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, App, Context, Div, ExternalPaths, FontWeight, PathPromptOptions, SharedString,
-    Stateful, Subscription, Window, div, prelude::*, px, rems,
+    Stateful, Subscription, Window, div, prelude::*, px, relative, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, InteractiveElementExt as _, Sizable as _,
-    h_flex, v_flex,
+    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable as _, h_flex, v_flex,
 };
 
 use crate::daemon::protocol::{
@@ -21,7 +20,8 @@ use crate::daemon::protocol::{
 use crate::daemon::ssh::sftp::{remote_basename, remote_join, remote_parent, safe_local_name};
 use crate::terminal::RemoteTerminal;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_SM, TILE_SIZE_SM, Tty59App};
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
+use crate::ui::remote_connect::human_bytes;
 use crate::ui::right_panel::{
     HEADING, META, ROW_FILL_RADIUS, ROW_GLYPH, ROW_INSET, TEXT, TEXT_INSET,
 };
@@ -33,6 +33,9 @@ const SFTP_ROW_H: f32 = 26.;
 
 /// The gap between a row's icon, name and size — the file tree's.
 const SFTP_ROW_GAP: f32 = 6.;
+
+/// The link glyph a symbolic link's row carries before its size.
+const SFTP_LINK_GLYPH: f32 = 12.;
 
 /// The transfer tray's disclosure chevron — the file tree's.
 const TRAY_CHEVRON: f32 = 10.;
@@ -299,6 +302,47 @@ fn apply_poll(
     }
 }
 
+/// How many of the transfers on show finished (not failed, not cancelled), as
+/// (downloads, uploads).
+fn finished_counts(jobs: &[&SftpJobProgress]) -> (usize, usize) {
+    let finished = |kind: SftpTransferKind| {
+        jobs.iter()
+            .filter(|j| j.state == SftpJobState::Done && j.kind == kind)
+            .count()
+    };
+    (
+        finished(SftpTransferKind::Download),
+        finished(SftpTransferKind::Upload),
+    )
+}
+
+/// What the collapsed tray says once nothing is running and nothing failed:
+/// what finished, in counts and nouns, rather than a bare "Transfers" that
+/// reads the same whether anything happened or not. Only cancelled work left
+/// has nothing to count and keeps the bare word.
+fn finished_summary(downloads: usize, uploads: usize) -> String {
+    let down = || t_plural(L10nKey::SftpTransferSummaryDownloads, downloads, &[]);
+    let up = || t_plural(L10nKey::SftpTransferSummaryUploads, uploads, &[]);
+    match (downloads, uploads) {
+        (0, 0) => t(L10nKey::SftpTransferSummaryIdle).to_string(),
+        (_, 0) => down(),
+        (0, _) => up(),
+        _ => t_fmt(
+            L10nKey::SftpTransferSummaryBoth,
+            &[("downloads", &down()), ("uploads", &up())],
+        ),
+    }
+}
+
+/// A finished, unfiltered listing of a folder below the root with nothing in
+/// it: the `..` row is drawn (`show_go_up` is only true for an unfiltered
+/// non-root listing) and the Empty folder note goes under it. The root, a
+/// filter that matched nothing and a listing still loading keep their own
+/// notes (`render_sftp_list`).
+fn is_empty_folder_below_parent(entries_empty: bool, loading: bool, show_go_up: bool) -> bool {
+    entries_empty && !loading && show_go_up
+}
+
 fn is_dir_like(e: &SftpEntry) -> bool {
     matches!(e.kind, SftpEntryKind::Dir)
         || (matches!(e.kind, SftpEntryKind::Symlink) && e.target_is_dir)
@@ -330,21 +374,6 @@ pub(crate) fn breadcrumb_segments(path: &str) -> Vec<(String, String)> {
         out.push((comp.to_string(), acc.clone()));
     }
     out
-}
-
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1}{}", UNITS[unit])
-    }
 }
 
 fn mode_string(mode: u32) -> String {
@@ -802,7 +831,10 @@ impl Tty59App {
         );
         let answer = window.prompt(
             gpui::PromptLevel::Warning,
-            &t_fmt(L10nKey::FileTreeDeleteTitle, &[("name", &entry.name)]),
+            &t_fmt(
+                L10nKey::SftpDeleteTitleOnHost,
+                &[("name", &entry.name), ("host", &host)],
+            ),
             Some(&body),
             &crate::ui::confirm_answers(t(L10nKey::Delete), t(L10nKey::Cancel)),
             cx,
@@ -1271,15 +1303,18 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // One conversion, then cheap clones: the title count and the
+        // breadcrumb's machine chip both name the same host.
+        let host: SharedString = host.into();
         let controls = self.sftp_controls(cx);
         let title = self.panel_title(
             t(L10nKey::SftpPanelTitleFiles),
-            Some(host),
+            Some(host.clone()),
             Some(controls),
             window,
             cx,
         );
-        let breadcrumb = self.render_sftp_breadcrumb(cx);
+        let breadcrumb = self.render_sftp_breadcrumb(&host, cx);
         let filter = div()
             .id("panel-sftp-filter")
             .child(self.panel_search(&self.sftp_panel.filter_input.clone(), cx))
@@ -1424,7 +1459,10 @@ impl Tty59App {
         }
     }
 
-    fn render_sftp_breadcrumb(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// `host` is the machine being browsed (`RemoteContext::target`), drawn
+    /// first so a delete or a rename is never aimed at the wrong machine by a
+    /// path that looks the same on all of them.
+    fn render_sftp_breadcrumb(&self, host: &SharedString, cx: &mut Context<Self>) -> Stateful<Div> {
         if let Some(input) = &self.sftp_panel.editing_path {
             return h_flex()
                 .id("sftp-path-edit")
@@ -1440,7 +1478,7 @@ impl Tty59App {
 
         let foreground = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
-        let mut row = h_flex()
+        let row = h_flex()
             .id("sftp-breadcrumb")
             .flex_wrap()
             .items_center()
@@ -1451,6 +1489,23 @@ impl Tty59App {
             .on_double_click(
                 cx.listener(|this, _, window, cx| this.sftp_begin_edit_path(window, cx)),
             );
+        #[cfg(test)]
+        let row = gpui::InteractiveElement::debug_selector(row, || "sftp-breadcrumb-row".into());
+        let mut row = row;
+        // The row wraps, so a narrow panel drops the path under the chip; the
+        // chip itself shrinks and truncates before it would leave the row.
+        let chip = div()
+            .min_w_0()
+            .max_w(relative(1.))
+            .mr(px(4.))
+            .truncate()
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(muted)
+            .child(host.clone());
+        #[cfg(test)]
+        let chip = gpui::InteractiveElement::debug_selector(chip, || "sftp-host-chip".into());
+        row = row.child(chip);
         let segments = breadcrumb_segments(&self.sftp_panel.cwd);
         let last = segments.len().saturating_sub(1);
         for (i, (label, path)) in segments.into_iter().enumerate() {
@@ -1486,8 +1541,7 @@ impl Tty59App {
     fn render_sftp_edit_form(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let well = cx.theme().muted;
         let foreground = cx.theme().foreground;
-        let surface: gpui::Hsla =
-            gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.base).into();
+        let rungs = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let (title, input): (String, _) = match self.sftp_panel.editing.as_ref()? {
             SftpEdit::NewFolder(input) => (t(L10nKey::SftpEditNewFolder).to_string(), input),
             SftpEdit::NewFile(input) => (t(L10nKey::SftpEditNewFile).to_string(), input),
@@ -1545,14 +1599,14 @@ impl Tty59App {
                                 ),
                         )
                         .child(
-                            Button::new("sftp-edit-ok")
-                                .label(t(L10nKey::Ok))
-                                .xsmall()
-                                .custom(crate::ui::theme::inverted_button(surface, cx))
-                                .disabled(!can_commit)
-                                .on_click(
-                                    cx.listener(|this, _, w, cx| this.sftp_commit_edit(w, cx)),
-                                ),
+                            crate::ui::dialog::primary_button(
+                                "sftp-edit-ok",
+                                t(L10nKey::Ok),
+                                can_commit,
+                                rungs,
+                                cx,
+                            )
+                            .on_click(cx.listener(|this, _, w, cx| this.sftp_commit_edit(w, cx))),
                         ),
                 ),
         )
@@ -1571,20 +1625,22 @@ impl Tty59App {
             .pb(px(4.));
 
         let note = |text: gpui::SharedString, color| {
-            div()
+            let note = div()
                 .px(px(ROW_INSET))
                 .py(px(4.))
                 .text_size(rems(TEXT))
                 .text_color(color)
-                .child(text)
+                .child(text);
+            #[cfg(test)]
+            let note = gpui::InteractiveElement::debug_selector(note, || "sftp-note".into());
+            note
         };
 
         if let Some(err) = &self.sftp_panel.list_error {
             // A listing that failed leaves nothing to click, `..` included, so
             // the way back out has to be drawn here.
             let can_go_up = err.path != "/";
-            let surface: gpui::Hsla =
-                gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().sidebar.base).into();
+            let rungs = cx.global::<crate::ui::presets::Surfaces>().sidebar;
             let actions = h_flex()
                 .gap(px(4.))
                 .px(px(ROW_INSET))
@@ -1594,13 +1650,14 @@ impl Tty59App {
                             b.debug_selector(|| "sftp-list-retry".into())
                         })
                         .child(
-                            Button::new("sftp-list-retry")
-                                .label(t(L10nKey::SftpListRetry))
-                                .xsmall()
-                                .custom(crate::ui::theme::inverted_button(surface, cx))
-                                .on_click(
-                                    cx.listener(|this, _, _w, cx| this.sftp_retry_listing(cx)),
-                                ),
+                            crate::ui::dialog::primary_button(
+                                "sftp-list-retry",
+                                t(L10nKey::SftpListRetry),
+                                true,
+                                rungs,
+                                cx,
+                            )
+                            .on_click(cx.listener(|this, _, _w, cx| this.sftp_retry_listing(cx))),
                         ),
                 )
                 .when(can_go_up, |row| {
@@ -1647,6 +1704,11 @@ impl Tty59App {
         let mut list = v_flex().gap(px(1.)).py(px(2.));
         if show_go_up {
             list = list.child(self.render_sftp_go_up_row(cx));
+        }
+        // `..` is a way out, not content: a folder with nothing but it is empty,
+        // and says so under it. A listing still loading is not one.
+        if is_empty_folder_below_parent(entries.is_empty(), self.sftp_panel.loading, show_go_up) {
+            list = list.child(note(t(L10nKey::SftpEmptyDirectory).into(), muted));
         }
         for entry in entries {
             list = list.child(self.render_sftp_row(entry, cx));
@@ -1713,7 +1775,7 @@ impl Tty59App {
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
             .child(
-                Icon::new(IconName::FolderOpen)
+                Icon::new(IconName::ArrowUp)
                     .size(px(ROW_GLYPH))
                     .text_color(muted),
             )
@@ -1746,12 +1808,7 @@ impl Tty59App {
         let size = if dir_like {
             String::new()
         } else {
-            human_size(entry.size)
-        };
-        let name_label = if is_symlink {
-            format!("{} →", entry.name)
-        } else {
-            entry.name.clone()
+            human_bytes(entry.size)
         };
         let row_id = SharedString::from(format!("sftp-row-{}", entry.name));
 
@@ -1764,6 +1821,37 @@ impl Tty59App {
             .as_deref()
             .map(|login| scp_location(login, &menu_path));
         let app = cx.entity().downgrade();
+
+        let name_el = div()
+            .flex_1()
+            .min_w_0()
+            .text_size(rems(TEXT))
+            .text_color(name_ink)
+            .truncate()
+            .child(entry.name.clone());
+        #[cfg(test)]
+        let name_el = gpui::InteractiveElement::debug_selector(name_el, || "sftp-row-name".into());
+        // A link says so in a glyph of its own, between the name and the size.
+        let link_el = is_symlink.then(|| {
+            div().flex_none().child(
+                Icon::empty()
+                    .path("icons/link.svg")
+                    .size(px(SFTP_LINK_GLYPH))
+                    .text_color(muted),
+            )
+        });
+        #[cfg(test)]
+        let link_el = link_el.map(|glyph| {
+            gpui::InteractiveElement::debug_selector(glyph, || "sftp-link-glyph".into())
+        });
+        let size_el = div()
+            .flex_none()
+            .text_size(rems(META))
+            .font_features(crate::ui::theme::tabular_figures())
+            .text_color(muted)
+            .child(size);
+        #[cfg(test)]
+        let size_el = gpui::InteractiveElement::debug_selector(size_el, || "sftp-row-size".into());
 
         h_flex()
             .id(row_id)
@@ -1783,24 +1871,19 @@ impl Tty59App {
                     this.sftp_open_entry(open_entry.clone(), window, cx)
                 }),
             )
+            // The name stays the remote file's name, so truncation and a screen
+            // reader see exactly what the filesystem calls it; a link says so
+            // in its own glyph and label.
+            .when(is_symlink, |row| {
+                row.aria_label(SharedString::from(t_fmt(
+                    L10nKey::SftpSymlinkAria,
+                    &[("name", &entry.name)],
+                )))
+            })
             .child(Icon::new(icon).size(px(ROW_GLYPH)).text_color(muted))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(rems(TEXT))
-                    .text_color(name_ink)
-                    .truncate()
-                    .child(name_label),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(rems(META))
-                    .font_features(crate::ui::theme::tabular_figures())
-                    .text_color(muted)
-                    .child(size),
-            )
+            .child(name_el)
+            .children(link_el)
+            .child(size_el)
             .context_menu(move |menu, _window, cx| {
                 let danger = cx.theme().danger;
                 Self::sftp_row_context_menu(
@@ -1977,7 +2060,8 @@ impl Tty59App {
                 &[("count", &failed.to_string())],
             )
         } else {
-            t(L10nKey::SftpTransferSummaryIdle).to_string()
+            let (downloads, uploads) = finished_counts(&jobs);
+            finished_summary(downloads, uploads)
         };
         let summary_color = if jobs_error.is_some() || (running == 0 && failed > 0) {
             danger
@@ -2120,8 +2204,8 @@ impl Tty59App {
             SftpJobState::Running => t_fmt(
                 L10nKey::SftpTransferProgress,
                 &[
-                    ("done", &human_size(job.bytes_done)),
-                    ("total", &human_size(job.bytes_total)),
+                    ("done", &human_bytes(job.bytes_done)),
+                    ("total", &human_bytes(job.bytes_total)),
                     ("pct", &format!("{pct:.0}")),
                 ],
             ),
@@ -2399,6 +2483,59 @@ mod tests {
         }
     }
 
+    /// (entries empty, loading, show_go_up) -> the Empty folder note under `..`.
+    /// Only a finished, unfiltered, non-root listing with no entries has it;
+    /// every other empty state keeps the note it already had.
+    #[test]
+    fn an_empty_folder_below_the_root_says_so_under_its_parent_row() {
+        assert!(is_empty_folder_below_parent(true, false, true));
+        assert!(
+            !is_empty_folder_below_parent(true, true, true),
+            "a listing still loading is not an empty folder"
+        );
+        assert!(
+            !is_empty_folder_below_parent(true, false, false),
+            "the root, or a filter that matched nothing, has its own note"
+        );
+        assert!(
+            !is_empty_folder_below_parent(false, false, true),
+            "a folder with entries has no empty note"
+        );
+    }
+
+    /// What the tray says after work: counts and nouns for what finished;
+    /// failed and cancelled jobs are not finished work and are not counted.
+    #[test]
+    fn a_finished_tray_counts_downloads_and_uploads_by_name() {
+        crate::ui::i18n::set_locale("en");
+        let mut download = upload(1, SftpJobState::Done);
+        download.kind = SftpTransferKind::Download;
+        let jobs = [
+            download.clone(),
+            upload(2, SftpJobState::Done),
+            upload(3, SftpJobState::Done),
+            upload(4, SftpJobState::Error),
+            upload(5, SftpJobState::Cancelled),
+        ];
+        let shown: Vec<&SftpJobProgress> = jobs.iter().collect();
+        assert_eq!(finished_counts(&shown), (1, 2));
+        assert_eq!(finished_counts(&shown[3..]), (0, 0));
+
+        assert_eq!(finished_summary(1, 0), "1 download finished");
+        assert_eq!(finished_summary(3, 0), "3 downloads finished");
+        assert_eq!(finished_summary(0, 1), "1 upload finished");
+        assert_eq!(finished_summary(0, 2), "2 uploads finished");
+        assert_eq!(
+            finished_summary(1, 2),
+            "1 download finished · 2 uploads finished"
+        );
+        assert_eq!(
+            finished_summary(0, 0),
+            "Transfers",
+            "only cancelled work left has nothing to count"
+        );
+    }
+
     #[test]
     fn an_upload_owes_a_listing_until_it_stops_running() {
         let owed = HashSet::from([7]);
@@ -2620,12 +2757,13 @@ mod tests {
     }
 
     #[test]
-    fn human_size_scales_units() {
-        assert_eq!(human_size(0), "0 B");
-        assert_eq!(human_size(512), "512 B");
-        assert_eq!(human_size(1024), "1.0K");
-        assert_eq!(human_size(1536), "1.5K");
-        assert_eq!(human_size(1024 * 1024), "1.0M");
+    fn sftp_sizes_use_the_shared_byte_formatter() {
+        // The rows and the tray import `remote_connect::human_bytes`; the full
+        // boundary table lives with it.
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(3_789), "3.7 KB");
+        assert_eq!(human_bytes(48 * 1024 * 1024), "48 MB");
     }
 
     #[test]
@@ -2643,7 +2781,10 @@ mod gpui_tests {
     use crate::core::config::{Config, RightPanelTab};
     use crate::core::session::Session;
     use crate::ui::app::Tty59App;
-    use gpui::{AppContext, Entity, Focusable as _, TestAppContext, VisualTestContext};
+    use gpui::{
+        AppContext, Entity, Focusable as _, ParentElement as _, Styled as _, TestAppContext,
+        VisualTestContext,
+    };
     use gpui_component::input::InputState;
 
     fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
@@ -2711,6 +2852,102 @@ mod gpui_tests {
                 "the focus the box held must have gone somewhere still on screen"
             );
         });
+    }
+
+    /// A window of its own whose one view is the list the app renders. The list
+    /// has hover and scroll handling, which ask the window for the view being
+    /// drawn, so it has to be drawn as a view's content and not as a bare
+    /// element handed to `VisualTestContext::draw`.
+    struct ListHost(Entity<Tty59App>);
+
+    impl gpui::Render for ListHost {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            self.0
+                .clone()
+                .update(cx, |app, cx| app.render_sftp_list(cx))
+        }
+    }
+
+    /// Sets the listing's state and draws the real list in `host` (the window
+    /// of a [`ListHost`]), returning the bounds of its `..` row and of its note,
+    /// if each was drawn.
+    fn drawn_list(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        host: &mut VisualTestContext,
+        cwd: &str,
+        loading: bool,
+        error: Option<&str>,
+        filter: &'static str,
+    ) -> (
+        Option<gpui::Bounds<gpui::Pixels>>,
+        Option<gpui::Bounds<gpui::Pixels>>,
+    ) {
+        app.update_in(vcx, |app, window, cx| {
+            app.sftp_panel.cwd = cwd.to_string();
+            app.sftp_panel.entries.clear();
+            app.sftp_panel.loading = loading;
+            app.sftp_panel.list_error = error.map(|message| super::SftpListError {
+                path: cwd.to_string(),
+                message: message.to_string(),
+            });
+            let input = app.sftp_panel.filter_input.clone();
+            input.update(cx, |s, cx| s.set_value(filter, window, cx));
+        });
+        host.update(|window, _| window.refresh());
+        host.run_until_parked();
+        host.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (
+            host.debug_bounds("sftp-go-up"),
+            host.debug_bounds("sftp-note"),
+        )
+    }
+
+    /// A folder below the root with nothing in it draws its `..` row and, under
+    /// it, the note that it is empty. Every other empty state keeps what it
+    /// drew before: no note while the listing loads (the `..` row alone), only a
+    /// note at the root, for a filter that matched nothing or for an error.
+    #[gpui::test]
+    fn an_empty_folder_draws_its_parent_row_then_its_note(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        crate::ui::i18n::set_locale("en");
+        let (_host_view, host) = cx.add_window_view(|_, _| ListHost(app.clone()));
+
+        let (up, note) = drawn_list(&app, &mut vcx, host, "/srv/empty", false, None, "");
+        let (up, note) = (up.expect("the parent row"), note.expect("the empty note"));
+        assert!(
+            note.top() >= up.bottom(),
+            "the note sits under the parent row: {up:?} then {note:?}"
+        );
+
+        let (up, note) = drawn_list(&app, &mut vcx, host, "/srv/empty", true, None, "");
+        assert!(up.is_some() && note.is_none(), "loading: `..` alone");
+
+        let (up, note) = drawn_list(&app, &mut vcx, host, "/", false, None, "");
+        assert!(up.is_none() && note.is_some(), "the root: the note alone");
+
+        let (up, note) = drawn_list(&app, &mut vcx, host, "/srv/empty", false, None, "zz");
+        assert!(
+            up.is_none() && note.is_some(),
+            "a filter that matched nothing: its own note, no `..`"
+        );
+
+        let (up, note) = drawn_list(
+            &app,
+            &mut vcx,
+            host,
+            "/srv/empty",
+            false,
+            Some("denied"),
+            "",
+        );
+        assert!(up.is_none() && note.is_some(), "an error: the error alone");
     }
 
     /// A view to draw the listing inside: its buttons look up the view being
@@ -2844,5 +3081,177 @@ mod gpui_tests {
             app.toggle_sftp(window, cx);
         });
         assert_eq!(panel(&app, &mut vcx), (true, RightPanelTab::Files));
+    }
+
+    /// The breadcrumb of the real app, `width` wide, naming `host`.
+    struct CrumbHost {
+        app: Entity<Tty59App>,
+        host: gpui::SharedString,
+        width: f32,
+    }
+
+    impl gpui::Render for CrumbHost {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            let host = self.host.clone();
+            gpui::div().w(gpui::px(self.width)).child(
+                self.app
+                    .clone()
+                    .update(cx, |app, cx| app.render_sftp_breadcrumb(&host, cx)),
+            )
+        }
+    }
+
+    /// (chip, row) bounds for the breadcrumb drawn at `width` for `host`.
+    fn drawn_crumbs(
+        cx: &mut TestAppContext,
+        app: &Entity<Tty59App>,
+        host: &str,
+        width: f32,
+    ) -> (gpui::Bounds<gpui::Pixels>, gpui::Bounds<gpui::Pixels>) {
+        let host_name: gpui::SharedString = host.to_string().into();
+        let (_view, window) = cx.add_window_view(|_, _| CrumbHost {
+            app: app.clone(),
+            host: host_name,
+            width,
+        });
+        window.update(|window, _| window.refresh());
+        window.run_until_parked();
+        window.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (
+            window
+                .debug_bounds("sftp-host-chip")
+                .expect("the breadcrumb leads with the machine's chip"),
+            window
+                .debug_bounds("sftp-breadcrumb-row")
+                .expect("the breadcrumb row is drawn"),
+        )
+    }
+
+    /// F5: the Files panel says which machine it is showing, and keeps saying
+    /// so when the panel is narrow or the name is long.
+    #[gpui::test]
+    fn the_breadcrumb_leads_with_the_host_and_keeps_it_in_narrow_panels(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        crate::ui::i18n::set_locale("en");
+        app.update_in(&mut vcx, |app, _, _| {
+            app.sftp_panel.cwd = "/home/demo/projects/tty59".to_string();
+        });
+        let inset = crate::ui::right_panel::TEXT_INSET;
+
+        let (short, short_row) = drawn_crumbs(cx, &app, "demo@127.0.0.1", 260.);
+        assert!(
+            f32::from(short.left()) >= f32::from(short_row.left()) + inset - 0.5
+                && f32::from(short.right()) <= f32::from(short_row.right()) - inset + 0.5,
+            "the chip sits inside the row's text column: {short:?} in {short_row:?}"
+        );
+
+        let long = "build-service-account@a-very-long-machine-name.internal.example.com";
+        let (long_chip, long_row) = drawn_crumbs(cx, &app, long, 260.);
+        assert!(
+            f32::from(long_chip.right()) <= f32::from(long_row.right()) - inset + 0.5,
+            "a long host shrinks inside the row instead of overflowing: {long_chip:?} in {long_row:?}"
+        );
+        assert!(
+            long_chip.size.width > short.size.width,
+            "the long host still gets more room than the short one, so it names the machine"
+        );
+        assert!(
+            long_row.size.height > short_row.size.height,
+            "the path wraps below a chip that fills the line: {long_row:?} vs {short_row:?}"
+        );
+
+        let (narrow, narrow_row) = drawn_crumbs(cx, &app, "demo@127.0.0.1", 140.);
+        assert!(
+            f32::from(narrow.right()) <= f32::from(narrow_row.right()) - inset + 0.5,
+            "a very narrow panel still holds the chip: {narrow:?} in {narrow_row:?}"
+        );
+    }
+
+    fn entry(
+        name: &str,
+        kind: crate::daemon::protocol::SftpEntryKind,
+        size: u64,
+    ) -> super::SftpEntry {
+        super::SftpEntry {
+            name: name.to_string(),
+            kind,
+            size,
+            mtime: 0,
+            permissions: 0o644,
+            target_is_dir: false,
+        }
+    }
+
+    /// Draws the real list holding only `entries`, in `host`.
+    fn draw_entries(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        host: &mut VisualTestContext,
+        entries: Vec<super::SftpEntry>,
+    ) {
+        app.update_in(vcx, |app, window, cx| {
+            app.sftp_panel.cwd = "/".to_string();
+            app.sftp_panel.entries = entries;
+            app.sftp_panel.loading = false;
+            app.sftp_panel.list_error = None;
+            let input = app.sftp_panel.filter_input.clone();
+            input.update(cx, |s, cx| s.set_value("", window, cx));
+        });
+        host.update(|window, _| window.refresh());
+        host.run_until_parked();
+        host.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// F9: a symbolic link carries a 12px glyph between its name and its size,
+    /// and nothing else does. (That the name itself is the filesystem's, with
+    /// no arrow, and the glyph's shape and the row's accessibility label are
+    /// native-capture gates: text and icon identity are not observable here.)
+    #[gpui::test]
+    fn only_a_symlink_row_carries_the_link_glyph_between_name_and_size(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SftpEntryKind::{Dir, File, Symlink};
+        let (app, mut vcx) = harness(cx);
+        crate::ui::i18n::set_locale("en");
+        let (_host_view, host) = cx.add_window_view(|_, _| ListHost(app.clone()));
+
+        for (name, kind) in [("notes.txt", File), ("src", Dir)] {
+            draw_entries(&app, &mut vcx, host, vec![entry(name, kind, 2048)]);
+            assert!(
+                host.debug_bounds("sftp-link-glyph").is_none(),
+                "{name} is not a link and draws no glyph"
+            );
+            assert!(host.debug_bounds("sftp-row-name").is_some());
+        }
+
+        let long = "a-symlink-with-a-very-long-name-".repeat(12);
+        for name in ["current", long.as_str()] {
+            draw_entries(&app, &mut vcx, host, vec![entry(name, Symlink, 4096)]);
+            let glyph = host
+                .debug_bounds("sftp-link-glyph")
+                .expect("a symlink draws the link glyph");
+            let name_box = host.debug_bounds("sftp-row-name").expect("the name");
+            let size = host.debug_bounds("sftp-row-size").expect("the size");
+            assert!(
+                (f32::from(glyph.size.width) - 12.).abs() < 0.01
+                    && (f32::from(glyph.size.height) - 12.).abs() < 0.01,
+                "the glyph is 12px: {glyph:?}"
+            );
+            assert!(
+                name_box.right() <= glyph.left() + gpui::px(0.5)
+                    && glyph.right() <= size.left() + gpui::px(0.5),
+                "name, then glyph, then size: {name_box:?} {glyph:?} {size:?}"
+            );
+            assert!(
+                (f32::from(glyph.center().y) - f32::from(name_box.center().y)).abs() <= 1.,
+                "the glyph is centred on the row's line: {glyph:?} vs {name_box:?}"
+            );
+        }
     }
 }

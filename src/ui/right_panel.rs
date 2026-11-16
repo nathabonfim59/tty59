@@ -15,6 +15,7 @@ use crate::ui::app::{
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
+use crate::ui::text_elision::{ElidedLabel, Mode as ElideMode};
 
 /// The tab a stored choice shows. Search was a tab of its own until the
 /// Files tab took over searching file contents; a config that still says
@@ -26,20 +27,139 @@ pub(crate) fn shown_tab(tab: RightPanelTab) -> RightPanelTab {
     }
 }
 
-/// Wide enough for the word tabs, bare, beside the panel toggle at
-/// the default interface size — the Changes count is dropped before a label is
-/// ever cut. A larger UI font raises the floor past this; see
-/// [`right_panel_tabs_floor`].
+/// Which of the two panel button paints an empty state's way out takes.
+///
+/// No danger tone: a way back from an empty or failed state is never the thing
+/// a panel warns about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PanelActionTone {
+    /// The inverted neutral — body ink as the fill — for the one thing the
+    /// state is waiting on.
+    Primary,
+    /// The light neutral fill, for a way out the panel offers rather than asks
+    /// for.
+    Secondary,
+}
+
+/// Space between an empty state's words and its button, on top of the 3px the
+/// column already puts between its lines: 8 in all, the panel's step.
+pub(crate) const PANEL_ACTION_GAP: f32 = 5.;
+
+type PanelActionHandler = Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App)>;
+
+/// A button under an empty or failed panel state: the recovery an Error state
+/// has to come with, in the panel's own 28px button.
+pub(crate) struct PanelAction {
+    id: gpui::SharedString,
+    label: gpui::SharedString,
+    tone: PanelActionTone,
+    on_click: PanelActionHandler,
+}
+
+impl PanelAction {
+    pub(crate) fn primary(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self::new(id, label, PanelActionTone::Primary, on_click)
+    }
+
+    pub(crate) fn secondary(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self::new(id, label, PanelActionTone::Secondary, on_click)
+    }
+
+    fn new(
+        id: impl Into<gpui::SharedString>,
+        label: impl Into<gpui::SharedString>,
+        tone: PanelActionTone,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            tone,
+            on_click: Box::new(on_click),
+        }
+    }
+
+    /// The dialog button, on the panel's own surface ladder so the primary's
+    /// label reads as cut out of the panel and the secondary's fill is the
+    /// panel's next rung.
+    ///
+    /// The shared dialog recipe paints a Secondary label in the raw foreground,
+    /// which does not clear the text floor on every theme's hover rung. This
+    /// consumer lays the cached panel-row title ink over it
+    /// (`ChromeInk::panel_title`, floored on the sidebar's resting, hovered and
+    /// selected rows — the fills the Secondary button sits on and brightens to);
+    /// the recipe itself is left exactly as it is. Findable by `id` as a debug
+    /// selector in tests.
+    pub(crate) fn render(self, cx: &gpui::App) -> AnyElement {
+        let (tone, ink) = match self.tone {
+            PanelActionTone::Primary => (crate::ui::dialog::Tone::Primary, None),
+            PanelActionTone::Secondary => (
+                crate::ui::dialog::Tone::Secondary,
+                Some(gpui::rgb(crate::ui::theme::chrome_ink(cx).panel_title)),
+            ),
+        };
+        let rungs = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let on_click = self.on_click;
+        #[cfg(test)]
+        let selector = self.id.to_string();
+        let button = crate::ui::dialog::button(
+            self.id,
+            self.label,
+            tone,
+            true,
+            rungs,
+            cx,
+            move |e, w, cx| on_click(e, w, cx),
+        )
+        .when_some(ink, |button, ink| button.text_color(ink));
+        // The paints as this consumer leaves them: for a Secondary that is the
+        // overriding ink, which the recipe's own note (taken before it) cannot
+        // see. The hover fills stay the recipe's own, noted by `dialog::button`.
+        #[cfg(test)]
+        let mut button = button;
+        #[cfg(test)]
+        crate::ui::paint_probe::note(
+            match self.tone {
+                PanelActionTone::Primary => "panel_action.primary",
+                PanelActionTone::Secondary => "panel_action.secondary",
+            },
+            &mut button,
+        );
+        #[cfg(test)]
+        let button = button.debug_selector(move || selector);
+        button.into_any_element()
+    }
+}
+
+/// Wide enough for the word tabs and the widest Changes count (`99+`), beside
+/// the panel toggle, at the default interface size. The count's room is held
+/// whether or not there is one, so the panel's minimum width does not move as
+/// the number does. A larger UI font or a longer language raises the floor
+/// past this; see [`right_panel_tabs_floor`].
 pub(crate) const MIN_WIDTH: f32 = 240.;
 
-/// What the tab row needs with the count dropped: the labels, the row's lead,
-/// its 2px gaps, and the panel toggle at the trailing end.
-fn right_panel_tabs_floor(window: &Window, cx: &gpui::App) -> f32 {
-    let chrome = match cfg!(target_os = "macos") {
+/// What the tab row needs: the labels and the widest count, from the
+/// `RightTabMetrics` the tab row is drawn from, plus the row's lead, its 2px
+/// gaps, and the panel toggle at the trailing end.
+fn right_panel_tabs_floor(metrics: &crate::ui::tab_strip::RightTabMetrics) -> f32 {
+    (TAB_ROW_LEAD + metrics.tabs_w() + tabs_chrome_w()).ceil()
+}
+
+/// What the tab row keeps at its trailing end: the panel toggle and its inset
+/// on macOS, the row's inset elsewhere.
+pub(crate) fn tabs_chrome_w() -> f32 {
+    match cfg!(target_os = "macos") {
         true => crate::ui::tab_strip::trailing_chrome_tiles_w(),
         false => tile_trailing_inset(),
-    };
-    (TAB_ROW_LEAD + crate::ui::tab_strip::right_panel_tab_labels_w(window, cx) + chrome).ceil()
+    }
 }
 
 /// The tab row's leading inset: the selected tab's pill starts on
@@ -178,6 +298,27 @@ pub(crate) fn forwards_port(m: &ManagedForward, port: u16) -> bool {
         && crate::daemon::protocol::PortEntry::reaches_loopback(&m.target_host)
 }
 
+/// The space between two tiles of an [`action_strip`].
+const ACTION_STRIP_GAP: f32 = 1.;
+
+/// Air a row keeps between its text and the strip drawn over its end. A
+/// choice about the text, not painted padding: 5 is what leaves a clear gap
+/// at the default size, and gives the 23 and 42px that one and two tiles
+/// reserve.
+const ACTION_STRIP_CLEARANCE: f32 = 5.;
+
+/// How wide an [`action_strip`] of `tiles` [`TILE_SIZE_XS`] tiles paints: the
+/// tiles and the gaps between them, from the constants the painter uses.
+fn action_strip_width(tiles: usize) -> f32 {
+    tiles as f32 * TILE_SIZE_XS + tiles.saturating_sub(1) as f32 * ACTION_STRIP_GAP
+}
+
+/// The width a row holds back from its text so that it ends before an
+/// [`action_strip`] of `tiles` tiles instead of under it.
+pub(crate) fn action_strip_reserve(tiles: usize) -> f32 {
+    action_strip_width(tiles) + ACTION_STRIP_CLEARANCE
+}
+
 /// The strip the row and group action buttons live in, revealed by hovering
 /// `row`.
 ///
@@ -202,17 +343,23 @@ pub(crate) fn forwards_port(m: &ManagedForward, port: u16) -> bool {
 /// without lying to the hit test: children register their handlers after this
 /// one and gpui bubbles back to front, so a button still gets its click first.
 pub(crate) fn action_strip(row: &gpui::SharedString, backing: u32) -> gpui::Div {
-    h_flex()
+    let strip = h_flex()
         .absolute()
         .right(px(ROW_INSET))
         .top_0()
         .bottom_0()
         .items_center()
-        .gap(px(1.))
+        .gap(px(ACTION_STRIP_GAP))
         .bg(gpui::rgb(backing))
         .invisible()
         .group_hover(row.clone(), |s| s.visible())
-        .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+        .on_any_mouse_down(|_, _, cx| cx.stop_propagation());
+    #[cfg(test)]
+    let strip = strip.debug_selector({
+        let row = row.clone();
+        move || format!("{row}-strip")
+    });
+    strip
 }
 
 /// Height of a bare inline input row — Source Control's new-branch and
@@ -334,6 +481,9 @@ pub(crate) struct PaneForwardCtx {
 enum InfoValue {
     /// Mono text, truncated from the tail.
     Text(String),
+    /// A branch name, shrunk from the middle: the end is what tells two
+    /// `feature/…` branches apart, and the start says which kind it is.
+    Branch(String),
     /// A filesystem path, shrunk from the head so the leaf survives.
     Path(String),
     /// `+N −M` in the sidebar's two colours, and a click into the diff
@@ -395,9 +545,18 @@ impl InfoRow {
         }
     }
 
+    fn branch(label: &'static str, value: String) -> Self {
+        Self {
+            label,
+            value: InfoValue::Branch(value),
+            copy: None,
+            reveal: None,
+        }
+    }
+
     fn copyable(mut self) -> Self {
         self.copy = match &self.value {
-            InfoValue::Text(v) | InfoValue::Path(v) => Some(v.clone()),
+            InfoValue::Text(v) | InfoValue::Branch(v) | InfoValue::Path(v) => Some(v.clone()),
             _ => None,
         };
         self
@@ -483,10 +642,10 @@ impl Tty59App {
     }
 
     /// The narrowest the panel may be drawn: `MIN_WIDTH`, or wider when the
-    /// interface font or the language makes the three tab labels and the two
-    /// chrome tiles beside them need more than that.
-    pub(crate) fn right_panel_min_px(&self, window: &Window, cx: &gpui::App) -> f32 {
-        MIN_WIDTH.max(right_panel_tabs_floor(window, cx))
+    /// interface font or the language makes the tab labels, the Changes count
+    /// and the chrome tiles beside them need more than that.
+    pub(crate) fn right_panel_min_px(&self, _window: &Window, _cx: &gpui::App) -> f32 {
+        MIN_WIDTH.max(right_panel_tabs_floor(&self.right_tab_metrics))
     }
 
     pub(crate) fn right_panel_max_px(&self, window: &Window, cx: &gpui::App) -> f32 {
@@ -554,31 +713,25 @@ impl Tty59App {
         };
         let (backing, handle) = self.right_panel_resize(window, cx);
 
-        Some(
-            v_flex()
-                .id("right-panel")
-                .relative()
-                .flex_none()
-                .w(px(width))
-                .h_full()
-                .child(backing)
-                .bg(crate::ui::theme::workspace_surface_color(cx))
-                .border_l(crate::ui::theme::hairline(window))
-                .border_color(cx.theme().sidebar_border)
-                .children(cfg!(target_os = "macos").then(|| {
-                    let row = h_flex()
-                        .id("right-panel-titlebar-drag")
-                        .flex_none()
-                        // Match TitleBar's content height, including its invisible
-                        // bottom border. Otherwise this row centres the toggle
-                        // half a point below its position in the closed panel.
-                        .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent);
-                    crate::ui::app::window_move_gesture(
-                        row,
-                        "right-panel-titlebar-drag",
-                        window,
-                        cx,
-                    )
+        let panel = v_flex()
+            .id("right-panel")
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .h_full()
+            .child(backing)
+            .bg(crate::ui::theme::workspace_surface_color(cx))
+            .border_l(crate::ui::theme::hairline(window))
+            .border_color(cx.theme().sidebar_border)
+            .children(cfg!(target_os = "macos").then(|| {
+                let row = h_flex()
+                    .id("right-panel-titlebar-drag")
+                    .flex_none()
+                    // Match TitleBar's content height, including its invisible
+                    // bottom border. Otherwise this row centres the toggle
+                    // half a point below its position in the closed panel.
+                    .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent);
+                crate::ui::app::window_move_gesture(row, "right-panel-titlebar-drag", window, cx)
                     .on_double_click(|_, window, _| window.titlebar_double_click())
                     .items_center()
                     .pl(px(TAB_ROW_LEAD))
@@ -589,23 +742,24 @@ impl Tty59App {
                     // when it moves into this row, so opening the panel does
                     // not shift the glyph or change its hover target.
                     .child(self.window_chrome(cx))
-                }))
-                // Only the Files and Search tabs step down 8px. Their first row
-                // is a filled search well whose top edge is the first thing you
-                // see, so it wants air under the tab row. Info and Source Control open on
-                // bare text centred in a 28px row, which already sits ~7px
-                // under the row's top; adding 8 more put their first line a
-                // visible step lower than the Files well beside them.
-                .children(
-                    (cfg!(target_os = "macos")
-                        && matches!(tab, RightPanelTab::Files | RightPanelTab::Search))
-                    .then(|| div().flex_none().h(px(8.))),
-                )
-                .child(body)
-                .children(self.sftp_transfers_footer(cx))
-                .child(handle)
-                .into_any_element(),
-        )
+            }))
+            // Only the Files and Search tabs step down 8px. Their first row
+            // is a filled search well whose top edge is the first thing you
+            // see, so it wants air under the tab row. Info and Source Control open on
+            // bare text centred in a 28px row, which already sits ~7px
+            // under the row's top; adding 8 more put their first line a
+            // visible step lower than the Files well beside them.
+            .children(
+                (cfg!(target_os = "macos")
+                    && matches!(tab, RightPanelTab::Files | RightPanelTab::Search))
+                .then(|| div().flex_none().h(px(8.))),
+            )
+            .child(body)
+            .children(self.sftp_transfers_footer(cx))
+            .child(handle);
+        #[cfg(test)]
+        let panel = panel.debug_selector(|| "right-panel".into());
+        Some(panel.into_any_element())
     }
 
     fn right_panel_resize(
@@ -715,7 +869,7 @@ impl Tty59App {
     pub(crate) fn panel_title(
         &self,
         text: &str,
-        count: Option<String>,
+        count: Option<gpui::SharedString>,
         trailing: Option<AnyElement>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -744,7 +898,7 @@ impl Tty59App {
             }))
             // Where the tabs live in this row, they are the heading: the
             // current one already names the panel, and the Changes tab carries
-            // the count. No rule under it — the body's own inset is the break.
+            // its count (`right_panel_tabs`). No rule under it — the body's own inset is the break.
             .when(tabs.is_some(), |row| row.pl(px(TAB_ROW_LEAD)))
             .when(tabs.is_none(), |row| {
                 row.child(
@@ -883,6 +1037,27 @@ impl Tty59App {
         hint: Option<&str>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.panel_empty_with(
+            text,
+            hint.map(|h| h.to_string().into_any_element()),
+            None,
+            cx,
+        )
+    }
+
+    /// [`Self::panel_empty`] with the hint already built, for one that is more
+    /// than a string — text around an element, such as a command in a chip —
+    /// and a way out under it. The hint sits in the same secondary line the
+    /// plain one does. A state that says something failed, or that something
+    /// is missing, and then leaves the user to work out the fix elsewhere is
+    /// half a message.
+    pub(crate) fn panel_empty_with(
+        &self,
+        text: &str,
+        hint: Option<AnyElement>,
+        action: Option<PanelAction>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let muted = cx.theme().muted_foreground;
         v_flex()
             .px(px(TEXT_INSET))
@@ -891,12 +1066,11 @@ impl Tty59App {
             .text_size(rems(TEXT))
             .text_color(muted)
             .child(text.to_string())
-            .children(hint.map(|h| {
-                div()
-                    .text_size(rems(META))
-                    .text_color(muted)
-                    .child(h.to_string())
-            }))
+            .children(hint.map(|h| div().text_size(rems(META)).text_color(muted).child(h)))
+            // Its own row, so the button keeps its width rather than being
+            // stretched across the column, with a pause above it that sets it
+            // apart from the text it answers.
+            .children(action.map(|a| h_flex().pt(px(PANEL_ACTION_GAP)).child(a.render(cx))))
             .into_any_element()
     }
 
@@ -993,7 +1167,7 @@ impl Tty59App {
             // a diff, disagreeing means a click that opens a repository other
             // than the one whose numbers were clicked.
             if let Some(git) = git {
-                rows.push(InfoRow::text(t(L10nKey::PanelBranch), git.branch.clone()).copyable());
+                rows.push(InfoRow::branch(t(L10nKey::PanelBranch), git.branch.clone()).copyable());
                 rows.push(InfoRow {
                     label: t(L10nKey::PanelChangesRow),
                     value: InfoValue::Diff {
@@ -1078,11 +1252,26 @@ impl Tty59App {
             "{}, {}",
             row.label,
             match &row.value {
-                InfoValue::Text(v) | InfoValue::Path(v) => v.clone(),
+                InfoValue::Text(v) | InfoValue::Branch(v) | InfoValue::Path(v) => v.clone(),
                 InfoValue::Diff { added, removed, .. } => format!("+{added} −{removed}"),
             }
         );
+        #[cfg(test)]
+        let is_branch = matches!(row.value, InfoValue::Branch(_));
         let value = match row.value {
+            // The label measures the width layout gives the value slot, so the
+            // strip's reserved padding and a narrow panel are both already in
+            // the budget. The whole name is what the copy tile puts on the
+            // clipboard and what assistive tech reads.
+            InfoValue::Branch(v) => div()
+                .flex_1()
+                .min_w_0()
+                .text_size(rems(TEXT))
+                .text_color(cx.theme().foreground)
+                // The id only has to be unique among the row's own children:
+                // the row's `id` is already on the element-id stack above it.
+                .child(ElidedLabel::new("branch", v, ElideMode::Middle))
+                .into_any_element(),
             // A path identifies a pane by its last segment, and plain
             // truncation eats exactly that: a deep checkout read
             // "/private/tmp/claude-501…" and told you nothing. Let the head
@@ -1186,7 +1375,7 @@ impl Tty59App {
             .min_w_0()
             .items_baseline()
             .when(tiles_wide > 0, |this| {
-                this.pr(px(tiles_wide as f32 * (TILE_SIZE_XS + 1.) + 4.))
+                this.pr(px(action_strip_reserve(tiles_wide)))
             })
             .child(value);
 
@@ -1219,8 +1408,16 @@ impl Tty59App {
         // empty one carrying a hover subscription for a set of buttons that
         // does not exist.
         let actions = has_tiles.then_some(tiles);
+        // Test-only handles on the branch row, to hover it and click its one
+        // tile; the strip's own selector is the row id, which a test cannot
+        // spell as a literal.
+        #[cfg(test)]
+        let actions = actions.map(|strip| match is_branch {
+            true => strip.debug_selector(|| "panel-info-branch-strip".into()),
+            false => strip,
+        });
 
-        h_flex()
+        let element = h_flex()
             .id(id.clone())
             .role(gpui::Role::Label)
             .aria_label(a11y_name)
@@ -1247,8 +1444,13 @@ impl Tty59App {
                     .child(row.label),
             )
             .child(value)
-            .children(actions)
-            .into_any_element()
+            .children(actions);
+        #[cfg(test)]
+        let element = match is_branch {
+            true => element.debug_selector(|| "panel-info-branch-row".into()),
+            false => element,
+        };
+        element.into_any_element()
     }
 
     /// The tile an Info row's hover strip is made of — the [`TILE_SIZE_XS`]
@@ -1413,6 +1615,10 @@ impl Tty59App {
         }
 
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
+        let (chrome_ink, chrome_fill_pole) = (
+            crate::ui::theme::chrome_ink(cx),
+            crate::ui::theme::fill_pole(cx),
+        );
         let mono = cx.theme().mono_font_family.clone();
         let openable = ctx.port_route != crate::terminal::view::PortRoute::Blocked;
         let mut list = v_flex().px(px(CONTENT_INSET)).py(px(1.));
@@ -1508,7 +1714,7 @@ impl Tty59App {
             list = list.child(
                 h_flex()
                     .id(id.clone())
-                    .group(id)
+                    .group(id.clone())
                     .relative()
                     .items_center()
                     .gap(px(8.))
@@ -1516,10 +1722,13 @@ impl Tty59App {
                     .px(px(ROW_INSET))
                     .rounded(ROW_FILL_RADIUS)
                     .hover(|s| s.bg(gpui::rgb(sf.hover)))
-                    .child(info_chip(
+                    .child(port_chip(
                         &p.port.to_string(),
-                        cx.theme().accent,
-                        cx.theme().foreground,
+                        gpui::Hsla::from(gpui::rgb(chrome_fill_pole))
+                            .opacity(crate::ui::presets::PORT_CHIP_WASH),
+                        gpui::rgb(chrome_ink.port_chip_ink).into(),
+                        gpui::rgb(chrome_ink.port_chip_hover_ink).into(),
+                        id,
                         &mono,
                     ))
                     .child(
@@ -1530,7 +1739,7 @@ impl Tty59App {
                             // Room held back for the strip, so the process name
                             // ends where the buttons begin instead of under
                             // them. Same reservation the Info rows make.
-                            .pr(px(tiles_wide as f32 * (TILE_SIZE_XS + 1.) + 4.))
+                            .pr(px(action_strip_reserve(tiles_wide)))
                             .text_size(rems(TEXT_MONO))
                             .font_family(mono.clone())
                             .text_color(cx.theme().muted_foreground)
@@ -2089,15 +2298,20 @@ impl Tty59App {
 }
 
 /// Width of the fixed cell a git status letter is centred in: the widest
-/// letter at `META_MONO`, and nothing more, so the name after it starts
-/// `ROW_INSET + 10 + 8` = 18px past the row's fill edge.
+/// letter at `META_MONO`, with room for a [`DISCLOSURE_CHEVRON`] where a
+/// directory row puts its fold in the same cell, so the name after it starts
+/// `ROW_INSET + 12 + 8` = 28px past the row's fill edge.
 ///
-/// Load-bearing beyond this function: `scm/panel.rs` sets its group-header
-/// chevron in a box no wider than this, flush with the cell's leading edge, so
-/// the group arrows sit over the status letters, and it keeps its own
-/// `BADGE_W` in step. Changing it here without changing it there breaks that
-/// column.
-pub(crate) const BADGE_W: f32 = 10.;
+/// Load-bearing beyond this function: `scm/panel.rs` reads it for its
+/// directory rows' chevron cell and checks its group-header chevron against
+/// it, so the arrows stand over the status letters.
+pub(crate) const BADGE_W: f32 = 12.;
+
+/// Every disclosure chevron in the panel: the change groups, History, and the
+/// directories of both trees. One size, so a fold reads as the same control
+/// wherever it is. The commit button's caret is a menu, not a fold, and keeps
+/// its own size.
+pub(crate) const DISCLOSURE_CHEVRON: f32 = 10.;
 
 /// A single-letter git status marker in a fixed-width cell.
 ///
@@ -2132,17 +2346,101 @@ pub(crate) fn info_chip(
     fg: gpui::Hsla,
     mono: &gpui::SharedString,
 ) -> AnyElement {
+    let pill = pill(text, bg, fg, mono);
+    #[cfg(test)]
+    let mut pill = pill.debug_selector(|| "ui-chip".into());
+    #[cfg(test)]
+    crate::ui::paint_probe::note("ui.chip", &mut pill);
+    pill.into_any_element()
+}
+
+/// A port number: a neutral wash with the theme's floored inks. The ink turns
+/// to the link ink while the row it sits in (`row_group`) is hovered — the
+/// number is a fact that turns out to open something, so only the pointer
+/// asks for the accent.
+fn port_chip(
+    text: &str,
+    wash: gpui::Hsla,
+    ink: gpui::Hsla,
+    hover_ink: gpui::Hsla,
+    row_group: gpui::SharedString,
+    mono: &gpui::SharedString,
+) -> AnyElement {
+    // The id is what lets the hover ink show: a string child is shaped at
+    // layout, from the style the element has *then*, and an id-less element
+    // has no remembered group-hover state to give it. It nests under the
+    // row's own id, so it is unique per row.
+    let port = pill(text, wash, ink, mono)
+        .id("port-chip")
+        .group_hover(row_group, move |style| {
+            let style = style.text_color(hover_ink);
+            #[cfg(test)]
+            let mut style = style;
+            #[cfg(test)]
+            crate::ui::paint_probe::note("port.chip.hover", &mut style);
+            style
+        });
+    #[cfg(test)]
+    let mut port = port;
+    #[cfg(test)]
+    crate::ui::paint_probe::note("port.chip", &mut port);
+    port.into_any_element()
+}
+
+/// The padding either side of a pill's text, shared with whatever budgets a
+/// pill's width.
+pub(crate) const CHIP_PAD_X: f32 = 5.;
+
+/// The least padding either side a chip may be trimmed to, in the one place
+/// that trims it: the diff header's chip in a row too narrow for it.
+pub(crate) const CHIP_PAD_X_MIN: f32 = 3.5;
+
+/// The padding either side of a chip `w` pixels wide (its word between two
+/// [`CHIP_PAD_X`] paddings) in a row `cap` pixels wide: [`CHIP_PAD_X`] where the
+/// row holds it, and otherwise exactly what the row lacks taken off the two
+/// paddings together, never below [`CHIP_PAD_X_MIN`] each: the word is never
+/// trimmed. The one function the plan that budgets the chip and the chip that
+/// is drawn both read.
+pub(crate) fn chip_pad_x(w: f32, cap: f32) -> f32 {
+    CHIP_PAD_X - (w - cap).clamp(0., 2. * (CHIP_PAD_X - CHIP_PAD_X_MIN)) / 2.
+}
+
+/// [`info_chip`] with `pad_x` either side of its text instead of
+/// [`CHIP_PAD_X`], for the one chip that gives up its padding to a narrow row.
+pub(crate) fn info_chip_padded(
+    text: &str,
+    bg: gpui::Hsla,
+    fg: gpui::Hsla,
+    mono: &gpui::SharedString,
+    pad_x: f32,
+) -> AnyElement {
+    let pill = pill_shell(bg, fg, mono)
+        .px(px(pad_x))
+        .child(text.to_string());
+    #[cfg(test)]
+    let mut pill = pill.debug_selector(|| "ui-chip".into());
+    #[cfg(test)]
+    crate::ui::paint_probe::note("ui.chip", &mut pill);
+    pill.into_any_element()
+}
+
+fn pill(text: &str, bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -> gpui::Div {
+    pill_shell(bg, fg, mono).child(text.to_string())
+}
+
+/// The pill of [`info_chip`] without its content, for a chip whose text has to
+/// give way to a width cap and so brings its own element. It is `flex_none`
+/// like the chip; a caller that needs it to shrink says so after.
+pub(crate) fn pill_shell(bg: gpui::Hsla, fg: gpui::Hsla, mono: &gpui::SharedString) -> gpui::Div {
     div()
         .flex_none()
-        .px(px(5.))
+        .px(px(CHIP_PAD_X))
         .py(px(1.5))
         .rounded(px(4.))
         .bg(bg)
         .text_size(rems(META_MONO))
         .font_family(mono.clone())
         .text_color(fg)
-        .child(text.to_string())
-        .into_any_element()
 }
 
 pub fn reveal_label() -> &'static str {
@@ -2163,7 +2461,12 @@ fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
 #[cfg(test)]
 mod tests {
     use super::{InfoRow, InfoValue, format_rtt, forwards_port};
-    use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind};
+    use crate::daemon::protocol::{
+        DaemonMsg, ForwardStatus, ManagedForward, RemoteContext, RemoteKind, SshForwardKind,
+        SshPhase,
+    };
+    use crate::ui::app::Tty59App;
+    use gpui::{TestAppContext, VisualTestContext};
 
     fn forward(kind: SshForwardKind, target_host: &str, target_port: u16) -> ManagedForward {
         ManagedForward {
@@ -2314,5 +2617,711 @@ mod tests {
             None,
             "there is no sensible clipboard form of two coloured numbers"
         );
+    }
+
+    /// The detail pane's current SSH phase, the way `pane_forward_ctx` and
+    /// `remote_files_pane` read it.
+    fn detail_phase(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<SshPhase> {
+        app.update_in(vcx, |app, window, cx| {
+            app.tabs
+                .get(app.active)?
+                .detail_pane(window, cx)?
+                .read(cx)
+                .ssh_phase()
+        })
+    }
+
+    fn phase_landed(
+        app: &gpui::Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        want: &SshPhase,
+    ) -> bool {
+        for _ in 0..200 {
+            if detail_phase(app, vcx).as_ref() == Some(want) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// A pane mid-dial, wired the way a real `tty59 ssh` pane is: a native-ssh
+    /// remote context and a phase still short of `Connected`.
+    fn dial_in(
+        app: &gpui::Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        daemon: &mut crate::daemon::transport::Stream,
+    ) {
+        DaemonMsg::RemoteContext(Some(RemoteContext {
+            kind: RemoteKind::NativeSsh,
+            argv: Vec::new(),
+            target: "me@build-box".into(),
+        }))
+        .encode(daemon)
+        .unwrap();
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Authenticating,
+        }
+        .encode(daemon)
+        .unwrap();
+        assert!(
+            phase_landed(app, vcx, &SshPhase::Authenticating),
+            "the mid-dial phase never reached the pane"
+        );
+    }
+
+    /// Forwards are what a granted shell is for: the panel must not offer
+    /// them while the connect is still mid-flight, because `Connected` only
+    /// reports once the far end granted the shell (remote F13's other side).
+    ///
+    /// CONTROL: this passes on the pre-fix baseline — the statuses here are
+    /// fed straight down the wire, so it guards the panel's gate rather than
+    /// proving the producer's timing.
+    #[gpui::test]
+    fn the_forward_route_waits_for_the_granted_shell_control(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = crate::ui::app::test_window::harness_with_pane(cx);
+        dial_in(&app, &mut vcx, &mut daemon);
+
+        let ctx = app
+            .update_in(&mut vcx, |app, window, cx| app.pane_forward_ctx(window, cx))
+            .expect("a leaf pane always has a forward ctx");
+        assert!(
+            ctx.route.is_none(),
+            "no forwards while the dial is still up"
+        );
+
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Connected,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        assert!(phase_landed(&app, &mut vcx, &SshPhase::Connected));
+        let ctx = app
+            .update_in(&mut vcx, |app, window, cx| app.pane_forward_ctx(window, cx))
+            .expect("a leaf pane always has a forward ctx");
+        assert!(ctx.route.is_some(), "an established session holds forwards");
+    }
+
+    /// The SFTP panel gates on the same phase as forwards: browsing the far
+    /// filesystem needs the session channel the shell rides, so it too waits
+    /// for `Connected`.
+    ///
+    /// CONTROL: baseline-passing like the forward-route control above; it
+    /// guards the gate, it does not prove the producer's timing.
+    #[gpui::test]
+    fn remote_files_waits_for_the_granted_shell_control(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut daemon) = crate::ui::app::test_window::harness_with_pane(cx);
+        dial_in(&app, &mut vcx, &mut daemon);
+
+        let files = app.update_in(&mut vcx, |app, window, cx| {
+            app.remote_files_pane(window, cx)
+        });
+        assert!(
+            files.is_none(),
+            "no remote files while the dial is still up"
+        );
+
+        DaemonMsg::SshStatus {
+            phase: SshPhase::Connected,
+        }
+        .encode(&mut daemon)
+        .unwrap();
+        assert!(phase_landed(&app, &mut vcx, &SshPhase::Connected));
+        let files = app.update_in(&mut vcx, |app, window, cx| {
+            app.remote_files_pane(window, cx)
+        });
+        assert_eq!(files, Some((1, "me@build-box".to_string())));
+    }
+
+    #[test]
+    fn a_branch_row_copies_the_whole_name_it_may_elide() {
+        let name = "feature/checkout-flow-saved-payment-methods";
+        assert_eq!(
+            InfoRow::branch("branch", name.into())
+                .copyable()
+                .copy
+                .as_deref(),
+            Some(name),
+            "the row draws a cut of the name; the clipboard gets all of it"
+        );
+    }
+}
+
+/// Seeds the Info tab of a `harness_with_tabs` window, whose first pane is
+/// pane 1, so the real app render draws its ports and forward rows.
+#[cfg(test)]
+pub(crate) mod test_panel {
+    use gpui::{Entity, VisualTestContext};
+
+    use crate::core::config::RightPanelTab;
+    use crate::daemon::protocol::{ManagedForward, PaneProcs, PortEntry};
+    use crate::ui::app::Tty59App;
+
+    pub(crate) fn port(port: u16, pid: u32, name: &str) -> PortEntry {
+        PortEntry {
+            port,
+            pid,
+            name: name.into(),
+            addr: "127.0.0.1".into(),
+        }
+    }
+
+    pub(crate) fn open_info(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        ports: Vec<PortEntry>,
+        managed: Vec<ManagedForward>,
+    ) {
+        app.update_in(vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Info;
+            // Naming the pane and marking a poll as in flight keeps the app's
+            // own per-frame sync from clearing what is seeded here or
+            // spawning a daemon query that nothing in a test window answers.
+            app.right_panel.procs_pane = Some(1);
+            app.right_panel.procs_loading = true;
+            app.right_panel.procs = Some(PaneProcs {
+                ports,
+                ..Default::default()
+            });
+            app.loopback_panel.managed = managed;
+            cx.notify();
+        });
+    }
+}
+
+/// Panels F14 through the real app render: the Info tab is drawn with two
+/// listening ports, and the chip paints the port builder assigned are read
+/// back from the scoped probe.
+#[cfg(test)]
+mod contrast_tests {
+    use gpui::TestAppContext;
+
+    use super::test_panel::{open_info, port};
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, Misses, TEXT_FLOOR};
+    use crate::ui::paint_probe as probe;
+    use crate::ui::presets::{self, PORT_CHIP_WASH};
+
+    #[gpui::test]
+    fn port_chips_paint_a_neutral_wash_with_floored_inks(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        open_info(
+            &app,
+            &mut vcx,
+            vec![port(3000, 42, "node"), port(8080, 43, "api")],
+            Vec::new(),
+        );
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            let (ink, pole, sidebar, window) = vcx.update(|_, cx| {
+                let surfaces = cx.global::<presets::Surfaces>();
+                (
+                    crate::ui::theme::chrome_ink(cx),
+                    crate::ui::theme::fill_pole(cx),
+                    surfaces.sidebar,
+                    surfaces.window,
+                )
+            });
+            probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let id = theme.id.as_str();
+
+            let chips = probe::all("port.chip");
+            assert_eq!(
+                chips.len(),
+                2,
+                "{id}: one chip per port row in the real render"
+            );
+            let hovers = probe::all("port.chip.hover");
+            assert_eq!(hovers.len(), 2, "{id}: every port chip carries a hover ink");
+            for (n, chip) in chips.iter().enumerate() {
+                assert_eq!(
+                    chip.fill,
+                    Some(pole),
+                    "{id}: chip {n} washes with the fill pole"
+                );
+                assert!(
+                    chip.fill_alpha
+                        .is_some_and(|a| (a - PORT_CHIP_WASH).abs() < 0.005),
+                    "{id}: chip {n} keeps the shared wash alpha, got {:?}",
+                    chip.fill_alpha
+                );
+                assert_eq!(
+                    chip.text,
+                    Some(ink.port_chip_ink),
+                    "{id}: chip {n} resting ink"
+                );
+                assert_eq!(chip.text_alpha, Some(1.0), "{id}: chip {n} ink is solid");
+                assert_eq!(
+                    hovers[n].text,
+                    Some(ink.port_chip_hover_ink),
+                    "{id}: chip {n} hover ink"
+                );
+                assert_eq!(
+                    hovers[n].text_alpha,
+                    Some(1.0),
+                    "{id}: chip {n} hover ink is solid"
+                );
+                for (row, under) in [
+                    ("sidebar resting", sidebar.base),
+                    ("sidebar hovered", sidebar.hover),
+                    ("window resting", window.base),
+                    ("window hovered", window.hover),
+                ] {
+                    // The composite the GPU draws: the wash laid over the row.
+                    let fill = probe::hsla24(
+                        gpui::Hsla::from(gpui::rgb(under))
+                            .blend(gpui::Hsla::from(gpui::rgb(pole)).opacity(PORT_CHIP_WASH)),
+                    );
+                    misses.floor(
+                        id,
+                        &format!("chip {n} resting ink on the {row} row"),
+                        ink.port_chip_ink,
+                        fill,
+                        TEXT_FLOOR,
+                    );
+                    misses.floor(
+                        id,
+                        &format!("chip {n} hover ink on the {row} row"),
+                        ink.port_chip_hover_ink,
+                        fill,
+                        TEXT_FLOOR,
+                    );
+                }
+            }
+        }
+        misses.assert_none("port chip inks");
+    }
+}
+
+/// B3b style sweeps over the recovery buttons of an empty or failed panel
+/// state. They render the real consumer, [`PanelAction`], on every built-in and
+/// every generated theme and read what it painted through the scoped probe: its
+/// own note of the final rest paints (for a Secondary that is the cached
+/// `panel_title` ink laid over the shared recipe's) and the shared recipe's
+/// note of the hover fill it sets. The label of a hovered button is the same
+/// ink as at rest — hover sets only the fill — so each pair is the final ink
+/// against the real fill. A raw `dialog::button` probe would measure the shared
+/// recipe, not this consumer. They change no recipe, token or target.
+///
+/// Limit, stated so it is not mistaken for coverage: this is style, not raster
+/// pixels, so native 4.5/3 measurements stay a separate gate.
+#[cfg(test)]
+mod recovery_button_diagnostics {
+    use gpui::TestAppContext;
+    use gpui_component::ActiveTheme as _;
+
+    use super::PanelAction;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, MARK_FLOOR, Misses, TEXT_FLOOR};
+    use crate::ui::paint_probe::{self as probe, Painted, hsla24};
+    use crate::ui::presets::{self, Theme};
+
+    /// The 877-odd themes: every built-in and the whole generated grid, not
+    /// the sampled spread the other contrast tests use.
+    fn every_theme() -> Vec<Theme> {
+        let mut all = presets::builtins();
+        all.extend(presets::generated_theme_grid());
+        all
+    }
+
+    /// What `PanelAction::render` painted for each tone on the theme now
+    /// applied: the final rest paints (`primary`, `secondary`) and the fill the
+    /// shared recipe sets under the pointer (`*_hover`); and the panel's fill.
+    struct Drawn {
+        primary: Painted,
+        secondary: Painted,
+        primary_hover: Painted,
+        secondary_hover: Painted,
+        sidebar_base: u32,
+        /// The panel's fill as `workspace_surface_color` returns it, RGB only;
+        /// `panel_alpha` is its alpha, which `hsla24` drops; the diagnostics
+        /// pin an opaque window and assert it (see `assert_opaque_panel`).
+        panel: u32,
+        panel_alpha: f32,
+        muted: u32,
+    }
+
+    /// An opaque window, set once before a theme loop: `test_themes::apply`
+    /// clones the Config global and changes only the theme fields, so these
+    /// survive every `apply_theme`.
+    fn pin_opaque_window(vcx: &mut gpui::VisualTestContext) {
+        vcx.update(|_, cx| {
+            let mut config = cx.global::<crate::core::config::Config>().clone();
+            config.window_opacity = Some(1.0);
+            config.window_blur = Some(false);
+            cx.set_global(config);
+        });
+    }
+
+    /// The ratios below are against `hsla24(panel)`, which drops alpha, so they
+    /// only mean something while the panel fill is solid. Fails by name if the
+    /// pinned fixture did not make it so.
+    fn assert_opaque_panel(id: &str, drawn: &Drawn) {
+        assert!(
+            drawn.panel_alpha >= 1.0,
+            "{id}: workspace_surface_color has alpha {} with window_opacity=Some(1.0) and \
+             window_blur=Some(false) pinned; the fixture is not opaque, so no ratio against the \
+             panel fill is valid",
+            drawn.panel_alpha
+        );
+    }
+
+    fn draw_buttons(vcx: &mut gpui::VisualTestContext) -> Drawn {
+        probe::clear();
+        let (sidebar_base, panel, panel_alpha, muted) = vcx.update(|_, cx| {
+            let rungs = cx.global::<presets::Surfaces>().sidebar;
+            // Rendering is what notes: the consumer's final rest paints and,
+            // inside it, the shared recipe's hover fill.
+            let _ = PanelAction::primary("diag-primary", "Refresh", |_, _, _| {}).render(cx);
+            let _ = PanelAction::secondary("diag-secondary", "Retry", |_, _, _| {}).render(cx);
+            let panel = crate::ui::theme::workspace_surface_color(cx);
+            (
+                rungs.base,
+                hsla24(panel),
+                panel.a,
+                hsla24(cx.theme().muted_foreground),
+            )
+        });
+        let one = |key: &'static str| {
+            let notes = probe::all(key);
+            assert_eq!(notes.len(), 1, "{key}: one note per drawn button");
+            notes[0]
+        };
+        Drawn {
+            primary: one("panel_action.primary"),
+            secondary: one("panel_action.secondary"),
+            primary_hover: one("dialog.button.primary.hover"),
+            secondary_hover: one("dialog.button.secondary.hover"),
+            sidebar_base,
+            panel,
+            panel_alpha,
+            muted,
+        }
+    }
+
+    /// Element and pair, at rest: the label of the Primary button (surface ink
+    /// on the `foreground` fill) and of the Secondary one (the cached
+    /// `panel_title` ink PanelAction lays over the recipe's, on the sidebar's
+    /// hover rung), 12.5px, so the 4.5:1 text floor, on the paints
+    /// `PanelAction::render` really set. Both paints must be opaque for the
+    /// ratio to mean anything, and that is checked too. No theme is skipped.
+    /// (Before PanelAction laid its own ink over the Secondary's, this test
+    /// read the raw recipe and missed in 45 of 877 themes, lowest ~4.27:1.)
+    #[gpui::test]
+    fn recovery_button_labels_clear_the_text_floor_on_every_theme(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        let mut translucent: Vec<String> = Vec::new();
+        pin_opaque_window(&mut vcx);
+        for theme in &every_theme() {
+            themes::apply(&mut vcx, theme);
+            let drawn = draw_buttons(&mut vcx);
+            let id = theme.id.as_str();
+            assert_opaque_panel(id, &drawn);
+            for (name, p) in [("primary", drawn.primary), ("secondary", drawn.secondary)] {
+                let (Some(fill), Some(ink)) = (p.fill, p.text) else {
+                    translucent.push(format!("{id}: {name} drew no solid fill or ink: {p:?}"));
+                    continue;
+                };
+                if p.fill_alpha != Some(1.0) || p.text_alpha != Some(1.0) {
+                    translucent.push(format!(
+                        "{id}: {name} is not opaque (fill {:?}, ink {:?})",
+                        p.fill_alpha, p.text_alpha
+                    ));
+                }
+                misses.floor(
+                    id,
+                    &format!("{name} label on its fill"),
+                    ink,
+                    fill,
+                    TEXT_FLOOR,
+                );
+            }
+        }
+        assert!(
+            translucent.is_empty(),
+            "recovery button paints: {} not solid\n{}",
+            translucent.len(),
+            translucent.join("\n")
+        );
+        misses.assert_none("recovery button label contrast");
+    }
+
+    /// Element and pair: the Primary button's `foreground` fill against the
+    /// panel's own fill is what makes it findable, so it carries the
+    /// 3:1 component floor and is asserted, with the window pinned opaque and
+    /// that asserted per theme (`hsla24` drops alpha). The Secondary button's
+    /// fill is the
+    /// sidebar's faint hover rung — a tint by design, named by its label — so
+    /// its ratio is printed, not asserted, with how often it falls under 3:1.
+    /// Also printed: whether the sidebar's `base` rung is the panel's fill (the
+    /// recipe takes its surface from the former, the panel paints the latter),
+    /// and how the muted ink of the state's reason (14px) and hint (12px)
+    /// stands against that fill, both text, at 4.5:1.
+    #[gpui::test]
+    fn recovery_button_fills_against_the_panel_fill_diagnostic(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        let mut secondary_under = 0usize;
+        let mut secondary_min = (f32::MAX, String::new());
+        let mut base_differs: Vec<String> = Vec::new();
+        let mut muted_under: Vec<String> = Vec::new();
+        let mut themes_seen = 0usize;
+        pin_opaque_window(&mut vcx);
+        for theme in &every_theme() {
+            themes::apply(&mut vcx, theme);
+            let drawn = draw_buttons(&mut vcx);
+            let id = theme.id.as_str();
+            themes_seen += 1;
+            assert_opaque_panel(id, &drawn);
+            if let Some(fill) = drawn.primary.fill {
+                misses.floor(
+                    id,
+                    "primary fill on the panel fill",
+                    fill,
+                    drawn.panel,
+                    MARK_FLOOR,
+                );
+            }
+            if let Some(fill) = drawn.secondary.fill {
+                let ratio = presets::contrast(fill, drawn.panel);
+                if ratio < MARK_FLOOR {
+                    secondary_under += 1;
+                }
+                if ratio < secondary_min.0 {
+                    secondary_min = (ratio, id.to_string());
+                }
+            }
+            if drawn.sidebar_base != drawn.panel {
+                base_differs.push(format!(
+                    "{id}: sidebar.base {:06x} vs panel fill {:06x}",
+                    drawn.sidebar_base, drawn.panel
+                ));
+            }
+            let muted = presets::contrast(drawn.muted, drawn.panel);
+            if muted < TEXT_FLOOR {
+                muted_under.push(format!("{id}: muted ink {muted:.2}:1 on the panel fill"));
+            }
+        }
+        eprintln!(
+            "recovery diagnostic over {themes_seen} themes (opaque window pinned): secondary fill \
+             vs panel under 3:1 in {secondary_under} (lowest {:.2}:1, {}); sidebar.base != panel \
+             fill in {}; muted ink (reason 14px / hint 12px) under 4.5:1 on the panel fill in {}",
+            secondary_min.0,
+            secondary_min.1,
+            base_differs.len(),
+            muted_under.len(),
+        );
+        for line in base_differs.iter().chain(&muted_under).take(40) {
+            eprintln!("  {line}");
+        }
+        misses.assert_none("recovery primary button fill");
+    }
+
+    /// Element and pair, under the pointer: the same final label ink as at
+    /// rest (hover sets only the fill) against the fill the shared recipe
+    /// really sets on hover — the Primary's `foreground` blended 14% toward the
+    /// surface, the Secondary's `sidebar.selected` rung — at the 4.5:1 text
+    /// floor, on every theme, none skipped. Both hover fills must be solid.
+    ///
+    /// The Secondary's hover is a GATE at 4.5:1 for every theme. The Primary's
+    /// is INFORMATIONAL: its hover fill is set by the shared dialog recipe
+    /// (`foreground` blended 14% toward the surface), no role floors it, and
+    /// changing it is the recipe owner's decision, not this package's — so its
+    /// misses are collected and printed as one aggregate (count of total, every
+    /// exact ink/fill pair), never asserted, never allow-listed. The rest
+    /// paints of both tones stay gated by the sibling test.
+    #[gpui::test]
+    fn recovery_button_hover_labels_clear_the_text_floor_on_every_theme(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        let mut not_solid: Vec<String> = Vec::new();
+        let mut primary_hover_under: Vec<(f32, String)> = Vec::new();
+        let mut themes_seen = 0usize;
+        pin_opaque_window(&mut vcx);
+        for theme in &every_theme() {
+            themes::apply(&mut vcx, theme);
+            let drawn = draw_buttons(&mut vcx);
+            let id = theme.id.as_str();
+            themes_seen += 1;
+            for (name, rest, hover) in [
+                ("primary", drawn.primary, drawn.primary_hover),
+                ("secondary", drawn.secondary, drawn.secondary_hover),
+            ] {
+                let (Some(ink), Some(fill)) = (rest.text, hover.fill) else {
+                    not_solid.push(format!(
+                        "{id}: {name} has no ink or no hover fill: rest {rest:?}, hover {hover:?}"
+                    ));
+                    continue;
+                };
+                if hover.fill_alpha != Some(1.0) || rest.text_alpha != Some(1.0) {
+                    not_solid.push(format!(
+                        "{id}: {name} hover is not opaque (fill {:?}, ink {:?})",
+                        hover.fill_alpha, rest.text_alpha
+                    ));
+                }
+                if name == "primary" {
+                    let ratio = presets::contrast(ink, fill);
+                    if ratio < TEXT_FLOOR {
+                        primary_hover_under.push((
+                            ratio,
+                            format!("{id}: ink {ink:06x} on hover fill {fill:06x} = {ratio:.2}:1"),
+                        ));
+                    }
+                } else {
+                    misses.floor(
+                        id,
+                        &format!("{name} label on its hover fill"),
+                        ink,
+                        fill,
+                        TEXT_FLOOR,
+                    );
+                }
+            }
+        }
+        // Informational, printed before any assertion so it survives one:
+        // the shared Primary hover, which this package does not own.
+        primary_hover_under.sort_by(|a, b| a.0.total_cmp(&b.0));
+        eprintln!(
+            "recovery diagnostic (informational, not asserted): Primary hover label under \
+             {TEXT_FLOOR}:1 in {} of {themes_seen} themes; lowest first, every pair:",
+            primary_hover_under.len()
+        );
+        for (_, line) in &primary_hover_under {
+            eprintln!("  {line}");
+        }
+        assert!(
+            not_solid.is_empty(),
+            "recovery button hover paints: {} not solid\n{}",
+            not_solid.len(),
+            not_solid.join("\n")
+        );
+        misses.assert_none("recovery secondary button hover label contrast");
+    }
+}
+
+#[cfg(test)]
+mod panel_empty_gpui_tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{Entity, TestAppContext, VisualTestContext, div, prelude::*, px};
+
+    use super::PanelAction;
+    use crate::ui::app::{Tty59App, test_window};
+
+    const ACTION: &str = "test-panel-empty-action";
+    const BODY: &str = "test-panel-empty-body";
+
+    /// An empty state on its own, in a window of its own, so the click lands on
+    /// it and nothing else.
+    struct EmptyState {
+        app: Entity<Tty59App>,
+        primary: bool,
+        with_action: bool,
+        clicks: Rc<Cell<u32>>,
+    }
+
+    impl gpui::Render for EmptyState {
+        fn render(
+            &mut self,
+            _: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            let on_click = move |_: &gpui::ClickEvent, _: &mut gpui::Window, _: &mut gpui::App| {
+                clicks.set(clicks.get() + 1);
+            };
+            let action = self.with_action.then(|| match self.primary {
+                true => PanelAction::primary(ACTION, "Refresh", on_click),
+                false => PanelAction::secondary(ACTION, "Retry", on_click),
+            });
+            let body = self.app.update(cx, |app, cx| {
+                app.panel_empty_with(
+                    "Something failed",
+                    Some("A hint.".to_string().into_any_element()),
+                    action,
+                    cx,
+                )
+            });
+            div()
+                .w(px(320.))
+                .h(px(600.))
+                .child(div().debug_selector(|| BODY.into()).child(body))
+        }
+    }
+
+    fn open(
+        cx: &mut TestAppContext,
+        app: &Entity<Tty59App>,
+        primary: bool,
+        with_action: bool,
+    ) -> (VisualTestContext, Rc<Cell<u32>>) {
+        let clicks = Rc::new(Cell::new(0));
+        let (app, seen) = (app.clone(), clicks.clone());
+        let window = cx.add_window(move |_, _| EmptyState {
+            app,
+            primary,
+            with_action,
+            clicks: seen,
+        });
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (vcx, clicks)
+    }
+
+    /// Both paints draw a 28px button under the text, and a click on it runs
+    /// the handler the call site gave — once.
+    #[gpui::test]
+    fn an_empty_states_action_renders_and_its_handler_fires(cx: &mut TestAppContext) {
+        let (app, _vcx, _pane) = test_window::harness_with_pane(cx);
+        for primary in [true, false] {
+            let (mut vcx, clicks) = open(cx, &app, primary, true);
+            let button = vcx
+                .debug_bounds(ACTION)
+                .expect("an empty state with an action draws its button");
+            assert_eq!(button.size.height, px(crate::ui::dialog::BUTTON_H));
+            vcx.simulate_click(button.center(), gpui::Modifiers::none());
+            assert_eq!(clicks.get(), 1, "primary: {primary}");
+        }
+    }
+
+    /// The button sits in a row of its own under the words, 8px clear of the
+    /// last line (the column's 3px gap and `PANEL_ACTION_GAP`), and keeps its
+    /// own width instead of stretching across the column.
+    #[gpui::test]
+    fn the_action_sits_in_its_own_row_under_the_words(cx: &mut TestAppContext) {
+        let (app, _vcx, _pane) = test_window::harness_with_pane(cx);
+        let (mut vcx, _) = open(cx, &app, false, true);
+        let body = vcx.debug_bounds(BODY).expect("the empty state is drawn");
+        let button = vcx.debug_bounds(ACTION).expect("and its button");
+        assert!(
+            button.origin.y > body.origin.y && button.bottom() <= body.bottom(),
+            "the button is inside the state, below its top: {button:?} in {body:?}"
+        );
+        assert!(
+            button.size.width < body.size.width,
+            "and is not stretched across the column: {button:?} in {body:?}"
+        );
+    }
+
+    /// `panel_empty` is unchanged: words only, no button to find.
+    #[gpui::test]
+    fn an_empty_state_without_an_action_draws_no_button(cx: &mut TestAppContext) {
+        let (app, _vcx, _pane) = test_window::harness_with_pane(cx);
+        let (mut vcx, _) = open(cx, &app, false, false);
+        assert!(vcx.debug_bounds(BODY).is_some(), "the state is drawn");
+        assert!(vcx.debug_bounds(ACTION).is_none());
     }
 }

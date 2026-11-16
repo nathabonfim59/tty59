@@ -2,10 +2,11 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, Axis, Bounds, Context, Div, ExternalPaths,
     FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, SharedString,
     Stateful, Window, canvas, deferred, div, ease_out_quint, linear_color_stop, linear_gradient,
-    prelude::*, px,
+    prelude::*, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent};
+use gpui_component::kbd::Kbd;
 use gpui_component::menu::{ContextMenu, ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
@@ -27,16 +28,73 @@ use crate::ui::hints::{badge_positions_from_order, tab_badge_label};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
-use crate::ui::tab_strip::{
-    DragTab, REORDER_SLIDE_MS, abbreviate_home, elide_end_clusters, elide_label,
-    elide_path_keep_tail, measure_text,
-};
+use crate::ui::tab_strip::{DragTab, REORDER_SLIDE_MS, abbreviate_home};
+use crate::ui::text_elision::{ElidedLabel, Mode};
 
 pub(crate) const MIN_SIDEBAR_WIDTH: f32 = 180.;
 
 const GRAB_HANDLE_W: f32 = 48.;
 
 const ROW_GAP: f32 = 1.;
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+struct RenderedSidebarAgentRow {
+    key: PaneKey,
+    title: String,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static RENDERED_SIDEBAR_AGENT_ROWS: std::cell::RefCell<Vec<RenderedSidebarAgentRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_rendered_sidebar_agent_rows() -> Vec<RenderedSidebarAgentRow> {
+    RENDERED_SIDEBAR_AGENT_ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()))
+}
+
+// The "nothing matches" sentences handed to the rail's elements, exactly as
+// handed: the text a user would read, not the selector it was found by.
+#[cfg(test)]
+std::thread_local! {
+    static RENDERED_SIDEBAR_NOTHING_MATCHES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn take_rendered_sidebar_nothing_matches() -> Vec<String> {
+    RENDERED_SIDEBAR_NOTHING_MATCHES.with(|lines| std::mem::take(&mut *lines.borrow_mut()))
+}
+
+/// What the rail's search field is called: agents' search only while the
+/// Agents list is both enabled and the one showing.
+fn sidebar_search_placeholder(agents_enabled: bool, list: SidebarList) -> L10nKey {
+    match (agents_enabled, list) {
+        (true, SidebarList::Agents) => L10nKey::VisionSearch,
+        _ => L10nKey::SearchTabs,
+    }
+}
+
+/// The strokes the keymap has for New Agent Tab, first binding only, in the
+/// order they are typed; empty when the action is unbound. Read from the
+/// keymap's per-action index rather than by resolving the whole table.
+fn new_agent_chord(cx: &gpui::App) -> Vec<gpui::Keystroke> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    keymap
+        .bindings_for_action(&crate::core::actions::NewAgentTab)
+        .next()
+        .map(|binding| {
+            binding
+                .keystrokes()
+                .iter()
+                .map(|stroke| stroke.inner().clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum SidebarList {
@@ -153,55 +211,26 @@ const RAIL_INSET: f32 = 12.;
 const HEAD_CONTROL_HEIGHT: f32 = 28.;
 const HEAD_CONTROL_RADIUS: f32 = 7.;
 
-/// What sits between a group's branch and its diff counts.
-const META_SEP_TRIMMED: &str = "·";
+/// What sits between a group's branch and its diff counts: the branch's tail,
+/// led by the space that would otherwise be a flex gap.
+const META_SEP_TRIMMED: &str = "  ·";
+
+/// The fewest characters of a header's branch worth drawing. Below this the
+/// branch names nothing (`fea…`), so it is dropped and only the counts stay.
+const MIN_HEADER_BRANCH: usize = 6;
 
 /// Tabular numerals, so a column of diff counts lines up digit for digit.
 fn tabular() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
-/// The row chrome the text budget has to be measured around. These are the
-/// numbers the layout below is built from, not a second guess at it — a row
-/// that elides against a budget wider than it really has falls back to CSS
-/// truncation, which drops the tail this whole module exists to keep.
+/// The sizes the row's fixed-width children are drawn with, shared by the
+/// painters that need them.
 mod row_metrics {
-    /// `border_r_1` on the sidebar itself.
-    pub(super) const BORDER: f32 = 1.;
-    /// `px_3` on the scrolling list that holds the rows.
-    pub(super) const LIST_PAD: f32 = 12.;
-    /// `pl_2` + `pr_2` on the row.
-    pub(super) const ROW_PAD: f32 = 8.;
     /// The avatar handed to `tab_avatar_plain`.
     pub(super) const AVATAR: f32 = 16.;
     /// `gap_2p5` between the row's children.
     pub(super) const GAP: f32 = 10.;
-    /// The trailing status mark, when the row has one.
-    pub(super) const STATUS: f32 = crate::ui::tab_strip::ROW_STATUS_SLOT;
-    /// The ⌘N badge, when one is shown.
-    pub(super) const BADGE: f32 = 20.;
-    /// The zoom mark, when the tab has a pane zoomed over the others.
-    pub(super) const ZOOM: f32 = 16.;
-    /// `gap_1p5`, between a branch and the counts after it.
-    pub(super) const META_GAP: f32 = 6.;
-    /// `px_2` on a group header.
-    pub(super) const HEADER_PAD: f32 = 8. + 8.;
-    /// The chevron a header opens with, and the pin that marks a folder
-    /// group: both `xsmall` icons, which resolve to 12px.
-    pub(super) const HEADER_ICON: f32 = 12.;
-
-    /// What a row can spend on text, before the badge is taken out.
-    pub(super) const fn text_budget(width: f32) -> f32 {
-        width - BORDER - 2. * LIST_PAD - 2. * ROW_PAD - AVATAR - GAP
-    }
-
-    /// What a group header can spend on its name and the branch beside it.
-    /// The chevron, the pin and the folded row count come off at the call
-    /// site, which knows whether they are drawn — an open group draws no
-    /// chevron, and reserving one anyway elided its branch with 18px to spare.
-    pub(super) const fn header_budget(width: f32) -> f32 {
-        width - BORDER - 2. * LIST_PAD - HEADER_PAD
-    }
 }
 
 /// The narrowest a group's heading is allowed to get: three or four capitals
@@ -214,47 +243,6 @@ const HEADER_NAME_FLOOR: f32 = 40.;
 const ROW_TITLE_FLOOR: f32 = 48.;
 const ROW_CWD_FLOOR: f32 = 24.;
 
-/// How a group header divides its line between the heading and the branch its
-/// rows share. The branch takes what it wants up to half the line, and the
-/// heading keeps the rest — so a long branch can no longer crush the name
-/// (flex used to hand the overflow to them in proportion to what each asked
-/// for, which gave the longer string the smaller cut), and a long group name
-/// cannot crush the branch in return. `git_want` is `None` for a header with
-/// no shared branch on it, which then owns the whole line.
-fn header_name_avail(avail: f32, git_want: Option<f32>) -> f32 {
-    match git_want {
-        Some(want) => (avail - want.min(avail * 0.5)).max(HEADER_NAME_FLOOR),
-        None => avail,
-    }
-}
-
-/// What a diff's counts occupy on a line, measured against real glyphs: the
-/// two numbers, the gap between them when both are drawn, and the gap that
-/// separates them from the branch. They never wrap and never shrink, so this
-/// is the width a branch has to be elided around — on a row and on the group
-/// header that lifts the branch off its rows alike.
-fn counts_width(
-    ts: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    status: &crate::terminal::git_status::GitStatus,
-) -> f32 {
-    let mut w = 0.;
-    if status.added > 0 {
-        w += measure_text(ts, font, size, &format!("+{}", status.added));
-    }
-    if status.removed > 0 {
-        w += measure_text(ts, font, size, &format!("−{}", status.removed));
-    }
-    if status.added > 0 && status.removed > 0 {
-        w += row_metrics::META_GAP;
-    }
-    if w > 0. {
-        w += row_metrics::META_GAP;
-    }
-    w
-}
-
 /// The branch a whole group shares, lifted off its rows and onto its header.
 struct SharedGit {
     status: crate::terminal::git_status::GitStatus,
@@ -263,19 +251,6 @@ struct SharedGit {
     click: Option<(crate::ui::host_ops::HostId, PathBuf)>,
     /// Every row the group counts, drawn or folded away.
     rows: Vec<usize>,
-}
-
-/// What a sidebar row rendered, next to what it had to leave out, so the
-/// hover card can be built by comparison instead of deriving the same strings
-/// a second time — the two derivations have to agree, and the shortest way to
-/// guarantee that is to only ever have one.
-struct SidebarRowShown {
-    /// The elided title, and the full string it came from. `None` when the
-    /// row is showing a placeholder (`Shell 3`) rather than a real title,
-    /// which nothing can expand.
-    title: Option<(SharedString, SharedString)>,
-    branch: Option<(SharedString, SharedString, u32, u32)>,
-    cwd: Option<(SharedString, SharedString)>,
 }
 
 #[derive(Clone)]
@@ -287,16 +262,19 @@ impl Render for DragGroup {
     }
 }
 
-/// Every detail a sidebar row could not fit, collected so the hover card can
-/// be rendered from cloneable data (an `AnyElement` cannot be cloned, but the
-/// tooltip closure has to rebuild its content on every hover).
+/// The whole values behind a sidebar row's labels, collected so the hover card
+/// can be rendered from cloneable data (an `AnyElement` cannot be cloned, but
+/// the tooltip closure has to rebuild its content on every hover). The labels
+/// elide against whatever width layout gives them, so the card cannot compare
+/// "shown" with "full" and is offered for every row.
 #[derive(Clone)]
 struct SidebarInfo {
-    /// Full path, when the row's title was elided.
+    /// The full title. `None` for a placeholder (`Shell 3`), which nothing
+    /// can expand.
     title: Option<SharedString>,
-    /// Full branch plus diff counts, when the row's branch was elided.
+    /// The full branch plus diff counts.
     branch: Option<(SharedString, u32, u32)>,
-    /// Full working directory, when the row's second line was elided.
+    /// The full working directory.
     cwd: Option<SharedString>,
     /// Remote host, when the avatar only shows a dot for it.
     host: Option<SharedString>,
@@ -368,12 +346,36 @@ impl Tty59App {
         build_agent_rows(self.workspace, &layout, summaries)
     }
 
-    fn select_sidebar_list(&mut self, mode: SidebarList, cx: &mut Context<Self>) {
+    fn select_sidebar_list(
+        &mut self,
+        mode: SidebarList,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.sidebar_list = mode;
         self.sidebar_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.sidebar_reveal.set(None);
         self.sidebar_agent_reveal.set(None);
+        self.sync_sidebar_search_placeholder(window, cx);
         cx.notify();
+    }
+
+    /// The rail's search field names what it searches: agents while the
+    /// Agents list is the one showing, tabs otherwise. It is written from the
+    /// events that change that — the list switch, a language change and a
+    /// config reload (the toggle can be turned off from the file) — because
+    /// setting a placeholder notifies the field, which a render must not do.
+    pub(crate) fn sync_sidebar_search_placeholder(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = sidebar_search_placeholder(
+            cx.global::<Config>().sidebar_agents_toggle,
+            self.sidebar_list,
+        );
+        self.sidebar_search
+            .update(cx, |state, cx| state.set_placeholder(t(key), window, cx));
     }
 
     fn sidebar_list_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -395,7 +397,9 @@ impl Tty59App {
                     .min_w_0()
                     .h(px(HEAD_CONTROL_HEIGHT))
                     .rounded(px(HEAD_CONTROL_RADIUS))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_sidebar_list(mode, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.select_sidebar_list(mode, window, cx)
+                    }))
             }),
         );
         #[cfg(test)]
@@ -425,8 +429,16 @@ impl Tty59App {
                     view.host_id() == key.host && view.pane_id == key.pane
                 });
         let status = row.status();
-        let title = row.summary.location.tab_title.clone();
+        let title = row.summary.title().to_string();
+        let exited = row.summary.state == State::Exited;
         let marker = row.marker();
+        #[cfg(test)]
+        RENDERED_SIDEBAR_AGENT_ROWS.with(|rows| {
+            rows.borrow_mut().push(RenderedSidebarAgentRow {
+                key,
+                title: title.clone(),
+            });
+        });
         let row = sidebar_row_chrome(("sidebar-agent-row", slot), selected, sf)
             .child(
                 canvas(
@@ -487,6 +499,7 @@ impl Tty59App {
                             .truncate()
                             .text_sm()
                             .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
+                            .when(exited, |d| d.text_color(cx.theme().muted_foreground))
                             .child(title),
                     )
                     .when_some(marker, |d, marker| {
@@ -499,7 +512,7 @@ impl Tty59App {
                         )
                     }),
             )
-            .children(self.row_status_dot(status, 0, gpui::rgb(sf.base).into()))
+            .children(self.row_status_dot(status, 0, gpui::rgb(sf.base).into(), cx))
             .when_some(badge, |d, pos| {
                 let badge = div().flex_shrink_0().text_xs().child(tab_badge_label(pos));
                 #[cfg(test)]
@@ -588,7 +601,9 @@ impl Tty59App {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
         let width = self.sidebar_px(window, cx);
-        let query = self.sidebar_search.read(cx).value().trim().to_lowercase();
+        // As typed, for the "nothing matches" line; matching uses the lowered copy.
+        let query_text = self.sidebar_search.read(cx).value().trim().to_string();
+        let query = query_text.to_lowercase();
         let agents_mode = self.sidebar_agents_mode(cx);
         let agent_rows = if agents_mode {
             self.sidebar_agent_rows(&self.agent_pane_summaries(cx), cx)
@@ -698,39 +713,8 @@ impl Tty59App {
             .collect();
 
         let pointer = window.mouse_position();
-        // The row text is measured against real glyphs before it is elided:
-        // `text_sm` is 0.875rem and `text_xs` 0.75rem, resolved here so the
-        // measurement and the render use the same sizes and family.
-        let font = gpui::Font {
-            family: cx.theme().font_family.clone(),
-            features: Default::default(),
-            fallbacks: None,
-            weight: Default::default(),
-            style: Default::default(),
-        };
-        // The active row renders its title at `FontWeight::MEDIUM`, which is
-        // wider than the regular weight in any proportional face. Measuring
-        // it as regular would let the one row the user is looking at overflow
-        // into the truncation this is here to avoid.
-        let title_font_active = gpui::Font {
-            weight: FontWeight::MEDIUM,
-            ..font.clone()
-        };
         let rem = window.rem_size().as_f32();
-        // Measure with the same interface scale used to paint the header.
         let header_size = rem * META_REM;
-        // The git lines and the group header paint with `tabular()` figures,
-        // which set a `1` as wide as an `8`; measuring them proportionally
-        // came out a few pixels short on counts like `+1565 −124`, and the
-        // front-elided branch then lost its tail to CSS truncation as well.
-        let meta_font = gpui::Font {
-            features: tabular(),
-            ..font.clone()
-        };
-        let header_font = gpui::Font {
-            weight: FontWeight::MEDIUM,
-            ..meta_font.clone()
-        };
         // On the rail the diff counts are metadata like the branch beside
         // them, so they take its caption ink; the hover card, which is where
         // someone goes to read them, keeps the resting green and red.
@@ -1009,82 +993,55 @@ impl Tty59App {
                 let agent_status = tab.agent_status(cx);
                 let agent_unread = tab.agent_unread_count(cx);
                 let git_cwd = git_click(tab, window, cx);
-                let badge_extra = if show_badge {
-                    row_metrics::BADGE + row_metrics::GAP
-                } else {
-                    0.
-                };
                 let zoomed = self.tab_is_zoomed(i);
-                let zoom_extra = if zoomed {
-                    row_metrics::ZOOM + row_metrics::GAP
-                } else {
-                    0.
-                };
-                // The sleep mark takes the zoom mark's size; a sleeping tab
-                // has no panes on screen to zoom, so the two never share a row.
-                let zoom_extra = if asleep {
-                    zoom_extra + row_metrics::ZOOM + row_metrics::GAP
-                } else {
-                    zoom_extra
-                };
                 // Status rides at the row's trailing end, where the badge
                 // would be; the badge wins while the modifier is held.
                 let status_dot = match show_badge {
                     true => None,
-                    false => self.row_status_dot(agent_status, agent_unread, rail_fill),
+                    false => self.row_status_dot(agent_status, agent_unread, rail_fill, cx),
                 };
-                let status_extra = match status_dot.is_some() {
-                    true => row_metrics::STATUS + row_metrics::GAP,
-                    false => 0.,
-                };
-                // Elision is measured against this budget so the label and
-                // branch never wrap or overflow into CSS truncation.
-                let label_avail =
-                    (row_metrics::text_budget(width) - badge_extra - zoom_extra - status_extra)
-                        .max(48.);
-                let title_size = 0.875 * rem;
                 let meta_size = META_REM * rem;
-                let title_font = if is_active { &title_font_active } else { &font };
-                // Title: the *full* label, elided further down once the
-                // working directory beside it has said how much of the line
-                // it wants. A wide sidebar shows the whole thing and a narrow
-                // one keeps whichever end identifies it — the tail for a
-                // path, both edges for anything else. A fixed segment cap
-                // (`short_title`) would elide even when the row has room, so
-                // only the width may decide here.
+                // Title: the *full* label. The label elides it against the
+                // width layout actually gives it, so a wide sidebar shows the
+                // whole thing and a narrow one keeps whichever end identifies
+                // it — the tail for a path, both edges for anything else. A
+                // fixed segment cap (`short_title`) would elide even when the
+                // row has room, so only the width may decide here.
                 //
-                // `full_title` is the unelided string the card can expand
-                // back to; `None` means the row is showing a placeholder that
-                // no card can improve on.
+                // `full_title` is the unelided string the card can spell out;
+                // `None` means the row is showing a placeholder that no card
+                // can improve on.
                 //
                 // The ladder the strip and the switcher climb, read here for
-                // the name and not for the shortening: this column measures in
-                // pixels and lets a card expand the row back to the whole
-                // string, so it wants what `label_of` would have cut down
-                // rather than the cut. A renamed tab is elided like anything
-                // else — and so the card has to be able to spell it back out.
-                let (title_text, full_title) = match self.full_tab_label(tab, Some(window), cx) {
-                    Some(raw) => {
-                        let full = SharedString::from(raw);
-                        (full.clone(), Some(full))
-                    }
-                    // Nothing to expand: the row is naming an unnamed shell,
-                    // not hiding a title behind an ellipsis.
-                    None => {
-                        let placeholder = SharedString::from(t_fmt(
-                            L10nKey::TabUnnamedShell,
-                            &[("n", &((i + 1).to_string()))],
-                        ));
-                        (placeholder, None)
-                    }
-                };
-                let mut branch_shown: Option<(SharedString, SharedString, u32, u32)> = None;
-                let mut cwd_shown: Option<(SharedString, SharedString)> = None;
-                let git_line = match shared_git.is_some() {
+                // the name and not for the shortening. A renamed tab is elided
+                // like anything else, and the card spells it back out.
+                //
+                // An ended pane's own title keeps the words its exit wrote
+                // whole and elides only the name in front of them.
+                let (title_text, title_tail, full_title) =
+                    match self.full_tab_label(tab, Some(window), cx) {
+                        Some(label) => {
+                            let tail = label.ended_tail;
+                            (label.text.clone(), tail, Some(label.text))
+                        }
+                        // Nothing to expand: the row is naming an unnamed shell,
+                        // not hiding a title behind an ellipsis.
+                        None => {
+                            let placeholder = SharedString::from(t_fmt(
+                                L10nKey::TabUnnamedShell,
+                                &[("n", &((i + 1).to_string()))],
+                            ));
+                            (placeholder, None, None)
+                        }
+                    };
+                let git = match shared_git.is_some() {
                     true => None,
                     false => tab.git_status(Some(window), cx),
-                }
-                .map(|g| {
+                };
+                let branch_full = git
+                    .as_ref()
+                    .map(|g| (SharedString::from(g.branch.clone()), g.added, g.removed));
+                let git_line = git.map(|g| {
                     let mut line = h_flex()
                         .id(("sidebar-git", i))
                         .w_full()
@@ -1093,23 +1050,14 @@ impl Tty59App {
                         .text_size(px(meta_size))
                         .text_color(cx.theme().muted_foreground)
                         .font_features(tabular());
-                    let counts_w = counts_width(&window.text_system(), &meta_font, meta_size, &g);
-                    // Branch: cut from the end, the way any other label is.
-                    let branch_avail = (label_avail - counts_w).max(0.);
-                    let shown = elide_end_clusters(
-                        &window.text_system(),
-                        &meta_font,
-                        meta_size,
-                        &g.branch,
-                        branch_avail,
-                    );
-                    branch_shown = Some((
-                        shown.clone(),
-                        SharedString::from(g.branch.clone()),
-                        g.added,
-                        g.removed,
-                    ));
-                    line = line.child(div().flex_1().min_w_0().truncate().child(shown));
+                    // Branch: cut from the end, the way any other label is. The
+                    // counts are intrinsic siblings that never shrink, so the
+                    // branch is cut to whatever they leave.
+                    line = line.child(div().flex_1().min_w_0().child(ElidedLabel::new(
+                        ("sidebar-row-branch", i),
+                        g.branch.clone(),
+                        Mode::End,
+                    )));
                     if g.added > 0 || g.removed > 0 {
                         let mut counts = h_flex()
                             .id(("sidebar-diff", i))
@@ -1178,62 +1126,23 @@ impl Tty59App {
                         // copy adds noise, not information.
                         .filter(|full| full.as_ref() != title_text.as_ref()),
                 };
-                // The path takes what it needs up to half the line and the
-                // title keeps the rest — the same split a group header makes
-                // with the branch beside its heading. Flex would hand the
-                // overflow to the two of them in proportion to what each
-                // asked for, which cuts the longer string hardest.
-                let cwd_want = cwd_full.as_ref().map(|full| {
-                    row_metrics::META_GAP
-                        + measure_text(&window.text_system(), &font, meta_size, full)
-                });
-                let title_avail = match cwd_want {
-                    Some(want) => (label_avail - want.min(label_avail * 0.5)).max(ROW_TITLE_FLOOR),
-                    None => label_avail,
-                };
-                let shown_title = elide_label(
-                    &window.text_system(),
-                    title_font,
-                    title_size,
-                    &title_text,
-                    title_avail,
-                );
-                if let Some(full) = cwd_full {
-                    // Measured against what the title actually took, not what
-                    // it was allowed to: a short title hands the slack back
-                    // instead of leaving the path elided around a gap.
-                    let avail = (label_avail
-                        - measure_text(
-                            &window.text_system(),
-                            title_font,
-                            title_size,
-                            &shown_title,
-                        )
-                        - row_metrics::META_GAP)
-                        .max(0.);
-                    if avail >= ROW_CWD_FLOOR {
-                        let shown = elide_path_keep_tail(
-                            &window.text_system(),
-                            &font,
-                            meta_size,
-                            &full,
-                            avail,
-                        );
-                        cwd_shown = Some((shown, full));
-                    }
-                }
                 let rename_input = self
                     .renaming
                     .as_ref()
                     .filter(|r| r.tab == tab.tree_id.get())
                     .map(|r| r.input.clone());
 
-                let shown = SidebarRowShown {
-                    title: full_title.map(|full| (shown_title.clone(), full)),
-                    branch: branch_shown.clone(),
-                    cwd: cwd_shown.clone(),
-                };
-                let info = self.sidebar_info(tab, window, cx, &shown);
+                let info = self.sidebar_info(
+                    tab,
+                    window,
+                    cx,
+                    SidebarInfo {
+                        title: full_title,
+                        branch: branch_full,
+                        cwd: cwd_full.clone(),
+                        host: None,
+                    },
+                );
                 // Colors are captured by value so the tooltip builder (which
                 // borrows no app state) can style the card on its own.
                 let muted = cx.theme().muted_foreground;
@@ -1247,6 +1156,24 @@ impl Tty59App {
                     true => ROW_HEIGHT_TWO_LINE,
                     false => ROW_HEIGHT,
                 };
+                let title_slot = div()
+                    .flex_1()
+                    .min_w(px(ROW_TITLE_FLOOR))
+                    .text_sm()
+                    .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                    .child({
+                        let elided = ElidedLabel::new(
+                            ("sidebar-row-title", i),
+                            title_text.clone(),
+                            Mode::Label,
+                        );
+                        match title_tail {
+                            Some(tail) => elided.tail_included(tail),
+                            None => elided,
+                        }
+                    });
+                #[cfg(test)]
+                let title_slot = title_slot.debug_selector(|| format!("sidebar-row-title-{i}"));
                 let label_region = match rename_input {
                     Some(input) => div()
                         .id(("sidebar-rename", i))
@@ -1360,27 +1287,29 @@ impl Tty59App {
                                 .w_full()
                                 .items_center()
                                 .gap_1p5()
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_sm()
-                                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                                        .child(shown_title),
-                                )
-                                // The path is elided to the room the title
-                                // left, so it may not shrink again here — a
-                                // second cut would come out of its tail, the
-                                // half that says which directory this is.
-                                .when_some(cwd_shown.map(|(cwd, _)| cwd), |line, cwd| {
-                                    line.child(
-                                        div()
-                                            .flex_shrink_0()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(cwd),
-                                    )
+                                .child(title_slot)
+                                // The path takes what it needs up to half the
+                                // line and the title keeps the rest, the same
+                                // split a group header makes with its branch.
+                                // Flex would otherwise hand the overflow to
+                                // the two in proportion to what each asked
+                                // for, which cuts the longer string hardest.
+                                .when_some(cwd_full, |line, cwd| {
+                                    let cwd_slot = div()
+                                        .flex_shrink(1.)
+                                        .min_w(px(ROW_CWD_FLOOR))
+                                        .max_w(relative(0.5))
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(ElidedLabel::new(
+                                            ("sidebar-row-cwd", i),
+                                            cwd,
+                                            Mode::Path,
+                                        ));
+                                    #[cfg(test)]
+                                    let cwd_slot =
+                                        cwd_slot.debug_selector(|| format!("sidebar-row-cwd-{i}"));
+                                    line.child(cwd_slot)
                                 }),
                         )
                         .children(git_line)
@@ -1659,46 +1588,10 @@ impl Tty59App {
                 // overflow between the two in proportion to how much room each
                 // asked for, which is backwards here — the name is what the
                 // group *is*, the branch only what it happens to be sitting
-                // on. So both are measured against the header's real chrome:
-                // the branch gets what it needs up to half the line, the name
-                // keeps the rest, and each is elided into its share the way a
-                // row already elides its own.
-                let ts = window.text_system();
-                let mut avail = row_metrics::header_budget(width);
-                if folded {
-                    avail -= row_metrics::HEADER_ICON + row_metrics::META_GAP;
-                }
-                if pinned {
-                    avail -= PIN_MARK_SIZE + row_metrics::META_GAP;
-                }
+                // on. So the branch group may take up to half the line and
+                // the name keeps the rest down to a floor; each is a label
+                // that elides to the width layout hands it.
                 let count_label = row_count.to_string();
-                if folded {
-                    avail -= measure_text(&ts, &meta_font, header_size, &count_label)
-                        + row_metrics::META_GAP;
-                }
-                if header_badge_pos.is_some() {
-                    avail -= row_metrics::BADGE + row_metrics::META_GAP;
-                }
-                let avail = avail.max(HEADER_NAME_FLOOR);
-                // What the shared branch would take if nothing were in its
-                // way: the branch itself, the `·` before its counts, the
-                // counts, and the gaps the spacer between the name and the
-                // branch sits in.
-                // Drawn as a bare `·` with a gap on either side; the gap before
-                // it is the one `counts_width` already reserves.
-                let sep_w = measure_text(&ts, &meta_font, header_size, META_SEP_TRIMMED)
-                    + row_metrics::META_GAP;
-                let git_want = shared_git.as_ref().map(|shared| {
-                    let counts = counts_width(&ts, &meta_font, header_size, &shared.status);
-                    let sep = if counts > 0. { sep_w } else { 0. };
-                    2. * row_metrics::META_GAP
-                        + measure_text(&ts, &meta_font, header_size, &shared.status.branch)
-                        + sep
-                        + counts
-                });
-                let name_avail = header_name_avail(avail, git_want);
-                let label = elide_label(&ts, &header_font, header_size, &name, name_avail);
-                let name_w = measure_text(&ts, &header_font, header_size, &label);
                 let hover_group = SharedString::from(format!("sidebar-group-{group_ix}"));
                 let has_shared_git = shared_git.is_some();
                 let is_renaming = renaming_group.is_some();
@@ -1810,29 +1703,39 @@ impl Tty59App {
                             // sideways the moment rename began.
                             .child(Input::new(&input).appearance(false).px_0())
                             .into_any_element(),
-                        // Elided above, so the truncation here is only the
-                        // backstop for a face that measures wider than it
-                        // paints; the name no longer gives room to the branch.
-                        None => div()
-                            .id(("sidebar-group-name", group_ix))
-                            .flex_shrink_0()
-                            .min_w_0()
-                            .truncate()
-                            // A caption, not a title: the rows under it are
-                            // what the column is for, so the heading keeps
-                            // the metadata's grey and only a medium weight
-                            // to stand apart from the branch beside it.
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(label)
-                            // A folder group may have been renamed to anything;
-                            // the folder it keeps is what the name stands for.
-                            .when_some(pinned_folder.clone(), |name, folder| {
-                                name.tooltip(move |window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(folder.clone())
-                                        .build(window, cx)
-                                })
-                            })
-                            .into_any_element(),
+                        None => {
+                            // One shared string for the label and the tooltip.
+                            let name_text = SharedString::from(name);
+                            let name_slot = div()
+                                .id(("sidebar-group-name", group_ix))
+                                .flex_shrink(1.)
+                                .min_w(px(HEADER_NAME_FLOOR))
+                                // A caption, not a title: the rows under it are
+                                // what the column is for, so the heading keeps
+                                // the metadata's grey and only a medium weight
+                                // to stand apart from the branch beside it.
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(ElidedLabel::new(
+                                    ("sidebar-group-name-label", group_ix),
+                                    name_text.clone(),
+                                    Mode::Label,
+                                ))
+                                // A folder group may have been renamed to
+                                // anything; the folder it keeps is what the name
+                                // stands for. Any other heading spells itself
+                                // out whole.
+                                .tooltip({
+                                    let full = pinned_folder.clone().unwrap_or(name_text);
+                                    move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(full.clone())
+                                            .build(window, cx)
+                                    }
+                                });
+                            #[cfg(test)]
+                            let name_slot = name_slot
+                                .debug_selector(|| format!("sidebar-group-name-{group_ix}"));
+                            name_slot.into_any_element()
+                        }
                     })
                     .when_some(shared_git, |bar, shared| {
                         let SharedGit {
@@ -1840,33 +1743,35 @@ impl Tty59App {
                             click,
                             rows,
                         } = shared;
-                        let counts_w = counts_width(&ts, &meta_font, header_size, &status);
-                        let sep = if counts_w > 0. { sep_w } else { 0. };
-                        let branch_avail =
-                            (avail - name_w - 2. * row_metrics::META_GAP - sep - counts_w).max(0.);
-                        // Cut from the end, like a row's.
-                        let branch = elide_end_clusters(
-                            &ts,
-                            &meta_font,
-                            header_size,
-                            &status.branch,
-                            branch_avail,
-                        );
-                        let mut line = h_flex()
+                        let has_counts = status.added > 0 || status.removed > 0;
+                        // Cut from the end, like a row's. The separator rides
+                        // with the branch as its tail, so the two appear and
+                        // disappear together: a branch that cannot keep
+                        // `MIN_HEADER_BRANCH` readable characters is dropped,
+                        // and no dot is left pointing at nothing. It stays the
+                        // only shrinkable item in this right-pinned group, so
+                        // the counts keep their place either way.
+                        let mut branch = ElidedLabel::new(
+                            ("sidebar-group-branch", group_ix),
+                            status.branch.clone(),
+                            Mode::End,
+                        )
+                        .min_visible(MIN_HEADER_BRANCH);
+                        if has_counts {
+                            branch = branch.tail(META_SEP_TRIMMED);
+                        }
+                        let line = h_flex()
                             .id(("sidebar-group-git", group_ix))
-                            .flex_shrink(1.)
-                            .min_w_0()
+                            .flex_shrink_0()
+                            .max_w(relative(0.5))
                             .items_center()
                             .gap_1p5()
-                            .child(div().min_w_0().truncate().child(branch));
-                        if status.added > 0 || status.removed > 0 {
-                            line = line.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .whitespace_nowrap()
-                                    .child(META_SEP_TRIMMED),
-                            );
-                            let mut counts = h_flex()
+                            .child(div().flex_shrink(1.).min_w_0().child(branch));
+                        #[cfg(test)]
+                        let line = line.debug_selector(|| format!("sidebar-group-git-{group_ix}"));
+                        let mut line = line;
+                        if has_counts {
+                            let counts = h_flex()
                                 .id(("sidebar-group-diff", group_ix))
                                 .flex_shrink_0()
                                 .items_center()
@@ -1900,6 +1805,10 @@ impl Tty59App {
                                             ),
                                         )
                                 });
+                            #[cfg(test)]
+                            let counts =
+                                counts.debug_selector(|| format!("sidebar-group-diff-{group_ix}"));
+                            let mut counts = counts;
                             if status.added > 0 {
                                 counts = counts.child(
                                     div()
@@ -1955,6 +1864,8 @@ impl Tty59App {
                             cx,
                         ))
                     });
+                #[cfg(test)]
+                let bar = bar.debug_selector(|| format!("sidebar-group-{group_ix}"));
                 // Renaming is offered on a menu rather than a double click:
                 // the first click of a double would fold the group, so the
                 // name would be edited on a box that just shut. An auto group
@@ -2108,6 +2019,71 @@ impl Tty59App {
             list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
         }
 
+        // An empty list says so where its first row would be, so it goes in
+        // before the filler below: appended after it, the filler's `flex_1`
+        // pushed the message to the bottom edge of the rail.
+        let muted = cx.theme().muted_foreground;
+        let empty_state = if agents_mode && agent_rows.is_empty() && query.is_empty() {
+            let chord = new_agent_chord(cx);
+            let cta = div().pt_1().child(
+                Button::new("sidebar-new-agent")
+                    .ghost()
+                    .small()
+                    .accessible_label(t(L10nKey::SidebarNewAgent))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(t(L10nKey::SidebarNewAgent))
+                            .children((!chord.is_empty()).then(|| {
+                                let caps =
+                                    h_flex().gap_1().children(chord.into_iter().map(Kbd::new));
+                                #[cfg(test)]
+                                let caps = caps.debug_selector(|| "sidebar-new-agent-chord".into());
+                                caps
+                            })),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| this.new_agent_tab(window, cx))),
+            );
+            #[cfg(test)]
+            let cta = cta.debug_selector(|| "sidebar-new-agent-cta".into());
+            let state = v_flex()
+                .items_start()
+                .px_2()
+                .py_2()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(muted)
+                        .child(t(L10nKey::SidebarNoAgents)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(t(L10nKey::SidebarAgentsEmptyHint)),
+                )
+                .child(cta);
+            #[cfg(test)]
+            let state = state.debug_selector(|| "sidebar-empty-state".into());
+            Some(state)
+        } else if !any_rows && !query.is_empty() {
+            let line = t_fmt(L10nKey::SidebarNothingMatches, &[("query", &query_text)]);
+            #[cfg(test)]
+            RENDERED_SIDEBAR_NOTHING_MATCHES.with(|lines| lines.borrow_mut().push(line.clone()));
+            let state = v_flex()
+                .px_2()
+                .py_2()
+                .child(div().text_sm().text_color(muted).child(line));
+            #[cfg(test)]
+            let state = state.debug_selector(|| "sidebar-nothing-matches".into());
+            Some(state)
+        } else {
+            None
+        };
+        list = list.children(empty_state);
+
         // The room under the last row. Right-clicking a row opens that tab's
         // menu, so the list's own — new tab, new group — lives here rather
         // than on the list, where it would open over every row's as well.
@@ -2138,30 +2114,6 @@ impl Tty59App {
                     }
                 }),
         );
-
-        if agents_mode && agent_rows.is_empty() && query.is_empty() {
-            list = list.child(
-                div()
-                    .px_2()
-                    .py_3()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(t(L10nKey::SidebarNoAgents)),
-            );
-        }
-        if !any_rows && !query.is_empty() {
-            list = list.child(
-                div()
-                    .px_2()
-                    .py_3()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::ui::i18n::t_fmt(
-                        crate::ui::i18n::L10nKey::SettingsNothingMatches,
-                        &[("query", &query)],
-                    )),
-            );
-        }
 
         // On screen at rest unless the Appearance switch says otherwise; then
         // these two tiles wait for the pointer to reach the rail. The mark
@@ -2246,6 +2198,8 @@ impl Tty59App {
                         .pl_0(),
                 ),
             );
+        #[cfg(test)]
+        let search = search.debug_selector(|| "sidebar-search".into());
         let workspace_head = v_flex()
             .w(px(width - 1.))
             .flex_shrink_0()
@@ -2548,42 +2502,18 @@ impl Tty59App {
         )
     }
 
-    /// What the sidebar row hid: the full title, the full branch and diff
-    /// counts, the working directory, and the remote host the avatar only
-    /// dots. `None` when the row showed everything — a card would add noise,
-    /// not information. The host is included even for an untruncated row,
-    /// because the title strips the `user@host:` prefix the avatar cannot
-    /// spell out.
-    ///
-    /// Every line is decided by comparing what the row rendered against the
-    /// string it was elided from. Both come from the row itself: deriving
-    /// them here a second time is how a renamed tab ended up with a name the
-    /// row shortened and the card refused to expand.
+    /// What the sidebar row's card spells out: the full title, the full branch
+    /// and diff counts, the working directory, and the remote host the avatar
+    /// only dots. `None` for a row with nothing to say. The host is included
+    /// even for a row that cut nothing, because the title strips the
+    /// `user@host:` prefix the avatar cannot spell out.
     fn sidebar_info(
         &self,
         tab: &crate::ui::app::Tab,
         window: &mut Window,
         cx: &gpui::App,
-        shown: &SidebarRowShown,
+        mut info: SidebarInfo,
     ) -> Option<SidebarInfo> {
-        let elided = |pair: &Option<(SharedString, SharedString)>| {
-            pair.as_ref()
-                .filter(|(shown, full)| shown != full)
-                .map(|(_, full)| full.clone())
-        };
-        let mut info = SidebarInfo {
-            title: elided(&shown.title),
-            branch: shown
-                .branch
-                .as_ref()
-                .filter(|(shown, full, _, _)| shown != full)
-                .map(|(_, full, added, removed)| (full.clone(), *added, *removed)),
-            // The cwd only earns a card line when it was rendered *and*
-            // elided: a repo row already shows the full path as its title, so
-            // repeating the cwd under it would be noise, not information.
-            cwd: elided(&shown.cwd),
-            host: None,
-        };
         // The host is read off the same leaf the title and cwd came from; a
         // split tab whose panes sit on different machines would otherwise
         // name whichever one happens to be first.
@@ -3818,7 +3748,7 @@ fn git_click(
 mod fold_tests {
     use super::*;
     use crate::ui::app::test_window::harness_with_tabs;
-    use gpui::TestAppContext;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
 
     /// Bounds a row registered for itself while it was on screen. A folded
     /// row leaves the default rectangle behind, and that is what stops a pane
@@ -3834,6 +3764,18 @@ mod fold_tests {
     /// missing makes it return "no decision", which would leave every group
     /// below untouched and every assertion about moving vacuous.
     fn plant(app: &Tty59App, i: usize, cwd: &str, root: &str, home: &str, cx: &mut gpui::App) {
+        plant_on(app, i, cwd, (root, home), ("main", (0, 0)), cx);
+    }
+
+    /// [`plant`] with the branch the cache answers and its diff counts.
+    fn plant_on(
+        app: &Tty59App,
+        i: usize,
+        cwd: &str,
+        (root, home): (&str, &str),
+        (branch, counts): (&str, (u32, u32)),
+        cx: &mut gpui::App,
+    ) {
         use crate::terminal::git_status::{GitStatusCache, RepoSnapshot};
         use crate::ui::host_ops::HostId;
 
@@ -3851,8 +3793,8 @@ mod fold_tests {
                 Some(RepoSnapshot {
                     root: PathBuf::from(root),
                     home: PathBuf::from(home),
-                    branch: "main".into(),
-                    counts: Some((0, 0)),
+                    branch: branch.into(),
+                    counts: Some(counts),
                 }),
             );
         });
@@ -5043,6 +4985,313 @@ mod fold_tests {
         });
     }
 
+    /// What `harness_with_tabs` draws at `width`, drawn twice so the first
+    /// frame's measurements have settled.
+    fn draw_at(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, width: f32) {
+        app.update(vcx, |app, cx| {
+            app.sidebar_width.set(width);
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        for _ in 0..2 {
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    /// Two tabs pinned to one group whose long name and very long branch
+    /// (with `counts`) both want the whole header line.
+    fn long_branch_header(
+        cx: &mut TestAppContext,
+        counts: (u32, u32),
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, 2);
+        app.update(&mut vcx, |app, cx| {
+            let work = label(app, "a-rather-long-group-name-for-the-rail", cx);
+            for i in 0..2 {
+                app.set_tab_group(i, Some(work), cx);
+                plant_on(
+                    app,
+                    i,
+                    "/w/probed/sub",
+                    ("/w/probed", "/w/probed"),
+                    (
+                        "feature/checkout-flow-redesign-with-a-very-long-name",
+                        counts,
+                    ),
+                    cx,
+                );
+            }
+        });
+        (app, vcx, streams)
+    }
+
+    /// A header with a long branch used to leave the heading as `DEL…` while
+    /// the branch kept thirty characters. The branch group may take half the
+    /// header's line and no more, the heading keeps the rest down to its
+    /// floor, and the diff counts are never squeezed: they sit flush right at
+    /// the narrowest rail and at the default one, at the same size.
+    #[gpui::test]
+    fn a_long_branch_takes_at_most_half_the_header_and_the_counts_stay_whole(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = long_branch_header(cx, (12, 3));
+        let mut counts_widths = Vec::new();
+        for width in [MIN_SIDEBAR_WIDTH, 260.] {
+            draw_at(&app, &mut vcx, width);
+            let painted = |vcx: &mut VisualTestContext, selector: &'static str| {
+                vcx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} was not painted at {width}"))
+            };
+            let bar = painted(&mut vcx, "sidebar-group-0");
+            let name = painted(&mut vcx, "sidebar-group-name-0");
+            let git = painted(&mut vcx, "sidebar-group-git-0");
+            let counts = painted(&mut vcx, "sidebar-group-diff-0");
+            // `px_2` on the bar: the half is of what is inside it.
+            let inner = bar.size.width - px(16.);
+            assert!(
+                git.size.width <= inner * 0.5 + px(0.5),
+                "at {width}: the branch group is {:?} of a {inner:?} line",
+                git.size.width
+            );
+            assert!(
+                name.size.width >= px(HEADER_NAME_FLOOR) - px(0.5),
+                "at {width}: the heading kept {:?}",
+                name.size.width
+            );
+            assert!(
+                name.right() <= git.left() + px(0.5),
+                "at {width}: the heading and the branch overlap"
+            );
+            assert!(
+                (counts.right() - git.right()).abs() < px(0.5)
+                    && (bar.right() - px(8.) - counts.right()).abs() < px(0.5),
+                "at {width}: the counts are not flush right"
+            );
+            counts_widths.push(counts.size.width);
+        }
+        assert_eq!(
+            counts_widths[0], counts_widths[1],
+            "the counts are intrinsic and do not give way at the narrow rail"
+        );
+    }
+
+    /// A plain (no repo) tab whose title is short and whose working directory
+    /// is far longer than any row: the path rides on the title's own line.
+    fn short_title_long_cwd(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, 1);
+        app.update(&mut vcx, |app, cx| {
+            app.tabs[0].name = Some("zsh".into());
+            plant_plain(
+                app,
+                0,
+                "/w/scratch/experiments/long-nested-directory-name-for-truncation/and-one-more",
+                cx,
+            );
+            cx.notify();
+        });
+        (app, vcx, streams)
+    }
+
+    /// The working directory beside a short title takes what it asks for up to
+    /// half of the title line and no more: the title keeps the rest. The cap is
+    /// what limits it here (its path is far longer), so it lands on the half.
+    #[gpui::test]
+    fn a_long_working_directory_takes_half_of_the_title_line_and_no_more(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = short_title_long_cwd(cx);
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let title = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted");
+        let cwd = vcx
+            .debug_bounds("sidebar-row-cwd-0")
+            .expect("the working directory was painted beside the title");
+        let line = cwd.right() - title.left();
+        assert!(
+            cwd.size.width <= line * 0.5 + px(0.5),
+            "the path is {:?} of a {line:?} line",
+            cwd.size.width
+        );
+        assert!(
+            cwd.size.width >= line * 0.5 - px(1.),
+            "the path asked for far more than half and got only {:?} of {line:?}",
+            cwd.size.width
+        );
+    }
+
+    /// A row with less room (the Alt badge column is on) still keeps the
+    /// title's floor: the working directory gives way, not the title.
+    #[gpui::test]
+    fn a_row_title_keeps_its_floor_when_the_row_has_less_room(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = short_title_long_cwd(cx);
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let roomy = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted")
+            .size
+            .width;
+        app.update(&mut vcx, |app, cx| {
+            app.mod_hint_badges = true;
+            app.mod_hint_group = false;
+            cx.notify();
+        });
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let tight = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted with the badge column")
+            .size
+            .width;
+        assert!(
+            tight < roomy,
+            "the badge column took room from the line: {roomy:?} -> {tight:?}"
+        );
+        assert!(
+            tight >= px(ROW_TITLE_FLOOR) - px(0.5),
+            "the title was squeezed to {tight:?}"
+        );
+    }
+
+    /// A title takes the room a wider rail gives it.
+    #[gpui::test]
+    fn a_row_title_grows_with_the_rail(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update(&mut vcx, |app, cx| {
+            app.tabs[0].name = Some("a-fairly-long-custom-tab-name-for-this-row".into());
+            cx.notify();
+        });
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let narrow = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted at the narrowest rail")
+            .size
+            .width;
+        draw_at(&app, &mut vcx, 260.);
+        let wide = vcx
+            .debug_bounds("sidebar-row-title-0")
+            .expect("the title was painted at the default rail")
+            .size
+            .width;
+        assert!(
+            wide > narrow,
+            "the title takes the room a wider rail gives it: {narrow:?} -> {wide:?}"
+        );
+    }
+
+    /// The six-character rule at the real consumer. At the narrowest rail and
+    /// at 240 the branch has no room for six readable characters, so its label
+    /// is drawn hidden (prepared with nothing, nothing painted) while the diff
+    /// counts stay painted flush right; at a wide rail the same label paints.
+    /// 240 is a measured width, not a guess: without the rule the label there
+    /// shows `feat…  ·` (four of its characters), so a missing rule paints a
+    /// fragment where this test requires nothing. The observer answers `None`
+    /// for a label that was not drawn at all, which must not pass for hidden,
+    /// so every state is asserted as present.
+    #[gpui::test]
+    fn the_header_hides_a_branch_without_six_characters_and_keeps_the_counts(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::text_elision::observe;
+
+        let (app, mut vcx, _streams) = long_branch_header(cx, (1, 1));
+        let branch = gpui::ElementId::from(("sidebar-group-branch", 0usize));
+        let mut counts_widths = Vec::new();
+        for (width, shown) in [(MIN_SIDEBAR_WIDTH, false), (240., false), (400., true)] {
+            // Settle at the new width first, then forget what that drew, so
+            // the frame inspected is the only source of the observation.
+            draw_at(&app, &mut vcx, width);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let label = observe::label(&branch)
+                .unwrap_or_else(|| panic!("at {width}: the branch label was not drawn at all"));
+            match shown {
+                false => assert!(
+                    label.text.is_empty() && !label.painted,
+                    "at {width}: expected a present, hidden label, got {label:?}"
+                ),
+                true => assert!(
+                    !label.text.is_empty() && label.painted,
+                    "at {width}: expected a painted branch, got {label:?}"
+                ),
+            }
+            let bar = vcx.debug_bounds("sidebar-group-0").expect("the header");
+            let counts = vcx
+                .debug_bounds("sidebar-group-diff-0")
+                .unwrap_or_else(|| panic!("at {width}: the counts were not painted"));
+            assert!(
+                (bar.right() - px(8.) - counts.right()).abs() < px(0.5),
+                "at {width}: the counts are not flush right"
+            );
+            counts_widths.push(counts.size.width);
+        }
+        assert_eq!(
+            counts_widths[0], counts_widths[1],
+            "the counts keep their size whether or not the branch is drawn"
+        );
+    }
+
+    /// An ended pane's row keeps the words its exit wrote, whole, in every
+    /// shipped language, and elides only the name in front of them: the
+    /// observer reads what the title label prepared and painted at the widest
+    /// rail, where the head still has room beside the tail.
+    #[gpui::test]
+    fn an_ended_row_keeps_its_localized_tail_whole(cx: &mut TestAppContext) {
+        use crate::ui::text_elision::observe;
+
+        const NAME: &str = "a-pane-with-a-very-long-name-that-no-row-can-hold-whole-and-then-some-more-words-after-it-to-be-sure";
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let title = gpui::ElementId::from(("sidebar-row-title", 0usize));
+        // The rail width per language is MEASURED, not computed: at each one the title slot
+        // is too narrow for an ordinary label (the whole text, no included tail) to keep
+        // the status whole, yet wide enough for the included tail plus a cut name.
+        for (language, width, tail) in [
+            ("en", 240., " — process exited"),
+            ("ru-RU", 240., ": процесс завершён"),
+            ("ja-JP", 220., " — プロセスが終了しました"),
+            ("zh-CN", MIN_SIDEBAR_WIDTH, " — 进程已退出"),
+        ] {
+            crate::ui::i18n::set_locale(language);
+            app.update(&mut vcx, |app, cx| {
+                let leaf = app.tabs[0].pane.first_leaf().expect("a tab has a pane");
+                leaf.terminal()
+                    .expect("a terminal pane")
+                    .update(cx, |view, cx| view.end_for_test(NAME, cx));
+                cx.notify();
+            });
+            draw_at(&app, &mut vcx, width);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let label = observe::label(&title)
+                .unwrap_or_else(|| panic!("{language}: the row title was not drawn"));
+            assert!(label.painted, "{language}: {label:?}");
+            assert!(
+                label.text.ends_with(tail),
+                "{language}: the tail was cut: {:?}",
+                label.text
+            );
+            assert!(
+                label.text.contains('…') && label.text.len() < NAME.len() + tail.len(),
+                "{language}: the name did not elide: {:?}",
+                label.text
+            );
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
     /// Double-clicking a row opens the same rename box the context menu does,
     /// on that row's tab. The box has to survive the click that opened it: a
     /// focus left behind on the terminal would blur it shut straight away.
@@ -5391,30 +5640,6 @@ mod tests {
         let shown = [ids[0], ids[2], ids[3]];
         assert_eq!(reordered_pinned(&ids, &shown, 2, 0), Some(vec![3, 0, 1, 2]));
     }
-
-    /// A header with a long branch on it used to leave the heading as `DEL…`
-    /// while the branch kept thirty characters. The name is the group; the
-    /// branch is what it happens to be sitting on, and it may take at most
-    /// half the line before the heading starts paying for it.
-    #[test]
-    fn a_long_branch_takes_half_the_header_and_no_more() {
-        let avail = 200.;
-        assert_eq!(header_name_avail(avail, Some(400.)), 100.);
-        assert_eq!(header_name_avail(avail, Some(100.)), 100.);
-    }
-
-    #[test]
-    fn a_short_branch_leaves_the_heading_the_rest_of_the_header() {
-        assert_eq!(header_name_avail(200., Some(40.)), 160.);
-        assert_eq!(header_name_avail(200., None), 200.);
-    }
-
-    /// Even a header narrow enough that the branch's half swallows the line
-    /// keeps a readable stub of the name, rather than eliding it away.
-    #[test]
-    fn the_heading_keeps_a_floor_on_a_narrow_sidebar() {
-        assert_eq!(header_name_avail(60., Some(400.)), HEADER_NAME_FLOOR);
-    }
 }
 
 #[cfg(test)]
@@ -5425,6 +5650,7 @@ mod agent_tests {
     use crate::ui::agent_vision::PaneLocation;
     use crate::ui::app::test_window::harness_with_tabs;
     use crate::ui::host_ops::HostId;
+    use gpui::Entity;
     use tty59_core::core::machine::TabId;
 
     fn summary(workspace: WorkspaceId, tab: TabId, host: HostId, pane: u64) -> PaneSummary {
@@ -5565,17 +5791,17 @@ mod agent_tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (first, mut vcx, _streams) = harness_with_tabs(cx, 1);
-        first.update_in(&mut vcx, |app, _, cx| {
+        first.update_in(&mut vcx, |app, window, cx| {
             assert_eq!(app.sidebar_list, SidebarList::Terminal);
             assert!(!app.sidebar_agents_mode(cx));
-            app.select_sidebar_list(SidebarList::Agents, cx);
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
             assert!(app.sidebar_agents_mode(cx));
             app.set_sidebar_agents_toggle(false, cx);
             assert_eq!(app.sidebar_list, SidebarList::Terminal);
             assert!(!app.sidebar_agents_mode(cx));
             app.set_sidebar_agents_toggle(true, cx);
             assert!(!app.sidebar_agents_mode(cx));
-            app.select_sidebar_list(SidebarList::Agents, cx);
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
         });
         let (second, mut second_vcx, _other_streams) = harness_with_tabs(cx, 1);
         second.update_in(&mut second_vcx, |app, _, _| {
@@ -5585,6 +5811,416 @@ mod agent_tests {
             first.read_with(&vcx, |app, _| app.sidebar_list),
             SidebarList::Agents
         );
+    }
+
+    fn settle_and_draw(vcx: &mut gpui::VisualTestContext) {
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    /// A window on the Agents list with no agent running, the keymap's
+    /// New Agent Tab binding replaced by `binding` when one is given.
+    fn empty_agents_rail(
+        cx: &mut gpui::TestAppContext,
+        binding: Option<crate::core::config::KeybindingOverride>,
+    ) -> (
+        Entity<Tty59App>,
+        gpui::VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |cfg| {
+                if let Some(binding) = binding {
+                    cfg.keybindings.insert("NewAgentTab".to_string(), binding);
+                }
+            });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        settle_and_draw(&mut vcx);
+        (app, vcx, streams)
+    }
+
+    fn strokes(specs: &[&str]) -> Vec<(String, gpui::Modifiers)> {
+        specs
+            .iter()
+            .map(|spec| {
+                let stroke = gpui::Keystroke::parse(spec).expect("the expected stroke parses");
+                (stroke.key, stroke.modifiers)
+            })
+            .collect()
+    }
+
+    fn rail_chord(
+        app: &Entity<Tty59App>,
+        vcx: &mut gpui::VisualTestContext,
+    ) -> Vec<(String, gpui::Modifiers)> {
+        app.update_in(vcx, |_, _, cx| {
+            new_agent_chord(cx)
+                .into_iter()
+                .map(|stroke| (stroke.key, stroke.modifiers))
+                .collect()
+        })
+    }
+
+    #[gpui::test]
+    fn an_empty_agents_rail_says_so_under_the_search_field(cx: &mut gpui::TestAppContext) {
+        let (_app, mut vcx, _streams) = empty_agents_rail(cx, None);
+        let search = vcx
+            .debug_bounds("sidebar-search")
+            .expect("the search field");
+        let empty = vcx
+            .debug_bounds("sidebar-empty-state")
+            .expect("an empty Agents list paints its message");
+        let toggle = vcx.debug_bounds("sidebar-list-toggle").expect("the switch");
+        assert!(
+            empty.top() >= search.bottom(),
+            "the message starts below the search field: {empty:?} vs {search:?}"
+        );
+        assert!(
+            empty.top() - search.bottom() < px(ROW_HEIGHT * 3.),
+            "the message sits where the first row would, not at the bottom: {empty:?} vs {search:?}"
+        );
+        assert!(
+            toggle.top() - empty.bottom() > px(ROW_HEIGHT * 3.),
+            "the Terminal/Agents switch is far below it: {empty:?} vs {toggle:?}"
+        );
+        assert!(
+            vcx.debug_bounds("sidebar-new-agent-cta").is_some(),
+            "an empty list offers the way out"
+        );
+    }
+
+    #[gpui::test]
+    fn an_exact_binding_replaces_the_chord_on_the_new_agent_row(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::KeybindingOverride::Exact;
+        let (app, mut vcx, _streams) =
+            empty_agents_rail(cx, Some(Exact(vec!["ctrl-alt-n".into()])));
+        assert_eq!(rail_chord(&app, &mut vcx), strokes(&["ctrl-alt-n"]));
+        assert!(vcx.debug_bounds("sidebar-new-agent-chord").is_some());
+    }
+
+    #[gpui::test]
+    fn a_two_stroke_binding_shows_every_stroke_in_order(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::KeybindingOverride::Exact;
+        let (app, mut vcx, _streams) = empty_agents_rail(
+            cx,
+            Some(Exact(vec!["ctrl-b a".into(), "ctrl-alt-n".into()])),
+        );
+        assert_eq!(
+            rail_chord(&app, &mut vcx),
+            strokes(&["ctrl-b", "a"]),
+            "every stroke of the first binding, in order"
+        );
+        assert!(vcx.debug_bounds("sidebar-new-agent-chord").is_some());
+    }
+
+    #[gpui::test]
+    fn a_string_override_adds_a_chord_beside_the_default(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::KeybindingOverride::Add;
+        let (app, mut vcx, _streams) = empty_agents_rail(cx, Some(Add("ctrl-alt-m".into())));
+        let chord = rail_chord(&app, &mut vcx);
+        // macOS ships New Agent Tab on cmd-shift-a and the added chord comes
+        // after it; elsewhere the action ships unbound and the added one leads.
+        let expected = if cfg!(target_os = "macos") {
+            strokes(&["cmd-shift-a"])
+        } else {
+            strokes(&["ctrl-alt-m"])
+        };
+        assert_eq!(chord, expected, "the first binding the keymap holds");
+        assert!(vcx.debug_bounds("sidebar-new-agent-chord").is_some());
+    }
+
+    #[gpui::test]
+    fn an_unbound_new_agent_row_advertises_no_chord(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::KeybindingOverride::Exact;
+        let (app, mut vcx, _streams) = empty_agents_rail(cx, Some(Exact(Vec::new())));
+        assert!(rail_chord(&app, &mut vcx).is_empty());
+        assert!(
+            vcx.debug_bounds("sidebar-new-agent-cta").is_some(),
+            "the action stays when it has no chord"
+        );
+        assert!(
+            vcx.debug_bounds("sidebar-new-agent-chord").is_none(),
+            "an unbound action advertises no chord"
+        );
+    }
+
+    #[gpui::test]
+    fn the_new_agent_row_follows_the_shipped_default(cx: &mut gpui::TestAppContext) {
+        let (app, mut vcx, _streams) = empty_agents_rail(cx, None);
+        let expected = if cfg!(target_os = "macos") {
+            strokes(&["cmd-shift-a"])
+        } else {
+            Vec::new()
+        };
+        assert_eq!(rail_chord(&app, &mut vcx), expected);
+        assert_eq!(
+            vcx.debug_bounds("sidebar-new-agent-chord").is_some(),
+            cfg!(target_os = "macos"),
+            "Linux and Windows ship New Agent Tab unbound, so no chord is drawn"
+        );
+    }
+
+    /// With no agent installed, New agent says so and opens nothing. The
+    /// fixture makes that true on any machine without touching the process
+    /// environment: an agent is looked up by the program its `agent_launch`
+    /// entry runs, so pointing every entry at a program that does not exist
+    /// leaves nothing installed. A plain New Tab would open a shell (a new
+    /// tab, or `startup_error` if the spawn failed) and say nothing; installing
+    /// an agent and actually launching it needs a real shell spawn, which this
+    /// harness does not verify.
+    #[gpui::test]
+    fn the_new_agent_row_runs_new_agent_tab_not_new_tab(cx: &mut gpui::TestAppContext) {
+        use gpui_component::WindowExt as _;
+        let (app, mut vcx, _streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |cfg| {
+                for agent in CLIAgent::ALL {
+                    cfg.agent_launch.insert(
+                        agent.slug().to_string(),
+                        "tty59-test-no-such-agent".to_string(),
+                    );
+                }
+            });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        settle_and_draw(&mut vcx);
+        let (tabs, notices) = app.update_in(&mut vcx, |app, window, cx| {
+            assert!(
+                app.offered_agents(cx).is_empty(),
+                "the fixture leaves no agent installed"
+            );
+            assert!(app.startup_error.is_none());
+            (app.tabs.len(), window.notifications(cx).len())
+        });
+        let cta = vcx.debug_bounds("sidebar-new-agent-cta").expect("the row");
+        vcx.simulate_click(cta.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(
+                window.notifications(cx).len(),
+                notices + 1,
+                "the existing no-agent notice appears"
+            );
+            assert_eq!(app.tabs.len(), tabs, "no agent, so no tab opened");
+            assert!(
+                app.startup_error.is_none(),
+                "and no shell was attempted either"
+            );
+        });
+    }
+
+    /// Two agents are installed and the one launched last is not the one the
+    /// list offers first: a click on New agent has to ask for the last one,
+    /// in a new tab, with the command its `agent_launch` entry gives. The
+    /// request is read where `launch_agent` is entered, before any shell is
+    /// opened, so the shell spawn, the typed command and the frecency stamp
+    /// are not covered here.
+    #[gpui::test]
+    fn the_new_agent_row_launches_the_most_recent_installed_agent(cx: &mut gpui::TestAppContext) {
+        use crate::core::config::{ProfileUsage, unix_now};
+        use gpui_component::WindowExt as _;
+        let exe = std::env::current_exe()
+            .expect("the test binary has a path")
+            .display()
+            .to_string();
+        assert!(
+            !exe.contains(char::is_whitespace),
+            "the stub program is typed as a command line: {exe}"
+        );
+        let (offered_first, last_launched) = (CLIAgent::Claude, CLIAgent::Codex);
+        let now = unix_now();
+        let (app, mut vcx, _streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |cfg| {
+                for agent in CLIAgent::ALL {
+                    cfg.agent_launch.insert(
+                        agent.slug().to_string(),
+                        "tty59-test-no-such-agent".to_string(),
+                    );
+                }
+                cfg.agent_launch
+                    .insert(offered_first.slug().to_string(), format!("{exe} --stub-a"));
+                cfg.agent_launch
+                    .insert(last_launched.slug().to_string(), format!("{exe} --stub-b"));
+                // Used a lot, a minute ago: the most frecent, so offered first.
+                cfg.agent_frecency.insert(
+                    offered_first.slug().to_string(),
+                    ProfileUsage {
+                        count: 100,
+                        last_used: now - 60,
+                    },
+                );
+                // Used once, just now: the most recent.
+                cfg.agent_frecency.insert(
+                    last_launched.slug().to_string(),
+                    ProfileUsage {
+                        count: 1,
+                        last_used: now,
+                    },
+                );
+            });
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        settle_and_draw(&mut vcx);
+        let (tabs, notices) = app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(
+                app.offered_agents(cx),
+                [offered_first, last_launched],
+                "the list offers the most frecent first, which is not the most recent"
+            );
+            assert!(app.startup_error.is_none());
+            (app.tabs.len(), window.notifications(cx).len())
+        });
+        let launches = crate::ui::agent_launch::intercept_launches();
+        let cta = vcx.debug_bounds("sidebar-new-agent-cta").expect("the row");
+        vcx.simulate_click(cta.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        let requests = launches.requests();
+        assert_eq!(requests.len(), 1, "one launch request: {requests:?}");
+        let (agent, at, command) = &requests[0];
+        assert_eq!(
+            *agent, last_launched,
+            "the most recent agent, not the first offered"
+        );
+        assert!(
+            matches!(at, crate::ui::app::SpawnWhere::NewTab),
+            "in a new tab: {at:?}"
+        );
+        assert_eq!(
+            command,
+            &format!("{exe} --stub-b"),
+            "its configured command"
+        );
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.tabs.len(), tabs, "the request stopped before any shell");
+            assert_eq!(window.notifications(cx).len(), notices, "no notice");
+            assert!(app.startup_error.is_none());
+        });
+    }
+
+    fn nothing_matches_is_top_aligned_and_quotes_the_query_as_typed(
+        cx: &mut gpui::TestAppContext,
+        agents: bool,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, window, cx| {
+            if agents {
+                app.select_sidebar_list(SidebarList::Agents, window, cx);
+            }
+            app.sidebar_search
+                .update(cx, |state, cx| state.set_value("ZzQ", window, cx));
+        });
+        let _ = take_rendered_sidebar_nothing_matches();
+        settle_and_draw(&mut vcx);
+        let lines = take_rendered_sidebar_nothing_matches();
+        assert!(!lines.is_empty(), "the rail drew its no-match sentence");
+        for line in &lines {
+            assert!(
+                line.contains("ZzQ") && !line.contains("zzq"),
+                "the sentence quotes what was typed, case kept: {line:?}"
+            );
+            assert!(
+                line.contains('\u{201c}') && line.contains('\u{201d}'),
+                "the typed text sits in real quotes: {line:?}"
+            );
+        }
+        let search = vcx
+            .debug_bounds("sidebar-search")
+            .expect("the search field");
+        let empty = vcx
+            .debug_bounds("sidebar-nothing-matches")
+            .expect("the no-match line is painted");
+        let toggle = vcx.debug_bounds("sidebar-list-toggle").expect("the switch");
+        assert!(
+            empty.top() - search.bottom() < px(ROW_HEIGHT * 3.),
+            "top-aligned under the search: {empty:?} vs {search:?}"
+        );
+        assert!(
+            toggle.top() - empty.bottom() > px(ROW_HEIGHT * 3.),
+            "not jammed against the switch: {empty:?} vs {toggle:?}"
+        );
+        assert!(
+            vcx.debug_bounds("sidebar-new-agent-cta").is_none(),
+            "a failed search offers no launch row"
+        );
+        assert!(vcx.debug_bounds("sidebar-empty-state").is_none());
+    }
+
+    #[gpui::test]
+    fn an_agents_search_with_no_match_is_top_aligned_and_quoted(cx: &mut gpui::TestAppContext) {
+        nothing_matches_is_top_aligned_and_quotes_the_query_as_typed(cx, true);
+    }
+
+    #[gpui::test]
+    fn a_tabs_search_with_no_match_is_top_aligned_and_quoted(cx: &mut gpui::TestAppContext) {
+        nothing_matches_is_top_aligned_and_quotes_the_query_as_typed(cx, false);
+    }
+
+    #[test]
+    fn the_rail_search_is_agents_search_only_on_an_enabled_agents_list() {
+        for (enabled, list, expected) in [
+            (true, SidebarList::Agents, L10nKey::VisionSearch),
+            (true, SidebarList::Terminal, L10nKey::SearchTabs),
+            (false, SidebarList::Agents, L10nKey::SearchTabs),
+            (false, SidebarList::Terminal, L10nKey::SearchTabs),
+        ] {
+            assert_eq!(
+                sidebar_search_placeholder(enabled, list),
+                expected,
+                "enabled={enabled} list={list:?}"
+            );
+        }
+    }
+
+    /// The field's placeholder is written from events, and `set_placeholder`
+    /// notifies the field, so a notification is the witness that each event
+    /// reached it. A frame that only draws must not write it.
+    #[gpui::test]
+    fn the_rail_placeholder_is_written_by_events_and_never_by_a_draw(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let writes = Rc::new(Cell::new(0usize));
+        let input = app.read_with(&vcx, |app, _| app.sidebar_search.clone());
+        vcx.update(|_, cx| {
+            let writes = writes.clone();
+            cx.observe(&input, move |_, _| writes.set(writes.get() + 1))
+                .detach();
+        });
+        settle_and_draw(&mut vcx);
+        let idle = writes.get();
+        settle_and_draw(&mut vcx);
+        assert_eq!(writes.get(), idle, "drawing writes no placeholder");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        vcx.run_until_parked();
+        assert!(writes.get() > idle, "the list switch writes it");
+
+        let before = writes.get();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.refresh_locale_state(window, cx)
+        });
+        vcx.run_until_parked();
+        assert!(writes.get() > before, "a language change writes it");
+
+        // Turned off from the file: the list is still Agents, but the rail
+        // is not in agent mode, so the name has to go back.
+        let before = writes.get();
+        vcx.update(|_, cx| cx.global_mut::<Config>().sidebar_agents_toggle = false);
+        vcx.run_until_parked();
+        app.read_with(&vcx, |app, cx| {
+            assert_eq!(app.sidebar_list, SidebarList::Agents);
+            assert!(!app.sidebar_agents_mode(cx));
+        });
+        assert!(writes.get() > before, "an external config change writes it");
     }
 
     #[gpui::test]
@@ -5666,7 +6302,7 @@ mod agent_tests {
             app.sidebar_groups
                 .pinned
                 .extend([shell_project, agent_project]);
-            app.select_sidebar_list(SidebarList::Agents, cx);
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
             stream
         });
         report_agent(&mut streams[0], AgentStatus::Working);
@@ -5794,5 +6430,142 @@ mod agent_tests {
                 9
             );
         });
+    }
+
+    #[gpui::test]
+    fn sidebar_agent_row_keeps_exited_identity_without_dot(cx: &mut gpui::TestAppContext) {
+        use crate::core::cli_agent::AgentDetectionSession;
+        use crate::daemon::protocol::DaemonMsg;
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 2);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
+        });
+        for (stream, (dir, agent, kind)) in streams.iter_mut().zip([
+            ("/tmp/billing-service", CLIAgent::Codex, "codex"),
+            ("/tmp/acme-web", CLIAgent::Claude, "claude"),
+        ]) {
+            DaemonMsg::Cwd(PathBuf::from(dir)).encode(stream).unwrap();
+            DaemonMsg::Agent(Some(agent)).encode(stream).unwrap();
+            DaemonMsg::AgentStatus(Some(AgentSessionState {
+                status: AgentStatus::Working,
+                since_ms: Some(crate::core::config::unix_now().saturating_sub(60) * 1000),
+                detection: Some(AgentDetectionSession {
+                    kind: kind.into(),
+                    epoch: 1,
+                    exited: false,
+                    source: None,
+                    rule: None,
+                }),
+                ..Default::default()
+            }))
+            .encode(stream)
+            .unwrap();
+        }
+        let mut ready = false;
+        for _ in 0..200 {
+            ready = app.read_with(&vcx, |app, cx| app.agent_pane_summaries(cx).len() == 2);
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready, "both live agent panes reached the collector");
+
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Idle,
+            since_ms: Some(crate::core::config::unix_now().saturating_sub(180) * 1000),
+            detection: Some(AgentDetectionSession {
+                kind: "codex".into(),
+                epoch: 2,
+                exited: true,
+                source: None,
+                rule: None,
+            }),
+            ..Default::default()
+        }))
+        .encode(&mut streams[0])
+        .unwrap();
+        DaemonMsg::Agent(None).encode(&mut streams[0]).unwrap();
+        let mut exited = false;
+        for _ in 0..200 {
+            exited = app.read_with(&vcx, |app, cx| {
+                app.agent_pane_summaries(cx)
+                    .iter()
+                    .any(|pane| pane.location.key.pane == 1 && pane.state == State::Exited)
+            });
+            if exited {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(exited, "daemon exit transition reached the collector");
+
+        let _ = take_rendered_sidebar_agent_rows();
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let rendered = take_rendered_sidebar_agent_rows();
+        let exited_row = rendered
+            .iter()
+            .rfind(|row| row.key.pane == 1)
+            .expect("exited sidebar agent row rendered");
+        assert_eq!(exited_row.title, CLIAgent::Codex.display_name());
+        assert!(
+            vcx.debug_bounds("row-status-circle-0").is_some(),
+            "live pane paints its status dot as positive control"
+        );
+
+        let live_row = rendered
+            .iter()
+            .rfind(|row| row.key.pane == 2)
+            .expect("live sidebar agent row rendered");
+        assert_eq!(live_row.title, CLIAgent::Claude.display_name());
+
+        // Once the remaining pane also exits, no status dot is painted in the agent rail.
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status: AgentStatus::Idle,
+            since_ms: None,
+            detection: Some(AgentDetectionSession {
+                kind: "claude".into(),
+                epoch: 2,
+                exited: true,
+                source: None,
+                rule: None,
+            }),
+            ..Default::default()
+        }))
+        .encode(&mut streams[1])
+        .unwrap();
+        DaemonMsg::Agent(None).encode(&mut streams[1]).unwrap();
+        let mut all_exited = false;
+        for _ in 0..200 {
+            all_exited = app.read_with(&vcx, |app, cx| {
+                app.agent_pane_summaries(cx)
+                    .iter()
+                    .all(|pane| pane.state == State::Exited)
+            });
+            if all_exited {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(all_exited, "second daemon exit reached the collector");
+        let _ = take_rendered_sidebar_agent_rows();
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let rendered = take_rendered_sidebar_agent_rows();
+        let exited_p2 = rendered
+            .iter()
+            .rfind(|row| row.key.pane == 2)
+            .expect("second exited sidebar agent row rendered");
+        assert_eq!(exited_p2.title, CLIAgent::Claude.display_name());
+        assert!(vcx.debug_bounds("row-status-circle-0").is_none());
     }
 }

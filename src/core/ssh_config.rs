@@ -8,6 +8,7 @@ const MAX_CONFIG_FILES: usize = 256;
 
 pub const IMPORTED_GROUP: &str = "Imported from ssh_config";
 
+#[cfg(not(test))]
 fn home_dir() -> Option<PathBuf> {
     #[cfg(windows)]
     {
@@ -21,6 +22,30 @@ fn home_dir() -> Option<PathBuf> {
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
     }
+}
+
+/// Under test the home every production loader reads is a throwaway directory of
+/// the calling thread, never the developer's: a test that lists SSH hosts must see
+/// the aliases it planted and nothing from a real `~/.ssh/config`. One directory
+/// per thread (tests run on their own threads), created on first use, removed when
+/// the thread ends; the process environment is never touched.
+#[cfg(test)]
+fn home_dir() -> Option<PathBuf> {
+    Some(test_home())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_HOME: tempfile::TempDir = tempfile::Builder::new()
+        .prefix("tty59-ssh-home-")
+        .tempdir()
+        .expect("a temporary home for the test");
+}
+
+/// The home the production loaders read on this thread: plant `.ssh/config` here.
+#[cfg(test)]
+pub(crate) fn test_home() -> PathBuf {
+    TEST_HOME.with(|dir| dir.path().to_path_buf())
 }
 
 fn expand_hostname_tokens(hostname: &str, alias: &str) -> String {
@@ -363,19 +388,37 @@ fn stamps_of(paths: Vec<PathBuf>) -> Vec<(PathBuf, Option<std::time::SystemTime>
 }
 
 pub fn alias_still_resolves(alias: &str) -> bool {
-    static CACHE: std::sync::Mutex<Option<AliasCache>> = std::sync::Mutex::new(None);
-
     let Some(home) = home_dir() else {
         return false;
     };
     let root = home.join(".ssh/config");
-    let mut cache = match CACHE.lock() {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    cache
-        .get_or_insert_with(AliasCache::default)
-        .resolves(&root, &home, alias)
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::Mutex<Option<AliasCache>> = std::sync::Mutex::new(None);
+
+        let mut cache = match CACHE.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        cache
+            .get_or_insert_with(AliasCache::default)
+            .resolves(&root, &home, alias)
+    }
+    // The cache validates by the stamps of the files of its last parse, never by the
+    // root, so one shared by tests with different homes would answer one test from
+    // another's parse. Each test thread has its own home and so its own cache.
+    #[cfg(test)]
+    {
+        thread_local! {
+            static CACHE: std::cell::RefCell<Option<AliasCache>> = const { std::cell::RefCell::new(None) };
+        }
+        CACHE.with(|cache| {
+            cache
+                .borrow_mut()
+                .get_or_insert_with(AliasCache::default)
+                .resolves(&root, &home, alias)
+        })
+    }
 }
 
 fn apply_resolved(profile: &mut ManagedProfile, alias: &str, r: ResolvedHost) -> Option<String> {
@@ -1493,5 +1536,143 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The aliases the picker's host rail is built from, as the loaders must see
+    /// them from the throwaway home and from nowhere else.
+    const FIXTURE_HOSTS: &str = "Host build-runner-eu-west-1\n  HostName 10.255.255.1\n  User ci\n\
+        Host edge-gw\n  HostName 127.0.0.1\n  Port 1\n  User ops\n\
+        Host staging-db\n  HostName staging-db.example.test\n  User deploy\n";
+
+    fn plant_in_test_home(config: &str) {
+        let ssh = test_home().join(".ssh");
+        std::fs::create_dir_all(&ssh).expect("a .ssh dir in the test home");
+        std::fs::write(ssh.join("config"), config).expect("a config in the test home");
+    }
+
+    #[test]
+    fn the_home_a_test_reads_is_never_the_real_one() {
+        let home = home_dir().expect("a test always has a home");
+        assert_eq!(
+            home,
+            test_home(),
+            "home_dir() answers the thread's own directory"
+        );
+        for var in ["HOME", "USERPROFILE"] {
+            if let Some(real) = std::env::var_os(var) {
+                assert_ne!(
+                    home,
+                    PathBuf::from(real),
+                    "{var} is the developer's, a test must not read it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_production_loader_reads_the_planted_fixture() {
+        plant_in_test_home(FIXTURE_HOSTS);
+
+        let mut names: Vec<String> = import_profiles()
+            .into_iter()
+            .map(|p| p.profile.name)
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["build-runner-eu-west-1", "edge-gw", "staging-db"],
+            "import_profiles lists the planted fixture and nothing from a real home"
+        );
+
+        let report = import_report();
+        assert!(report.source_read, "the planted root was read");
+        assert_eq!(report.source, test_home().join(".ssh/config"));
+        assert_eq!(report.profiles.len(), 3);
+
+        let edge = resolve_alias_to_profile("edge-gw").expect("the planted alias resolves");
+        assert_eq!(
+            (
+                edge.profile.host.as_str(),
+                edge.profile.port,
+                edge.profile.user.as_str()
+            ),
+            ("127.0.0.1", 1, "ops")
+        );
+        assert!(resolve_alias_to_profile("not-in-the-fixture").is_none());
+
+        assert!(
+            alias_still_resolves("edge-gw"),
+            "the planted alias still resolves"
+        );
+        assert!(!alias_still_resolves("not-in-the-fixture"));
+    }
+
+    /// Tests run on their own threads: one's planted hosts must not be another's.
+    #[test]
+    fn a_threads_test_home_is_its_own() {
+        plant_in_test_home(FIXTURE_HOSTS);
+        let (other_home, other_names) = std::thread::spawn(|| {
+            let names: Vec<String> = import_profiles()
+                .into_iter()
+                .map(|p| p.profile.name)
+                .collect();
+            (test_home(), names)
+        })
+        .join()
+        .expect("the other thread finished");
+        assert_ne!(other_home, test_home(), "each thread has its own directory");
+        assert!(
+            other_names.is_empty(),
+            "the other thread sees none of this thread's hosts: {other_names:?}"
+        );
+        assert_eq!(
+            import_profiles().len(),
+            3,
+            "and this thread still sees its own"
+        );
+    }
+
+    /// The alias cache validates by the stamps of its last parse, not by the
+    /// config's path, so one process-wide cache would answer a thread from another
+    /// thread's parse while that thread's directory still exists. Two threads with
+    /// different aliases are held in step by a barrier so both have parsed before
+    /// either asks about the other's alias. The threads only RECORD what the public
+    /// `alias_still_resolves` answered and cross both barriers before anything is
+    /// asserted: a thread that panicked between them would leave its peer waiting
+    /// forever. The assertions run on the test thread after both have joined.
+    #[test]
+    fn two_threads_ask_alias_still_resolves_without_crosstalk() {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let run = |own: &'static str, other: &'static str| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                plant_in_test_home(&format!("Host {own}\n  HostName {own}.test\n"));
+                let own_first = alias_still_resolves(own);
+                barrier.wait();
+                // Both caches are parsed now; the other thread's home still exists.
+                let other_answered = alias_still_resolves(other);
+                let own_after = alias_still_resolves(own);
+                barrier.wait();
+                (own_first, other_answered, own_after)
+            })
+        };
+        let first = run("only-in-first", "only-in-second");
+        let second = run("only-in-second", "only-in-first");
+        let first = first.join().expect("the first thread finished");
+        let second = second.join().expect("the second thread finished");
+        for (name, own, other, (own_first, other_answered, own_after)) in [
+            ("first", "only-in-first", "only-in-second", first),
+            ("second", "only-in-second", "only-in-first", second),
+        ] {
+            assert!(own_first, "{name} thread: {own} resolves in its own home");
+            assert!(
+                !other_answered,
+                "{name} thread: {other} is answered from the other thread's parse"
+            );
+            assert!(
+                own_after,
+                "{name} thread: {own} still resolves in its own home"
+            );
+        }
     }
 }

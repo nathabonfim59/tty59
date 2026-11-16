@@ -17,20 +17,23 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, HighlightStyle, MouseButton, SharedString, StyledText,
-    Subscription, Window, div, px, rems,
+    AnyElement, App, Context, Entity, HighlightStyle, Hsla, MouseButton, SharedString, StyledText,
+    Subscription, UnderlineStyle, Window, div, px, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _, h_flex, v_flex,
 };
-use tty59_core::host::{ContentHit, ContentLimits, ContentQuery};
+use tty59_core::host::content_search::ELLIPSIS;
+use tty59_core::host::{ContentHit, ContentLimits, ContentQuery, ContentRange, ContentResults};
 
+use crate::core::config::Config;
 use crate::ui::app::Tty59App;
 use crate::ui::host_ops::HostOps;
 use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::presets::SearchMark;
 use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_GLYPH, ROW_INSET, TEXT_MONO};
 
 use model::{FileGroup, Outcome, SearchKey, SearchRun};
@@ -47,6 +50,124 @@ const ROW_GAP: f32 = 6.;
 /// Where a hit's excerpt starts: under its file's name, past the chevron and
 /// the icon.
 const HIT_LEAD: f32 = ROW_INSET + CHEVRON_W + ROW_GAP + ROW_GLYPH + ROW_GAP;
+
+/// How much of the line before its first match a hit keeps, in bytes. A row is
+/// start-anchored, so a match further in than the panel is wide would be cut
+/// off the end of it; this much context is enough to read what the match is
+/// part of.
+const HIT_LEAD_BYTES: usize = 16;
+
+/// Scroll a hit's excerpt so its first match is near the start of the row.
+///
+/// `text` and `ranges` come from the host as the line is meant to be shown:
+/// `ranges` are byte ranges into `text`, in order and not overlapping. The cut
+/// is a grapheme-cluster boundary, never inside a character or between a base
+/// and its combining marks or an emoji sequence, and what is left starts with
+/// one `…` so the row says it is a part. The ranges move by what was removed
+/// and what was added. `line` and `column` are untouched: they say where the
+/// match is in the file, which is not what the excerpt shows.
+fn window_hit(hit: &mut ContentHit) {
+    use unicode_segmentation::UnicodeSegmentation as _;
+
+    // The first match worth windowing around is the first the row would draw.
+    let Some(first) = hit
+        .ranges
+        .iter()
+        .find(|r| usable(&hit.text, r))
+        .map(|r| r.start as usize)
+    else {
+        return;
+    };
+    let want = first.saturating_sub(HIT_LEAD_BYTES);
+    let cut = hit
+        .text
+        .grapheme_indices(true)
+        .map(|(at, _)| at)
+        .take_while(|&at| at <= want)
+        .last()
+        .unwrap_or(0);
+    let (Ok(cut_by), Ok(lead)) = (u32::try_from(cut), u32::try_from(ELLIPSIS.len())) else {
+        return;
+    };
+    if cut == 0 {
+        return;
+    }
+    hit.ranges = hit
+        .ranges
+        .iter()
+        .filter(|r| usable(&hit.text, r) && r.start >= cut_by)
+        .filter_map(|r| {
+            Some(ContentRange {
+                start: r.start.checked_sub(cut_by)?.checked_add(lead)?,
+                end: r.end.checked_sub(cut_by)?.checked_add(lead)?,
+            })
+        })
+        .collect();
+    hit.text = format!("{ELLIPSIS}{}", &hit.text[cut..]);
+}
+
+/// Whether `range` is a match the row can highlight in `text`: a non-empty
+/// span inside it, on character boundaries. A host's answer is data from
+/// another machine, so a range that is not is dropped, never trusted.
+fn usable(text: &str, range: &ContentRange) -> bool {
+    let (start, end) = (range.start as usize, range.end as usize);
+    start < end && end <= text.len() && text.is_char_boundary(start) && text.is_char_boundary(end)
+}
+
+/// How a matched term is painted for one size class's cached mark. The fill is
+/// laid with the same `Hsla` arithmetic the derivation composites with, so the
+/// pixels are the ones the ratios were computed for. With no pair for the
+/// palette nothing new is painted: no fill and no ink, the glyphs keep the
+/// row's ink and are underlined in it.
+fn mark_style(mark: SearchMark) -> HighlightStyle {
+    match mark {
+        SearchMark::Fill(pair) => HighlightStyle {
+            background_color: Some(Hsla::from(gpui::rgb(pair.fill)).opacity(pair.alpha)),
+            color: Some(gpui::rgb(pair.ink).into()),
+            ..Default::default()
+        },
+        SearchMark::Unavailable(_) => HighlightStyle {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: None,
+                wavy: false,
+            }),
+            ..Default::default()
+        },
+    }
+}
+
+/// Test observer: what each hit row handed to its `StyledText`, with the text
+/// size the class was chosen for. Records after the fact and changes nothing
+/// about layout or paint.
+#[cfg(test)]
+mod probe {
+    use std::cell::RefCell;
+    use std::ops::Range;
+
+    use gpui::HighlightStyle;
+
+    pub(super) type Painted = (f32, Vec<(Range<usize>, HighlightStyle)>);
+
+    thread_local! {
+        static PAINTED: RefCell<Vec<Painted>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(text_px: f32, highlights: &[(Range<usize>, HighlightStyle)]) {
+        PAINTED.with(|p| p.borrow_mut().push((text_px, highlights.to_vec())));
+    }
+
+    pub(super) fn take() -> Vec<Painted> {
+        PAINTED.with(|p| std::mem::take(&mut *p.borrow_mut()))
+    }
+}
+
+/// A search result as the panel draws it: every hit windowed once, here,
+/// instead of on each frame the list is drawn.
+fn windowed(mut found: ContentResults) -> ContentResults {
+    found.hits.iter_mut().for_each(window_hit);
+    found
+}
 
 pub(crate) struct PanelSearchState {
     pub(crate) input: Entity<InputState>,
@@ -171,11 +292,10 @@ impl Tty59App {
                     host,
                     cx,
                     move |h| {
-                        Outcome::from_result(h.search_content(
-                            &roots,
-                            &query,
-                            &ContentLimits::default(),
-                        ))
+                        Outcome::from_result(
+                            h.search_content(&roots, &query, &ContentLimits::default())
+                                .map(windowed),
+                        )
                     },
                     move |app, outcome, cx| {
                         if app.panel_search.run.accept(generation, outcome) {
@@ -577,21 +697,20 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
-        let mark = HighlightStyle {
-            background_color: Some(cx.theme().yellow.opacity(0.35)),
-            ..Default::default()
-        };
+        // The size class is read where the text is painted: the row's text is
+        // `TEXT_MONO` rems and the window's rem is `ui_font_size`, so no font
+        // size is cached beside the marks and a size change cannot leave a
+        // stale class.
+        let text_px = TEXT_MONO * cx.global::<Config>().ui_font_size;
+        let mark = mark_style(crate::ui::theme::search_marks(cx).for_text_px(text_px));
         let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = hit
             .ranges
             .iter()
-            .filter(|r| {
-                (r.end as usize) <= hit.text.len()
-                    && hit.text.is_char_boundary(r.start as usize)
-                    && hit.text.is_char_boundary(r.end as usize)
-                    && r.start < r.end
-            })
+            .filter(|r| usable(&hit.text, r))
             .map(|r| (r.start as usize..r.end as usize, mark))
             .collect();
+        #[cfg(test)]
+        probe::record(text_px, &highlights);
         let text =
             StyledText::new(SharedString::from(hit.text.clone())).with_highlights(highlights);
         let (path, line, column) = (hit.path.clone(), hit.line, hit.column);
@@ -844,6 +963,52 @@ mod gpui_tests {
     }
 
     #[gpui::test]
+    fn a_match_far_along_a_long_line_lands_windowed_around_itself(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("windowed");
+        // Unicode before the match, so a cut by byte count could land inside a
+        // character; the match itself is past column 60.
+        let line = format!("{}needle and the rest of it\n", "針e\u{301}".repeat(18));
+        std::fs::write(root.join("long.txt"), &line).unwrap();
+        let (app, mut vcx, _pane) = search_panel_on(cx, &root);
+
+        type_query(&app, &mut vcx, "needle");
+        let Outcome::Found(found) = landed(&app, &mut vcx) else {
+            panic!("the search did not find the line");
+        };
+        let hit = found.hits.first().expect("one hit");
+        assert!(
+            hit.text.starts_with(ELLIPSIS),
+            "a match this far in must not be left past the row's end: {:?}",
+            hit.text
+        );
+        let marked: Vec<&str> = hit
+            .ranges
+            .iter()
+            .map(|r| &hit.text[r.start as usize..r.end as usize])
+            .collect();
+        assert_eq!(marked, vec!["needle"], "the highlight follows the cut");
+        assert!(
+            hit.text.len() < line.len(),
+            "the head of the line was cut away"
+        );
+        let grouped = app.update_in(&mut vcx, |app, _, _| {
+            app.panel_search.run.landed().map(|l| {
+                l.groups
+                    .iter()
+                    .flat_map(|g| g.hits.iter().map(|h| h.text.clone()))
+                    .collect::<Vec<_>>()
+            })
+        });
+        assert_eq!(
+            grouped,
+            Some(vec![hit.text.clone()]),
+            "the grouped rows the panel draws carry the windowed text"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
     fn dotfiles_are_searched_when_the_tree_shows_them(cx: &mut TestAppContext) {
         let _serial = serial();
         let root = scratch("hidden");
@@ -902,5 +1067,412 @@ mod gpui_tests {
         vcx.background_executor.run_until_parked();
         assert_eq!(render_probe::draws(), 0, "a finished search kept drawing");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn rgb_of(c: Hsla) -> u32 {
+        let c = gpui::Rgba::from(c);
+        let ch = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+        ch(c.r) << 16 | ch(c.g) << 8 | ch(c.b)
+    }
+
+    /// `fill` laid over the opaque `row`, as the painter composites it.
+    fn over(row: u32, fill: Hsla) -> u32 {
+        rgb_of(Hsla::from(gpui::rgb(row)).blend(fill))
+    }
+
+    /// Sets the UI font size and lets every observer of it settle. Writing the
+    /// `Config` global makes the app's config watcher run `reload_from_config`,
+    /// which re-runs `apply_theme` and so REINSTALLS every cached global,
+    /// `SearchMarks` included: anything a test forces into the cache has to be
+    /// installed after this, never before.
+    fn set_font(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, ui_font_size: f32) {
+        app.update_in(vcx, |_, _, cx| {
+            cx.global_mut::<Config>().ui_font_size = ui_font_size;
+            cx.notify();
+        });
+        vcx.background_executor.run_until_parked();
+    }
+
+    /// One more frame, with the probe cleared immediately before it, and what
+    /// every hit row drew with in that frame. Touches no config or theme.
+    fn redraw(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<probe::Painted> {
+        probe::take();
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        vcx.background_executor.run_until_parked();
+        probe::take()
+    }
+
+    /// `set_font`, then a measured frame: what every hit row drew at that
+    /// UI font size (the window's rem follows it in the same render).
+    fn paint_at(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        ui_font_size: f32,
+    ) -> Vec<probe::Painted> {
+        set_font(app, vcx, ui_font_size);
+        redraw(app, vcx)
+    }
+
+    /// Applies `theme` through the production path (the registry, the config's
+    /// preset and `apply_theme`), outside any render, and checks the cache the
+    /// row reads is that theme's own derivation.
+    fn install_theme(vcx: &mut VisualTestContext, theme: &crate::ui::presets::Theme) {
+        vcx.update(|_, cx| {
+            let mut themes = crate::ui::presets::builtins();
+            themes.push(theme.clone());
+            cx.set_global(crate::ui::presets::Themes(themes));
+            let cfg = cx.global_mut::<Config>();
+            cfg.theme_follow_system = false;
+            cfg.theme_preset = theme.id.clone();
+            crate::ui::theme::apply_theme(None, cx);
+            assert_eq!(
+                crate::ui::theme::search_marks(cx),
+                theme.search_marks(),
+                "{}: the installed marks",
+                theme.id
+            );
+        });
+    }
+
+    /// Draws the hit rows at `ui_font_size` and measures what they drew: for
+    /// every match, the fill 3:1 off both rows the row paints on (resting and
+    /// hover) and the ink 4.5:1 (normal class) or 5.0:1 (small class) on the
+    /// highlight, with literal floors, and the drawn style equal to the cached
+    /// pair of the expected class.
+    fn assert_painted(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, size: f32, small: bool) {
+        let painted = paint_at(app, vcx, size);
+        assert!(
+            !painted.is_empty(),
+            "no hit row was drawn at ui_font_size {size}"
+        );
+        let (marks, rows, row_ink) = vcx.update(|_, cx| {
+            let sf = cx.global::<crate::ui::presets::Surfaces>();
+            (
+                crate::ui::theme::search_marks(cx),
+                [sf.sidebar.base, sf.popover.hover],
+                rgb_of(cx.theme().sidebar_foreground),
+            )
+        });
+        let floor = if small { 5.0 } else { 4.5 };
+        for (text_px, highlights) in &painted {
+            assert_eq!(
+                *text_px,
+                TEXT_MONO * size,
+                "the row text size the class is chosen for"
+            );
+            assert_eq!(*text_px <= 12.0, small, "{size}: size class");
+            assert!(!highlights.is_empty(), "a hit row without a match");
+            let want = mark_style(if small { marks.small } else { marks.normal });
+            for (range, style) in highlights {
+                let fill = style.background_color.unwrap_or_else(|| {
+                    panic!("{size}: match {range:?} was drawn with no highlight fill")
+                });
+                let ink = style.color.map(rgb_of).unwrap_or(row_ink);
+                for (state, row) in ["resting", "hover"].into_iter().zip(rows) {
+                    let comp = over(row, fill);
+                    let highlight = crate::ui::presets::contrast(comp, row);
+                    assert!(
+                        highlight >= 3.0,
+                        "{size} {state}: highlight {comp:06x} on row {row:06x} is {highlight:.2}:1 (< 3)"
+                    );
+                    let text = crate::ui::presets::contrast(ink, comp);
+                    assert!(
+                        text >= floor,
+                        "{size} {state}: ink {ink:06x} on highlight {comp:06x} is {text:.2}:1 (< {floor})"
+                    );
+                }
+                assert_eq!(
+                    *style,
+                    want,
+                    "{size}: the drawn match is the cached {} pair",
+                    if small { "small" } else { "normal" }
+                );
+            }
+        }
+    }
+
+    /// The search hit rows really paint the cached pair for the size class
+    /// their text is at, live as the UI font size moves: 16 (13px) is the
+    /// normal class, 14 (11.375px) the small one, and back to 16 again with no
+    /// stale class. For every drawn match, the ink and the fill it actually
+    /// drew are measured against both rows the row paints on (resting and
+    /// hover), with literal floors: the highlight 3:1 off the row, the glyphs
+    /// 4.5:1 (normal) or 5.0:1 (small) on the highlight.
+    #[gpui::test]
+    fn search_matches_are_painted_with_the_cached_pair_per_text_size(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("marks");
+        std::fs::write(root.join("a.rs"), "fn needle() {}\n// Needle needle\n").unwrap();
+        let (app, mut vcx, _pane) = search_panel_on(cx, &root);
+        type_query(&app, &mut vcx, "needle");
+        landed(&app, &mut vcx);
+
+        // Phase 1, the finding's own state: the DEFAULT DARK theme at the
+        // default 16px UI font (13px row text, normal class). The old paint
+        // is #c9c9cb on #696955, 3.38:1, which fails the 4.5 floor.
+        let dark = crate::ui::presets::builtins()
+            .into_iter()
+            .find(|t| t.id == "dark")
+            .expect("the default dark built-in");
+        install_theme(&mut vcx, &dark);
+        assert_painted(&app, &mut vcx, 16.0, false);
+
+        // Phase 2, a real, validated theme whose two classes have DIFFERENT
+        // pairs, applied through `apply_theme` (so the cache the row reads is
+        // the production one, installed outside any render). Without it a
+        // wrongly chosen class could paint an identical pair and go unnoticed.
+        let theme = crate::ui::presets::builtins()
+            .into_iter()
+            .chain(crate::ui::presets::generated_theme_grid())
+            .find(|t| {
+                let m = t.search_marks();
+                matches!((m.normal, m.small),
+                    (SearchMark::Fill(a), SearchMark::Fill(b)) if a != b)
+            })
+            .expect("a built-in or generated theme whose normal and small pairs differ");
+        install_theme(&mut vcx, &theme);
+        let cached = vcx.update(|_, cx| crate::ui::theme::search_marks(cx));
+        assert_ne!(
+            cached.normal, cached.small,
+            "witness: the installed theme has distinct normal and small pairs"
+        );
+        for (size, small) in [(16.0, false), (14.0, true), (16.0, false)] {
+            assert_painted(&app, &mut vcx, size, small);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A class with no pair (forced through the cache the paint reads) is
+    /// drawn as an underline in the row's own ink: no fill, no colour of its
+    /// own, in both classes, live across a size change.
+    #[gpui::test]
+    fn an_unavailable_class_is_drawn_as_a_plain_underline(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("unavailable");
+        std::fs::write(root.join("a.rs"), "fn needle() {}\n").unwrap();
+        let (app, mut vcx, _pane) = search_panel_on(cx, &root);
+        type_query(&app, &mut vcx, "needle");
+        landed(&app, &mut vcx);
+
+        for size in [16.0, 14.0] {
+            // Settle the font (and the theme the config watcher re-applies
+            // with it) FIRST, then force the miss into the cache the paint
+            // reads, LAST, and measure the very next frame.
+            set_font(&app, &mut vcx, size);
+            let forced = vcx.update(|_, cx| {
+                let sf = cx.global::<crate::ui::presets::Surfaces>();
+                let miss = crate::ui::presets::search_mark_pair_for(
+                    [sf.sidebar.base, sf.popover.hover],
+                    sf.sidebar.text_resting,
+                    0xffff00,
+                    25.0,
+                )
+                .expect_err("no pair reaches 25:1");
+                let forced = crate::ui::presets::SearchMarks {
+                    normal: SearchMark::Unavailable(miss),
+                    small: SearchMark::Unavailable(miss),
+                };
+                cx.set_global(forced);
+                forced
+            });
+            let cached = |vcx: &mut VisualTestContext| {
+                vcx.update(|_, cx| crate::ui::theme::search_marks(cx))
+            };
+            assert_eq!(
+                cached(&mut vcx),
+                forced,
+                "{size}: the forced miss is the cache"
+            );
+            let painted = redraw(&app, &mut vcx);
+            assert_eq!(
+                cached(&mut vcx),
+                forced,
+                "{size}: the cache was replaced while the measured frame drew"
+            );
+            assert!(!painted.is_empty(), "no hit row at ui_font_size {size}");
+            for (_, highlights) in &painted {
+                assert!(!highlights.is_empty());
+                for (_, style) in highlights {
+                    assert_eq!(style.background_color, None, "{size}: no fill");
+                    assert_eq!(style.color, None, "{size}: no ink of its own");
+                    assert_eq!(
+                        style.underline,
+                        Some(UnderlineStyle {
+                            thickness: px(1.),
+                            color: None,
+                            wavy: false
+                        }),
+                        "{size}: a 1px underline in the row ink"
+                    );
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn hit(text: &str, needle: &str) -> ContentHit {
+        let ranges = text
+            .match_indices(needle)
+            .map(|(at, m)| ContentRange {
+                start: at as u32,
+                end: (at + m.len()) as u32,
+            })
+            .collect();
+        ContentHit {
+            path: PathBuf::from("a.rs"),
+            line: 7,
+            column: 61,
+            text: text.to_string(),
+            ranges,
+        }
+    }
+
+    fn shown(hit: &ContentHit) -> Vec<&str> {
+        hit.ranges
+            .iter()
+            .map(|r| &hit.text[r.start as usize..r.end as usize])
+            .collect()
+    }
+
+    #[test]
+    fn a_match_near_the_start_is_left_where_it_is() {
+        let mut h = hit("return new Intl.NumberFormat(locale)", "NumberFormat");
+        let before = h.clone();
+        window_hit(&mut h);
+        assert_eq!(h, before, "16 bytes in is exactly the lead that is kept");
+    }
+
+    #[test]
+    fn a_late_match_starts_sixteen_bytes_before_it() {
+        let line = format!("{}needle and the rest of the line", "x".repeat(60));
+        let mut h = hit(&line, "needle");
+        window_hit(&mut h);
+        assert_eq!(
+            h.text,
+            format!("…{}needle and the rest of the line", "x".repeat(16))
+        );
+        assert_eq!(shown(&h), vec!["needle"]);
+        assert_eq!(
+            (h.line, h.column),
+            (7, 61),
+            "where the match is in the file does not move with the excerpt"
+        );
+    }
+
+    #[test]
+    fn every_range_moves_by_the_same_amount() {
+        let line = format!("{}needle, needle and a third needle", "x".repeat(40));
+        let mut h = hit(&line, "needle");
+        window_hit(&mut h);
+        assert_eq!(h.ranges.len(), 3);
+        assert_eq!(shown(&h), vec!["needle"; 3]);
+        assert!(h.text.starts_with('…'));
+    }
+
+    #[test]
+    fn a_cut_never_lands_inside_a_character() {
+        // Each `針` is three bytes, so sixteen bytes back from the match falls
+        // inside one for most prefix lengths.
+        for chars in 7..14 {
+            let line = format!("{}needle", "針".repeat(chars));
+            let mut h = hit(&line, "needle");
+            window_hit(&mut h);
+            assert_eq!(shown(&h), vec!["needle"], "{chars} wide characters before");
+            assert!(h.text.starts_with('…'), "{chars}");
+            assert!(h.text.chars().filter(|c| *c == '針').count() <= 6);
+        }
+    }
+
+    #[test]
+    fn a_cut_never_separates_a_base_from_its_mark_or_an_emoji_sequence() {
+        // `e` + U+0301 is two chars and one cluster; a family emoji is seven
+        // chars and one cluster.
+        let combining = format!("{}needle", "e\u{301}".repeat(20));
+        let family = format!("{}needle", "👨‍👩‍👧".repeat(4));
+        for line in [combining, family] {
+            let mut h = hit(&line, "needle");
+            window_hit(&mut h);
+            let kept = h.text.trim_start_matches('…');
+            assert!(
+                !kept.starts_with('\u{301}') && !kept.starts_with('\u{200d}'),
+                "the excerpt opens on half a cluster: {:?}",
+                h.text
+            );
+            assert_eq!(shown(&h), vec!["needle"]);
+        }
+    }
+
+    #[test]
+    fn a_line_the_host_already_cut_does_not_gain_a_second_ellipsis() {
+        let line = format!("…{}needle", "x".repeat(50));
+        let mut h = hit(&line, "needle");
+        window_hit(&mut h);
+        assert_eq!(h.text.matches('…').count(), 1);
+        assert!(h.text.starts_with('…'));
+        assert_eq!(shown(&h), vec!["needle"]);
+    }
+
+    #[test]
+    fn a_hit_without_usable_ranges_is_left_alone() {
+        let mut none = hit("some line", "zzz");
+        let before = none.clone();
+        window_hit(&mut none);
+        assert_eq!(none, before);
+
+        let mut wrong = hit("short", "short");
+        wrong.ranges = vec![ContentRange {
+            start: 900,
+            end: 906,
+        }];
+        let before = wrong.clone();
+        window_hit(&mut wrong);
+        assert_eq!(
+            wrong, before,
+            "a range outside the text is the row's to drop"
+        );
+    }
+
+    #[test]
+    fn malformed_ranges_are_dropped_as_the_row_would_and_never_panic() {
+        // `é` is two bytes, so 61 is inside it. The real match is past the
+        // lead, so the line is windowed, and each bad range sits ahead of it
+        // where blind arithmetic would have underflowed or sliced inside a
+        // character.
+        let line = format!("{}é needle and the rest", "x".repeat(60));
+        let bad = [
+            ContentRange { start: 50, end: 10 },
+            ContentRange { start: 30, end: 30 },
+            ContentRange { start: 61, end: 70 },
+            ContentRange { start: 40, end: 61 },
+            ContentRange {
+                start: u32::MAX - 1,
+                end: u32::MAX,
+            },
+            ContentRange {
+                start: 70,
+                end: 9_000,
+            },
+            ContentRange {
+                start: u32::MAX,
+                end: u32::MAX,
+            },
+        ];
+        for bad in bad {
+            let mut h = hit(&line, "needle");
+            h.ranges.insert(0, bad);
+            window_hit(&mut h);
+            assert!(
+                h.text.starts_with('…'),
+                "{bad:?}: a bad range stopped the window"
+            );
+            assert_eq!(h.ranges.len(), 1, "{bad:?}: only a usable range survives");
+            assert_eq!(shown(&h), vec!["needle"]);
+        }
     }
 }

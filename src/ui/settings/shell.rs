@@ -14,6 +14,17 @@ pub(crate) type PickFn = Rc<dyn Fn(&mut Tty59App, &mut Window, &mut Context<Tty5
 /// The settings page's own close tile, hung in the top band's right corner.
 const CLOSE_TILE: f32 = 26.;
 
+/// The results page puts the title and notices in the scroll pane's first
+/// child; result number `n` is child `SEARCH_LEADING_CHILDREN + n`.
+const SEARCH_LEADING_CHILDREN: usize = 1;
+
+/// What fills the scroll pane under the header: a page, framed as one column,
+/// or the search results, one scroll child each.
+enum PageBody {
+    Page(AnyElement),
+    Results(Vec<AnyElement>),
+}
+
 /// One line of a dropdown's menu.
 pub(crate) enum MenuEntry {
     Item {
@@ -44,6 +55,37 @@ impl MenuEntry {
             trailing: None,
             on_pick: Rc::new(on_pick),
         }
+    }
+}
+
+/// A control built to stay at most 140px wide (a switch, a stepper). Its row
+/// keeps it beside the label instead of stacking it under, however narrow the
+/// page or large the interface font.
+pub(crate) struct InlineControl(AnyElement);
+
+/// Marks `control` as one of those small fixed-size controls. The size itself
+/// is the control's own; a row never measures it.
+pub(crate) fn inline_control(control: impl IntoElement) -> InlineControl {
+    InlineControl(control.into_any_element())
+}
+
+/// What a row is given for its right-hand side. A bare element may be wider
+/// than the label column can spare, so the row stacks it on a narrow page; an
+/// [`InlineControl`] never does.
+pub(crate) enum RowControl {
+    Free(AnyElement),
+    Inline(AnyElement),
+}
+
+impl From<AnyElement> for RowControl {
+    fn from(control: AnyElement) -> Self {
+        RowControl::Free(control)
+    }
+}
+
+impl From<InlineControl> for RowControl {
+    fn from(control: InlineControl) -> Self {
+        RowControl::Inline(control.0)
     }
 }
 
@@ -134,6 +176,7 @@ impl Tty59App {
             label,
             leading,
             open,
+            false,
             &tk,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -197,7 +240,7 @@ impl Tty59App {
                             div()
                                 .pl(px(12.))
                                 .text_size(fs(11.5))
-                                .text_color(tk.k4)
+                                .text_color(tk.sub)
                                 .child(text),
                         )
                     })
@@ -215,7 +258,7 @@ impl Tty59App {
                         .pb(px(6.))
                         .text_size(fs(11.5))
                         .line_height(px(16.))
-                        .text_color(tk.k45)
+                        .text_color(tk.sub)
                         .child(text),
                 ),
             };
@@ -244,6 +287,7 @@ impl Tty59App {
             label,
             None,
             open,
+            false,
             &tk,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -312,7 +356,7 @@ impl Tty59App {
                         .px(px(8.))
                         .flex()
                         .items_center()
-                        .text_color(tk.k35)
+                        .text_color(tk.sub)
                         .child(t(L10nKey::SettingsNoMatchesShort)),
                 );
             }
@@ -371,7 +415,7 @@ impl Tty59App {
                                     .h(px(28.)),
                             ),
                         )
-                        .child(div().text_size(fs(11.)).text_color(tk.k35).child("↑↓ ↵")),
+                        .child(div().text_size(fs(11.)).text_color(tk.sub).child("↑↓ ↵")),
                 )
                 .child(list)
         });
@@ -407,6 +451,22 @@ impl Tty59App {
             .into_any_element()
     }
 
+    /// A slice of the page column: the side padding, the reading width and the
+    /// forty-point gap between what it holds. Every page and every piece of the
+    /// results page is framed here, so they line up.
+    ///
+    /// A block, not a flex box: as a flex item it would negotiate a height with
+    /// the pane and leave most of the page outside the scroll range.
+    fn settings_column(children: impl IntoIterator<Item = AnyElement>, scale: f32) -> Div {
+        div().w_full().px(px(56.)).child(
+            v_flex()
+                .w_full()
+                .max_w(px(READING_COLUMN * scale))
+                .gap(px(40.))
+                .children(children),
+        )
+    }
+
     /// A page: its groups, forty points apart.
     pub(crate) fn settings_page(groups: impl IntoIterator<Item = AnyElement>) -> AnyElement {
         v_flex().gap(px(40.)).children(groups).into_any_element()
@@ -416,7 +476,7 @@ impl Tty59App {
         &self,
         label: impl Into<String>,
         desc: impl Into<String>,
-        control: AnyElement,
+        control: impl Into<RowControl>,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         self.settings_row_gated_when(label, desc, control, false, cx)
@@ -430,10 +490,14 @@ impl Tty59App {
         &self,
         label: impl Into<String>,
         desc: impl Into<String>,
-        control: AnyElement,
+        control: impl Into<RowControl>,
         gated: bool,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
+        let (control, inline) = match control.into() {
+            RowControl::Free(control) => (control, false),
+            RowControl::Inline(control) => (control, true),
+        };
         let tk = Tk::of(cx);
         let label = label.into();
         let desc = desc.into();
@@ -448,7 +512,7 @@ impl Tty59App {
         let entry = settings_search_entries()
             .iter()
             .find(|entry| t(entry.title) == label);
-        let modified = entry.is_some_and(|entry| entry.modified(cx.global::<Config>()));
+        let modified = entry.is_some_and(|entry| entry.modified_in(cx));
         let capture = self
             .active_settings()
             .is_some_and(|s| s.search_rows.borrow().is_some());
@@ -477,15 +541,17 @@ impl Tty59App {
         let first_hit_anchor = self.first_hit_anchor(&label, cx);
         // The control never shrinks, so on a narrow pane it would squeeze the
         // label column to a letter per line. Below the width where both still
-        // fit, the control goes on a line of its own instead.
-        let stacked = self.settings_row_under(STACK_ROW_BELOW, cx);
+        // fit, the control goes on a line of its own instead — unless it is
+        // small enough to fit anywhere.
+        let stacked = !inline && self.settings_row_under(STACK_ROW_BELOW, cx);
         // The reset sits on the label's own line, beside the name it resets,
         // so a changed row keeps the height of an unchanged one. Rows the
         // catalog cannot reset in place still say they differ.
-        let resettable = entry.filter(|e| {
-            e.title != L10nKey::SettingsSearchKeybindingsTitle
-                && e.title != L10nKey::SettingsThemeIntroTitle
-        });
+        let resettable = entry.filter(|e| e.title != L10nKey::SettingsSearchKeybindingsTitle);
+        #[cfg(test)]
+        let reset_debug_id = format!("{element_id}-reset");
+        #[cfg(test)]
+        let tag_debug_id = format!("{element_id}-modified-tag");
         let title_line = h_flex()
             .gap(px(8.))
             .items_center()
@@ -494,29 +560,43 @@ impl Tty59App {
             .when(modified, |line| match resettable {
                 Some(entry) => {
                     let key = entry.title;
-                    line.child(
-                        div()
-                            .id(SharedString::from(format!("reset-setting-{key:?}")))
-                            .role(gpui::Role::Button)
-                            .aria_label(reset_name.clone())
-                            .flex_shrink_0()
-                            .text_size(fs(11.5))
-                            .text_color(tk.k4)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(tk.fg))
-                            .child(t(L10nKey::Reset))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.reset_settings_value(key, window, cx)
-                            })),
-                    )
-                }
-                None => line.child(
-                    div()
+                    let reset = div()
+                        .id(SharedString::from(format!("reset-setting-{key:?}")))
+                        .role(gpui::Role::Button)
+                        .aria_label(reset_name.clone())
                         .flex_shrink_0()
                         .text_size(fs(11.5))
-                        .text_color(tk.k4)
-                        .child(t(L10nKey::SettingsModified)),
-                ),
+                        .text_color(tk.sub)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(tk.fg))
+                        .child(t(L10nKey::Reset))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.reset_settings_value(key, window, cx)
+                        }));
+                    #[cfg(test)]
+                    let reset = kit::probe("settings.reset", reset);
+                    #[cfg(test)]
+                    let reset = reset.debug_selector({
+                        let id = reset_debug_id.clone();
+                        move || id.clone()
+                    });
+                    line.child(reset)
+                }
+                None => {
+                    let tag = div()
+                        .flex_shrink_0()
+                        .text_size(fs(11.5))
+                        .text_color(tk.sub)
+                        .child(t(L10nKey::SettingsModified));
+                    #[cfg(test)]
+                    let tag = kit::probe("settings.modified-tag", tag);
+                    #[cfg(test)]
+                    let tag = tag.debug_selector({
+                        let id = tag_debug_id.clone();
+                        move || id.clone()
+                    });
+                    line.child(tag)
+                }
             });
         // Tests find the row's pieces by stable selectors derived from the
         // row's own `settings-row-{key}` id. Both the selector strings and the
@@ -537,8 +617,10 @@ impl Tty59App {
                 let description = div()
                     .text_size(fs(12.))
                     .line_height(px(17.))
-                    .text_color(tk.k5)
+                    .text_color(tk.sub)
                     .child(desc);
+                #[cfg(test)]
+                let description = kit::probe("settings.row-desc", description);
                 #[cfg(test)]
                 let description = description.debug_selector(|| format!("{element_id}-desc"));
                 col.child(description)
@@ -740,7 +822,7 @@ impl Tty59App {
                         s.bg(tk.chip).shadow(tk.raised()).text_color(tk.fg)
                     })
                     .when(!active, |s| {
-                        s.text_color(tk.k5).hover(move |h| h.text_color(tk.fg))
+                        s.text_color(tk.sub).hover(move |h| h.text_color(tk.fg))
                     })
                     .child(label.to_string())
                     .cursor_pointer()
@@ -758,11 +840,12 @@ impl Tty59App {
         on: bool,
         cx: &mut Context<Self>,
         set: impl Fn(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
-        kit::switch(id)
-            .checked(on)
-            .on_click(cx.listener(move |this, on: &bool, window, cx| set(this, *on, window, cx)))
-            .into_any_element()
+    ) -> InlineControl {
+        inline_control(
+            kit::switch(id).checked(on).on_click(
+                cx.listener(move |this, on: &bool, window, cx| set(this, *on, window, cx)),
+            ),
+        )
     }
 
     pub(crate) fn settings_button(
@@ -809,15 +892,10 @@ impl Tty59App {
             .set(settings_row_width(viewport_w, scale));
         self.settings_hit_anchored.set(false);
 
-        // A query that matched here has to be reachable, not just counted: the
-        // anchor lands on the first matching row, and `scroll_to` reads where
-        // it ended up on the frame after this one.
-        if searching
-            && let Some(s) = self.active_settings()
-            && s.reveal_first_hit.replace(false)
-        {
-            s.search_anchor.scroll_to(window, cx);
-        }
+        // Arriving on a page to look for a setting has to take the page to it:
+        // the anchor lands on the setting, and `scroll_to` reads where it
+        // ended up on the frame after this one. The results page is not that:
+        // a query keeps the title and the first page heading in view.
         if let Some(s) = self.active_settings()
             && !searching
             && s.reveal_first_hit.get()
@@ -836,7 +914,8 @@ impl Tty59App {
         let nav = self.render_settings_nav(nav_width(viewport_w, scale), searching, cx);
 
         let (title, subtitle, content) = if searching {
-            self.render_settings_results(cx)
+            let (title, subtitle, results) = self.render_settings_results(cx);
+            (title, subtitle, PageBody::Results(results))
         } else {
             let content = match section {
                 SettingsSection::General => self.render_settings_general(cx),
@@ -849,7 +928,11 @@ impl Tty59App {
                 SettingsSection::Keybindings => self.render_settings_keybindings(cx),
                 SettingsSection::About => self.render_settings_about(cx),
             };
-            (t(section.title()).to_string(), None, content)
+            (
+                t(section.title()).to_string(),
+                None,
+                PageBody::Page(content),
+            )
         };
 
         // Up in the title-bar band, where the window's own chrome sits, and
@@ -864,7 +947,7 @@ impl Tty59App {
                 .gap(px(4.))
                 .items_center()
                 .text_size(fs(12.))
-                .text_color(tk.k5)
+                .text_color(tk.sub)
                 .cursor_pointer()
                 .hover(move |s| s.text_color(tk.fg))
                 .child(Icon::empty().path("icons/settings/back.svg").size(px(10.)))
@@ -885,32 +968,46 @@ impl Tty59App {
                     .child(title),
             )
             .when_some(subtitle, |row, sub| {
-                row.child(div().text_size(fs(12.)).text_color(tk.k4).child(sub))
+                let subtitle = div().text_size(fs(12.)).text_color(tk.sub).child(sub);
+                #[cfg(test)]
+                let subtitle = kit::probe("settings.results-subtitle", subtitle);
+                #[cfg(test)]
+                let subtitle = subtitle.debug_selector(|| "settings-results-subtitle".to_string());
+                row.child(subtitle)
             });
 
         let notices = self.render_settings_notices(cx);
+        let save_banner = self.render_settings_save_banner(cx);
 
-        let body = v_flex()
+        let head = std::iter::once(header.into_any_element()).chain(notices);
+        let pane = v_flex()
             .id("settings-content")
             .size_full()
             .overflow_y_scroll()
             .when_some(self.active_settings(), |pane, s| {
                 pane.track_scroll(&s.content_scroll)
-            })
-            .child(
-                // A block, not a flex box: as a flex item it would negotiate a
-                // height with the pane and leave most of the page outside the
-                // scroll range.
-                div().w_full().px(px(56.)).pb(px(48.)).child(
-                    v_flex()
-                        .w_full()
-                        .max_w(px(READING_COLUMN * scale))
-                        .gap(px(40.))
-                        .child(header)
-                        .children(notices)
-                        .child(content),
-                ),
-            );
+            });
+        let body = match content {
+            // One scroll child per result, so the keyboard can ask the scroll
+            // handle to reveal the selected one (`scroll_to_item`): the header
+            // is child 0, the results follow.
+            PageBody::Results(content) => {
+                let last = content.len().saturating_sub(1);
+                pane.child(
+                    Self::settings_column(head, scale)
+                        .flex_shrink_0()
+                        .pb(px(40.)),
+                )
+                .children(content.into_iter().enumerate().map(|(i, result)| {
+                    Self::settings_column([result], scale)
+                        .flex_shrink_0()
+                        .when(i == last, |c| c.pb(px(48.)))
+                }))
+            }
+            PageBody::Page(content) => pane.child(
+                Self::settings_column(head.chain(std::iter::once(content)), scale).pb(px(48.)),
+            ),
+        };
         let main = v_flex()
             .flex_1()
             .min_w_0()
@@ -926,6 +1023,10 @@ impl Tty59App {
                     .px(px(56.))
                     .children(back),
             )
+            // Not part of the scrolling page, and not a child of it: the
+            // header-first child mapping the results page scrolls by is
+            // untouched.
+            .children(save_banner)
             .when_some(self.active_settings(), |pane, s| {
                 pane.child(crate::ui::scrollbar::with_inset_vertical_scrollbar(
                     "settings-content-scrollbar",
@@ -1019,7 +1120,7 @@ impl Tty59App {
                         Icon::empty()
                             .path("icons/settings/close.svg")
                             .size(px(10.))
-                            .text_color(tk.k45),
+                            .text_color(tk.sub),
                     )
                     .tooltip(|window, cx| {
                         gpui_component::tooltip::Tooltip::new(t(L10nKey::Close)).build(window, cx)
@@ -1113,34 +1214,74 @@ impl Tty59App {
                     .into_any_element(),
             );
         }
-        if let Some(error) = self.active_settings().and_then(|s| s.save_error.clone()) {
-            out.push(
-                v_flex()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .text_size(fs(12.5))
-                            .text_color(tk.danger)
-                            .child(t_fmt(L10nKey::SettingsSaveError, &[("error", &error)])),
-                    )
-                    .child(
-                        h_flex().child(
-                            kit::button(
-                                "retry-settings-save",
-                                t(L10nKey::SettingsRetrySave),
-                                BtnKind::Secondary,
-                            )
-                            .on_click(
-                                cx.listener(|this, _, _window, cx| {
-                                    this.persist_settings_config(cx)
-                                }),
-                            ),
-                        ),
-                    )
-                    .into_any_element(),
-            );
-        }
         out
+    }
+
+    /// A failed write, said under the title band and outside the scrolling
+    /// page so scrolling or changing section never hides it. It stays until a
+    /// write lands: Retry runs the same save every toggle does.
+    fn render_settings_save_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.active_settings()?;
+        let error = state.save_error.as_deref()?;
+        let path = state.save_error_path.clone();
+        let tk = Tk::of(cx);
+        let scale = ui_scale(cx);
+        let message = div()
+            .id("settings-save-error")
+            .flex_1()
+            .min_w_0()
+            .text_size(fs(12.5))
+            .line_height(px(18.))
+            .text_color(tk.fg)
+            .child(t_fmt(L10nKey::SettingsSaveError, &[("error", error)]))
+            .when_some(path, |d, path| {
+                d.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(path.clone()).build(window, cx)
+                })
+            });
+        let retry = kit::button(
+            "retry-settings-save",
+            t(L10nKey::SettingsRetrySave),
+            BtnKind::Link,
+        )
+        .on_click(cx.listener(|this, _, _window, cx| this.persist_settings_config(cx)));
+        #[cfg(test)]
+        let retry = div()
+            .flex_shrink_0()
+            .debug_selector(|| "settings-save-retry".to_string())
+            .child(retry);
+        let bar = h_flex()
+            .id("settings-save-banner")
+            .role(gpui::Role::Alert)
+            .w_full()
+            .max_w(px(READING_COLUMN * scale))
+            .px(px(12.))
+            .py(px(8.))
+            .gap(px(10.))
+            .items_start()
+            .rounded(px(8.))
+            .shadow(vec![kit::ring(tk.k15, kit::hairline(), true)])
+            .child(
+                div()
+                    .mt(px(6.))
+                    .size(px(6.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(tk.danger),
+            )
+            .child(message)
+            .child(retry);
+        #[cfg(test)]
+        let bar = bar.debug_selector(|| "settings-save-banner".to_string());
+        Some(
+            div()
+                .w_full()
+                .flex_shrink_0()
+                .px(px(56.))
+                .pb(px(12.))
+                .child(bar)
+                .into_any_element(),
+        )
     }
 
     fn render_settings_nav(
@@ -1157,10 +1298,11 @@ impl Tty59App {
         let search = s.search.clone();
         let modified_only = s.modified_only;
         let cfg = cx.global::<Config>();
+        let view = ThemeView::of(cx);
         let modified_in = |target: SettingsSection| {
             settings_search_entries()
                 .iter()
-                .filter(|e| e.section == target && e.modified(cfg))
+                .filter(|e| e.section == target && e.modified(cfg, view))
                 .count()
         };
         let counts: Vec<(SettingsSection, usize)> = SettingsSection::ALL
@@ -1206,12 +1348,13 @@ impl Tty59App {
                         .child(t(target.title())),
                 )
                 .when(count > 0, |r| {
-                    r.child(
-                        div()
-                            .text_size(fs(11.5))
-                            .text_color(tk.k4)
-                            .child(count.to_string()),
-                    )
+                    let badge = div()
+                        .text_size(fs(11.5))
+                        .text_color(tk.sub)
+                        .child(count.to_string());
+                    #[cfg(test)]
+                    let badge = kit::probe("settings.nav-count", badge);
+                    r.child(badge)
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.navigate_settings(target, None, window, cx)
@@ -1254,13 +1397,16 @@ impl Tty59App {
                                 ),
                             )
                             .when(!search_focused, |r| {
-                                r.child(div().text_size(fs(11.)).text_color(tk.k35).child(
+                                let hint = div().text_size(fs(11.)).text_color(tk.sub).child(
                                     if cfg!(target_os = "macos") {
                                         "⌘F"
                                     } else {
                                         "Ctrl F"
                                     },
-                                ))
+                                );
+                                #[cfg(test)]
+                                let hint = kit::probe("settings.search-hint", hint);
+                                r.child(hint)
                             }),
                     ),
             )
@@ -1290,14 +1436,14 @@ impl Tty59App {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_color(tk.k6)
+                                .text_color(tk.sub)
                                 .child(t(L10nKey::SettingsModifiedOnly)),
                         )
                         .when(total > 0, |r| {
                             r.child(
                                 div()
                                     .text_size(fs(11.5))
-                                    .text_color(tk.k4)
+                                    .text_color(tk.sub)
                                     .child(total.to_string()),
                             )
                         })
@@ -1352,7 +1498,12 @@ impl Tty59App {
             return;
         };
         let query = s.search.read(cx).value().trim().to_lowercase();
-        let entries = search_result_order(&query, s.modified_only, cx.global::<Config>());
+        let entries = search_result_order(
+            &query,
+            s.modified_only,
+            cx.global::<Config>(),
+            ThemeView::of(cx),
+        );
         let actions = search_result_actions(&query, s.modified_only);
         let count = entries.len() + actions.len();
         if count > 0 {
@@ -1374,11 +1525,26 @@ impl Tty59App {
                 } else {
                     index.saturating_sub(1)
                 };
-                s.reveal_first_hit.set(true);
+                // Only a move by key scrolls, and only when the new row is
+                // outside the view: the pane brings it in with the least
+                // movement and leaves an in-view row where it is.
+                s.content_scroll
+                    .scroll_to_item(SEARCH_LEADING_CHILDREN + s.search_selection);
                 cx.notify();
             }
         }
         cx.stop_propagation();
+    }
+
+    /// Empties the search box and leaves the user typing in it, back on the
+    /// category they were reading before they searched.
+    fn clear_settings_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(search) = self.active_settings().map(|s| s.search.clone()) else {
+            return;
+        };
+        search.update(cx, |input, cx| input.set_value("", window, cx));
+        window.focus(&search.read(cx).focus_handle(cx), cx);
+        self.autoselect_settings_search(cx);
     }
 
     /// Opens the shortcut editor filtered to one action.
@@ -1388,14 +1554,21 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+        let open = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
             this.navigate_settings(SettingsSection::Keybindings, None, window, cx);
             if let Some(s) = this.active_settings() {
                 s.shortcut_search
                     .clone()
                     .update(cx, |s, cx| s.set_value(action, window, cx));
             }
-        });
+        };
+        // Moving within Settings: only edits that live in the page ask first,
+        // a failed write stays on the banner.
+        if self.ssh_form_dirty(cx) || self.theme_draft_dirty() {
+            self.with_settings_edits_resolved(window, cx, open);
+        } else {
+            open(self, window, cx);
+        }
     }
 
     /// Search results and the "modified" filter: the matching rows, live,
@@ -1403,14 +1576,15 @@ impl Tty59App {
     fn render_settings_results(
         &self,
         cx: &mut Context<Self>,
-    ) -> (String, Option<String>, AnyElement) {
+    ) -> (String, Option<String>, Vec<AnyElement>) {
         let tk = Tk::of(cx);
         let Some(state) = self.active_settings() else {
-            return (String::new(), None, div().into_any_element());
+            return (String::new(), None, vec![div().into_any_element()]);
         };
         let query = state.search.read(cx).value().trim().to_lowercase();
         let modified_only = state.modified_only;
         let selection = state.search_selection;
+        let view = ThemeView::of(cx);
         *state.search_rows.borrow_mut() = Some(Vec::new());
         // Build each page that has a match once, and keep only the matching
         // rows. Discarded page chrome never enters the element tree, so the
@@ -1419,7 +1593,7 @@ impl Tty59App {
             if !settings_search_entries().iter().any(|entry| {
                 entry.section == section
                     && entry_matches(entry, &query)
-                    && (!modified_only || entry.modified(cx.global::<Config>()))
+                    && (!modified_only || entry.modified(cx.global::<Config>(), view))
             }) {
                 continue;
             }
@@ -1443,7 +1617,11 @@ impl Tty59App {
                     self.render_settings_mobile(cx);
                 }
                 SettingsSection::Agents => {
-                    self.render_command_line_rows(cx);
+                    // The whole page, so the Machine row is built by the same
+                    // helper the page uses and captured as itself. The agent
+                    // rows are not settings rows and are discarded with the
+                    // rest of the page's chrome.
+                    self.render_settings_agents(cx);
                 }
                 SettingsSection::About => {
                     self.render_settings_about(cx);
@@ -1458,99 +1636,88 @@ impl Tty59App {
             .borrow_mut()
             .take()
             .unwrap_or_default();
-        let matches = search_result_order(&query, modified_only, cx.global::<Config>());
+        let matches = search_result_order(&query, modified_only, cx.global::<Config>(), view);
         let actions = search_result_actions(&query, modified_only);
 
-        let mut groups: Vec<AnyElement> = Vec::new();
-        let mut index = 0usize;
-        for section in SettingsSection::ALL {
-            let here: Vec<&&SearchEntry> =
-                matches.iter().filter(|e| e.section == section).collect();
-            if here.is_empty() {
-                continue;
-            }
-            let mut rows = Vec::new();
-            for entry in here {
-                let title = entry.title;
-                let target = if title == L10nKey::SettingsSearchKeybindingsTitle {
-                    SettingsSection::Keybindings
-                } else {
-                    entry.section
-                };
-                let control = controls
-                    .iter()
-                    .position(|(key, _)| *key == title)
-                    .map(|i| controls.remove(i).1);
-                let selected = index == selection;
-                let row = control.unwrap_or_else(|| {
-                    self.settings_row(
-                        t(title),
-                        entry.description(),
-                        kit::button(
-                            SharedString::from(format!("search-open-{title:?}")),
-                            t(L10nKey::SettingsOpenSetting),
-                            BtnKind::Secondary,
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.navigate_settings(target, Some(title), window, cx)
-                        }))
-                        .into_any_element(),
-                        cx,
+        // One chunk per result, each a child of the scroll pane: the keyboard
+        // reveals the selected result by its child position, which is
+        // `SEARCH_LEADING_CHILDREN + index`. A page's heading travels with the
+        // first result under it, so revealing that result reveals the heading.
+        let mut chunks: Vec<AnyElement> = Vec::with_capacity(matches.len() + actions.len() + 1);
+        for (index, entry) in matches.iter().enumerate() {
+            let title = entry.title;
+            let section = entry.section;
+            let target = if title == L10nKey::SettingsSearchKeybindingsTitle {
+                SettingsSection::Keybindings
+            } else {
+                section
+            };
+            let control = controls
+                .iter()
+                .position(|(key, _)| *key == title)
+                .map(|i| controls.remove(i).1);
+            let selected = index == selection;
+            let row = control.unwrap_or_else(|| {
+                self.settings_row(
+                    t(title),
+                    entry.description(),
+                    kit::button(
+                        SharedString::from(format!("search-open-{title:?}")),
+                        t(L10nKey::SettingsOpenSetting),
+                        BtnKind::Secondary,
                     )
-                    .into_any_element()
-                });
-                // The wrapper is what carries a selected result's highlight
-                // background, so tests measure it too, by the same id it
-                // already carries.
-                #[cfg(test)]
-                let wrapper_debug_id = format!("search-result-{title:?}");
-                let wrapper = div()
-                    .id(SharedString::from(format!("search-result-{title:?}")))
-                    .when(selected, |d| {
-                        d.bg(tk.k04).rounded(px(7.)).mx(px(-8.)).px(px(8.))
-                    })
-                    .when_some(
-                        self.active_settings()
-                            .filter(|_| selected)
-                            .map(|s| s.search_anchor.clone()),
-                        |d, anchor| d.anchor_scroll(Some(anchor)),
-                    )
-                    .child(row);
-                #[cfg(test)]
-                let wrapper = wrapper.debug_selector(move || wrapper_debug_id.clone());
-                rows.push(wrapper.into_any_element());
-                index += 1;
-            }
-            groups.push(
-                v_flex()
-                    .child(
-                        div()
-                            .id(SharedString::from(format!(
-                                "search-page-{}",
-                                section.profile_label()
-                            )))
-                            .pb(px(8.))
-                            .text_size(fs(11.5))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(tk.heading)
-                            .cursor_pointer()
-                            .hover(move |s| s.text_color(tk.fg))
-                            .child(t(section.title()))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.navigate_settings(section, None, window, cx)
-                            })),
-                    )
-                    .children(rows)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.navigate_settings(target, Some(title), window, cx)
+                    }))
                     .into_any_element(),
-            );
+                    cx,
+                )
+                .into_any_element()
+            });
+            // The wrapper is what carries a selected result's highlight
+            // background, so tests measure it too, by the same id it
+            // already carries.
+            #[cfg(test)]
+            let wrapper_debug_id = format!("search-result-{title:?}");
+            let wrapper = div()
+                .id(SharedString::from(format!("search-result-{title:?}")))
+                .when(selected, |d| {
+                    d.bg(tk.k04).rounded(px(7.)).mx(px(-8.)).px(px(8.))
+                })
+                .child(row);
+            #[cfg(test)]
+            let wrapper = match selected {
+                true => kit::probe("settings.search-row-selected", wrapper),
+                false => wrapper,
+            };
+            #[cfg(test)]
+            let wrapper = wrapper.debug_selector(move || wrapper_debug_id.clone());
+            let heading = (index == 0 || matches[index - 1].section != section).then(|| {
+                div()
+                    // Static prefix + result index: unique per result, and no
+                    // string is built per frame.
+                    .id(("search-page", index))
+                    .pb(px(8.))
+                    .text_size(fs(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(tk.heading)
+                    .cursor_pointer()
+                    .hover(move |s| s.text_color(tk.fg))
+                    .child(t(section.title()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.navigate_settings(section, None, window, cx)
+                    }))
+                    .into_any_element()
+            });
+            chunks.push(Self::search_result_chunk(heading, index, wrapper));
         }
 
         // Action names stay searchable without a whole shortcut editor in the
         // results: each one is a row that opens the editor on it.
         if !actions.is_empty() {
             let effective = crate::ui::keymap::effective_chords(cx);
-            let mut rows = Vec::new();
-            for action in actions.iter() {
+            for (n, action) in actions.iter().enumerate() {
+                let index = matches.len() + n;
                 let (_, label) = crate::ui::keymap::action_entry(action);
                 let chords = effective
                     .iter()
@@ -1559,70 +1726,88 @@ impl Tty59App {
                     .unwrap_or_default();
                 let selected = index == selection;
                 let action = action.clone();
-                rows.push(
-                    h_flex()
-                        .id(SharedString::from(format!("search-shortcut-{index}")))
-                        .h(px(34.))
-                        .mx(px(-8.))
-                        .px(px(8.))
-                        .gap(px(16.))
-                        .items_center()
-                        .rounded(px(7.))
-                        .cursor_pointer()
-                        .when(selected, |d| d.bg(tk.k04))
-                        .hover(move |s| s.bg(tk.k04))
-                        .when_some(
-                            self.active_settings()
-                                .filter(|_| selected)
-                                .map(|s| s.search_anchor.clone()),
-                            |d, anchor| d.anchor_scroll(Some(anchor)),
-                        )
-                        .child(div().flex_1().min_w_0().truncate().child(label))
-                        .child(Self::keycap_row(&chords, &tk))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_shortcut_search(action.clone(), window, cx)
-                        }))
-                        .into_any_element(),
-                );
-                index += 1;
+                let row = h_flex()
+                    .id(SharedString::from(format!("search-shortcut-{index}")))
+                    .h(px(34.))
+                    .mx(px(-8.))
+                    .px(px(8.))
+                    .gap(px(16.))
+                    .items_center()
+                    .rounded(px(7.))
+                    .cursor_pointer()
+                    .when(selected, |d| d.bg(tk.k04))
+                    .hover(move |s| s.bg(tk.k04))
+                    .child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(Self::keycap_row(&chords, &tk))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_shortcut_search(action.clone(), window, cx)
+                    }));
+                let heading = (n == 0).then(|| {
+                    kit::section_head(t(L10nKey::SettingsSearchKeybindingsTitle), None, &tk)
+                        .into_any_element()
+                });
+                chunks.push(Self::search_result_chunk(heading, index, row));
             }
-            groups.push(
-                v_flex()
-                    .child(kit::section_head(
-                        t(L10nKey::SettingsSearchKeybindingsTitle),
-                        None,
-                        &tk,
-                    ))
-                    .children(rows)
-                    .into_any_element(),
-            );
         }
 
-        let total = index;
+        let total = matches.len() + actions.len();
         let title = if modified_only && query.is_empty() {
             t(L10nKey::SettingsModifiedTitle).to_string()
         } else {
             t(L10nKey::SettingsSearchResults).to_string()
         };
-        let subtitle = (!(modified_only && query.is_empty()))
+        let subtitle = (!(modified_only && query.is_empty()) && total > 0)
             .then(|| t_plural(L10nKey::SettingsMatchCount, total, &[]));
-        if groups.is_empty() {
+        if chunks.is_empty() {
             let text = if modified_only && query.is_empty() {
                 t(L10nKey::SettingsNothingModified).to_string()
             } else if modified_only {
                 t(L10nKey::SettingsNoModified).to_string()
             } else {
-                t_fmt(L10nKey::SettingsNothingMatches, &[("query", &query)])
+                t_fmt(L10nKey::SettingsNoSettingsMatch, &[("query", &query)])
             };
-            groups.push(
-                div()
+            let empty =
+                v_flex()
                     .py(px(24.))
-                    .text_color(tk.k35)
+                    .gap(px(8.))
+                    .items_start()
+                    .text_color(tk.sub)
                     .child(text)
-                    .into_any_element(),
-            );
+                    .when(!query.is_empty(), |col| {
+                        col.child(
+                            kit::button(
+                                "settings-clear-search",
+                                t(L10nKey::SettingsClearSearch),
+                                BtnKind::Link,
+                            )
+                            .announced()
+                            .on_click(cx.listener(
+                                |this, _, window, cx| this.clear_settings_search(window, cx),
+                            )),
+                        )
+                    });
+            #[cfg(test)]
+            let empty = kit::probe("settings.search-empty", empty);
+            #[cfg(test)]
+            let empty = empty.debug_selector(|| "settings-search-empty".to_string());
+            chunks.push(empty.into_any_element());
         }
-        (title, subtitle, Self::settings_page(groups))
+        (title, subtitle, chunks)
+    }
+
+    /// One result as a scroll child: the heading of its page when it is the
+    /// first under that page (set apart from the page above), then the row.
+    fn search_result_chunk(
+        heading: Option<AnyElement>,
+        index: usize,
+        row: impl IntoElement,
+    ) -> AnyElement {
+        v_flex()
+            .when_some(heading, |chunk, heading| {
+                chunk.when(index > 0, |c| c.pt(px(40.))).child(heading)
+            })
+            .child(row)
+            .into_any_element()
     }
 
     /// A shortcut as keycaps: `⌘ T`, `⌃B then X`.
@@ -1640,7 +1825,7 @@ impl Tty59App {
                         d.child(
                             div()
                                 .text_size(fs(11.))
-                                .text_color(tk.k4)
+                                .text_color(tk.sub)
                                 .child(t(L10nKey::SettingsKeyThen)),
                         )
                     })
@@ -1653,24 +1838,28 @@ impl Tty59App {
     }
 }
 
-/// The search results in the order the page draws them: grouped by page in
-/// nav order, best match first within each.
+/// The search results in the order the page draws them: best match first
+/// (exact title, then prefix, then keyword), pages in nav order within a rank.
+/// A page's heading is drawn wherever its run of results begins.
 pub(crate) fn search_result_order<'a>(
     query: &str,
     modified_only: bool,
     cfg: &Config,
+    view: ThemeView,
 ) -> Vec<&'a SearchEntry> {
     let mut matches: Vec<&SearchEntry> = settings_search_entries()
         .iter()
-        .filter(|entry| entry_matches(entry, query) && (!modified_only || entry.modified(cfg)))
+        .filter(|entry| {
+            entry_matches(entry, query) && (!modified_only || entry.modified(cfg, view))
+        })
         .collect();
     matches.sort_by_key(|entry| {
         (
+            entry.rank(query),
             SettingsSection::ALL
                 .iter()
                 .position(|&s| s == entry.section)
                 .unwrap_or(0),
-            entry.rank(query),
         )
     });
     matches
@@ -1686,4 +1875,794 @@ pub(crate) fn search_result_actions(query: &str, modified_only: bool) -> Vec<Str
         .filter(|(action, _)| keybinding_matches_query(action, query))
         .map(|(action, _)| action.to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::presets::settings_wash;
+    use gpui::{Modifiers, TestAppContext, VisualTestContext, size};
+    use kit::test_support::harness;
+
+    fn set_query(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext, text: &str) {
+        app.update_in(vcx, |app, window, cx| {
+            let search = app.active_settings().unwrap().search.clone();
+            search.update(cx, |input, cx| {
+                input.set_value(text.to_string(), window, cx)
+            });
+            app.autoselect_settings_search(cx);
+        });
+        vcx.run_until_parked();
+    }
+
+    /// Types into the focused search field with real keystrokes, so the
+    /// field's own `Change` event reaches the app's subscriber the way it
+    /// does for a user (`set_query` goes through `set_value`, which emits no
+    /// event). Returns how many `Change` events the field emitted.
+    fn type_query(
+        app: &gpui::Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        text: &str,
+    ) -> Rc<std::cell::Cell<usize>> {
+        focus_search(app, vcx);
+        let changes = Rc::new(std::cell::Cell::new(0));
+        let search = app.read_with(&*vcx, |app, _| {
+            app.active_settings().unwrap().search.clone()
+        });
+        let seen = changes.clone();
+        vcx.update(|_, cx| {
+            cx.subscribe(
+                &search,
+                move |_, ev: &gpui_component::input::InputEvent, _| {
+                    if matches!(ev, gpui_component::input::InputEvent::Change) {
+                        seen.set(seen.get() + 1);
+                    }
+                },
+            )
+            .detach();
+        });
+        vcx.simulate_input(text);
+        vcx.run_until_parked();
+        changes
+    }
+
+    /// F2: a search nothing matches says so once, in the quoted-query form,
+    /// with a way out, and the way out puts the page back; a search that
+    /// matches keeps its count. Drives the real settings render.
+    #[gpui::test]
+    fn a_search_with_no_matches_says_so_once_and_clear_search_restores_the_page(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        vcx.run_until_parked();
+
+        set_query(&app, &mut vcx, "zzzq");
+        assert!(
+            vcx.debug_bounds("settings-search-empty").is_some(),
+            "the empty state is drawn"
+        );
+        assert!(
+            vcx.debug_bounds("settings-results-subtitle").is_none(),
+            "no second 'No matches' line beside the empty state"
+        );
+        let clear = vcx
+            .debug_bounds("settings-clear-search")
+            .expect("the empty state offers Clear search");
+        vcx.simulate_click(clear.center(), Modifiers::default());
+        vcx.run_until_parked();
+        app.update_in(&mut vcx, |app, _, cx| {
+            let s = app.active_settings().unwrap();
+            assert!(s.search.read(cx).value().is_empty(), "the query is cleared");
+            assert!(!s.search_active, "the results page is left");
+            assert!(s.section == SettingsSection::General, "back on the page");
+        });
+        assert!(vcx.debug_bounds("settings-search-empty").is_none());
+
+        set_query(&app, &mut vcx, "font");
+        assert!(
+            vcx.debug_bounds("settings-results-subtitle").is_some(),
+            "a search that matches keeps its count"
+        );
+        assert!(vcx.debug_bounds("settings-search-empty").is_none());
+        assert!(vcx.debug_bounds("settings-clear-search").is_none());
+    }
+
+    /// F1/F4 on the real render: the secondary text each page builds carries
+    /// the cached `sub` ink, fully opaque and not faded by an ancestor, and an
+    /// off switch carries the cached track. Reads what each builder assigned
+    /// (`paint_probe`), so reverting any of those assignments fails here.
+    #[gpui::test]
+    fn secondary_text_and_off_switches_are_painted_in_the_cached_ink(cx: &mut TestAppContext) {
+        use crate::core::agent_hooks::{HookAgent, HooksState};
+        use crate::ui::paint_probe::{self, hsla24};
+
+        let _probe = paint_probe::scope();
+        let (app, mut vcx) = harness(cx);
+        let tk = vcx.update(|_, cx| Tk::of(cx));
+        let sub = hsla24(tk.sub);
+        let check_text = |keys: &[&'static str]| {
+            for &key in keys {
+                let painted = paint_probe::all(key);
+                assert!(!painted.is_empty(), "{key}: nothing was painted");
+                for p in painted {
+                    assert_eq!(p.text, Some(sub), "{key}: text ink");
+                    assert_eq!(p.text_alpha, Some(1.), "{key}: ink is opaque, not a ramp");
+                    assert_eq!(p.opacity, None, "{key}: not faded in place");
+                }
+            }
+        };
+        // Filled backgrounds: each wash is painted in the cached pole's colour
+        // at the shared strength the pole criterion floored the inks against.
+        let pole = vcx.update(|_, cx| hsla24(gpui::rgb(crate::ui::theme::fill_pole(cx)).into()));
+        let check_wash = |key: &'static str, wash: (f32, f32)| {
+            let strength = if tk.dark { wash.1 } else { wash.0 };
+            let painted = paint_probe::all(key);
+            assert!(!painted.is_empty(), "{key}: nothing was painted");
+            for p in painted {
+                assert_eq!(p.fill, Some(pole), "{key}: wash colour");
+                assert_eq!(p.fill_alpha, Some(strength), "{key}: wash strength");
+            }
+        };
+        let open =
+            |app: &gpui::Entity<Tty59App>,
+             vcx: &mut VisualTestContext,
+             section: SettingsSection,
+             prepare: &dyn Fn(&mut Tty59App, &mut Window, &mut Context<Tty59App>)| {
+                paint_probe::clear();
+                app.update_in(vcx, |app, window, cx| {
+                    app.open_settings_section(section, window, cx);
+                    prepare(app, window, cx);
+                });
+                vcx.simulate_resize(size(px(960.), px(700.)));
+                vcx.run_until_parked();
+            };
+
+        // General: descriptions, Reset links, nav counts, the search hint, and
+        // the nav rail's off switch.
+        // The "Ctrl F" hint is drawn only while the search box is not focused,
+        // so the page itself holds focus here.
+        open(
+            &app,
+            &mut vcx,
+            SettingsSection::General,
+            &|app, window, cx| {
+                app.set_notify_threshold(71, cx);
+                if let Some(page) = app.active_settings().map(|s| s.focus_handle.clone()) {
+                    window.focus(&page, cx);
+                }
+            },
+        );
+        check_text(&[
+            "settings.row-desc",
+            "settings.reset",
+            "settings.nav-count",
+            "settings.search-hint",
+        ]);
+        let glass = paint_probe::all("settings.search-glass");
+        assert!(!glass.is_empty(), "the search glass is drawn");
+        for p in glass {
+            assert_eq!(p.text, Some(hsla24(tk.glyph)), "search glass ink");
+            assert_eq!(p.text_alpha, Some(1.), "the glass ink is opaque");
+        }
+        let off_alpha = vcx.update(|_, cx| crate::ui::theme::settings_ink(cx).switch_off_alpha);
+        let off = paint_probe::all("settings.switch-off");
+        assert!(!off.is_empty(), "the rail's modified-only switch is off");
+        for p in off {
+            assert_eq!(p.fill, Some(hsla24(tk.switch_off)), "off track");
+            // The cached opacity: 1 in light, the translucent 0.16 in dark.
+            assert_eq!(p.fill_alpha, Some(off_alpha), "off track opacity");
+        }
+
+        // Terminal: a group's intro sentence.
+        open(&app, &mut vcx, SettingsSection::Terminal, &|_, _, _| {});
+        check_text(&["settings.section-desc"]);
+
+        // SSH: a host's address and last-used caption. Unused hosts have no caption.
+        open(&app, &mut vcx, SettingsSection::Ssh, &|_, _, cx| {
+            cx.global_mut::<Config>().ssh_profiles = (0..3)
+                .map(|i| {
+                    let mut p = crate::core::ssh_profile::SshProfile::new(&format!("host-{i}"));
+                    p.host = format!("h{i}.example");
+                    p
+                })
+                .collect();
+            let used_id = cx.global::<Config>().ssh_profiles[0].id;
+            cx.global_mut::<Config>().ssh_profile_frecency.insert(
+                used_id,
+                crate::core::config::ProfileUsage {
+                    count: 1,
+                    last_used: crate::core::config::unix_now().saturating_sub(3600),
+                },
+            );
+        });
+        check_text(&["settings.host-address", "settings.host-meta"]);
+
+        // Agents: hook targets, status text and the Show all link.
+        open(&app, &mut vcx, SettingsSection::Agents, &|app, _, cx| {
+            let s = app.active_settings_mut().unwrap();
+            s.agent_hooks_seq += 1;
+            s.agent_show_all = true;
+            s.agent_hooks_states = AgentHooksView::Ready(
+                HookAgent::ALL
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &agent)| AgentHookRow {
+                        agent,
+                        state: if i == 0 {
+                            HooksState::Installed
+                        } else {
+                            HooksState::NotInstalled
+                        },
+                        target: format!("~/.agent-{i}/hooks.json"),
+                    })
+                    .collect(),
+            );
+            cx.notify();
+        });
+        check_text(&["settings.agent-target", "settings.agent-status"]);
+        let links = paint_probe::all("settings.btn-link");
+        assert!(!links.is_empty(), "the Show all link is drawn");
+        for p in links {
+            assert_eq!(p.text, Some(sub), "link ink");
+        }
+
+        // Keyboard shortcuts: the hint line and the keycaps.
+        open(&app, &mut vcx, SettingsSection::Keybindings, &|_, _, _| {});
+        check_text(&["settings.shortcut-hint"]);
+        let caps = paint_probe::all("settings.keycap");
+        assert!(!caps.is_empty(), "keycaps are drawn");
+        for p in caps {
+            assert_eq!(p.text, Some(sub), "keycap ink");
+        }
+        check_wash("settings.keycap", settings_wash::KEYCAP);
+
+        // Search: the empty state, then a matching query's count and the
+        // selected result's wash.
+        paint_probe::clear();
+        set_query(&app, &mut vcx, "zzzq");
+        check_text(&["settings.search-empty"]);
+        assert!(paint_probe::all("settings.results-subtitle").is_empty());
+        paint_probe::clear();
+        set_query(&app, &mut vcx, "font");
+        check_text(&["settings.results-subtitle"]);
+        check_wash("settings.search-row-selected", settings_wash::ROW);
+    }
+
+    /// The agent hooks' Unavailable line is painted on the page in the general
+    /// warning role, and the Unsaved meta of a host is a separate, stronger role.
+    /// The default theme is light, where the two differ, so the comparison is not
+    /// vacuous. Drives the real Agents page render.
+    #[gpui::test]
+    fn the_unavailable_agents_page_paints_the_general_warning_role_not_the_unsaved_one(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::paint_probe::{self, hsla24};
+
+        let _probe = paint_probe::scope();
+        let (app, mut vcx) = harness(cx);
+        let tk = vcx.update(|_, cx| Tk::of(cx));
+        assert!(!tk.dark, "the witness theme is light");
+        assert_ne!(
+            hsla24(tk.warn_text),
+            hsla24(tk.unsaved),
+            "the general warning role and the Unsaved role differ on the light witness"
+        );
+        paint_probe::clear();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Agents, window, cx);
+            let s = app.active_settings_mut().unwrap();
+            s.agent_hooks_seq += 1;
+            s.agent_hooks_states =
+                AgentHooksView::Unavailable("The agent config is unavailable.".into());
+            cx.notify();
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        vcx.run_until_parked();
+        let painted = paint_probe::all("settings.agents-unavailable");
+        assert!(!painted.is_empty(), "the Unavailable line is drawn");
+        for p in painted {
+            assert_eq!(p.text, Some(hsla24(tk.warn_text)), "Unavailable text role");
+            assert_eq!(p.text_alpha, Some(1.), "the role is opaque, not a ramp");
+            assert_ne!(p.text, Some(hsla24(tk.unsaved)), "not the Unsaved role");
+        }
+    }
+
+    /// A host being edited with a changed field shows the Unsaved meta in its own role, not the
+    /// general warning role. Driven through the real actions: Edit host (`ssh_form_load`) on a saved
+    /// host, then a change to its address field; the row is the one the SSH page renders.
+    #[gpui::test]
+    fn an_edited_host_paints_its_unsaved_meta_in_the_unsaved_role(cx: &mut TestAppContext) {
+        use crate::ui::paint_probe::{self, hsla24};
+
+        let _probe = paint_probe::scope();
+        let (app, mut vcx) = harness(cx);
+        let tk = vcx.update(|_, cx| Tk::of(cx));
+        assert_ne!(
+            hsla24(tk.warn_text),
+            hsla24(tk.unsaved),
+            "the two warning roles differ on the light witness"
+        );
+        let mut profile = crate::core::ssh_profile::SshProfile::new("host-0");
+        profile.host = "h0.example".to_string();
+        paint_probe::clear();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            cx.global_mut::<Config>().ssh_profiles = vec![profile.clone()];
+            app.ssh_form_load(&profile, window, cx);
+            let host = app
+                .ssh_form_mut()
+                .expect("Edit host opened its form")
+                .host
+                .clone();
+            host.update(cx, |input, cx| {
+                input.set_value("changed.example".to_string(), window, cx)
+            });
+            cx.notify();
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        vcx.run_until_parked();
+        let metas = paint_probe::all("settings.host-meta");
+        assert!(
+            metas.iter().any(|p| p.text == Some(hsla24(tk.unsaved))),
+            "the edited host's Unsaved meta is painted in the unsaved role"
+        );
+        for p in metas {
+            assert_eq!(p.text_alpha, Some(1.), "the meta ink is opaque");
+            assert_ne!(
+                p.text,
+                Some(hsla24(tk.warn_text)),
+                "no host meta uses the general warning role"
+            );
+        }
+    }
+
+    /// The empty state and its link fit the window in every language, at the
+    /// narrowest width the settings window opens to.
+    #[gpui::test]
+    fn the_empty_search_state_fits_the_window_in_every_locale(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(480.)));
+        vcx.run_until_parked();
+        let width = vcx.update(|window, _| window.viewport_size().width);
+        for locale in ["en", "ru-RU", "zh-CN", "ja-JP"] {
+            crate::ui::i18n::set_locale(locale);
+            set_query(&app, &mut vcx, "zzzq");
+            for selector in ["settings-search-empty", "settings-clear-search"] {
+                let bounds = vcx
+                    .debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{locale}: {selector} is drawn"));
+                assert!(
+                    bounds.origin.x >= px(0.) && bounds.right() <= width,
+                    "{locale}: {selector} spans {:?}..{:?} in a {:?} window",
+                    bounds.origin.x,
+                    bounds.right(),
+                    width
+                );
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// Paints twice: scroll requests and bounds land on the frame after the
+    /// event that asked.
+    fn settle(vcx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    fn content_scroll(app: &gpui::Entity<Tty59App>, vcx: &VisualTestContext) -> gpui::ScrollHandle {
+        app.read_with(vcx, |app, _| {
+            app.active_settings().unwrap().content_scroll.clone()
+        })
+    }
+
+    fn focus_search(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| {
+            let handle = app
+                .active_settings()
+                .unwrap()
+                .search
+                .read(cx)
+                .focus_handle(cx);
+            window.focus(&handle, cx);
+        });
+    }
+
+    /// Whether child `ix` of the scrolling pane is fully inside its viewport.
+    fn child_in_view(scroll: &gpui::ScrollHandle, ix: usize) -> bool {
+        let child = scroll
+            .bounds_for_item(ix)
+            .expect("the result is a pane child");
+        let view = scroll.bounds();
+        let shift = scroll.offset().y;
+        child.top() + shift >= view.top() - px(1.)
+            && child.bottom() + shift <= view.bottom() + px(1.)
+    }
+
+    /// F10: best match first, whatever page it is on. Each query is the title
+    /// of a setting and each word of one; the results must be ordered by
+    /// (rank, page), and at least one query must have a better match on a
+    /// later page than a worse one — otherwise this could not tell the two
+    /// orders apart.
+    #[test]
+    fn search_results_put_the_better_match_first_whatever_its_page() {
+        crate::ui::i18n::set_locale("en");
+        let cfg = Config::default();
+        let page = |e: &SearchEntry| {
+            SettingsSection::ALL
+                .iter()
+                .position(|&s| s == e.section)
+                .unwrap_or(0)
+        };
+        let mut queries: Vec<String> = Vec::new();
+        for entry in settings_search_entries() {
+            let title = t(entry.title).to_lowercase();
+            queries.extend(title.split_whitespace().map(str::to_string));
+            queries.push(title);
+        }
+        let mut told_apart = 0;
+        for query in &queries {
+            let order = search_result_order(query, false, &cfg, ThemeView::default());
+            let keys: Vec<(u8, usize)> = order.iter().map(|e| (e.rank(query), page(e))).collect();
+            assert!(
+                keys.windows(2).all(|w| w[0] <= w[1]),
+                "{query:?}: results are not ordered by (rank, page): {keys:?}"
+            );
+            if keys.windows(2).any(|w| w[0].0 < w[1].0 && w[0].1 > w[1].1) {
+                told_apart += 1;
+            }
+        }
+        assert!(
+            told_apart > 0,
+            "no query has a better match on a later page, so the order is untested"
+        );
+    }
+
+    /// F10: typing a query leaves the page where the user is looking: the
+    /// results page starts at the top, with its title and count and the first
+    /// page's heading in view, and every result is its own scroll child.
+    #[gpui::test]
+    fn typing_a_query_keeps_the_results_title_and_first_heading_in_view(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Terminal, window, cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(480.)));
+        settle(&mut vcx);
+        let scroll = content_scroll(&app, &vcx);
+        scroll.set_offset(gpui::point(px(0.), px(-120.)));
+        settle(&mut vcx);
+
+        // Real keystrokes into the focused field: the entry path a user takes,
+        // through the field's `Change` event and the app's subscriber.
+        let changes = type_query(&app, &mut vcx, "e");
+        settle(&mut vcx);
+        assert_eq!(
+            app.read_with(&vcx, |app, cx| app
+                .active_settings()
+                .unwrap()
+                .search
+                .read(cx)
+                .value()
+                .to_string()),
+            "e",
+            "the keystroke reached the search field"
+        );
+        assert!(
+            changes.get() >= 1,
+            "typing emitted a Change event, so the app's subscriber ran"
+        );
+
+        let results = app.read_with(&vcx, |_, cx| {
+            let cfg = cx.global::<Config>();
+            search_result_order("e", false, cfg, ThemeView::of(cx)).len()
+                + search_result_actions("e", false).len()
+        });
+        assert!(
+            results > 10,
+            "a broad query has many results, got {results}"
+        );
+        assert_eq!(
+            scroll.children_count(),
+            SEARCH_LEADING_CHILDREN + results,
+            "the header and one child per result"
+        );
+        assert_eq!(scroll.offset().y, px(0.), "entry does not scroll the page");
+        let view = scroll.bounds();
+        let subtitle = vcx
+            .debug_bounds("settings-results-subtitle")
+            .expect("the match count is drawn");
+        assert!(
+            subtitle.top() >= view.top() && subtitle.bottom() <= view.bottom(),
+            "the title area is in view: {subtitle:?} in {view:?}"
+        );
+        assert!(
+            child_in_view(&scroll, SEARCH_LEADING_CHILDREN),
+            "the first result, with its page heading, is in view"
+        );
+    }
+
+    /// F10: the results page and every other page are framed by the one
+    /// `settings_column`: a normal page is still a single child, and a result
+    /// has the same left edge and width as that page's content.
+    #[gpui::test]
+    fn results_and_pages_share_the_column_frame(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        settle(&mut vcx);
+        let scroll = content_scroll(&app, &vcx);
+        assert_eq!(scroll.children_count(), 1, "a page is one scroll child");
+        let page = scroll.bounds_for_item(0).unwrap();
+
+        set_query(&app, &mut vcx, "e");
+        settle(&mut vcx);
+        assert!(scroll.children_count() > 2);
+        for ix in 0..scroll.children_count() {
+            let child = scroll.bounds_for_item(ix).unwrap();
+            assert_eq!(child.origin.x, page.origin.x, "child {ix} left edge");
+            assert_eq!(child.size.width, page.size.width, "child {ix} width");
+        }
+    }
+
+    /// F10: ↑/↓ move the selection, and the pane scrolls only when the
+    /// selected result is outside the view — by the least that shows it. A
+    /// move to a result already in view leaves the scroll position alone.
+    #[gpui::test]
+    fn arrow_keys_scroll_only_to_reveal_an_offscreen_result(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(480.)));
+        settle(&mut vcx);
+        set_query(&app, &mut vcx, "e");
+        focus_search(&app, &mut vcx);
+        settle(&mut vcx);
+        let scroll = content_scroll(&app, &vcx);
+        let results = scroll.children_count() - SEARCH_LEADING_CHILDREN;
+        assert!(results > 10);
+
+        let mut press = |key: &str, selected: usize| {
+            let target = SEARCH_LEADING_CHILDREN + selected;
+            let was_in_view = child_in_view(&scroll, target);
+            let before = scroll.offset().y;
+            vcx.simulate_keystrokes(key);
+            settle(&mut vcx);
+            let now = app.read_with(&vcx, |app, _| {
+                app.active_settings().unwrap().search_selection
+            });
+            assert_eq!(now, selected, "{key} moves the selection");
+            assert!(
+                child_in_view(&scroll, target),
+                "{key} to result {selected} leaves it in view"
+            );
+            match was_in_view {
+                true => assert_eq!(
+                    scroll.offset().y,
+                    before,
+                    "{key} to result {selected}, already in view, must not scroll"
+                ),
+                false => assert_ne!(scroll.offset().y, before, "{key} reveals result {selected}"),
+            }
+            was_in_view
+        };
+
+        let mut revealed = false;
+        for selected in 1..results.min(25) {
+            revealed |= !press("down", selected);
+        }
+        assert!(revealed, "some result was below the fold and got revealed");
+        // Back up: the neighbours just passed are in view, so nothing moves
+        // until the selection reaches one that is not.
+        let top = results.min(25) - 1;
+        for selected in (top.saturating_sub(3)..top).rev() {
+            press("up", selected);
+        }
+    }
+
+    /// The row and its label column, by selector: a control that stays beside
+    /// the label leaves the row as tall as its text; a stacked one adds a line.
+    fn row_is_stacked(
+        vcx: &mut VisualTestContext,
+        row: &'static str,
+        labels: &'static str,
+    ) -> bool {
+        let row = vcx.debug_bounds(row).expect("the row is drawn");
+        let labels = vcx.debug_bounds(labels).expect("its label column is drawn");
+        let inline_height = (labels.size.height + px(24.)).max(px(52.));
+        row.size.height > inline_height + px(20.)
+    }
+
+    /// F16: at the smallest window, at the default and the largest interface
+    /// font, a switch and a stepper stay beside their label, while a wide
+    /// control (the language dropdown) still goes under it.
+    #[gpui::test]
+    fn small_controls_stay_inline_and_wide_ones_stack_at_minimum_size(cx: &mut TestAppContext) {
+        use crate::core::config::{UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX};
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(720.), px(480.)));
+        for font in [UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX] {
+            app.update_in(&mut vcx, |_, _, cx| {
+                cx.global_mut::<Config>().ui_font_size = font;
+            });
+            let query = |key: L10nKey| t(key).to_string();
+
+            set_query(&app, &mut vcx, &query(L10nKey::SettingsRememberWindowSize));
+            settle(&mut vcx);
+            assert!(
+                !row_is_stacked(
+                    &mut vcx,
+                    "settings-row-SettingsRememberWindowSize",
+                    "settings-row-SettingsRememberWindowSize-labels"
+                ),
+                "{font}pt: the switch row is not stacked"
+            );
+            let labels = vcx
+                .debug_bounds("settings-row-SettingsRememberWindowSize-labels")
+                .unwrap();
+            let switch = vcx.debug_bounds("wt-remember-window").expect("the switch");
+            assert!(
+                switch.top() < labels.bottom() && switch.left() >= labels.right(),
+                "{font}pt: the switch {switch:?} sits beside its label {labels:?}"
+            );
+
+            set_query(&app, &mut vcx, &query(L10nKey::SettingsUiFontSize));
+            settle(&mut vcx);
+            assert!(
+                !row_is_stacked(
+                    &mut vcx,
+                    "settings-row-SettingsUiFontSize",
+                    "settings-row-SettingsUiFontSize-labels"
+                ),
+                "{font}pt: the stepper row is not stacked"
+            );
+
+            set_query(&app, &mut vcx, &query(L10nKey::SettingsLanguage));
+            settle(&mut vcx);
+            assert!(
+                row_is_stacked(
+                    &mut vcx,
+                    "settings-row-SettingsLanguage",
+                    "settings-row-SettingsLanguage-labels"
+                ),
+                "{font}pt: a wide control still goes under its label"
+            );
+        }
+    }
+
+    /// F16: the host filter never gets squeezed below 160px, and the import
+    /// link goes on its own line under a toolbar narrower than 560px but sits
+    /// beside the filter on a wide page.
+    #[gpui::test]
+    fn the_host_filter_stays_usable_and_import_wraps_below_when_narrow(cx: &mut TestAppContext) {
+        use crate::core::config::{UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX};
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+        });
+        let toolbar = |vcx: &mut VisualTestContext| {
+            settle(vcx);
+            let mut get = |selector: &'static str| {
+                vcx.debug_bounds(selector)
+                    .unwrap_or_else(|| panic!("{selector} is drawn"))
+            };
+            (
+                get("ssh-host-filter"),
+                get("ssh-import-config"),
+                get("ssh-add-host"),
+            )
+        };
+
+        for font in [UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX] {
+            app.update_in(&mut vcx, |_, _, cx| {
+                cx.global_mut::<Config>().ui_font_size = font;
+            });
+            vcx.simulate_resize(size(px(720.), px(480.)));
+            let (filter, import, add) = toolbar(&mut vcx);
+            assert!(
+                filter.size.width >= px(160.),
+                "{font}pt: the filter is {:?} wide",
+                filter.size.width
+            );
+            assert!(
+                import.top() >= filter.bottom(),
+                "{font}pt: the import link {import:?} wraps below the filter {filter:?}"
+            );
+            assert!(
+                add.top() < filter.bottom(),
+                "{font}pt: Add host stays beside the filter"
+            );
+        }
+
+        app.update_in(&mut vcx, |_, _, cx| {
+            cx.global_mut::<Config>().ui_font_size = UI_FONT_SIZE_DEFAULT;
+        });
+        vcx.simulate_resize(size(px(1200.), px(800.)));
+        let (filter, import, add) = toolbar(&mut vcx);
+        assert!(
+            import.top() < filter.bottom() && filter.right() <= import.left(),
+            "on a wide page the import link {import:?} is beside the filter {filter:?}"
+        );
+        assert!(import.right() <= add.left(), "import precedes Add host");
+    }
+
+    /// F17: after a failed write the banner is drawn under the title band and
+    /// stays exactly where it is while the page under it scrolls. Real render,
+    /// real failed write (a quarantined config refuses to save), real scroll.
+    #[gpui::test]
+    fn the_save_banner_stays_put_while_the_page_scrolls(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(960.), px(420.)));
+        settle(&mut vcx);
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_none(),
+            "no banner before anything failed"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            cx.global_mut::<Config>().quarantined = true;
+            app.set_notify_threshold(93, cx);
+        });
+        settle(&mut vcx);
+        let banner = vcx
+            .debug_bounds("settings-save-banner")
+            .expect("the failed write is said in a banner");
+        let row_before = vcx
+            .debug_bounds("settings-row-SettingsLanguage")
+            .expect("the page's first rows are drawn");
+
+        let scroll = content_scroll(&app, &vcx);
+        assert!(
+            scroll.max_offset().y > px(200.),
+            "the page must be tall enough to scroll in this window: {:?}",
+            scroll.max_offset()
+        );
+        scroll.set_offset(gpui::point(px(0.), px(-150.)));
+        settle(&mut vcx);
+
+        let banner_after = vcx
+            .debug_bounds("settings-save-banner")
+            .expect("the banner is still drawn after scrolling");
+        let row_after = vcx
+            .debug_bounds("settings-row-SettingsLanguage")
+            .expect("the scrolled row is still laid out");
+        assert!(
+            row_before.origin.y - row_after.origin.y > px(100.),
+            "the page really scrolled: {row_before:?} -> {row_after:?}"
+        );
+        assert_eq!(
+            banner_after, banner,
+            "the banner did not move with the page"
+        );
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        assert!(
+            banner_after.origin.y > px(0.) && banner_after.bottom() < viewport.height,
+            "the banner sits inside the window, below its top edge: {banner_after:?} in {viewport:?}"
+        );
+        assert!(
+            scroll.bounds().top() >= banner_after.bottom(),
+            "the banner is above the scrolling page, not inside it: banner {banner_after:?}, page {:?}",
+            scroll.bounds()
+        );
+    }
 }

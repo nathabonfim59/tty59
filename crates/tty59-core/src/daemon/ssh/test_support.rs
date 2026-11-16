@@ -21,7 +21,28 @@ use crate::daemon::protocol::{NativeSshSpec, SshAuthMode, SshProxy};
 use super::broker::PromptBroker;
 use super::forward::RemoteForwardTable;
 use super::handler::ClientHandler;
-use super::{ConnectionKey, SshConnection};
+use super::{ConnectionKey, SshConnection, SshForwardRegistry, SshManager};
+
+/// A manager of its own, so nothing here touches the global cache — and, for
+/// tests outside `crate::daemon::ssh`, a way to own a manager at all: its
+/// fields stay private to the module.
+pub(crate) fn test_manager() -> &'static SshManager {
+    Box::leak(Box::new(SshManager {
+        runtime: tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime"),
+        conns: std::sync::Mutex::new(HashMap::new()),
+        forwards: SshForwardRegistry::default(),
+        probes: std::sync::Mutex::new(HashMap::new()),
+    }))
+}
+
+/// Run `fut` on the manager's own runtime — how a test outside this module
+/// drives sessions it spawned there.
+pub(crate) fn block_on<F: std::future::Future>(mgr: &'static SshManager, fut: F) -> F::Output {
+    mgr.runtime.block_on(fut)
+}
 
 /// How the server answers an `exec` request.
 #[derive(Clone, Copy)]
@@ -32,6 +53,26 @@ pub(crate) enum Exec {
     /// Success and nothing more: a command that never finishes. The server
     /// never closes, so only the client can.
     Hangs,
+}
+
+/// How the server answers a `shell` request — the request a pane's whole
+/// session rides on.
+#[derive(Clone, Copy)]
+pub(crate) enum Shell {
+    /// CHANNEL_SUCCESS and a prompt: the usual sshd.
+    Grants,
+    /// stdout and stderr first, then CHANNEL_SUCCESS, then the prompt and a
+    /// close — the far side was already writing when the grant landed. A
+    /// client that waits for the success must keep every byte that came
+    /// before it.
+    EarlyData,
+    /// CHANNEL_FAILURE: the request reached the server and was refused.
+    Refused,
+    /// CHANNEL_CLOSE and nothing else: the channel died mid-request.
+    Closes,
+    /// No answer at all: the request is held forever, as a stuck far end
+    /// leaves it.
+    Silent,
 }
 
 /// How the server answers a request for the `sftp` subsystem.
@@ -54,13 +95,20 @@ struct Counts {
     opened: AtomicUsize,
     closed: AtomicUsize,
     refused: AtomicUsize,
+    shells: AtomicUsize,
 }
 
 struct Sshd {
     exec: Exec,
     subsystem: Subsystem,
+    shell: Shell,
     channels: HashMap<ChannelId, Channel<server::Msg>>,
     max_sessions: Option<usize>,
+    /// Sessions this connection is holding. sshd's `MaxSessions` is a
+    /// per-connection budget — a second client link gets a fresh one — so
+    /// the shared `counts` (which sum across connections on a multi-accept
+    /// server) cannot answer it.
+    open_here: usize,
     counts: Arc<Counts>,
     /// `Some` for a server that has stopped answering: each open is held
     /// here, neither accepted nor refused, the way a request sits when its
@@ -85,17 +133,13 @@ impl server::Handler for Sshd {
             held.push(reply);
             return Ok(());
         }
-        let open = self
-            .counts
-            .opened
-            .load(Ordering::SeqCst)
-            .saturating_sub(self.counts.closed.load(Ordering::SeqCst));
-        if self.max_sessions.is_some_and(|max| open >= max) {
+        if self.max_sessions.is_some_and(|max| self.open_here >= max) {
             self.counts.refused.fetch_add(1, Ordering::SeqCst);
             // sshd's answer once MaxSessions are all taken.
             reply.reject(ChannelOpenFailure::ConnectFailed).await;
             return Ok(());
         }
+        self.open_here += 1;
         self.counts.opened.fetch_add(1, Ordering::SeqCst);
         self.channels.insert(channel.id(), channel);
         reply.accept().await;
@@ -170,8 +214,46 @@ impl server::Handler for Sshd {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        session.channel_success(channel)?;
-        session.data(channel, &b"$ "[..])?;
+        match self.shell {
+            Shell::Grants | Shell::EarlyData => {
+                if matches!(self.shell, Shell::EarlyData) {
+                    session.data(channel, &b"pre-grant-out"[..])?;
+                    session.extended_data(channel, 1, &b"pre-grant-err"[..])?;
+                }
+                self.counts.shells.fetch_add(1, Ordering::SeqCst);
+                session.channel_success(channel)?;
+                session.data(channel, &b"$ "[..])?;
+                if matches!(self.shell, Shell::EarlyData) {
+                    session.eof(channel)?;
+                    session.close(channel)?;
+                }
+            }
+            Shell::Refused => session.channel_failure(channel)?,
+            Shell::Closes => {
+                session.close(channel)?;
+            }
+            // A request the server never answers — the client's own timeout
+            // is the only thing that ends it.
+            Shell::Silent => {}
+        }
+        Ok(())
+    }
+
+    /// The client asks for its PTY with `want_reply` unset, so a conforming
+    /// answer is silence — and saying `channel_success` here anyway would put
+    /// a stale success on the wire that a grant wait could mistake for the
+    /// shell's.
+    async fn pty_request(
+        &mut self,
+        _channel: ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(russh::Pty, u32)],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
         Ok(())
     }
 
@@ -180,6 +262,7 @@ impl server::Handler for Sshd {
         _channel: ChannelId,
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.open_here = self.open_here.saturating_sub(1);
         self.counts.closed.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -237,8 +320,10 @@ impl FakeSshd {
         let handler = Sshd {
             exec,
             subsystem,
+            shell: Shell::Grants,
             channels: HashMap::new(),
             max_sessions,
+            open_here: 0,
             counts: Arc::clone(&counts),
             unanswered: unanswering.then(Vec::new),
         };
@@ -333,7 +418,110 @@ pub(crate) fn base_spec() -> NativeSshSpec {
     }
 }
 
-fn spec_for(port: u16) -> NativeSshSpec {
+/// A fake server that takes as many connections as dial it — what
+/// `run_session` tests need, since the session dials the spec itself, and a
+/// saturated-retry run redials a second link beside the first. `max_sessions`
+/// stays a per-connection budget, the way sshd's `MaxSessions` works; the
+/// counters sum every connection's channels.
+pub(crate) struct FakeSshdListener {
+    /// The loopback port it bound, for `spec_for`.
+    pub(crate) port: u16,
+    counts: Arc<Counts>,
+}
+
+impl FakeSshdListener {
+    /// `max_sessions`: `None` for the usual generous sshd, `Some(n)` to cap
+    /// each connection at `n` session channels.
+    pub(crate) async fn listen(max_sessions: Option<usize>) -> FakeSshdListener {
+        Self::listen_with(Shell::Grants, max_sessions).await
+    }
+
+    /// The same listener with a chosen `shell` answer.
+    pub(crate) async fn listen_with(shell: Shell, max_sessions: Option<usize>) -> FakeSshdListener {
+        let counts = Arc::new(Counts::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind a loopback port");
+        let port = listener.local_addr().expect("bound address").port();
+        let mut config = server::Config::default();
+        config.inactivity_timeout = None;
+        config
+            .keys
+            .push(PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32])));
+        let config = Arc::new(config);
+        let counted = Arc::clone(&counts);
+        tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let handler = Sshd {
+                    exec: Exec::Hangs,
+                    subsystem: Subsystem::Sftp,
+                    shell,
+                    channels: HashMap::new(),
+                    max_sessions,
+                    open_here: 0,
+                    counts: Arc::clone(&counted),
+                    unanswered: None,
+                };
+                let config = Arc::clone(&config);
+                tokio::spawn(async move {
+                    if let Ok(running) = server::run_stream(config, socket, handler).await {
+                        let _ = running.await;
+                    }
+                });
+            }
+        });
+        FakeSshdListener { port, counts }
+    }
+
+    pub(crate) fn opened(&self) -> usize {
+        self.counts.opened.load(Ordering::SeqCst)
+    }
+
+    /// How many session opens ended in a `ConnectFailed` refusal — what the
+    /// client's saturated-reuse redial is answering.
+    pub(crate) fn refused(&self) -> usize {
+        self.counts.refused.load(Ordering::SeqCst)
+    }
+
+    /// Shells the server has granted — the far side of a `Connected`. A
+    /// broker callback sampling this at the moment a status lands learns
+    /// whether the shell was already there when the client heard about it.
+    pub(crate) fn shell_probe(&self) -> impl Fn() -> usize + Send + Sync + 'static {
+        let counts = Arc::clone(&self.counts);
+        move || counts.shells.load(Ordering::SeqCst)
+    }
+
+    /// Wait until `n` session channels have been opened.
+    pub(crate) async fn wait_for_opened(&self, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.counts.opened.load(Ordering::SeqCst) < n {
+            assert!(
+                Instant::now() < deadline,
+                "only {} channel(s) opened",
+                self.counts.opened.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Wait until `n` session channels have seen `channel_close`.
+    pub(crate) async fn wait_for_closed(&self, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while self.counts.closed.load(Ordering::SeqCst) < n {
+            assert!(
+                Instant::now() < deadline,
+                "only {} channel(s) closed",
+                self.counts.closed.load(Ordering::SeqCst)
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+}
+
+pub(crate) fn spec_for(port: u16) -> NativeSshSpec {
     let mut spec = base_spec();
     spec.host = "127.0.0.1".into();
     spec.port = port;

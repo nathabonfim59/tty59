@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Window, div, px};
+use gpui::{AnyElement, App, Context, Window, div, px, relative};
 use gpui_component::input::{LineEdit, Position};
 use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex};
 use tty59_core::core::machine::TabId;
@@ -30,6 +30,7 @@ use crate::ui::app::Tty59App;
 use crate::ui::host_ops::HostId;
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::search::{CommandKind, Item, SearchTab};
+use crate::ui::text_elision::{ElidedLabel, Mode};
 
 /// A caret that moves this many lines or more at once has jumped. Arrowing
 /// and typing never do; a click, a search hit or Page Down do.
@@ -749,14 +750,15 @@ impl Tty59App {
     ) -> Option<AnyElement> {
         let f = self.buffer(id)?;
         let caret = f.input.read(cx).cursor_position();
-        let segments: Vec<String> = if f.untitled.is_some() {
-            vec![f.label().to_string()]
+        // The directories in front of the file, and the file's own name.
+        let (dirs, file_name) = if f.untitled.is_some() {
+            (String::new(), Some(f.label().to_string()))
         } else {
             let roots = self.tab_code().map(|c| c.roots.as_slice()).unwrap_or(&[]);
             let local = f.host.id() == self.spawn_host(cx);
             match local {
-                true => path_segments(&self.project_spelling(&f.path, cx), roots),
-                false => path_segments(&f.path, &[]),
+                true => path_crumbs(&self.project_spelling(&f.path, cx), roots),
+                false => path_crumbs(&f.path, &[]),
             }
         };
         let file = (f.untitled.is_none()).then(|| f.path.clone());
@@ -777,51 +779,89 @@ impl Tty59App {
 
         let theme = cx.theme();
         let (fg, muted) = (theme.foreground, theme.muted_foreground);
-        // A chevron a rung fainter than the names, so the path reads as its
-        // names and the separators recede.
+        // The chevron is as quiet as the directories it follows: it separates
+        // names, and a fainter one fell under the 3:1 a mark needs.
         let sep = || {
             div().flex_none().px(px(4.)).child(
                 Icon::new(IconName::ChevronRight)
                     .size(px(9.))
-                    .text_color(muted.opacity(0.6)),
+                    .text_color(muted),
             )
         };
-        let last = segments.len().saturating_sub(1);
+        // The file name is the part the reader came for and never gives way;
+        // only the directories in front of it do, from their start, so the
+        // folder next to the file is the last thing to go.
+        let dirs = gpui::SharedString::from(dirs);
+        let has_dirs = !dirs.is_empty();
         let mut path = h_flex()
             .flex_shrink(1.)
             .min_w_0()
             .overflow_hidden()
             .items_center();
-        for (i, seg) in segments.into_iter().enumerate() {
-            if i > 0 {
-                path = path.child(sep());
-            }
+        if has_dirs {
+            // The directories and the separator behind them are ONE shrinkable slot that clips
+            // (overflow_hidden): they yield, and are clipped, together, so a chevron never
+            // stands alone and the separator can never take room from the file name.
             path = path.child(
-                div()
-                    .flex_none()
-                    .whitespace_nowrap()
-                    .text_color(if i == last { fg } else { muted })
-                    .child(seg),
+                h_flex()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .items_center()
+                    .child(div().flex_shrink(1.).min_w_0().text_color(muted).child(
+                        ElidedLabel::new(("editor-breadcrumb-dirs", slot), dirs, Mode::Path),
+                    ))
+                    .child(sep()),
             );
         }
+        if let Some(name) = file_name {
+            // The file name ALONE is capped to the row and never shrunk by flex: it stays whole
+            // whenever it fits the row by itself (the directories slot gives way first), and a
+            // name wider than the whole row is cut by its own label INSIDE the cap, in the
+            // middle so the extension survives. The label shrinks from its natural width (auto
+            // basis), so a name that fits is never touched; nothing overflows to be clipped.
+            let name_slot = div()
+                .flex_none()
+                .max_w(relative(1.))
+                .min_w_0()
+                .text_color(fg)
+                .child(ElidedLabel::new(
+                    ("editor-breadcrumb-file", slot),
+                    name,
+                    Mode::Middle,
+                ));
+            #[cfg(test)]
+            let name_slot = name_slot.debug_selector(|| format!("editor-breadcrumb-file-{slot}"));
+            path = path.child(name_slot);
+        }
+        // The directories may be cut, so the whole path is one hover away. The
+        // file's tab carries no path of its own while this row shows it.
+        let full_path = file.clone();
         let path = div()
             .id(("editor-breadcrumb-path", slot))
             .flex_shrink(1.)
             .min_w_0()
             .overflow_hidden()
             .cursor_pointer()
+            .when_some(full_path, |d, full| {
+                d.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(full.display().to_string())
+                        .build(window, cx)
+                })
+            })
             .child(path)
             .on_click(cx.listener(move |this, _, _window, cx| {
                 if let Some(file) = &file {
                     this.file_tree_reveal_path(file, cx);
                 }
             }));
+        #[cfg(test)]
+        let path = path.debug_selector(|| format!("editor-breadcrumb-path-{slot}"));
 
-        let symbols = supported.then(|| {
+        // A caret outside every symbol has nothing to name, so it draws no
+        // crumb at all; Go to Symbol stays on its own chord.
+        let symbols = (supported && !chain.is_empty()).then(|| {
             let mut row = h_flex().min_w_0().overflow_hidden().items_center();
-            if chain.is_empty() {
-                row = row.child(sep()).child(div().text_color(muted).child("…"));
-            }
             for (kind, name) in chain {
                 row = row.child(sep()).child(
                     h_flex()
@@ -842,7 +882,7 @@ impl Tty59App {
                         ),
                 );
             }
-            div()
+            let crumb = div()
                 .id(("editor-breadcrumb-symbols", slot))
                 .flex_shrink(1.)
                 .min_w_0()
@@ -861,7 +901,10 @@ impl Tty59App {
                         this.editor_focus_group(left, window, cx);
                     }
                     this.editor_go_to_symbol(window, cx)
-                }))
+                }));
+            #[cfg(test)]
+            let crumb = crumb.debug_selector(|| format!("editor-breadcrumb-symbols-{slot}"));
+            crumb
         });
 
         Some(
@@ -881,26 +924,44 @@ impl Tty59App {
     }
 }
 
-/// A path as the breadcrumbs spell it: from inside the project root it is in,
-/// with the root's own name first, or whole when it is in none.
-pub(crate) fn path_segments(path: &Path, roots: &[PathBuf]) -> Vec<String> {
+/// A path as the breadcrumbs spell it, split for drawing: the directories in
+/// front of the file joined with `/`, and the file's own name. From inside the
+/// project root it is in, the root's own name leads; outside every root the
+/// path is spelled whole. Only the path's own (native) components count, so a
+/// root marker or Windows prefix is not a name.
+///
+/// One pass into one buffer: no per-segment strings and no second join, so the
+/// cost does not grow with the depth of the path.
+pub(crate) fn path_crumbs(path: &Path, roots: &[PathBuf]) -> (String, Option<String>) {
     let (lead, rel) = match roots
         .iter()
         .find_map(|r| Some((r, path.strip_prefix(r).ok()?)))
     {
-        Some((root, rel)) => (
-            root.file_name().map(|n| n.to_string_lossy().to_string()),
-            rel.to_path_buf(),
-        ),
-        None => (None, path.to_path_buf()),
+        Some((root, rel)) => (root.file_name(), rel),
+        None => (None, path),
     };
-    lead.into_iter()
+    let names = lead
+        .into_iter()
         .chain(rel.components().filter_map(|c| match c {
-            std::path::Component::Normal(s) => Some(s.to_string_lossy().to_string()),
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => None,
+            std::path::Component::Normal(name) => Some(name),
             _ => None,
-        }))
-        .collect()
+        }));
+    let mut crumbs = String::with_capacity(path.as_os_str().len());
+    let mut last = 0;
+    for name in names {
+        if !crumbs.is_empty() {
+            crumbs.push('/');
+        }
+        last = crumbs.len();
+        crumbs.push_str(&name.to_string_lossy());
+    }
+    // `last` is where the final name starts, so what is split off is exactly
+    // that name and what stays ends with the `/` that led into it.
+    let file_name = (!crumbs.is_empty()).then(|| crumbs.split_off(last));
+    if crumbs.ends_with('/') {
+        crumbs.pop();
+    }
+    (crumbs, file_name)
 }
 
 fn symbol_command(symbol: &outline::Symbol) -> CommandKind {
@@ -1120,14 +1181,59 @@ mod tests {
 
     #[test]
     fn breadcrumb_paths_start_at_their_project() {
+        let crumbs = |path: &str, roots: &[PathBuf]| path_crumbs(Path::new(path), roots);
+        let spelled = |dirs: &str, file: &str| (dirs.to_string(), Some(file.to_string()));
         let roots = [PathBuf::from("/work/tty59")];
         assert_eq!(
-            path_segments(Path::new("/work/tty59/src/ui/code_editor.rs"), &roots),
-            ["tty59", "src", "ui", "code_editor.rs"]
+            crumbs("/work/tty59/src/ui/code_editor.rs", &roots),
+            spelled("tty59/src/ui", "code_editor.rs"),
+            "inside a root the root's own name leads"
         );
         assert_eq!(
-            path_segments(Path::new("/etc/hosts"), &roots),
-            ["etc", "hosts"]
+            crumbs("/work/tty59/README.md", &roots),
+            spelled("tty59", "README.md")
+        );
+        assert_eq!(
+            crumbs("/work/tty59", &roots),
+            (String::new(), Some("tty59".into())),
+            "the root itself is only its name"
+        );
+        assert_eq!(
+            crumbs("/etc/hosts", &roots),
+            spelled("etc", "hosts"),
+            "outside every root the path is spelled whole"
+        );
+        assert_eq!(
+            crumbs("/srv/app/main.rs", &[]),
+            spelled("srv/app", "main.rs"),
+            "a remote file has no local root to start from"
+        );
+        assert_eq!(crumbs("/", &[]), (String::new(), None), "no name at all");
+        assert_eq!(
+            crumbs("/проект/源码/ファイル.rs", &[]),
+            spelled("проект/源码", "ファイル.rs"),
+            "multibyte names are cut on their own boundaries"
+        );
+    }
+
+    /// `Path::components` follows the platform's own separators, and the
+    /// crumbs keep that: a backslash is a filename character on Unix, and a
+    /// drive prefix is not a name on Windows.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_is_an_ordinary_character_in_a_unix_breadcrumb() {
+        assert_eq!(
+            path_crumbs(Path::new(r"/srv/a\b/c.rs"), &[]),
+            (r"srv/a\b".to_string(), Some("c.rs".to_string()))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_drive_prefix_is_not_a_breadcrumb_name() {
+        assert_eq!(
+            path_crumbs(Path::new(r"C:\Users\dev\app\main.rs"), &[]),
+            ("Users/dev/app".to_string(), Some("main.rs".to_string()))
         );
     }
 
@@ -1178,7 +1284,7 @@ pub(super) mod gpui_tests {
     use super::*;
     use crate::ui::app::test_window::harness_with_tabs;
     use crate::ui::editor_text::{EditorConfig, TextFormat};
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
 
     /// `alpha` on line 0, `beta` on 30, `gamma` on 50.
     pub(crate) fn source() -> String {
@@ -1244,6 +1350,249 @@ pub(super) mod gpui_tests {
             });
         });
         draw(app, vcx);
+    }
+
+    /// A real frame: the breadcrumbs are drawn by the editor panel's own
+    /// render, not by calling its helper.
+    fn paint(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// With the caret between symbols the row draws the path and nothing
+    /// after it: a lone `…` crumb named nothing. Inside one, the symbol crumb
+    /// is there, so the absence below is not a row that never draws them.
+    #[gpui::test]
+    fn the_breadcrumbs_draw_a_symbol_crumb_only_while_the_caret_is_inside_one(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/nav-test/a.rs");
+        put_caret(&app, &mut vcx, 5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            paint(&mut vcx);
+            if vcx.debug_bounds("editor-breadcrumb-symbols-0").is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the caret is inside `alpha` and the crumb never appeared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(vcx.debug_bounds("editor-breadcrumb-path-0").is_some());
+
+        // Line 25 is one of the blank lines between `alpha` and `beta`.
+        put_caret(&app, &mut vcx, 25);
+        paint(&mut vcx);
+        assert!(
+            vcx.debug_bounds("editor-breadcrumb-path-0").is_some(),
+            "the path is still drawn"
+        );
+        assert!(
+            vcx.debug_bounds("editor-breadcrumb-symbols-0").is_none(),
+            "a caret outside every symbol draws no symbol crumb"
+        );
+    }
+
+    /// A file name wider than the whole breadcrumb row is cut by its own label,
+    /// in the middle so the extension survives, inside a group (separator +
+    /// name) capped to the row: nothing is left to overflow and be clipped at the
+    /// right edge. Real layout at a narrow and a wide window.
+    #[gpui::test]
+    fn an_overlong_filename_is_cut_in_the_middle_inside_the_breadcrumb_row(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::text_elision::observe;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let name = format!("{}.rs", "a-very-long-file-name-".repeat(10));
+        open_rs(&app, &mut vcx, &format!("/nav-test/dir/{name}"));
+        let file = gpui::ElementId::from(("editor-breadcrumb-file", 0usize));
+        for width in [960., 1440.] {
+            vcx.simulate_resize(size(px(width), px(600.)));
+            paint(&mut vcx);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let label = observe::label(&file)
+                .unwrap_or_else(|| panic!("at {width}: the file label was not drawn"));
+            assert!(label.painted, "at {width}: {label:?}");
+            assert!(
+                label.text.contains('…') && label.text.len() < name.len(),
+                "the overlong filename was not cut in the middle at {width}: {:?}",
+                label.text
+            );
+            assert!(
+                label.text.ends_with(".rs") && label.text.starts_with("a-very"),
+                "the cut filename keeps its extension and its start at {width}: {:?}",
+                label.text
+            );
+            let group = vcx
+                .debug_bounds("editor-breadcrumb-file-0")
+                .expect("the filename group was painted");
+            let path = vcx
+                .debug_bounds("editor-breadcrumb-path-0")
+                .expect("the path row was painted");
+            assert!(
+                group.left() >= path.left() - px(0.5) && group.right() <= path.right() + px(0.5),
+                "at {width}: the filename group {group:?} overflows the breadcrumb row {path:?}"
+            );
+        }
+    }
+
+    /// File priority is unchanged: a name that fits stays whole while the
+    /// directories in front of it are the ones that yield. A short name at the
+    /// narrow window, and the native fixture's actual long name (a component
+    /// file with a long descriptive name, 57 characters) at the wide control.
+    #[gpui::test]
+    fn a_filename_that_fits_stays_whole_while_the_directories_yield(cx: &mut TestAppContext) {
+        use crate::ui::text_elision::observe;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dirs: Vec<String> = (0..4)
+            .map(|i| format!("{}{i}", "directory-with-a-long-name-".repeat(3)))
+            .collect();
+        for (width, name) in [
+            (960., "main.rs"),
+            (
+                1440.,
+                "a-very-long-component-file-name-for-the-breadcrumb-row.ts",
+            ),
+        ] {
+            open_rs(
+                &app,
+                &mut vcx,
+                &format!("/nav-test/{}/{name}", dirs.join("/")),
+            );
+            vcx.simulate_resize(size(px(width), px(600.)));
+            paint(&mut vcx);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            // The directories first: they must be drawn and LEADING-elided (`…/last-dirs`, the
+            // Proposed) before anything is expected of the filename, so a layout that pushes the
+            // name off screen fails on the directories' guard, not on a later missing label.
+            let dirs_label =
+                observe::label(&gpui::ElementId::from(("editor-breadcrumb-dirs", 0usize)))
+                    .unwrap_or_else(|| {
+                        panic!("at {width}: the directories yield first: no directories label")
+                    });
+            assert!(
+                dirs_label.painted && dirs_label.text.starts_with('…'),
+                "at {width}: the directories yield first, from their start: {dirs_label:?}"
+            );
+            let file = observe::label(&gpui::ElementId::from(("editor-breadcrumb-file", 0usize)))
+                .unwrap_or_else(|| panic!("at {width}: the file label was not drawn"));
+            assert!(
+                file.painted && file.text.as_str() == name,
+                "at {width}: the filename stays whole: {file:?}"
+            );
+        }
+    }
+
+    /// BOUNDARY WITNESS. A file name that fits the breadcrumb row BY ITSELF is never cut,
+    /// even when the row cannot also hold the separator in front of it: the separator
+    /// belongs to the directories' slot, which yields (and clips) first. The name's natural
+    /// width comes from the shared text measurer (theme font, the row's text-size token), NOT
+    /// from any painted node, and the row's width from the path row's own bounds; a sweep of
+    /// window widths must cross the boundary, so every width between "name alone fits" and
+    /// "name plus separator fits" is exercised without any copied pixel constant.
+    #[gpui::test]
+    fn a_filename_that_fits_the_row_alone_is_never_cut_by_the_separator(cx: &mut TestAppContext) {
+        use crate::ui::text_elision::observe;
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        // `.txt`: no outline, so no symbol crumb shares the row with the path.
+        let name = "a-descriptive-component-file-name-that-is-fairly-long-to-fill-the-row.txt";
+        let dirs = [
+            "directory-with-a-long-name-one",
+            "directory-with-a-long-name-two",
+            "directory-with-a-long-name-three",
+        ]
+        .join("/");
+        open_rs(&app, &mut vcx, &format!("/nav-test/{dirs}/{name}"));
+        // The name's own natural width, measured INDEPENDENTLY of any production node: the
+        // shared text measurer, the theme font and the breadcrumb row's text-size token at the
+        // window's rem. It must not come from the file-name slot's bounds, which are whatever
+        // the structure under test puts in that slot (a separator moved back into it would
+        // widen the oracle with it and the boundary would hide).
+        vcx.simulate_resize(size(px(3000.), px(600.)));
+        paint(&mut vcx);
+        let natural = vcx.update(|window, cx| {
+            let font = gpui::Font {
+                family: cx.theme().font_family.clone(),
+                features: Default::default(),
+                fallbacks: None,
+                weight: gpui::FontWeight::NORMAL,
+                style: Default::default(),
+            };
+            let size = window.rem_size().as_f32() * crate::ui::right_panel::META;
+            px(crate::ui::tab_strip::measure_text(
+                window.text_system(),
+                &font,
+                size,
+                name,
+            ))
+        });
+        // Sanity only (true for any structure): the slot holds at least the name itself.
+        let slot_at_3000 = vcx
+            .debug_bounds("editor-breadcrumb-file-0")
+            .expect("the file name was painted in a very wide window")
+            .size
+            .width;
+        assert!(
+            natural > px(100.) && slot_at_3000 + px(0.5) >= natural,
+            "the independent measure ({natural:?}) disagrees with the painted slot ({slot_at_3000:?})"
+        );
+        let file = gpui::ElementId::from(("editor-breadcrumb-file", 0usize));
+        let (mut whole_seen, mut cut_seen) = (false, false);
+        for width in (400..=1600).rev().step_by(3).map(|w| w as f32) {
+            vcx.simulate_resize(size(px(width), px(600.)));
+            paint(&mut vcx);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let row = vcx
+                .debug_bounds("editor-breadcrumb-path-0")
+                .unwrap_or_else(|| panic!("at {width}: the path row was not painted"))
+                .size
+                .width;
+            let label = observe::label(&file)
+                .unwrap_or_else(|| panic!("at {width}: the file label was not drawn"));
+            let whole = label.text.as_str() == name;
+            // Only the two CLEAR regimes are judged: a row within half a pixel of the name
+            // (layout rounding against a fractional measure) is skipped, never widened into
+            // either side.
+            if row > natural + px(0.5) {
+                assert!(
+                    whole,
+                    "at {width}: the filename fits the row alone ({row:?} > {natural:?}) and is cut: {:?}",
+                    label.text
+                );
+                whole_seen = true;
+            } else if row + px(0.5) < natural {
+                assert!(
+                    !whole,
+                    "at {width}: the row ({row:?}) is narrower than the filename ({natural:?}) and shows it whole"
+                );
+                cut_seen = true;
+            }
+        }
+        assert!(
+            whole_seen && cut_seen,
+            "the sweep did not cross the boundary: whole {whole_seen}, cut {cut_seen}"
+        );
     }
 
     #[gpui::test]

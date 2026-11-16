@@ -25,7 +25,10 @@ use std::rc::Rc;
 use crate::core::config::{
     Config, DOCUMENT_RATIO_MAX, DOCUMENT_RATIO_MIN, DOCUMENT_RATIO_STOPS, DocumentLayout,
 };
-use crate::ui::app::{DOCUMENT_MIN_W, OverlayTop, TERMINAL_MIN_W, Tty59App, document_column_px};
+use crate::ui::app::{
+    DOCUMENT_MIN_W, OverlayTop, TERMINAL_MIN_W, Tty59App, document_column_px,
+    document_column_px_min,
+};
 use crate::ui::i18n::{L10nKey, t};
 use crate::ui::right_panel::RESIZE_HANDLE_WIDTH;
 
@@ -108,9 +111,30 @@ const SWITCH_FRAME_W: f32 = 14.;
 const SWITCH_FRAME_H: f32 = 11.;
 const SWITCH_EDGE: f32 = 2.;
 const SWITCH_GAP: f32 = 2.;
-const SWITCH_LEAD: f32 = 8.;
+pub(crate) const SWITCH_LEAD: f32 = 8.;
 const SWITCH_CELL_RADIUS: f32 = 5.;
 const SWITCH_TRACK_RADIUS: f32 = 7.;
+
+/// What a two-cell switch takes in a header row: its lead, the track's edge on
+/// both sides, the two cells and the gap between them.
+pub(crate) const fn layout_switch_w() -> f32 {
+    SWITCH_LEAD + 2. * SWITCH_EDGE + 2. * SWITCH_CELL_W + SWITCH_GAP
+}
+
+/// The filled editor's terminal pill: its padding, its badge, the gap between
+/// badge and name, and the divider that follows it.
+const TERMINAL_PILL_PAD_L: f32 = 8.;
+const TERMINAL_PILL_PAD_R: f32 = 10.;
+const TERMINAL_PILL_BADGE: f32 = 16.;
+const TERMINAL_PILL_GAP: f32 = 7.;
+const TERMINAL_DIVIDER_MX: f32 = 6.;
+
+/// The pill and its divider with the name at [`HEADER_CELL_MAX_W`], the most
+/// they take. The name is as wide as the terminal's title, so a header
+/// budgeting for it has to assume the longest.
+pub(crate) fn terminal_button_max_w(window: &Window) -> f32 {
+    terminal_button_fixed_w(crate::ui::theme::hairline(window).as_f32()) + HEADER_CELL_MAX_W
+}
 
 /// Which cell a document's layout switch raises: the box the surface is
 /// actually in, which a window too narrow to seat a column decides rather than
@@ -217,18 +241,22 @@ pub(crate) fn glyph_unified(ink: gpui::Hsla) -> gpui::AnyElement {
     glyph_two_panes(ink, false)
 }
 
-/// The sunken track the two cells sit on.
-pub(crate) fn switch_track(
+/// The sunken track the two cells sit on, with the margin before it given: a
+/// header that has to find room for its first line lets that margin yield, and
+/// nothing else does.
+pub(crate) fn switch_track_with_lead(
     id: &'static str,
     cells: Vec<gpui::AnyElement>,
+    lead: f32,
     cx: &gpui::App,
 ) -> gpui::AnyElement {
     let sf = cx.global::<crate::ui::presets::Surfaces>().window;
     h_flex()
         .id(id)
+        .when(cfg!(test), |d| d.debug_selector(move || id.into()))
         .occlude()
         .flex_none()
-        .ml(px(SWITCH_LEAD))
+        .ml(px(lead))
         .p(px(SWITCH_EDGE))
         .gap(px(SWITCH_GAP))
         .rounded(px(SWITCH_TRACK_RADIUS))
@@ -286,6 +314,41 @@ where
         .into_any_element()
 }
 
+/// What the terminal button spends on everything but its name: its padding,
+/// its badge, the gap before the name, and the divider after it with the room
+/// either side of it. `divider` is the divider's own width, a hairline.
+pub(crate) const fn terminal_button_fixed_w(divider: f32) -> f32 {
+    TERMINAL_PILL_PAD_L
+        + TERMINAL_PILL_BADGE
+        + TERMINAL_PILL_GAP
+        + TERMINAL_PILL_PAD_R
+        + divider
+        + 2. * TERMINAL_DIVIDER_MX
+}
+
+/// What the terminal button of a filled header does with its name.
+#[derive(Clone, Copy)]
+pub(crate) enum TerminalName {
+    /// The name is in the button, held to a cap in pixels, or to the button's
+    /// own when `None`.
+    Inline(Option<f32>),
+    /// The name has left for the header's second line, where
+    /// [`Tty59App::render_document_terminal_name`] draws it; the button keeps
+    /// its badge, its divider, its tip and its label.
+    Moved,
+}
+
+/// What the terminal button spends without its name once the name has left:
+/// its padding, its badge and the divider after it with the room either side
+/// of it. The gap before the name goes with the name.
+pub(crate) const fn terminal_badge_only_w(divider: f32) -> f32 {
+    TERMINAL_PILL_PAD_L
+        + TERMINAL_PILL_BADGE
+        + TERMINAL_PILL_PAD_R
+        + divider
+        + 2. * TERMINAL_DIVIDER_MX
+}
+
 impl Tty59App {
     /// A filled document's lead: the terminal it covers, by name, and a way
     /// back that keeps the file or diff open beside it. Both surfaces use this
@@ -297,20 +360,62 @@ impl Tty59App {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        self.render_document_terminal_button_with(chrome, TerminalName::Inline(None), window, cx)
+    }
+
+    /// The tooltip of a terminal name that may be cut or has left its button:
+    /// the whole title, not the shortened one the label ladder gives a chip.
+    fn terminal_whole_name(
+        &self,
+        name: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::SharedString {
+        let whole = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| self.full_tab_label(tab, Some(window), cx))
+            .map(|label| label.text)
+            .unwrap_or_else(|| name.to_string().into());
+        format!("{}: {whole}", t(L10nKey::DocumentDock)).into()
+    }
+
+    /// [`Self::render_document_terminal_button`] with the name held to a cap, in
+    /// pixels, by a header that has worked out what room the name has, or with
+    /// the name gone from it. The button's tooltip then carries the whole name,
+    /// since the name may be cut or elsewhere. `Inline(None)` is the button as
+    /// it always was.
+    pub(crate) fn render_document_terminal_button_with(
+        &self,
+        chrome: DocumentChrome,
+        name_mode: TerminalName,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         if chrome != DocumentChrome::Fill {
             return None;
         }
-        let theme = cx.theme();
         let name = self
             .tabs
             .get(self.active)
             .map(|tab| self.tab_label(tab, self.active, Some(window), cx))
             .unwrap_or_default();
         let badge_bg = gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().window.selected);
+        let (name_cap, name_moved) = match name_mode {
+            TerminalName::Inline(cap) => (cap, false),
+            TerminalName::Moved => (None, true),
+        };
+        let name_max = name_cap.unwrap_or(HEADER_CELL_MAX_W);
+        let whole_name: Option<gpui::SharedString> =
+            (name_cap.is_some() || name_moved).then(|| self.terminal_whole_name(&name, window, cx));
+        let theme = cx.theme();
         Some(
             h_flex()
                 .flex_none()
                 .items_center()
+                .when(cfg!(test), |group| {
+                    group.debug_selector(|| "document-terminal-group".into())
+                })
                 .child(
                     h_flex()
                         .id("document-back-to-terminal")
@@ -321,9 +426,9 @@ impl Tty59App {
                         .aria_label(format!("{}: {name}", t(L10nKey::DocumentDock)))
                         .occlude()
                         .h(px(HEADER_CELL_H))
-                        .pl(px(8.))
-                        .pr(px(10.))
-                        .gap(px(7.))
+                        .pl(px(TERMINAL_PILL_PAD_L))
+                        .pr(px(TERMINAL_PILL_PAD_R))
+                        .gap(px(TERMINAL_PILL_GAP))
                         .items_center()
                         .rounded(px(HEADER_CELL_RADIUS))
                         .text_size(rems(HEADER_CELL_TEXT))
@@ -332,28 +437,38 @@ impl Tty59App {
                         .child(
                             div()
                                 .flex_none()
-                                .size(px(16.))
+                                .size(px(TERMINAL_PILL_BADGE))
                                 .rounded_full()
                                 .flex()
                                 .items_center()
                                 .justify_center()
                                 .bg(badge_bg)
+                                .when(cfg!(test), |badge| {
+                                    badge.debug_selector(|| "document-terminal-badge".into())
+                                })
                                 .font_family(theme.mono_font_family.clone())
                                 .text_size(px(9.5))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(">_"),
                         )
-                        .child(
-                            div()
-                                .max_w(px(HEADER_CELL_MAX_W))
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .child(name),
-                        )
-                        .tooltip(|window, cx| {
-                            gpui_component::tooltip::Tooltip::new(t(L10nKey::DocumentDock))
-                                .build(window, cx)
+                        .when(!name_moved, |button| {
+                            button.child(
+                                div()
+                                    .max_w(px(name_max))
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .overflow_hidden()
+                                    .when(cfg!(test), |d| {
+                                        d.debug_selector(|| "document-terminal-name".into())
+                                    })
+                                    .child(name.clone()),
+                            )
+                        })
+                        .tooltip(move |window, cx| match &whole_name {
+                            Some(whole) => gpui_component::tooltip::Tooltip::new(whole.clone())
+                                .build(window, cx),
+                            None => gpui_component::tooltip::Tooltip::new(t(L10nKey::DocumentDock))
+                                .build(window, cx),
                         })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.set_document_layout(DocumentLayout::Dock, cx);
@@ -364,9 +479,55 @@ impl Tty59App {
                         .flex_none()
                         .w(crate::ui::theme::hairline(window))
                         .h(px(16.))
-                        .mx(px(6.))
+                        .mx(px(TERMINAL_DIVIDER_MX))
                         .bg(theme.border),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// The terminal's name on a filled header's second line, once it has left
+    /// its button: the same words in the same ink and size, held to `cap`
+    /// pixels, with the button's tooltip and its action. The button keeps the
+    /// role and the label, so assistive technology meets one button; this is
+    /// the same click for a pointer that lands on the name.
+    pub(crate) fn render_document_terminal_name(
+        &self,
+        cap: Option<f32>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let name = self
+            .tabs
+            .get(self.active)
+            .map(|tab| self.tab_label(tab, self.active, Some(window), cx))?;
+        let whole = self.terminal_whole_name(&name, window, cx);
+        let theme = cx.theme();
+        Some(
+            div()
+                .id("document-terminal-name-moved")
+                .flex_none()
+                .max_w(px(cap.unwrap_or(HEADER_CELL_MAX_W)))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .overflow_hidden()
+                .text_size(rems(HEADER_CELL_TEXT))
+                .text_color(theme.muted_foreground)
+                .cursor_pointer()
+                .hover({
+                    let ink = theme.foreground;
+                    move |s| s.text_color(ink)
+                })
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "document-terminal-name".into())
+                })
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(whole.clone()).build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.set_document_layout(DocumentLayout::Dock, cx);
+                }))
+                .child(name)
                 .into_any_element(),
         )
     }
@@ -382,6 +543,25 @@ impl Tty59App {
             .get(self.active)
             .and_then(|t| t.document_layout)
             .unwrap_or_else(|| cx.global::<Config>().document_layout)
+    }
+
+    /// Where the docked header sits. Everywhere but macOS the title bar spans
+    /// the workspace and leaves the strip above the column empty, so the
+    /// header goes up into it; on macOS the column already reaches the top of
+    /// the window and its own first row lands there. A code editor whose
+    /// share of that strip cannot hold its controls and the front file keeps
+    /// its header in the column instead, for as long as that is so. Nothing
+    /// is saved: the layout asked for stays the one asked for.
+    pub(crate) fn docked_document_chrome(
+        &self,
+        trail: f32,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> DocumentChrome {
+        match cfg!(target_os = "macos") || self.editor_header_inline(trail, window, cx) {
+            true => DocumentChrome::Dock,
+            false => DocumentChrome::DockHoisted,
+        }
     }
 
     /// Which of the two surfaces the docked column shows.
@@ -441,7 +621,18 @@ impl Tty59App {
         if self.document_layout(cx) != DocumentLayout::Dock || self.document_front().is_none() {
             return None;
         }
-        document_column_px(self.document_body_px(window, cx), self.document_ratio.get())
+        // A diff's column is as narrow as its header's controls allow, and gives
+        // way to the filled layout below that, held through the same margin the
+        // header's own fallback is: see `diff_fills`. A code editor's is the
+        // plain rule.
+        if self.diff_fills(window, cx) {
+            return None;
+        }
+        let (body, ratio) = (self.document_body_px(window, cx), self.document_ratio.get());
+        match self.document_front() {
+            Some(OverlayTop::Diff) => document_column_px_min(body, ratio, self.document_min_px(cx)),
+            _ => document_column_px(body, ratio),
+        }
     }
 
     /// Fill ↔ dock, for the active tab. One of the two writers of the layout;
@@ -506,6 +697,16 @@ impl Tty59App {
         chrome: DocumentChrome,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.document_layout_switch_with_lead(chrome, SWITCH_LEAD, cx)
+    }
+
+    /// [`Self::document_layout_switch`] with the margin before it given.
+    pub(crate) fn document_layout_switch_with_lead(
+        &self,
+        chrome: DocumentChrome,
+        lead: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let current = layout_switch_cell(chrome);
         let cell = |i: usize,
                     layout: DocumentLayout,
@@ -522,12 +723,13 @@ impl Tty59App {
                 cx,
             )
         };
-        switch_track(
+        switch_track_with_lead(
             "document-layout-switch",
             vec![
                 cell(0, DocumentLayout::Dock, glyph_dock, L10nKey::DocumentDock),
                 cell(1, DocumentLayout::Fill, glyph_fill, L10nKey::DocumentFill),
             ],
+            lead,
             cx,
         )
     }
@@ -540,6 +742,7 @@ impl Tty59App {
     pub(crate) fn render_document_header(
         &mut self,
         chrome: DocumentChrome,
+        trail: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -547,7 +750,7 @@ impl Tty59App {
             return None;
         }
         match self.document_front()? {
-            OverlayTop::Code => Some(self.render_editor_header_only(chrome, window, cx)),
+            OverlayTop::Code => Some(self.render_editor_header_only(chrome, trail, window, cx)),
             OverlayTop::Diff => self.render_diff_header_only(chrome, window, cx),
         }
     }
@@ -568,6 +771,9 @@ impl Tty59App {
         Some(
             v_flex()
                 .id("document-column")
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "document-column".into())
+                })
                 .relative()
                 .flex_none()
                 .w(px(width))
@@ -613,12 +819,14 @@ impl Tty59App {
                 let container = container.clone();
                 let ratio_cell = self.document_ratio.clone();
                 let dragging = self.document_dragging.clone();
+                let app = cx.entity().downgrade();
                 move |_bounds, _state, window, _cx| {
                     window.on_mouse_event({
                         let container = container.clone();
                         let ratio_cell = ratio_cell.clone();
                         let dragging = dragging.clone();
-                        move |ev: &MouseMoveEvent, _phase, window, _cx| {
+                        let app = app.clone();
+                        move |ev: &MouseMoveEvent, _phase, window, cx| {
                             if !dragging.get() || body <= 0. {
                                 return;
                             }
@@ -627,7 +835,12 @@ impl Tty59App {
                             };
                             let right = b.origin.x + b.size.width;
                             let raw = (right - ev.position.x).as_f32();
-                            ratio_cell.set(dragged_ratio(body, raw));
+                            let ratio = dragged_ratio(body, raw);
+                            // The editor header's fit follows the column's
+                            // width; telling the app is what lets it re-judge.
+                            if ratio_cell.replace(ratio) != ratio {
+                                app.update(cx, |_, cx| cx.notify()).ok();
+                            }
                             window.refresh();
                         }
                     });

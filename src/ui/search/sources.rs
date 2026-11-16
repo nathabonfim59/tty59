@@ -200,21 +200,54 @@ impl Catalog {
             // wanted is the tab you were just in.
             let mut sources: Vec<_> = tabs.filter(|s| s.on_the_empty_all_tab()).collect();
             sources.sort_by_key(|s| s.tab() != SearchTab::Terminals);
-            return sources
-                .into_iter()
-                .filter_map(|s| {
-                    let rows = recent_then_rest(s.as_ref(), cx);
-                    (!rows.is_empty()).then(|| Section {
-                        title: Some(s.tab().title().into()),
+            let mut sections = Vec::new();
+            for s in sources {
+                let rows = recent_then_rest(s.as_ref(), cx);
+                // Rows that launch an agent file under Agents rather than
+                // the tab's name — as on a query, below.
+                let (mut launches, rest): (Vec<Row>, Vec<Row>) =
+                    rows.into_iter().partition(|row| {
+                        matches!(row, Row::Item(item) if matches!(item.kind, CommandKind::LaunchAgent(_)))
+                    });
+                // A More row belongs with the section that has rows showing;
+                // when only launches showed, it follows them.
+                let rest: Vec<Row> = if rest.iter().all(|row| matches!(row, Row::More { .. })) {
+                    launches.extend(rest);
+                    Vec::new()
+                } else {
+                    rest
+                };
+                for (rows, title) in [
+                    (rest, s.tab().title()),
+                    (launches, t(L10nKey::CmdGroupAgents)),
+                ] {
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    sections.push(Section {
+                        title: Some(title.into()),
                         rows,
-                    })
-                })
-                .collect();
+                    });
+                }
+            }
+            return sections;
         }
-        let mut found: Vec<(i32, Section)> = tabs
-            .filter_map(|s| {
-                let hits = s.search(query, cx);
-                let best = hits.first()?.0 - section_bias(s.tab());
+        let mut found: Vec<(i32, Section)> = Vec::new();
+        for s in tabs {
+            let hits = s.search(query, cx);
+            // Rows that launch an agent file under Agents rather than the
+            // tab's name — under Terminals a launch row reads as a terminal.
+            let (launches, rest): (Vec<_>, Vec<_>) = hits
+                .into_iter()
+                .partition(|(_, item)| matches!(item.kind, CommandKind::LaunchAgent(_)));
+            for (hits, title) in [
+                (rest, s.tab().title()),
+                (launches, t(L10nKey::CmdGroupAgents)),
+            ] {
+                let Some((best, _)) = hits.first() else {
+                    continue;
+                };
+                let best = *best - section_bias(s.tab());
                 let hidden = hits.len().saturating_sub(ALL_TAB_ROWS);
                 let mut rows: Vec<Row> = hits
                     .into_iter()
@@ -227,15 +260,15 @@ impl Catalog {
                         hidden,
                     });
                 }
-                Some((
+                found.push((
                     best,
                     Section {
-                        title: Some(s.tab().title().into()),
+                        title: Some(title.into()),
                         rows,
                     },
-                ))
-            })
-            .collect();
+                ));
+            }
+        }
         found.sort_by_key(|(best, _)| std::cmp::Reverse(*best));
         found.into_iter().map(|(_, section)| section).collect()
     }
@@ -428,7 +461,37 @@ impl Source for Terminals<'_> {
     }
 
     fn search(&self, query: &str, _cx: &App) -> Vec<(i32, Item)> {
-        rank(self.0, query, |_| 0)
+        // The category's own word is not a name — "agent" does not say the
+        // shortest display name launches best. On the word alone (or its
+        // plural) every launcher answers alike, at the score the word earns
+        // the best of them, so the order they are offered in answers it;
+        // and a launcher the plural's extra letter would have missed still
+        // belongs, because the category was asked for, not a name. Any
+        // narrower query ranks by the letters typed.
+        if !matches!(query.trim().to_lowercase().as_str(), "agent" | "agents") {
+            return rank(self.0, query, |_| 0);
+        }
+        let tier = self
+            .0
+            .iter()
+            .filter(|item| matches!(item.kind, CommandKind::LaunchAgent(_)))
+            .filter_map(|item| item_score("agent", item))
+            .max();
+        let mut hits: Vec<(i32, Item)> = self
+            .0
+            .iter()
+            .filter_map(|item| {
+                let score = match (matches!(item.kind, CommandKind::LaunchAgent(_)), tier) {
+                    (true, Some(tier)) => tier,
+                    _ => item_score(query, item)?,
+                };
+                Some((score, item.clone()))
+            })
+            .collect();
+        // Stable: rows that score alike keep the order the tab lists them
+        // in — for the launchers, the order quick launch offers.
+        hits.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        hits
     }
 }
 
@@ -553,8 +616,14 @@ impl Source for Hosts<'_> {
         SearchTab::Hosts
     }
 
+    /// The hosts to pick from, under the line that says a host can also be
+    /// typed — helper text, where it used to be an error-looking "No results".
     fn browse(&self, _cx: &App) -> Vec<Section> {
-        by_section(self.0)
+        let mut sections = by_section(self.0);
+        if let Some(first) = sections.first_mut().filter(|s| s.title.is_none()) {
+            first.title = Some(t(L10nKey::SearchHostsHelper).into());
+        }
+        sections
     }
 
     fn highlights(&self, _cx: &App) -> Vec<Item> {
@@ -621,6 +690,44 @@ pub(crate) fn host_items(cx: &App) -> Vec<Item> {
                 item = item.with_subtitle(endpoint);
             }
             item
+        })
+        .collect()
+}
+
+/// The Hosts tab's rows for the `~/.ssh/config` aliases `imported`, listed after
+/// the saved hosts.
+///
+/// A saved host wins over an alias of the same name, the rule the machine rail
+/// uses (`remote_connect::available_hosts`), and an alias listed twice is one
+/// row. Choosing a row is `QuickConnect(alias)` — what typing the alias does:
+/// the alias is resolved against the config when the row is taken, and nothing
+/// connects before that. That only reaches the alias if the address parser
+/// reads it back as itself, which an alias with an `@`, a `:` or a `/` in it is
+/// not, so those are left off rather than listed as a row that would connect
+/// somewhere else.
+pub(crate) fn alias_host_items(
+    saved: &[crate::core::ssh_profile::SshProfile],
+    imported: Vec<crate::core::ssh_config::ImportedProfile>,
+) -> Vec<Item> {
+    let mut seen: std::collections::HashSet<String> =
+        saved.iter().map(|p| p.name.clone()).collect();
+    imported
+        .into_iter()
+        .filter_map(|imp| {
+            let alias = imp.profile.name.clone();
+            if alias.trim().is_empty() || !seen.insert(alias.clone()) {
+                return None;
+            }
+            let read_back = parse_quick_connect(&alias)?;
+            if read_back.user.is_some() || read_back.port.is_some() || read_back.host != alias {
+                return None;
+            }
+            let endpoint = crate::core::ssh_profile::to_connect_string(&imp.profile);
+            let item = Item::new(alias.clone(), CommandKind::QuickConnect(alias));
+            Some(match item.title == endpoint {
+                true => item,
+                false => item.with_subtitle(endpoint),
+            })
         })
         .collect()
 }
@@ -877,6 +984,304 @@ mod tests {
                 row_titles(&sections[0]),
                 vec!["previous", "older", "elsewhere", "Shell: zsh"]
             );
+        });
+    }
+
+    /// Rows that launch an agent file under Agents, not under the name of the
+    /// tab that holds them — under "Terminals" a launch row reads as a
+    /// terminal.
+    #[gpui::test]
+    fn agent_launch_rows_file_under_agents_on_the_all_tab(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+        with_config(cx);
+        // The shape `search_terminals` hands over today: tab rows under their
+        // workspace, shells and launch rows under "New Terminal".
+        let launch = |agent: CLIAgent| {
+            Item::new(
+                format!("Agent: {}", agent.display_name()),
+                CommandKind::LaunchAgent(agent),
+            )
+            .in_section("New Terminal")
+        };
+        let offered = [
+            CLIAgent::Claude,
+            CLIAgent::Codex,
+            CLIAgent::Gemini,
+            CLIAgent::Pi,
+            CLIAgent::Vibe,
+            CLIAgent::OpenCode,
+            CLIAgent::Amp,
+            CLIAgent::Aider,
+        ];
+        let terminals = [
+            terminal("agent logs", "acme-web"),
+            Item::new("Shell: zsh", CommandKind::OpenShell("zsh".into()))
+                .in_section("New Terminal"),
+        ]
+        .into_iter()
+        .chain(offered.iter().map(|a| launch(*a)))
+        .collect();
+        let catalog = Catalog::new(Vec::new(), terminals, Vec::new());
+        let titles = |sections: &[Section]| {
+            sections
+                .iter()
+                .map(|s| s.title.clone().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        };
+        let rows = |sections: &[Section], title: &str| {
+            sections
+                .iter()
+                .find(|s| s.title.as_deref() == Some(title))
+                .map(row_titles)
+        };
+        cx.update(|cx| {
+            // A launch row and an open tab alike match "agent": each under
+            // its own heading.
+            let sections = catalog.sections(SearchTab::All, "agent", cx);
+            assert_eq!(
+                rows(&sections, "Terminals"),
+                Some(vec!["agent logs".to_string()])
+            );
+            let agents = rows(&sections, "Agents").expect("the launch rows' heading");
+            // The category's own word is not a name: on it the launchers
+            // answer in the order they are offered, not shortest-title
+            // first.
+            assert_eq!(
+                &agents[..ALL_TAB_ROWS],
+                &[
+                    "Agent: Claude Code".to_string(),
+                    "Agent: Codex".to_string(),
+                    "Agent: Gemini".to_string(),
+                    "Agent: Pi".to_string(),
+                    "Agent: Vibe".to_string(),
+                ]
+            );
+            // The cap shows five; the rest is one row into the tab that
+            // holds them, with the true hidden count.
+            assert_eq!(agents.len(), ALL_TAB_ROWS + 1);
+            assert_eq!(agents.last().unwrap(), "+3 Terminals");
+
+            // The plural names the same category — including launchers its
+            // extra letter would not match, like Claude Code.
+            let sections = catalog.sections(SearchTab::All, "agents", cx);
+            let agents = rows(&sections, "Agents").expect("the launch rows' heading");
+            assert_eq!(
+                &agents[..ALL_TAB_ROWS],
+                &[
+                    "Agent: Claude Code".to_string(),
+                    "Agent: Codex".to_string(),
+                    "Agent: Gemini".to_string(),
+                    "Agent: Pi".to_string(),
+                    "Agent: Vibe".to_string(),
+                ]
+            );
+
+            // A narrower query still ranks by the letters typed.
+            let sections = catalog.sections(SearchTab::All, "vibe", cx);
+            assert_eq!(
+                rows(&sections, "Agents"),
+                Some(vec!["Agent: Vibe".to_string()])
+            );
+
+            // Nothing else answering: Agents is the whole result.
+            let sections = catalog.sections(SearchTab::All, "codex", cx);
+            assert_eq!(titles(&sections), vec!["Agents".to_string()]);
+            assert_eq!(
+                rows(&sections, "Agents"),
+                Some(vec!["Agent: Codex".to_string()])
+            );
+
+            // Before anything is typed they are their own section too, led
+            // by the order quick launch offers.
+            let sections = catalog.sections(SearchTab::All, "", cx);
+            assert_eq!(
+                titles(&sections),
+                vec!["Terminals".to_string(), "Agents".to_string()]
+            );
+            assert_eq!(
+                rows(&sections, "Agents"),
+                Some(vec![
+                    "Agent: Claude Code".to_string(),
+                    "Agent: Codex".to_string(),
+                    "Agent: Gemini".to_string(),
+                ])
+            );
+        });
+    }
+
+    /// Each heading ranks on its own best row — a weak terminal hit does not
+    /// drag the launch rows down, nor do they lift it — and each folds the
+    /// rest of its hits into a row back to the tab that holds them.
+    #[gpui::test]
+    fn sections_rank_and_fold_independently(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::CLIAgent;
+        with_config(cx);
+        let launch = |agent: CLIAgent| {
+            Item::new(
+                format!("Agent: {}", agent.display_name()),
+                CommandKind::LaunchAgent(agent),
+            )
+            .in_section("New Terminal")
+        };
+        let offered = [CLIAgent::Claude, CLIAgent::Codex, CLIAgent::Gemini];
+        // Six panes answer "agent" on their own and a seventh only through a
+        // subtitle — enough of them to overflow one heading.
+        let terminals = [
+            terminal("agent logs", "acme-web"),
+            terminal("agent debug", "acme-web"),
+            terminal("agent trace", "acme-web"),
+            terminal("agent bench", "acme-web"),
+            terminal("agent ci", "acme-web"),
+            terminal("agent deploy", "acme-web"),
+            terminal("zzz pane", "acme-web").with_subtitle("agent logs"),
+        ]
+        .into_iter()
+        .chain(offered.iter().map(|a| launch(*a)))
+        .collect();
+        let catalog = Catalog::new(Vec::new(), terminals, Vec::new());
+        let titles = |sections: &[Section]| {
+            sections
+                .iter()
+                .map(|s| s.title.clone().unwrap_or_default().to_string())
+                .collect::<Vec<_>>()
+        };
+        cx.update(|cx| {
+            let sections = catalog.sections(SearchTab::All, "agent", cx);
+            // The titled hits outscore every launch row — Terminals leads —
+            // and seven of them fold two behind the More row.
+            assert_eq!(
+                titles(&sections),
+                vec!["Terminals".to_string(), "Agents".to_string()]
+            );
+            let term = sections
+                .iter()
+                .find(|s| s.title.as_deref() == Some("Terminals"))
+                .expect("the panes' heading");
+            assert_eq!(row_titles(term).len(), ALL_TAB_ROWS + 1);
+            assert!(
+                matches!(
+                    term.rows.last(),
+                    Some(Row::More {
+                        tab: SearchTab::Terminals,
+                        hidden: 2
+                    })
+                ),
+                "two hidden panes fold into a row back to Terminals: {:?}",
+                row_titles(term).last()
+            );
+            // The weak hit landed at the bottom of its own heading, not
+            // among the launch rows — which answer the category word in
+            // offered order.
+            let agents = sections
+                .iter()
+                .find(|s| s.title.as_deref() == Some("Agents"))
+                .expect("the launch rows' heading");
+            assert_eq!(
+                row_titles(agents),
+                vec![
+                    "Agent: Claude Code".to_string(),
+                    "Agent: Codex".to_string(),
+                    "Agent: Gemini".to_string(),
+                ]
+            );
+            assert!(!matches!(agents.rows.last(), Some(Row::More { .. })));
+
+            // And the other way: nothing but a subtitle answers on the
+            // Terminals side, so the launch rows' heading leads.
+            let weak = Catalog::new(
+                Vec::new(),
+                [terminal("zzz pane", "acme-web").with_subtitle("agent logs")]
+                    .into_iter()
+                    .chain(offered.iter().map(|a| launch(*a)))
+                    .collect(),
+                Vec::new(),
+            );
+            let sections = weak.sections(SearchTab::All, "agent", cx);
+            assert_eq!(
+                titles(&sections),
+                vec!["Agents".to_string(), "Terminals".to_string()]
+            );
+            let term = sections
+                .iter()
+                .find(|s| s.title.as_deref() == Some("Terminals"))
+                .expect("the panes' heading");
+            assert_eq!(row_titles(term), vec!["zzz pane".to_string()]);
+        });
+    }
+
+    /// Reads `config` as a `~/.ssh/config` of its own, by explicit path in a
+    /// directory that goes away afterwards: the rows come back owned.
+    fn imported_from(config: &str) -> Vec<crate::core::ssh_config::ImportedProfile> {
+        let home = tempfile::Builder::new()
+            .prefix("tty59-alias-rows-")
+            .tempdir()
+            .expect("a temporary home");
+        let root = home.path().join("config");
+        std::fs::write(&root, config).expect("the temporary home is writable");
+        crate::core::ssh_config::import_profiles_from(root, home.path())
+    }
+
+    /// The Hosts tab lists the config's aliases after the saved hosts: a saved
+    /// host of the same name wins, a wildcard is not a host, and an alias the
+    /// address parser would read as another address is left off rather than
+    /// listed as a row that connects somewhere else. Each row connects by
+    /// `QuickConnect(alias)` — what typing the alias does.
+    #[test]
+    fn config_aliases_follow_saved_hosts_and_a_saved_name_wins() {
+        let imported = imported_from(
+            "Host box\n  HostName 10.0.0.9\n  User deploy\n\
+             Host prod\n  HostName prod.example.com\n\
+             Host odd:name\n  HostName 10.0.0.10\n\
+             Host a@b\n  HostName 10.0.0.11\n\
+             Host *\n  ServerAliveInterval 30\n",
+        );
+        let saved = [crate::core::ssh_profile::SshProfile::new("prod")];
+        let rows = alias_host_items(&saved, imported);
+        let kinds: Vec<CommandKind> = rows.iter().map(|i| i.kind.clone()).collect();
+        assert_eq!(kinds, vec![CommandKind::QuickConnect("box".into())]);
+        assert_eq!(rows[0].title, "box");
+        assert!(
+            rows[0]
+                .subtitle
+                .as_deref()
+                .is_some_and(|s| s.contains("10.0.0.9")),
+            "the row says where the alias goes: {:?}",
+            rows[0].subtitle
+        );
+
+        // Nothing saved: the plain aliases are all there, still without the
+        // ones that do not read back as themselves.
+        let all = alias_host_items(
+            &[],
+            imported_from("Host box\n  HostName 10.0.0.9\nHost prod\n"),
+        );
+        let titles: Vec<&str> = all.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, vec!["box", "prod"]);
+    }
+
+    /// Nothing typed: the hosts to pick from under the line that says a host
+    /// can also be typed. With no host at all there are no rows, and the view's
+    /// own empty state says the same thing instead of "No results".
+    #[gpui::test]
+    fn the_hosts_tab_with_nothing_typed_lists_hosts_under_its_helper(cx: &mut TestAppContext) {
+        with_config(cx);
+        crate::ui::i18n::set_locale("en");
+        let saved = Item::new(
+            "prod",
+            CommandKind::ConnectSavedProfile(uuid::Uuid::new_v4()),
+        );
+        let alias = Item::new("box", CommandKind::QuickConnect("box".into()));
+        let catalog = Catalog::new(Vec::new(), Vec::new(), vec![saved, alias]);
+        cx.update(|cx| {
+            let sections = catalog.sections(SearchTab::Hosts, "", cx);
+            assert_eq!(sections.len(), 1);
+            assert_eq!(
+                sections[0].title.as_deref(),
+                Some(t(L10nKey::SearchHostsHelper))
+            );
+            assert_eq!(row_titles(&sections[0]), vec!["prod", "box"]);
+            let none = Catalog::new(Vec::new(), Vec::new(), Vec::new());
+            assert!(none.sections(SearchTab::Hosts, "", cx).is_empty());
         });
     }
 

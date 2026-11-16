@@ -125,17 +125,22 @@ impl SearchDelegate {
             )]),
             None => gpui::StyledText::new(title),
         };
-        left = left.child(
-            div()
-                .flex_shrink(1.)
-                .min_w(px(40.))
-                .truncate()
-                .text_color(match self.query.trim().is_empty() {
-                    true => fg,
-                    false => fg.opacity(0.78),
-                })
-                .child(title),
-        );
+        let title_el = div()
+            .flex_shrink(1.)
+            .min_w(px(40.))
+            .truncate()
+            .text_color(match self.query.trim().is_empty() {
+                true => fg,
+                // The cached ink is the 92% title seed already floored on
+                // every row fill, which a bare fade of fg is not.
+                false => gpui::rgb(crate::ui::theme::chrome_ink(cx).search_title).into(),
+            })
+            .child(title);
+        #[cfg(test)]
+        let mut title_el = title_el;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("search.title", &mut title_el);
+        left = left.child(title_el);
         if let Some(subtitle) = item.subtitle.clone() {
             left = left.child(
                 div().flex_1().min_w(px(24.)).flex().justify_end().child(
@@ -263,37 +268,7 @@ impl ListDelegate for SearchDelegate {
         _window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> impl IntoElement {
-        // The SSH hint only where typing user@host would actually connect. A
-        // theme picker with no matches teaching SSH is a crossed wire (#602).
-        let mut headline = t(L10nKey::SearchNoResults);
-        let hint = match self.scope {
-            // An empty Files tab is rarely "nothing matches": say which of the
-            // other reasons it is, since each has a different way out.
-            Scope::Tab(SearchTab::Files) => match &self.catalog.files {
-                FileList::NoRoots => {
-                    headline = t(L10nKey::SearchFilesNoRoots);
-                    t(L10nKey::SearchFilesNoRootsHint)
-                }
-                FileList::Indexing => {
-                    headline = t(L10nKey::SearchFilesIndexing);
-                    ""
-                }
-                FileList::Failed => t(L10nKey::SearchFilesFailed),
-                FileList::Ready(_) => t(L10nKey::PaletteTryDifferentSearch),
-            },
-            Scope::Tab(SearchTab::All | SearchTab::Hosts) => t(L10nKey::ConnectSshHint),
-            Scope::Tab(SearchTab::Sessions) if self.query.trim().is_empty() => {
-                t(L10nKey::SearchSessionsEmptyHint)
-            }
-            Scope::Tab(SearchTab::Locations) if self.catalog.locations.is_empty() => {
-                t(L10nKey::SearchLocationsNone)
-            }
-            Scope::Tab(SearchTab::Symbols) if self.catalog.symbols.is_empty() => {
-                headline = t(L10nKey::SearchSymbolsNone);
-                t(L10nKey::SearchSymbolsNoneHint)
-            }
-            _ => t(L10nKey::PaletteTryDifferentSearch),
-        };
+        let (headline, hint) = empty_copy(self.scope, &self.query, &self.catalog);
         // The headline in body ink and the way out under it in caption ink:
         // two greys of the same size read as one sentence cut in half.
         // The empty view is drawn in place of the rows, so the list's top
@@ -305,7 +280,7 @@ impl ListDelegate for SearchDelegate {
             Scope::Themes | Scope::SessionActions => 0.,
         };
         let theme = cx.theme();
-        v_flex()
+        let empty = v_flex()
             .pt(px(scopes + 20.))
             .pb(px(24.))
             .px(px(LABEL_INSET))
@@ -315,13 +290,18 @@ impl ListDelegate for SearchDelegate {
             .text_color(theme.foreground)
             .child(headline)
             .when(!hint.is_empty(), |d| {
-                d.child(
-                    div()
-                        .text_size(rems(ROW_META))
-                        .text_color(theme.muted_foreground)
-                        .child(hint),
-                )
-            })
+                let hint = div()
+                    .text_size(rems(ROW_META))
+                    .text_color(theme.muted_foreground)
+                    .child(hint);
+                #[cfg(test)]
+                let hint =
+                    gpui::InteractiveElement::debug_selector(hint, || "search-empty-hint".into());
+                d.child(hint)
+            });
+        #[cfg(test)]
+        let empty = gpui::InteractiveElement::debug_selector(empty, || "search-empty".into());
+        empty
     }
 
     fn render_item(
@@ -393,6 +373,49 @@ impl ListDelegate for SearchDelegate {
         }
         cx.notify();
     }
+}
+
+/// What the empty list says: the headline, and under it the way out (empty
+/// when there is none).
+fn empty_copy(scope: Scope, query: &str, catalog: &Catalog) -> (&'static str, &'static str) {
+    // The SSH hint only where typing user@host would actually connect. A
+    // theme picker with no matches teaching SSH is a crossed wire (#602).
+    let mut headline = t(L10nKey::SearchNoResults);
+    let hint = match scope {
+        // An empty Files tab is rarely "nothing matches": say which of the
+        // other reasons it is, since each has a different way out.
+        Scope::Tab(SearchTab::Files) => match &catalog.files {
+            FileList::NoRoots => {
+                headline = t(L10nKey::SearchFilesNoRoots);
+                t(L10nKey::SearchFilesNoRootsHint)
+            }
+            FileList::Indexing => {
+                headline = t(L10nKey::SearchFilesIndexing);
+                ""
+            }
+            FileList::Failed => t(L10nKey::SearchFilesFailed),
+            FileList::Ready(_) => t(L10nKey::PaletteTryDifferentSearch),
+        },
+        // Nothing typed and no host to list: the way in is typing one, and
+        // that is the whole message — not an unmatched search.
+        Scope::Tab(SearchTab::Hosts) if query.trim().is_empty() => {
+            headline = t(L10nKey::SearchHostsHelper);
+            ""
+        }
+        Scope::Tab(SearchTab::All | SearchTab::Hosts) => t(L10nKey::ConnectSshHint),
+        Scope::Tab(SearchTab::Sessions) if query.trim().is_empty() => {
+            t(L10nKey::SearchSessionsEmptyHint)
+        }
+        Scope::Tab(SearchTab::Locations) if catalog.locations.is_empty() => {
+            t(L10nKey::SearchLocationsNone)
+        }
+        Scope::Tab(SearchTab::Symbols) if catalog.symbols.is_empty() => {
+            headline = t(L10nKey::SearchSymbolsNone);
+            t(L10nKey::SearchSymbolsNoneHint)
+        }
+        _ => t(L10nKey::PaletteTryDifferentSearch),
+    };
+    (headline, hint)
 }
 
 pub enum SearchEvent {
@@ -579,6 +602,27 @@ impl SearchView {
             |catalog| {
                 catalog.sessions = sessions;
                 catalog.sessions_here = here;
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// The Hosts tab's `~/.ssh/config` aliases, arrived from an import that
+    /// finished after the search opened. They follow the saved hosts, and an
+    /// earlier import's rows are replaced rather than added to.
+    pub(crate) fn set_host_aliases(
+        &mut self,
+        aliases: Vec<Item>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_catalog(
+            |catalog| {
+                catalog
+                    .hosts
+                    .retain(|item| !matches!(item.kind, CommandKind::QuickConnect(_)));
+                catalog.hosts.extend(aliases);
             },
             window,
             cx,
@@ -1491,6 +1535,210 @@ mod tests {
         ));
     }
 
+    /// A `~/.ssh/config` of its own. The import a test hands the search reads
+    /// this file by explicit path, so it depends on neither the thread that runs
+    /// it nor any home; the directory lives as long as the fixture does.
+    struct SshFixture {
+        _dir: tempfile::TempDir,
+        root: std::path::PathBuf,
+        home: std::path::PathBuf,
+    }
+
+    impl SshFixture {
+        fn new(config: &str) -> Self {
+            let dir = tempfile::Builder::new()
+                .prefix("tty59-search-ssh-")
+                .tempdir()
+                .expect("a temporary home");
+            let home = dir.path().to_path_buf();
+            std::fs::create_dir_all(home.join(".ssh")).expect("the temporary home is writable");
+            let root = home.join(".ssh/config");
+            std::fs::write(&root, config).expect("the temporary home is writable");
+            Self {
+                _dir: dir,
+                root,
+                home,
+            }
+        }
+
+        fn importer(
+            &self,
+        ) -> impl FnOnce() -> Vec<crate::core::ssh_config::ImportedProfile> + Send + 'static
+        {
+            let (root, home) = (self.root.clone(), self.home.clone());
+            move || crate::core::ssh_config::import_profiles_from(root, &home)
+        }
+    }
+
+    fn alias(name: &str) -> CommandKind {
+        CommandKind::QuickConnect(name.into())
+    }
+
+    /// The Hosts tab lists the config's aliases before anything is typed. They
+    /// arrive after the search opens (the config is read off the window's
+    /// thread), listing connects to nothing, and Enter on the row is the
+    /// existing `QuickConnect` for the alias — observed at the confirm, with
+    /// the window's own handler dropped so no connection is made.
+    #[gpui::test]
+    fn config_aliases_land_in_the_hosts_tab_and_enter_confirms_the_alias(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let fixture = SshFixture::new("Host box\n  HostName 10.0.0.9\n  User deploy\n");
+        let tabs_before = app.read_with(&vcx, |app, _| app.tabs.len());
+        let landing = app.update_in(&mut vcx, |app, window, cx| {
+            app.open_search_with(SearchTab::Hosts, "", fixture.importer(), window, cx)
+        });
+        let view = open(&app, &mut vcx);
+        assert!(
+            !row_kinds(&view, &mut vcx).contains(&alias("box")),
+            "the config is read after the search is up"
+        );
+        cx.foreground_executor().block_test(landing);
+        vcx.run_until_parked();
+        assert!(row_kinds(&view, &mut vcx).contains(&alias("box")));
+        assert_eq!(
+            app.read_with(&vcx, |app, _| app.tabs.len()),
+            tabs_before,
+            "listing an alias opens nothing"
+        );
+
+        let confirmed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        app.update(&mut vcx, |app, _| app.drop_search_event_handler());
+        let _watch = vcx.update(|_, cx| {
+            let confirmed = confirmed.clone();
+            cx.subscribe(&view, move |_, ev: &SearchEvent, _| {
+                if let SearchEvent::Confirm(kind) = ev {
+                    confirmed.borrow_mut().push(kind.clone());
+                }
+            })
+        });
+        assert_eq!(first_kind(&view, &mut vcx), Some(alias("box")));
+        vcx.simulate_keystrokes("enter");
+        vcx.run_until_parked();
+        assert_eq!(*confirmed.borrow(), vec![alias("box")]);
+        assert_eq!(
+            app.read_with(&vcx, |app, _| app.tabs.len()),
+            tabs_before,
+            "the confirm only reports the alias; this test connects to nothing"
+        );
+    }
+
+    /// An import that finishes after its search was closed — and another
+    /// opened — must not put its rows anywhere. Both orders: the import started
+    /// before the close and reopen (and finished after), and one started after
+    /// it. Every import is awaited before anything is asserted, and a fresh
+    /// search's own import is the control that landing works at all.
+    #[gpui::test]
+    fn a_late_alias_import_does_not_reach_a_closed_or_reopened_search(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let first = SshFixture::new("Host first\n");
+        let stale_before = SshFixture::new("Host stale-before\n");
+        let fresh = SshFixture::new("Host fresh\n");
+        let stale_after = SshFixture::new("Host stale-after\n");
+        let third = SshFixture::new("Host third\n");
+
+        let landing = app.update_in(&mut vcx, |app, window, cx| {
+            app.open_search_with(SearchTab::Hosts, "", first.importer(), window, cx)
+        });
+        cx.foreground_executor().block_test(landing);
+        vcx.run_until_parked();
+        let old = open(&app, &mut vcx);
+        assert!(row_kinds(&old, &mut vcx).contains(&alias("first")));
+
+        // Started now, while `old` is still the open search; finished after
+        // it has been closed and a new one opened.
+        let (late, fresh_landing) = app.update_in(&mut vcx, |app, window, cx| {
+            let late =
+                app.refresh_search_host_aliases(old.clone(), stale_before.importer(), window, cx);
+            app.close_search(window, cx);
+            let landing = app.open_search_with(SearchTab::Hosts, "", fresh.importer(), window, cx);
+            (late, landing)
+        });
+        let new = open(&app, &mut vcx);
+        assert_ne!(old.entity_id(), new.entity_id());
+        cx.foreground_executor().block_test(late);
+        cx.foreground_executor().block_test(fresh_landing);
+        vcx.run_until_parked();
+        assert!(
+            row_kinds(&new, &mut vcx).contains(&alias("fresh")),
+            "control: the new search's own import landed"
+        );
+        for (name, view) in [("new", &new), ("old", &old)] {
+            assert!(
+                !row_kinds(view, &mut vcx).contains(&alias("stale-before")),
+                "an import started before the reopen reached the {name} search"
+            );
+        }
+
+        // Started after the reopen, for the search that is already gone.
+        let (late, third_landing) = app.update_in(&mut vcx, |app, window, cx| {
+            app.close_search(window, cx);
+            let landing = app.open_search_with(SearchTab::Hosts, "", third.importer(), window, cx);
+            let late =
+                app.refresh_search_host_aliases(new.clone(), stale_after.importer(), window, cx);
+            (late, landing)
+        });
+        let newest = open(&app, &mut vcx);
+        cx.foreground_executor().block_test(late);
+        cx.foreground_executor().block_test(third_landing);
+        vcx.run_until_parked();
+        assert!(row_kinds(&newest, &mut vcx).contains(&alias("third")));
+        for (name, view) in [("newest", &newest), ("closed", &new)] {
+            assert!(
+                !row_kinds(view, &mut vcx).contains(&alias("stale-after")),
+                "an import started after the reopen reached the {name} search"
+            );
+        }
+    }
+
+    /// With nothing typed and no host anywhere the Hosts tab says how to add
+    /// one — and not "No results", which is for a search that found nothing.
+    /// Drawn in the real window: the helper has no second line, the unmatched
+    /// query's headline has the SSH hint under it.
+    #[gpui::test]
+    fn an_empty_hosts_tab_draws_its_helper_and_only_an_unmatched_query_says_no_results(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let fixture = SshFixture::new("");
+        let landing = app.update_in(&mut vcx, |app, window, cx| {
+            app.open_search_with(SearchTab::Hosts, "", fixture.importer(), window, cx)
+        });
+        cx.foreground_executor().block_test(landing);
+        vcx.run_until_parked();
+        let view = open(&app, &mut vcx);
+        let copy = |view: &Entity<SearchView>, vcx: &mut VisualTestContext| {
+            view.read_with(vcx, |view, cx| {
+                let d = view.list.read(cx).delegate();
+                empty_copy(d.scope, &d.query, &d.catalog)
+            })
+        };
+        let draw = |vcx: &mut VisualTestContext| {
+            vcx.run_until_parked();
+            let _ = vcx.update(|window, cx| window.draw(cx));
+        };
+
+        draw(&mut vcx);
+        assert_eq!(
+            copy(&view, &mut vcx),
+            (t(L10nKey::SearchHostsHelper), ""),
+            "nothing typed: the helper, no hint line"
+        );
+        assert!(vcx.debug_bounds("search-empty").is_some(), "it is drawn");
+        assert!(vcx.debug_bounds("search-empty-hint").is_none());
+
+        vcx.simulate_input("zzzz");
+        draw(&mut vcx);
+        assert_eq!(
+            copy(&view, &mut vcx),
+            (t(L10nKey::SearchNoResults), t(L10nKey::ConnectSshHint)),
+            "an unmatched query: No results, and the way to connect under it"
+        );
+        assert!(vcx.debug_bounds("search-empty-hint").is_some());
+    }
+
     fn past_session(id: &str) -> Item {
         Item::new(
             format!("session {id}"),
@@ -1610,5 +1858,93 @@ mod tests {
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
         assert!(app.read_with(&vcx, |app, _| app.search.is_none()));
+    }
+}
+
+/// Switcher F11 through the real app render: the search is opened, frames are
+/// drawn, and the title and keycap paints the row builders assigned are read
+/// back from the scoped probe.
+#[cfg(test)]
+mod contrast_tests {
+    use gpui::TestAppContext;
+
+    use super::SearchTab;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, Misses, TEXT_FLOOR};
+    use crate::ui::paint_probe as probe;
+
+    #[gpui::test]
+    fn typed_search_titles_hold_the_cached_ink_on_every_row_rung(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_search(SearchTab::Actions, "split", window, cx)
+        });
+        vcx.run_until_parked();
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            for _ in 0..2 {
+                probe::clear();
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+            }
+            let (ink, popover) = vcx.update(|_, cx| {
+                (
+                    crate::ui::theme::chrome_ink(cx),
+                    cx.global::<crate::ui::presets::Surfaces>().popover,
+                )
+            });
+            let id = theme.id.as_str();
+
+            let titles = probe::all("search.title");
+            assert!(!titles.is_empty(), "{id}: the real render drew result rows");
+            for (n, title) in titles.iter().enumerate() {
+                assert_eq!(
+                    title.text,
+                    Some(ink.search_title),
+                    "{id}: title {n} reads the cached role"
+                );
+                assert_eq!(
+                    title.text_alpha,
+                    Some(1.0),
+                    "{id}: title {n} is solid ink, not a fade of the foreground"
+                );
+                assert_eq!(title.opacity, None, "{id}: title {n} has no fade");
+                for (rung, fill) in [
+                    ("resting", popover.base),
+                    ("hovered", popover.hover),
+                    ("selected", popover.selected),
+                ] {
+                    misses.floor(
+                        id,
+                        &format!("title {n} on the {rung} rung"),
+                        ink.search_title,
+                        fill,
+                        TEXT_FLOOR,
+                    );
+                }
+            }
+
+            let caps = probe::all("dialog.keycap");
+            assert!(!caps.is_empty(), "{id}: result rows draw their chords");
+            for (n, cap) in caps.iter().enumerate() {
+                assert_eq!(cap.fill, Some(ink.keycap_fill), "{id}: keycap {n} fill");
+                assert_eq!(cap.fill_alpha, Some(1.0), "{id}: keycap {n} fill alpha");
+                assert_eq!(cap.text, Some(ink.keycap_ink), "{id}: keycap {n} ink");
+                assert_eq!(cap.text_alpha, Some(1.0), "{id}: keycap {n} ink alpha");
+                misses.floor(
+                    id,
+                    &format!("keycap {n} label"),
+                    ink.keycap_ink,
+                    ink.keycap_fill,
+                    TEXT_FLOOR,
+                );
+            }
+        }
+        misses.assert_none("search titles and keycaps");
     }
 }

@@ -4,8 +4,52 @@
 use std::rc::Rc;
 
 use super::kit::{self, BtnKind, Stepper, Tk, fs};
-use super::shell::{MenuEntry, SearchOption};
+use super::shell::{InlineControl, MenuEntry, SearchOption, inline_control};
 use super::*;
+
+/// The chord the live keymap has on Copy Raw, spelled the way the rest of the
+/// app spells chords — every stroke of the sequence through `Kbd::format`.
+///
+/// Read from the installed keymap, not resolved again from the config: gpui
+/// keeps an index from action to its bindings, so this walks only Copy Raw's
+/// own bindings (plus the keymap's disabled entries) and never the whole table.
+/// Takes the first one installed, the shipped chord before an added one, which
+/// is the policy `keymap::effective_key` and the palette already follow. `None`
+/// means the action has no chord: an exact replacement leaves only the new
+/// one, and `""` or `[]` installs nothing.
+fn copy_raw_key_text(keymap: &gpui::Keymap) -> Option<String> {
+    use gpui::AsKeystroke as _;
+    let binding = keymap
+        .bindings_for_action(&crate::terminal::view::CopyRaw)
+        .next()?;
+    let strokes: Vec<String> = binding
+        .keystrokes()
+        .iter()
+        .map(|stroke| gpui_component::kbd::Kbd::format(stroke.as_keystroke()))
+        .collect();
+    (!strokes.is_empty()).then(|| strokes.join(" "))
+}
+
+/// The Join-wrapped-lines description: the static sentence, then the sentence
+/// that names the key Copy Raw is on right now, or Copy Raw alone when it has
+/// none. Both are whole catalog templates, so each language owns the order and
+/// the spacing around the key.
+fn copy_join_wrapped_desc(cx: &App) -> String {
+    let desc = t(L10nKey::SettingsCopyJoinWrappedDesc);
+    let command = t(L10nKey::CmdCopyRaw);
+    // Bound first so the keymap borrow ends here, not at the end of the match.
+    let key = copy_raw_key_text(&cx.key_bindings().borrow());
+    match key {
+        Some(key) => t_fmt(
+            L10nKey::SettingsCopyJoinWrappedWithKey,
+            &[("desc", desc), ("key", &key), ("command", command)],
+        ),
+        None => t_fmt(
+            L10nKey::SettingsCopyJoinWrappedUnbound,
+            &[("desc", desc), ("command", command)],
+        ),
+    }
+}
 
 impl Tty59App {
     pub(crate) fn render_settings_general(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -293,11 +337,11 @@ impl Tty59App {
         (can_dec, can_inc): (bool, bool),
         cx: &mut Context<Self>,
         step: impl Fn(&mut Self, f32, &mut Context<Self>) + 'static,
-    ) -> AnyElement {
+    ) -> InlineControl {
         let tk = Tk::of(cx);
         let step = Rc::new(step);
         let (dec, inc) = (step.clone(), step);
-        kit::stepper(
+        inline_control(kit::stepper(
             id,
             Stepper {
                 value,
@@ -308,7 +352,7 @@ impl Tty59App {
             &tk,
             cx.listener(move |this, _, _w, cx| dec(this, -1., cx)),
             cx.listener(move |this, _, _w, cx| inc(this, 1., cx)),
-        )
+        ))
     }
 
     pub(crate) fn render_settings_appearance(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -898,7 +942,7 @@ impl Tty59App {
                 .pt(px(4.))
                 .text_size(fs(12.))
                 .line_height(px(17.))
-                .text_color(tk.k6)
+                .text_color(tk.sub)
                 .child(t(L10nKey::SettingsShellFooter))
                 .into_any_element(),
         );
@@ -1155,16 +1199,18 @@ impl Tty59App {
             cx,
             |this, on, _, cx| this.set_prompt_editor(on, cx),
         );
-        let completion = kit::switch("term-tab-completion")
-            .checked(tab_completion)
-            .disabled(!prompt_editor)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_tab_completion(*on, cx)))
-            .into_any_element();
-        let history = kit::switch("term-history-search")
-            .checked(history_search)
-            .disabled(!prompt_editor)
-            .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_history_search(*on, cx)))
-            .into_any_element();
+        let completion = inline_control(
+            kit::switch("term-tab-completion")
+                .checked(tab_completion)
+                .disabled(!prompt_editor)
+                .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_tab_completion(*on, cx))),
+        );
+        let history = inline_control(
+            kit::switch("term-history-search")
+                .checked(history_search)
+                .disabled(!prompt_editor)
+                .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_history_search(*on, cx))),
+        );
         let per_pane = self.settings_switch(
             "term-per-pane-history",
             per_pane_history,
@@ -1355,7 +1401,7 @@ impl Tty59App {
                     ),
                     self.settings_row(
                         t(L10nKey::SettingsCopyJoinWrapped),
-                        t(L10nKey::SettingsCopyJoinWrappedDesc),
+                        copy_join_wrapped_desc(cx),
                         join,
                         cx,
                     ),
@@ -1772,12 +1818,12 @@ impl Tty59App {
                 .gap(px(6.))
                 .text_size(fs(12.))
                 .line_height(px(17.))
-                .text_color(tk.k45)
+                .text_color(tk.sub)
                 .child(t(L10nKey::SettingsAboutDesc1))
                 .child(
                     Link::new("about-github")
                         .href("https://github.com/nathabonfim59/tty59")
-                        .text_color(tk.k6)
+                        .text_color(tk.sub)
                         .child("github.com/nathabonfim59/tty59"),
                 )
                 .into_any_element(),
@@ -1893,5 +1939,128 @@ impl Tty59App {
             .map(IntoElement::into_any_element),
             cx,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::i18n::{default_language_code, set_locale};
+    use gpui::TestAppContext;
+
+    const BASE: &str = "In a Claude Code pane, rejoin the lines Claude wrapped at the pane's edge, so a paragraph pastes as one line.";
+
+    /// The description a settings page draws when `config.json` reads `json`,
+    /// with the real keymap built from that config, as the app builds it.
+    fn description_on(cx: &mut TestAppContext, json: &str) -> String {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config(
+                serde_json::from_str(json).expect("the config parses"),
+            ));
+            crate::ui::keymap::init(cx);
+            copy_join_wrapped_desc(cx)
+        })
+    }
+
+    fn with_key(key: &str) -> String {
+        format!("{BASE} {key} or Copy Raw copies them as shown.")
+    }
+
+    fn unbound() -> String {
+        format!("{BASE} Copy Raw copies them as shown.")
+    }
+
+    // The key names are spelled out here rather than read from `Kbd::format`:
+    // Windows and Linux write Alt+Win+C for the shipped `cmd-alt-c`, macOS ⌥⌘C.
+    fn shipped_chord() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "⌥⌘C"
+        } else {
+            "Alt+Win+C"
+        }
+    }
+
+    #[gpui::test]
+    fn copy_raw_hint_names_the_shipped_chord_by_default(cx: &mut TestAppContext) {
+        set_locale("en");
+        assert_eq!(description_on(cx, "{}"), with_key(shipped_chord()));
+    }
+
+    #[gpui::test]
+    fn an_exact_rebind_replaces_the_shipped_chord_in_the_hint(cx: &mut TestAppContext) {
+        set_locale("en");
+        let rebound = if cfg!(target_os = "macos") {
+            "⌃⇧Y"
+        } else {
+            "Ctrl+Shift+Y"
+        };
+        assert_eq!(
+            description_on(cx, r#"{"keybindings": {"CopyRaw": ["ctrl-shift-y"]}}"#),
+            with_key(rebound)
+        );
+    }
+
+    #[gpui::test]
+    fn an_added_chord_keeps_the_shipped_one_first(cx: &mut TestAppContext) {
+        set_locale("en");
+        assert_eq!(
+            description_on(cx, r#"{"keybindings": {"CopyRaw": "ctrl-shift-y"}}"#),
+            with_key(shipped_chord())
+        );
+    }
+
+    #[gpui::test]
+    fn an_unbound_copy_raw_reads_as_the_command_alone(cx: &mut TestAppContext) {
+        set_locale("en");
+        for json in [
+            r#"{"keybindings": {"CopyRaw": ""}}"#,
+            r#"{"keybindings": {"CopyRaw": []}}"#,
+        ] {
+            assert_eq!(description_on(cx, json), unbound(), "{json}");
+        }
+    }
+
+    #[gpui::test]
+    fn a_sequence_shows_every_stroke(cx: &mut TestAppContext) {
+        set_locale("en");
+        let sequence = if cfg!(target_os = "macos") {
+            "⌃B Y"
+        } else {
+            "Ctrl+B Y"
+        };
+        assert_eq!(
+            description_on(cx, r#"{"keybindings": {"CopyRaw": ["ctrl-b y"]}}"#),
+            with_key(sequence)
+        );
+    }
+
+    /// Each language owns the order and spacing around the key, so the
+    /// unbound sentence has to come out whole in all of them: the base
+    /// sentence, then Copy Raw alone, with nothing of the key template left.
+    #[gpui::test]
+    fn the_unbound_sentence_is_whole_in_every_language(cx: &mut TestAppContext) {
+        for (locale, expected) in [
+            (
+                "zh-CN",
+                "在 Claude Code 窗格中，将 Claude 在窗格边缘折行的内容重新合并，段落粘贴为一行。“原样复制”按显示内容复制。",
+            ),
+            (
+                "ja-JP",
+                "Claude Code のペインで、Claude が画面端で折り返した行をつなげ、段落を 1 行として貼り付けます。「そのままコピー」で表示どおりにコピーします。",
+            ),
+            (
+                "ru-RU",
+                "В панели Claude Code склеивать строки, которые Claude перенёс у края панели, чтобы абзац вставлялся одной строкой. Команда «Копировать как есть» копирует их как на экране.",
+            ),
+        ] {
+            set_locale(locale);
+            assert_eq!(
+                description_on(cx, r#"{"keybindings": {"CopyRaw": ""}}"#),
+                expected,
+                "{locale}"
+            );
+        }
+        set_locale(default_language_code());
     }
 }

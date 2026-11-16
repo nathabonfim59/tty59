@@ -41,6 +41,9 @@ mod shell;
 mod shortcuts;
 mod theme_picker;
 
+#[cfg(test)]
+mod a33_tests;
+
 /// The settings nav, and the page's padding either side of its column.
 const NAV_W: f32 = 220.;
 const PAGE_PAD: f32 = 112.;
@@ -344,7 +347,12 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
-            title: SettingsThemeIntroTitle,
+            title: SettingsLightThemeLabel,
+            keywords: SettingsSearchThemeKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
+            title: SettingsDarkThemeLabel,
             keywords: SettingsSearchThemeKeywords,
         },
         SearchEntry {
@@ -582,6 +590,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Agents,
+            title: SettingsMachine,
+            keywords: SettingsSearchMachineKeywords,
+        },
+        SearchEntry {
+            section: Agents,
             title: SettingsAgentClaudeCode,
             keywords: SettingsSearchClaudeCodeKeywords,
         },
@@ -703,7 +716,7 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         SearchEntry {
             section: General,
             title: VisionDefault,
-            keywords: VisionDefaultDesc,
+            keywords: SettingsSearchVisionDefaultKeywords,
         },
         SearchEntry {
             section: General,
@@ -948,7 +961,8 @@ impl SearchEntry {
             L10nKey::SettingsBackdrop => "window_backdrop",
             L10nKey::SettingsSyncWithSystem => "theme_follow_system",
             L10nKey::SettingsLegiblePalette => "theme_legible_palette",
-            L10nKey::SettingsThemeIntroTitle => "theme_preset",
+            L10nKey::SettingsLightThemeLabel => "theme_preset_light",
+            L10nKey::SettingsDarkThemeLabel => "theme_preset_dark",
             L10nKey::SettingsAppHttpProxy => "http_proxy",
             L10nKey::SettingsOpenFilesCommand => "link_file_command",
             L10nKey::OpenFilesWith => "link_file_open",
@@ -1054,7 +1068,16 @@ impl SearchEntry {
             3
         }
     }
-    fn modified(&self, cfg: &Config) -> bool {
+    /// `modified` against the live config, reading the theme mode only for the
+    /// rows whose answer depends on it.
+    fn modified_in(&self, cx: &App) -> bool {
+        let view = match self.title {
+            L10nKey::SettingsLightThemeLabel | L10nKey::SettingsDarkThemeLabel => ThemeView::of(cx),
+            _ => ThemeView::default(),
+        };
+        self.modified(cx.global::<Config>(), view)
+    }
+    fn modified(&self, cfg: &Config, view: ThemeView) -> bool {
         let defaults = Config::default();
         match self.title {
             L10nKey::SettingsDimInactivePanes => {
@@ -1165,11 +1188,8 @@ impl SearchEntry {
             L10nKey::SettingsLegiblePalette => {
                 cfg.theme_legible_palette != defaults.theme_legible_palette
             }
-            L10nKey::SettingsThemeIntroTitle => {
-                cfg.theme_preset != defaults.theme_preset
-                    || cfg.theme_preset_light != defaults.theme_preset_light
-                    || cfg.theme_preset_dark != defaults.theme_preset_dark
-            }
+            L10nKey::SettingsLightThemeLabel => view.slot_modified(cfg, false),
+            L10nKey::SettingsDarkThemeLabel => view.slot_modified(cfg, true),
             L10nKey::SettingsAppHttpProxy => cfg.http_proxy != defaults.http_proxy,
             L10nKey::SettingsOpenFilesCommand => {
                 cfg.link_file_command != defaults.link_file_command
@@ -1317,6 +1337,10 @@ pub(crate) struct SettingsState {
     pub(crate) shortcut_search: Entity<InputState>,
     pub(crate) modified_only: bool,
     pub(crate) save_error: Option<String>,
+    /// Where the failed write was headed, resolved when it failed and never in
+    /// render. `None` when the config directory is unavailable: the banner then
+    /// has no path tooltip rather than an invented one.
+    pub(crate) save_error_path: Option<SharedString>,
     pub(crate) saved_config: Config,
     pub(crate) search_active: bool,
     pub(crate) search_return_offset: gpui::Point<gpui::Pixels>,
@@ -1328,8 +1352,10 @@ pub(crate) struct SettingsState {
     /// to the two, which on a long page start well below the fold.
     pub(crate) content_scroll: gpui::ScrollHandle,
     pub(crate) search_anchor: gpui::ScrollAnchor,
-    /// Set when the query or the section changes, and spent by the next render
-    /// that has somewhere to go. A `Cell` because that render only holds `&self`.
+    /// Set when the section changes with a setting to find on it, and spent by
+    /// the next render that has somewhere to go. The results page never uses
+    /// it: moving through results scrolls through `content_scroll` instead. A
+    /// `Cell` because that render only holds `&self`.
     pub(crate) reveal_first_hit: Cell<bool>,
     /// The families the font menus list, read once when the page opens.
     pub(crate) font_names: std::rc::Rc<Vec<String>>,
@@ -1429,6 +1455,59 @@ pub(crate) enum ThemeMode {
     System,
 }
 
+/// How the Appearance page reads the theme config, taken once per render from
+/// the same `theme_mode` the cards use, so a row, the search index, the
+/// modified list and navigation all agree on which slot a pinned mode shows.
+///
+/// System follows the OS and shows each slot's own key. A pinned Light or Dark
+/// shows only its slot, and that row's dropdown reads and writes
+/// `theme_preset`; the other slot is hidden, and its value is its own key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ThemeView(pub(crate) ThemeMode);
+
+impl Default for ThemeView {
+    fn default() -> Self {
+        Self(ThemeMode::System)
+    }
+}
+
+impl ThemeView {
+    pub(crate) fn of(cx: &App) -> Self {
+        Self(Tty59App::theme_mode(cx))
+    }
+
+    /// Whether the mode shows this slot's row on the plain page.
+    pub(crate) fn shows(self, dark_slot: bool) -> bool {
+        match self.0 {
+            ThemeMode::System => true,
+            ThemeMode::Light => !dark_slot,
+            ThemeMode::Dark => dark_slot,
+        }
+    }
+
+    /// The theme id the slot's row displays: `theme_preset` for the one slot a
+    /// pinned mode shows, the slot's own saved key for every other row.
+    pub(crate) fn value(self, cfg: &Config, dark_slot: bool) -> &str {
+        match (self.0, self.shows(dark_slot)) {
+            (ThemeMode::System, _) | (_, false) => match dark_slot {
+                true => cfg.theme_preset_dark.as_str(),
+                false => cfg.theme_preset_light.as_str(),
+            },
+            (_, true) => cfg.theme_preset.as_str(),
+        }
+    }
+
+    /// The slot's row differs from the default it would be reset to.
+    pub(crate) fn slot_modified(self, cfg: &Config, dark_slot: bool) -> bool {
+        let defaults = Config::default();
+        let default = match dark_slot {
+            true => &defaults.theme_preset_dark,
+            false => &defaults.theme_preset_light,
+        };
+        self.value(cfg, dark_slot) != default.as_str()
+    }
+}
+
 fn ssh_group_key(p: &SshProfile) -> &str {
     p.group.as_deref().unwrap_or("")
 }
@@ -1480,6 +1559,13 @@ fn profiles_sharing_endpoint(cfg: &Config, id: Uuid) -> usize {
 
 pub(crate) struct SshProfileForm {
     editing: Uuid,
+    /// What the form produced the moment it was loaded — the normalized
+    /// profile and the complaints validation had about it — so "unsaved"
+    /// means "differs from what was opened", not "differs from disk". A
+    /// just-added host's untouched form compares equal to itself and is
+    /// clean, while text that only fails validation still counts as an edit.
+    /// A successful save moves this to what was written.
+    seeded: Option<(SshProfile, SshFormErrors)>,
     carry_group: Option<String>,
     carry_credential_ref: Option<CredentialRef>,
 
@@ -2095,8 +2181,39 @@ impl Tty59App {
         let save_failed = self
             .active_settings()
             .is_some_and(|s| s.save_error.is_some());
-        if !save_failed && !self.ssh_form_dirty(cx) && !self.theme_draft_dirty() {
+        let other_edits = self.ssh_form_dirty(cx) || self.theme_draft_dirty();
+        if !save_failed && !other_edits {
             action(self, window, cx);
+            return;
+        }
+        if !other_edits {
+            // The write failing is the only thing in the way: saving is not
+            // on offer here (Retry is on the banner), so the question is
+            // whether to go on without it. Leaving puts the settings back to
+            // what is on disk rather than carrying values that never landed.
+            let answer = window.prompt::<gpui::PromptButton>(
+                gpui::PromptLevel::Warning,
+                t(L10nKey::SettingsSaveFailedTitle),
+                Some(t(L10nKey::SettingsSaveFailedBody)),
+                // Stay first: a default Enter on the dialog keeps the page and
+                // its unsaved values, and only a deliberate pick of Leave
+                // discards them.
+                &[
+                    gpui::PromptButton::cancel(t(L10nKey::SettingsStay)),
+                    gpui::PromptButton::new(t(L10nKey::SettingsLeave)),
+                ],
+                cx,
+            );
+            cx.spawn_in(window, async move |this, cx| {
+                if !matches!(answer.await, Ok(1)) {
+                    return;
+                }
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.discard_unsaved_settings(window, cx);
+                    action(this, window, cx);
+                });
+            })
+            .detach();
             return;
         }
         let answer = window.prompt::<gpui::PromptButton>(
@@ -2160,12 +2277,10 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ssh_form_dirty(cx)
-            || self.theme_draft_dirty()
-            || self
-                .active_settings()
-                .is_some_and(|s| s.save_error.is_some())
-        {
+        // A failed write is not asked about here: the banner above the page
+        // stays through section changes and keeps the values until a write
+        // lands, so only leaving Settings has anything to confirm.
+        if self.ssh_form_dirty(cx) || self.theme_draft_dirty() {
             self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
                 this.navigate_settings(target, setting, window, cx)
             });
@@ -2439,6 +2554,7 @@ impl Tty59App {
 
         let form = SshProfileForm {
             editing: profile.id,
+            seeded: None,
             carry_group: profile.group.clone(),
             carry_credential_ref: profile.credential_ref.clone(),
             name,
@@ -2488,6 +2604,14 @@ impl Tty59App {
             // A saved host edits in its own row; a new one gets a row of its
             // own at the top, so nothing else is shown opened.
             s.ssh_open = known.then_some(editing);
+        }
+        // What "edited" means is decided against what the form opened as, so
+        // the baseline is the collect result of the seeded fields — a form
+        // nobody has typed into, including a brand-new host with no saved
+        // profile to point at, compares equal to itself.
+        let seeded = self.ssh_form_collect(cx);
+        if let Some(form) = self.ssh_form_mut() {
+            form.seeded = seeded;
         }
         cx.notify();
     }
@@ -2600,6 +2724,15 @@ impl Tty59App {
             return None;
         }
         self.save_ssh_form_secrets(&profile, window, cx);
+        // The caller decides when the form closes, and until then what it
+        // holds is exactly what is on disk: move the baseline it compares
+        // against so the freshly saved edits do not read as unsaved. This
+        // only runs after the write actually persisted — a failed save keeps
+        // the old baseline and the edits stay flagged.
+        let seeded = self.ssh_form_collect(cx);
+        if let Some(form) = self.ssh_form_mut() {
+            form.seeded = seeded;
+        }
         Some(id)
     }
 
@@ -2752,20 +2885,16 @@ impl Tty59App {
 
     /// Whether the SSH profile form on screen holds edits that were never
     /// saved. Save is enabled off exactly this, so closing on it is the same
-    /// question the button already answers — and it compares what the form
-    /// would save even when the form cannot be saved yet, so a half-typed new
-    /// host is still something Escape has to ask about.
+    /// question the button already answers. The yardstick is what the form
+    /// was loaded as — profile and validation complaints both — so a form
+    /// nobody has touched is clean even for a host that is not on disk yet,
+    /// while text that only fails validation still counts, and a half-typed
+    /// new host is still something Escape has to ask about.
     pub(crate) fn ssh_form_dirty(&self, cx: &App) -> bool {
         let Some(form) = self.active_settings().and_then(|s| s.ssh_form.as_ref()) else {
             return false;
         };
-        let saved = cx
-            .global::<Config>()
-            .ssh_profiles
-            .iter()
-            .find(|p| p.id == form.editing)
-            .cloned();
-        self.ssh_form_collect(cx).map(|(profile, _)| profile) != saved || form.secrets_changed(cx)
+        self.ssh_form_collect(cx).as_ref() != form.seeded.as_ref() || form.secrets_changed(cx)
     }
 
     /// Closing from Escape or the X is the user leaving; every other caller
@@ -2983,7 +3112,7 @@ mod tests {
                 entry.title
             );
             assert!(
-                !entry.modified(&defaults),
+                !entry.modified(&defaults, ThemeView::default()),
                 "default {:?} is modified",
                 entry.title
             );
@@ -3038,6 +3167,49 @@ mod tests {
         crate::ui::i18n::set_locale("en");
     }
 
+    /// Renaming a setting by its outcome must not strand someone who still
+    /// types the old name: "agent mode" and the ssh_config keywords were the
+    /// words these rows used to be found by, in every language.
+    #[test]
+    fn renamed_settings_are_still_found_by_their_old_words() {
+        for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
+            crate::ui::i18n::set_locale(locale);
+            for (query, title) in [
+                ("agent mode", L10nKey::VisionDefault),
+                ("start windows", L10nKey::VisionDefault),
+                (
+                    "terminal agents selector",
+                    L10nKey::SettingsSidebarAgentsToggle,
+                ),
+                ("hostname", L10nKey::SettingsHosts),
+                ("identityfile", L10nKey::SettingsHosts),
+                ("proxyjump", L10nKey::SettingsHosts),
+            ] {
+                let entry = settings_search_entries()
+                    .iter()
+                    .find(|e| e.title == title)
+                    .unwrap();
+                assert!(entry_matches(entry, query), "{locale}: {query}");
+            }
+        }
+        // The words each language's old row title was found by, typed in that
+        // language: no other catalog carries them, so only that language's own
+        // keywords can keep them working.
+        for (locale, query) in [
+            ("ru-RU", "режим агентов"),
+            ("ja-JP", "エージェントビュー"),
+            ("zh-CN", "Agent 视图"),
+        ] {
+            crate::ui::i18n::set_locale(locale);
+            let entry = settings_search_entries()
+                .iter()
+                .find(|e| e.title == L10nKey::VisionDefault)
+                .unwrap();
+            assert!(entry_matches(entry, query), "{locale}: {query}");
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
     #[test]
     fn settings_row_ids_survive_language_changes() {
         for key in [
@@ -3061,7 +3233,7 @@ mod tests {
         cfg.notify_threshold_secs += 1;
         let changed = settings_search_entries()
             .iter()
-            .filter(|e| e.modified(&cfg))
+            .filter(|e| e.modified(&cfg, ThemeView::default()))
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsNotifyThreshold]);
@@ -3095,7 +3267,7 @@ mod tests {
         cfg.auto_hide_titlebar_buttons = true;
         let changed = settings_search_entries()
             .iter()
-            .filter(|e| e.modified(&cfg))
+            .filter(|e| e.modified(&cfg, ThemeView::default()))
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsAutoHideTitlebarButtons]);
@@ -3113,7 +3285,7 @@ mod tests {
         assert!(entry.section == SettingsSection::General);
         assert_eq!(entry.config_key(), "editor_mermaid_colors");
         assert!(!entry.description().is_empty());
-        assert!(!entry.modified(&Config::default()));
+        assert!(!entry.modified(&Config::default(), ThemeView::default()));
         for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
             crate::ui::i18n::set_locale(locale);
             let name = t(L10nKey::SettingsEditorMermaidColors);
@@ -3134,7 +3306,7 @@ mod tests {
         });
         let changed = settings_search_entries()
             .iter()
-            .filter(|e| e.modified(&cfg))
+            .filter(|e| e.modified(&cfg, ThemeView::default()))
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsEditorMermaidColors]);
@@ -3148,7 +3320,7 @@ mod tests {
             .unwrap();
         assert_eq!(entry.config_key(), "tab_group_shortcuts");
         assert!(!entry.description().is_empty());
-        assert!(!entry.modified(&Config::default()));
+        assert!(!entry.modified(&Config::default(), ThemeView::default()));
 
         let activation = settings_search_entries()
             .iter()
@@ -3156,14 +3328,14 @@ mod tests {
             .unwrap();
         assert_eq!(activation.config_key(), "tab_group_activation");
         assert!(!activation.description().is_empty());
-        assert!(!activation.modified(&Config::default()));
+        assert!(!activation.modified(&Config::default(), ThemeView::default()));
 
         let mut cfg = Config::default();
         cfg.tab_group_shortcuts = true;
         cfg.tab_group_activation = TabGroupActivation::First;
         let changed = settings_search_entries()
             .iter()
-            .filter(|e| e.modified(&cfg))
+            .filter(|e| e.modified(&cfg, ThemeView::default()))
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(
@@ -3447,13 +3619,18 @@ mod tests {
             "Blur",
             "blur"
         ));
-        // Keyword hit: the label says "Theme" and nothing more, but the index
-        // says that row answers "palette".
-        assert!(row_matches_query(
-            SettingsSection::Appearance,
-            t(L10nKey::SettingsThemeIntroTitle),
-            "palette"
-        ));
+        // Keyword hit: the label says "Light theme" and nothing more, but the
+        // index says that row answers "palette".
+        for slot in [
+            L10nKey::SettingsLightThemeLabel,
+            L10nKey::SettingsDarkThemeLabel,
+        ] {
+            assert!(row_matches_query(
+                SettingsSection::Appearance,
+                t(slot),
+                "palette"
+            ));
+        }
         // A row on some other page is not a hit just because the query matches
         // an entry elsewhere.
         assert!(!row_matches_query(
@@ -3616,6 +3793,8 @@ mod tests {
             "Show title bar buttons on hover",
             "Option (⌥) acts as Meta",
             "Install the tty59 command on PATH",
+            "Open new windows in the Inbox",
+            "Show Terminal / Agents switch",
         ] {
             if title == "Option (⌥) acts as Meta" && !cfg!(target_os = "macos") {
                 continue;
@@ -4268,6 +4447,289 @@ mod gpui_tests {
         });
     }
 
+    /// The host form used to ask "is this host on disk?", which is always no
+    /// for one that was just added — so an untouched New host read "Unsaved"
+    /// and every nav click opened the save prompt over nothing. It now asks
+    /// whether the form differs from what it was loaded with.
+    #[gpui::test]
+    fn an_untouched_new_host_is_clean_and_leaves_without_asking(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.add_new_profile(window, cx);
+        });
+        vcx.run_until_parked();
+
+        assert!(
+            !vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx)),
+            "a form nobody has typed in has nothing to save"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.navigate_settings(SettingsSection::General, None, window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(
+            !vcx.has_pending_prompt(),
+            "leaving a clean new host must not ask to save it"
+        );
+        app.update_in(&mut vcx, |app, _, _cx| {
+            assert!(app.active_settings().unwrap().section == SettingsSection::General);
+        });
+    }
+
+    /// Every kind of edit flags a form that started clean, and undoing it is
+    /// clean again: a text field, a toggle, text validation cannot turn into
+    /// a profile, and a secret the profile itself never sees.
+    #[gpui::test]
+    fn a_new_host_flags_each_kind_of_edit_and_clears_on_revert(cx: &mut TestAppContext) {
+        use gpui_component::input::InputState;
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.add_new_profile(window, cx);
+        });
+        vcx.run_until_parked();
+        let dirty =
+            |vcx: &mut VisualTestContext| vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx));
+        let set = |vcx: &mut VisualTestContext, input: &Entity<InputState>, value: &str| {
+            app.update_in(vcx, |_app, window, cx| {
+                input.update(cx, |i, cx| i.set_value(value, window, cx));
+            });
+            vcx.run_until_parked();
+        };
+        let (host, port, password) = vcx.update(|_, cx| {
+            let form = app
+                .read(cx)
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .expect("the host editor is open");
+            (form.host.clone(), form.port.clone(), form.password.clone())
+        });
+
+        assert!(!dirty(&mut vcx), "the seeded form starts clean");
+
+        set(&mut vcx, &host, "new.example");
+        assert!(dirty(&mut vcx), "a typed host is an unsaved change");
+        set(&mut vcx, &host, "");
+        assert!(!dirty(&mut vcx), "clearing it back is clean again");
+
+        // Text validation cannot turn into a profile is still typing worth
+        // asking about: Save cannot have it and Escape must not lose it.
+        set(&mut vcx, &port, "abc");
+        assert!(dirty(&mut vcx), "an invalid port is still an edit");
+        set(&mut vcx, &port, "22");
+        assert!(!dirty(&mut vcx));
+
+        app.update_in(&mut vcx, |app, _, _cx| {
+            app.ssh_form_mut().unwrap().x11 = true;
+        });
+        assert!(dirty(&mut vcx), "a toggled checkbox is an edit");
+        app.update_in(&mut vcx, |app, _, _cx| {
+            app.ssh_form_mut().unwrap().x11 = false;
+        });
+        assert!(!dirty(&mut vcx));
+
+        // The secret goes to the keychain, not the profile, so the profile
+        // comparison alone would never see it.
+        set(&mut vcx, &password, "hunter2");
+        assert!(dirty(&mut vcx), "a typed password is an unsaved change");
+        set(&mut vcx, &password, "");
+        assert!(!dirty(&mut vcx));
+    }
+
+    /// A saved host compares against the form it was loaded as: a forward-row
+    /// edit flags it, text validation cannot turn into a profile flags it
+    /// while a failed save leaves it flagged, and a revert is clean.
+    #[gpui::test]
+    fn a_saved_host_flags_forward_and_invalid_edits(cx: &mut TestAppContext) {
+        use crate::core::ssh_profile::{ForwardKind, ForwardRule, HostPort, SshProfile};
+        use gpui_component::input::InputState;
+        let (app, mut vcx) = harness(cx);
+        let mut profile = SshProfile::new("prod");
+        profile.host = "prod.example".into();
+        profile.user = "deploy".into();
+        profile.forwards = vec![ForwardRule {
+            kind: ForwardKind::Local,
+            bind: HostPort::new("127.0.0.1", 8080),
+            target: HostPort::new("app.internal", 80),
+            description: "app".into(),
+            enabled: true,
+        }];
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.update_config(cx, |cfg| cfg.ssh_profiles.push(profile.clone()));
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.ssh_form_load(&profile, window, cx);
+        });
+        vcx.run_until_parked();
+        let dirty =
+            |vcx: &mut VisualTestContext| vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx));
+        let set = |vcx: &mut VisualTestContext, input: &Entity<InputState>, value: &str| {
+            app.update_in(vcx, |_app, window, cx| {
+                input.update(cx, |i, cx| i.set_value(value, window, cx));
+            });
+            vcx.run_until_parked();
+        };
+        let (bind_port, port) = vcx.update(|_, cx| {
+            let form = app
+                .read(cx)
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .expect("the host editor is open");
+            (form.forwards[0].bind_port.clone(), form.port.clone())
+        });
+
+        assert!(!dirty(&mut vcx), "an untouched saved host is clean");
+
+        set(&mut vcx, &bind_port, "9090");
+        assert!(dirty(&mut vcx), "a changed forward is an unsaved change");
+        set(&mut vcx, &bind_port, "8080");
+        assert!(!dirty(&mut vcx));
+
+        // Invalid text cannot be saved, but it is still something the user
+        // typed — losing it on Escape without asking is still losing work.
+        set(&mut vcx, &port, "abc");
+        assert!(dirty(&mut vcx), "invalid text is still an unsaved change");
+        let saved = app.update_in(&mut vcx, |app, window, cx| {
+            app.save_editing_profile(window, cx)
+        });
+        assert!(saved.is_none(), "an invalid form cannot save");
+        assert!(
+            dirty(&mut vcx),
+            "a save that refused leaves the edits flagged"
+        );
+
+        set(&mut vcx, &port, "22");
+        assert!(!dirty(&mut vcx));
+    }
+
+    /// Saving writes the form out and leaves it open — the caller decides
+    /// when it closes — so "what it was loaded with" has to move to what was
+    /// just saved, or the freshly saved edits read as unsaved themselves.
+    #[gpui::test]
+    fn saving_the_open_form_rebases_the_dirty_baseline(cx: &mut TestAppContext) {
+        use crate::core::ssh_profile::SshProfile;
+        let (app, mut vcx) = harness(cx);
+        let mut profile = SshProfile::new("prod");
+        profile.host = "prod.example".into();
+        let profile_id = profile.id;
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.update_config(cx, |cfg| cfg.ssh_profiles.push(profile.clone()));
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.ssh_form_load(&profile, window, cx);
+        });
+        vcx.run_until_parked();
+        let dirty =
+            |vcx: &mut VisualTestContext| vcx.update(|_, cx| app.read(cx).ssh_form_dirty(cx));
+        let host = vcx.update(|_, cx| {
+            app.read(cx)
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .expect("the host editor is open")
+                .host
+                .clone()
+        });
+        app.update_in(&mut vcx, |_app, window, cx| {
+            host.update(cx, |i, cx| i.set_value("renamed.example", window, cx));
+        });
+        vcx.run_until_parked();
+        assert!(dirty(&mut vcx));
+
+        let saved = app.update_in(&mut vcx, |app, window, cx| {
+            app.save_editing_profile(window, cx)
+        });
+        assert_eq!(saved, Some(profile_id));
+        assert!(
+            !dirty(&mut vcx),
+            "the form still on screen now holds exactly what is on disk"
+        );
+
+        app.update_in(&mut vcx, |_app, window, cx| {
+            host.update(cx, |i, cx| i.set_value("renamed-again.example", window, cx));
+        });
+        vcx.run_until_parked();
+        assert!(
+            dirty(&mut vcx),
+            "the next edit counts against the new baseline"
+        );
+
+        // A write that cannot complete must not move the baseline either:
+        // the edits on screen are still unsaved.
+        app.update_in(&mut vcx, |_app, _window, cx| {
+            cx.global_mut::<Config>().quarantined = true;
+        });
+        let saved = app.update_in(&mut vcx, |app, window, cx| {
+            app.save_editing_profile(window, cx)
+        });
+        assert!(saved.is_none(), "a write that fails is not a save");
+        assert!(dirty(&mut vcx), "a failed save leaves the edits flagged");
+
+        app.update_in(&mut vcx, |_app, _window, cx| {
+            cx.global_mut::<Config>().quarantined = false;
+        });
+        let saved = app.update_in(&mut vcx, |app, window, cx| {
+            app.save_editing_profile(window, cx)
+        });
+        assert_eq!(saved, Some(profile_id));
+        assert!(!dirty(&mut vcx), "a completed save rebases the form");
+    }
+
+    /// The trailing text on a host row says something only when there is
+    /// something to say: a connected host shows its age, a host that never
+    /// connected stays quiet instead of reading "Never", and a clean New
+    /// host stays quiet instead of reading "Unsaved".
+    #[gpui::test]
+    fn host_rows_show_last_use_or_stay_quiet(cx: &mut TestAppContext) {
+        use crate::core::config::ProfileUsage;
+        use crate::core::ssh_profile::SshProfile;
+        use uuid::Uuid;
+        let (app, mut vcx) = harness(cx);
+        let mut never = SshProfile::new("never");
+        never.host = "never.example".into();
+        let mut used = SshProfile::new("used");
+        used.host = "used.example".into();
+        let (never_id, used_id) = (never.id, used.id);
+        let new_id = app.update_in(&mut vcx, |app, window, cx| {
+            let cfg = cx.global_mut::<Config>();
+            cfg.ssh_profiles = vec![never, used];
+            cfg.ssh_profile_frecency.insert(
+                used_id,
+                ProfileUsage {
+                    count: 2,
+                    last_used: crate::core::config::unix_now().saturating_sub(3600),
+                },
+            );
+            app.open_settings_section(SettingsSection::Ssh, window, cx);
+            app.add_new_profile(window, cx);
+            app.active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .map(|f| f.editing)
+                .expect("the new host form opened")
+        });
+        vcx.simulate_resize(size(px(1100.), px(800.)));
+        // Two cycles: the first lays the page out, the second paints the
+        // settled tree, which is when debug bounds are recorded.
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let meta = |id: Uuid| -> &'static str { format!("ssh-host-meta-{}", id.as_u128()).leak() };
+        assert!(
+            vcx.debug_bounds(meta(used_id)).is_some(),
+            "a recently connected host shows its age"
+        );
+        assert!(
+            vcx.debug_bounds(meta(never_id)).is_none(),
+            "a host that never connected says nothing"
+        );
+        assert!(
+            vcx.debug_bounds(meta(new_id)).is_none(),
+            "an untouched new host is not labelled Unsaved"
+        );
+    }
+
     /// The credential rows follow the auth method the same way connecting
     /// does: a password only for methods that offer one, a passphrase never
     /// for a method that does not try keys. (Whether Auto / PublicKey show the
@@ -4316,6 +4778,308 @@ mod gpui_tests {
             assert_eq!(cx.global::<Config>().notify_threshold_secs, 73);
         });
         vcx.run_until_parked();
+    }
+
+    /// Two paints: the first lays the page out, the second reads the bounds
+    /// and focus that layout produced.
+    fn settle(vcx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    /// A settings page whose next write is refused (a quarantined config will
+    /// not save) and one toggle changed on it: the failed write of an
+    /// interactive edit, with the value still held in memory.
+    fn fail_a_write(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, secs: u64) {
+        app.update_in(vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+            cx.global_mut::<Config>().quarantined = true;
+            app.set_notify_threshold(secs, cx);
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        settle(vcx);
+    }
+
+    /// The threshold `config.json` holds on disk right now, read the way
+    /// anyone reading the file would.
+    fn threshold_on_disk() -> Option<u64> {
+        let path = crate::core::config::config_path("config.json")?;
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()?
+            .get("notify_threshold_secs")?
+            .as_u64()
+    }
+
+    fn click_retry(vcx: &mut VisualTestContext) {
+        let retry = vcx
+            .debug_bounds("settings-save-retry")
+            .expect("the banner offers Retry");
+        vcx.simulate_click(retry.center(), gpui::Modifiers::default());
+        settle(vcx);
+    }
+
+    /// F17: a refused write is said in the banner, with the file it was meant
+    /// for, and nothing but a write that really lands takes it down: a Retry
+    /// that fails again keeps the error, the path and the unsaved value; a
+    /// Retry that succeeds clears both and puts the value on disk.
+    #[gpui::test]
+    fn a_failed_write_stays_until_a_real_write_lands(cx: &mut TestAppContext) {
+        // Other test Apps share this file; keep their saves outside our transaction.
+        let _config_writes = crate::core::config::lock_test_config_writes();
+        let (app, mut vcx) = harness(cx);
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_none(),
+            "no banner before anything failed"
+        );
+        fail_a_write(&app, &mut vcx, 91);
+        let expected_path = crate::core::config::config_path("config.json")
+            .expect("the test config dir is pinned")
+            .display()
+            .to_string();
+        let held = |vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, _, cx| {
+                let s = app.active_settings().unwrap();
+                (
+                    s.save_error.clone(),
+                    s.save_error_path.as_ref().map(|p| p.to_string()),
+                    cx.global::<Config>().notify_threshold_secs,
+                    s.saved_config.notify_threshold_secs,
+                )
+            })
+        };
+
+        let (error, path, held_value, saved_value) = held(&mut vcx);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("repair it before saving")),
+            "the refusal's own reason is kept: {error:?}"
+        );
+        assert_eq!(path, Some(expected_path.clone()), "where it was headed");
+        assert_eq!(held_value, 91, "the unsaved value is still held");
+        assert_ne!(saved_value, 91, "and is not recorded as saved");
+        assert!(vcx.debug_bounds("settings-save-banner").is_some());
+        assert_ne!(threshold_on_disk(), Some(91), "nothing was written");
+
+        // Retry while the write is still refused.
+        click_retry(&mut vcx);
+        let (error, path, held_value, saved_value) = held(&mut vcx);
+        assert!(error.is_some(), "a failed Retry keeps the error");
+        assert_eq!(path, Some(expected_path), "and the path");
+        assert_eq!(held_value, 91, "and the unsaved value");
+        assert_ne!(saved_value, 91);
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_some(),
+            "and the banner"
+        );
+
+        // The obstacle goes away; Retry now really writes.
+        app.update_in(&mut vcx, |_, _, cx| {
+            cx.global_mut::<Config>().quarantined = false;
+        });
+        settle(&mut vcx);
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_some(),
+            "fixing the cause alone does not dismiss the banner"
+        );
+        click_retry(&mut vcx);
+        let (error, path, held_value, saved_value) = held(&mut vcx);
+        assert_eq!(error, None, "a write that landed clears the error");
+        assert_eq!(path, None, "and the path");
+        assert_eq!(held_value, 91);
+        assert_eq!(saved_value, 91, "and the value is now what is saved");
+        assert!(vcx.debug_bounds("settings-save-banner").is_none());
+        assert_eq!(threshold_on_disk(), Some(91), "it is on disk");
+    }
+
+    /// F17: moving between sections, or jumping to a shortcut from search,
+    /// neither asks about the failed write nor dismisses it; the banner and
+    /// the held value ride along.
+    #[gpui::test]
+    fn a_failed_write_survives_moving_around_settings_without_a_prompt(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        fail_a_write(&app, &mut vcx, 92);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.navigate_settings(SettingsSection::Appearance, None, window, cx);
+        });
+        settle(&mut vcx);
+        assert!(!vcx.has_pending_prompt(), "a section change does not ask");
+        app.update_in(&mut vcx, |app, _, cx| {
+            let s = app.active_settings().unwrap();
+            assert!(s.section == SettingsSection::Appearance, "it moved");
+            assert!(s.save_error.is_some(), "the failure is still held");
+            assert!(s.save_error_path.is_some(), "with its path");
+            assert_eq!(cx.global::<Config>().notify_threshold_secs, 92);
+        });
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_some(),
+            "the banner is on the new section too"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_shortcut_search("NewTab".to_string(), window, cx);
+        });
+        settle(&mut vcx);
+        assert!(
+            !vcx.has_pending_prompt(),
+            "opening a shortcut from search does not ask"
+        );
+        app.update_in(&mut vcx, |app, _, _| {
+            let s = app.active_settings().unwrap();
+            assert!(s.section == SettingsSection::Keybindings, "it moved");
+            assert!(s.save_error.is_some());
+        });
+        assert!(vcx.debug_bounds("settings-save-banner").is_some());
+    }
+
+    /// F17: closing Settings over a failed write asks the failure's own
+    /// question, Stay or Leave. Stay (the cancel button, the default) changes
+    /// nothing; Leave puts the settings back to what is on disk and closes.
+    #[gpui::test]
+    fn closing_over_a_failed_write_asks_stay_or_leave(cx: &mut TestAppContext) {
+        use crate::ui::i18n::t;
+        let (app, mut vcx) = harness(cx);
+        fail_a_write(&app, &mut vcx, 94);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_settings_checked(window, cx);
+        });
+        vcx.run_until_parked();
+        let (title, body) = vcx.pending_prompt().expect("the failure is asked about");
+        assert_eq!(title, "Settings couldn't be saved");
+        assert!(body.starts_with("Leave anyway?"), "{body:?}");
+
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsStay));
+        settle(&mut vcx);
+        assert!(!vcx.has_pending_prompt());
+        app.update_in(&mut vcx, |app, _, cx| {
+            let s = app
+                .active_settings()
+                .expect("Stay leaves Settings open where it was");
+            assert!(s.save_error.is_some(), "Stay keeps the failure");
+            assert!(s.save_error_path.is_some());
+            assert_eq!(cx.global::<Config>().notify_threshold_secs, 94);
+        });
+        assert!(vcx.debug_bounds("settings-save-banner").is_some());
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_settings_checked(window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(vcx.has_pending_prompt());
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsLeave));
+        settle(&mut vcx);
+        assert!(!vcx.has_pending_prompt());
+        app.update_in(&mut vcx, |app, _, cx| {
+            assert!(app.active_settings().is_none(), "Leave closes Settings");
+            assert_eq!(
+                cx.global::<Config>().notify_threshold_secs,
+                Config::default().notify_threshold_secs,
+                "and the value that never landed is not carried on"
+            );
+        });
+    }
+
+    /// F17: leaving by another door (here, opening a new host from outside the
+    /// page) asks the same question, and Leave clears the failure and its
+    /// path before going on to where it was headed.
+    #[gpui::test]
+    fn leaving_by_another_door_clears_the_failure_on_leave(cx: &mut TestAppContext) {
+        use crate::ui::i18n::t;
+        let (app, mut vcx) = harness(cx);
+        fail_a_write(&app, &mut vcx, 95);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_ssh_profile_new_from_target("new.example.com".into(), window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.pending_prompt().map(|(title, _)| title).as_deref(),
+            Some("Settings couldn't be saved")
+        );
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsStay));
+        settle(&mut vcx);
+        app.update_in(&mut vcx, |app, _, _| {
+            let s = app.active_settings().unwrap();
+            assert!(s.section == SettingsSection::General, "Stay goes nowhere");
+            assert!(s.ssh_form.is_none());
+            assert!(s.save_error.is_some());
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_ssh_profile_new_from_target("new.example.com".into(), window, cx);
+        });
+        vcx.run_until_parked();
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsLeave));
+        settle(&mut vcx);
+        assert!(!vcx.has_pending_prompt());
+        app.update_in(&mut vcx, |app, _, cx| {
+            let s = app.active_settings().unwrap();
+            assert_eq!(s.save_error, None, "Leave drops the failure");
+            assert_eq!(s.save_error_path, None, "and its path");
+            assert!(s.ssh_form.is_some(), "and goes on to the new host");
+            assert_eq!(
+                cx.global::<Config>().notify_threshold_secs,
+                Config::default().notify_threshold_secs
+            );
+        });
+        assert!(vcx.debug_bounds("settings-save-banner").is_none());
+    }
+
+    /// F17: a failed write on top of an edited host form is not the plain
+    /// failure case: saving the form is on offer, so the existing
+    /// Save / Discard / Keep Editing question is the one asked.
+    #[gpui::test]
+    fn a_failed_write_beside_an_edited_form_keeps_the_save_discard_question(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::i18n::t;
+        let (app, mut vcx) = harness(cx);
+        let profile = crate::core::ssh_profile::SshProfile::new("beside");
+        let id = profile.id;
+        app.update_in(&mut vcx, |app, window, cx| {
+            cx.global_mut::<Config>().ssh_profiles.push(profile);
+            app.open_ssh_profile_in_settings(id, window, cx);
+            let host = app
+                .active_settings()
+                .unwrap()
+                .ssh_form
+                .as_ref()
+                .unwrap()
+                .host
+                .clone();
+            host.update(cx, |input, cx| {
+                input.set_value("edited.example", window, cx)
+            });
+            cx.global_mut::<Config>().quarantined = true;
+            app.set_notify_threshold(96, cx);
+        });
+        settle(&mut vcx);
+        assert!(app.update_in(&mut vcx, |app, _, cx| {
+            app.active_settings().unwrap().save_error.is_some() && app.ssh_form_dirty(cx)
+        }));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_settings_checked(window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.pending_prompt().map(|(title, _)| title).as_deref(),
+            Some("Save changes before leaving?"),
+            "the form's own question, not the failure-only one"
+        );
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsKeepEditing));
+        settle(&mut vcx);
+        app.update_in(&mut vcx, |app, _, _| {
+            let s = app.active_settings().expect("Keep Editing stays");
+            assert!(s.save_error.is_some());
+        });
     }
 
     /// A second window that counts its own view renders. Nothing in the
@@ -4941,21 +5705,23 @@ mod gpui_tests {
     }
 
     /// Below the row width where label and control still fit beside each
-    /// other, the row stacks: the control moves under the labels on a line of
-    /// its own. Stacking must not let the description escape the row either —
-    /// it wraps inside the narrower column too. Structure under the simplified
-    /// test metrics, not native pixels; the native pair is the headless
-    /// Wayland before/after capture.
+    /// other, a COMPACT control (these switches) stays beside its labels: the
+    /// labels wrap in the narrower column and the description stays inside the
+    /// row, but the switch does not drop under them (settings F16: only a
+    /// control wider than the compact limit stacks; that wide case is the
+    /// shell `small_controls_stay_inline_and_wide_ones_stack_at_minimum_size`
+    /// test). Structure under the simplified test metrics, not native pixels;
+    /// the native pair is the headless Wayland before/after capture.
     #[gpui::test]
-    fn settings_row_layout_stacks_the_control_below_the_labels_when_narrow(
+    fn settings_row_layout_keeps_compact_controls_beside_wrapped_labels_when_narrow(
         cx: &mut TestAppContext,
     ) {
         crate::core::config::pin_test_config_dir();
         let (app, mut vcx) = harness(cx);
         for fixture in [&MERMAID_ROW, &LANGUAGE_SERVERS_ROW] {
             let key = fixture.key;
-            // An 800px viewport leaves a 468px page column, below the 500px
-            // stacking threshold, so this row must be stacked.
+            // An 800px viewport leaves a 468px page column, narrow enough that
+            // the labels wrap, where a compact switch still stays inline.
             let laid = searched_row_layout(&app, &mut vcx, fixture, size(px(800.), px(700.)));
             assert_inside(laid.wrapper, laid.row, "the row");
             assert_inside(laid.row, laid.labels, "the label column");
@@ -4966,8 +5732,8 @@ mod gpui_tests {
                 "{key:?}: the switch must have positive size: {laid:?}"
             );
             assert!(
-                laid.control.top() >= laid.labels.bottom() - px(0.5),
-                "{key:?}: stacking puts the control below the labels: {laid:?}"
+                laid.control.left() >= laid.labels.right() - px(0.5),
+                "{key:?}: the compact switch stays beside the labels: {laid:?}"
             );
             assert_cannot_fit_one_line(
                 &mut vcx,

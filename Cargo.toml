@@ -286,6 +286,8 @@ ksni = { version = "0.3.6", default-features = false, features = ["blocking", "a
 # into test builds and never reaches a release binary.
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
+# A disk assertion can hold the test config write lock while its own UI saves re-enter.
+parking_lot = "0.12"
 # tests/edns_z_flag.rs drives iroh's resolver, so the simple-dns patch below is
 # checked by the default `cargo test` CI runs, which skips tty59-gateway.
 iroh = "1.2"

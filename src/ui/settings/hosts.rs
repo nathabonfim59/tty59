@@ -8,6 +8,14 @@ use super::*;
 /// How many hosts the page shows before "Show all".
 const RECENT_HOSTS: usize = 5;
 
+/// The host filter never narrows below this; it grows into what the toolbar's
+/// buttons leave.
+const HOST_FILTER_MIN_W: f32 = 160.;
+
+/// Below this row width, at the default interface font, the "Import from
+/// ~/.ssh/config" link moves under the filter instead of squeezing it.
+const HOST_TOOLBAR_WRAP_BELOW: f32 = 560.;
+
 /// A list line: a group's heading, or a host.
 enum HostLine {
     Head {
@@ -138,86 +146,94 @@ impl Tty59App {
             .len();
         let rest = total.saturating_sub(recent.len());
 
-        let toolbar = h_flex()
-            .gap(px(12.))
-            .items_center()
+        let filter_field = kit::search_field(&filter, &tk)
+            .flex_1()
+            .min_w(px(HOST_FILTER_MIN_W))
+            .capture_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                let key = ev.keystroke.key.as_str();
+                match key {
+                    "down" | "up" if !visible.is_empty() => {
+                        let current = this.active_settings().and_then(|s| s.ssh_open);
+                        let at = current.and_then(|id| visible.iter().position(|v| *v == id));
+                        let next = match (at, key) {
+                            (None, _) => 0,
+                            (Some(i), "down") => (i + 1).min(visible.len() - 1),
+                            (Some(i), _) => i.saturating_sub(1),
+                        };
+                        if this.active_settings().is_some_and(|s| s.ssh_form.is_none()) {
+                            if let Some(s) = this.active_settings_mut() {
+                                s.ssh_open = Some(visible[next]);
+                            }
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                    "escape" => {
+                        let filter = this.active_settings().map(|s| s.ssh_filter.clone());
+                        if let Some(filter) = filter
+                            && !filter.read(cx).value().is_empty()
+                        {
+                            filter.update(cx, |f, cx| f.set_value("", window, cx));
+                            cx.stop_propagation();
+                        }
+                    }
+                    _ => {}
+                }
+            }));
+        #[cfg(test)]
+        let filter_field = filter_field.debug_selector(|| "ssh-host-filter".to_string());
+        let import_link = kit::button(
+            "ssh-import-config",
+            t(L10nKey::SettingsImportFromSshConfig),
+            BtnKind::Link,
+        )
+        .text_size(fs(12.5))
+        .on_click(cx.listener(|this, _, window, cx| this.import_ssh_config_profiles(window, cx)));
+        let add_host = kit::button(
+            "ssh-add-host",
+            t(L10nKey::SettingsAddHost),
+            BtnKind::Secondary,
+        )
+        .icon("icons/settings/plus.svg")
+        .dimmed(adding.is_some())
+        .on_click(cx.listener(|this, _, window, cx| {
+            if this
+                .active_settings()
+                .and_then(|s| s.ssh_form.as_ref())
+                .is_some_and(|f| {
+                    !cx.global::<Config>()
+                        .ssh_profiles
+                        .iter()
+                        .any(|p| p.id == f.editing)
+                })
+            {
+                return;
+            }
+            let filter = this.active_settings().map(|s| s.ssh_filter.clone());
+            if let Some(filter) = filter {
+                filter.update(cx, |f, cx| f.set_value("", window, cx));
+            }
+            this.add_new_profile(window, cx);
+        }));
+        // The filter takes whatever the buttons leave, never less than
+        // HOST_FILTER_MIN_W. When the page is too narrow to hold the import
+        // link beside it, the link goes on its own line below.
+        let (beside, below) = match self.settings_row_under(HOST_TOOLBAR_WRAP_BELOW, cx) {
+            true => (None, Some(import_link)),
+            false => (Some(import_link), None),
+        };
+        let toolbar = v_flex()
+            .gap(px(8.))
             .pb(px(8.))
             .child(
-                kit::search_field(&filter, &tk)
-                    .w(px(240.))
-                    .capture_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
-                        let key = ev.keystroke.key.as_str();
-                        match key {
-                            "down" | "up" if !visible.is_empty() => {
-                                let current = this.active_settings().and_then(|s| s.ssh_open);
-                                let at =
-                                    current.and_then(|id| visible.iter().position(|v| *v == id));
-                                let next = match (at, key) {
-                                    (None, _) => 0,
-                                    (Some(i), "down") => (i + 1).min(visible.len() - 1),
-                                    (Some(i), _) => i.saturating_sub(1),
-                                };
-                                if this.active_settings().is_some_and(|s| s.ssh_form.is_none()) {
-                                    if let Some(s) = this.active_settings_mut() {
-                                        s.ssh_open = Some(visible[next]);
-                                    }
-                                }
-                                cx.stop_propagation();
-                                cx.notify();
-                            }
-                            "escape" => {
-                                let filter = this.active_settings().map(|s| s.ssh_filter.clone());
-                                if let Some(filter) = filter
-                                    && !filter.read(cx).value().is_empty()
-                                {
-                                    filter.update(cx, |f, cx| f.set_value("", window, cx));
-                                    cx.stop_propagation();
-                                }
-                            }
-                            _ => {}
-                        }
-                    })),
+                h_flex()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(filter_field)
+                    .children(beside)
+                    .child(add_host),
             )
-            .child(div().flex_1())
-            .child(
-                kit::button(
-                    "ssh-import-config",
-                    t(L10nKey::SettingsImportFromSshConfig),
-                    BtnKind::Link,
-                )
-                .text_size(fs(12.5))
-                .on_click(
-                    cx.listener(|this, _, window, cx| this.import_ssh_config_profiles(window, cx)),
-                ),
-            )
-            .child(
-                kit::button(
-                    "ssh-add-host",
-                    t(L10nKey::SettingsAddHost),
-                    BtnKind::Secondary,
-                )
-                .icon("icons/settings/plus.svg")
-                .dimmed(adding.is_some())
-                .on_click(cx.listener(|this, _, window, cx| {
-                    if this
-                        .active_settings()
-                        .and_then(|s| s.ssh_form.as_ref())
-                        .is_some_and(|f| {
-                            !cx.global::<Config>()
-                                .ssh_profiles
-                                .iter()
-                                .any(|p| p.id == f.editing)
-                        })
-                    {
-                        return;
-                    }
-                    let filter = this.active_settings().map(|s| s.ssh_filter.clone());
-                    if let Some(filter) = filter {
-                        filter.update(cx, |f, cx| f.set_value("", window, cx));
-                    }
-                    this.add_new_profile(window, cx);
-                })),
-            );
+            .children(below.map(|link| h_flex().child(link)));
 
         let bounded = !query.is_empty() || show_all;
         let mut list = v_flex()
@@ -247,7 +263,7 @@ impl Tty59App {
                     .h(px(40.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(t_fmt(L10nKey::SettingsNoHostsMatch, &[("query", &query)]))
                     .into_any_element()
             })
@@ -257,7 +273,7 @@ impl Tty59App {
                     .h(px(40.))
                     .flex()
                     .items_center()
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(t(L10nKey::SettingsNoHostsYet))
                     .into_any_element(),
             )
@@ -269,12 +285,9 @@ impl Tty59App {
                     .gap(px(8.))
                     .items_center()
                     .text_size(fs(12.))
-                    .text_color(tk.k45)
+                    .text_color(tk.sub)
                     .child(if show_all {
-                        t_fmt(
-                            L10nKey::SettingsHostsFromFiles,
-                            &[("count", &total.to_string()), ("files", &files.to_string())],
-                        )
+                        hosts_from_sources_text(total, files)
                     } else {
                         t_plural(L10nKey::SettingsMoreHosts, rest, &[])
                     })
@@ -363,7 +376,7 @@ impl Tty59App {
             .child(
                 div()
                     .font_weight(FontWeight::NORMAL)
-                    .text_color(tk.k35)
+                    .text_color(tk.sub)
                     .child(count.to_string()),
             )
             .on_click(cx.listener(move |this, _, _w, cx| this.toggle_ssh_group(owned.clone(), cx)))
@@ -434,7 +447,7 @@ impl Tty59App {
         // and stays.
         let echo = !editing && address == title;
         let (meta, meta_color) = if dirty {
-            (t(L10nKey::SettingsUnsaved).to_string(), tk.warn_text)
+            (t(L10nKey::SettingsUnsaved).to_string(), tk.unsaved)
         } else if live {
             (t(L10nKey::SettingsLive).to_string(), tk.ok)
         } else {
@@ -449,9 +462,11 @@ impl Tty59App {
                 (Some(then), _) => {
                     crate::ui::home::relative_time(crate::core::config::unix_now(), then)
                 }
-                (None, _) => t(L10nKey::SettingsNever).to_string(),
+                // A host that never connected says nothing — "Never" on every
+                // row was noise beside the rows that had a real time.
+                (None, _) => String::new(),
             };
-            (text, tk.k4)
+            (text, tk.sub)
         };
 
         let head = div()
@@ -480,29 +495,38 @@ impl Tty59App {
                             .line_height(px(17.))
                             .truncate()
                             .when(open, |d| d.font_weight(FontWeight::MEDIUM))
-                            .text_color(if blank_title { tk.k4 } else { tk.fg })
+                            .text_color(if blank_title { tk.sub } else { tk.fg })
                             .child(title),
                     )
                     .when(!echo, |col| {
-                        col.child(
-                            div()
-                                .font_family(Tk::mono(cx))
-                                .text_size(fs(11.))
-                                .line_height(px(15.))
-                                .text_color(tk.k45)
-                                .truncate()
-                                .child(address),
-                        )
+                        let address = div()
+                            .font_family(Tk::mono(cx))
+                            .text_size(fs(11.))
+                            .line_height(px(15.))
+                            .text_color(tk.sub)
+                            .truncate()
+                            .child(address);
+                        #[cfg(test)]
+                        let address = kit::probe("settings.host-address", address);
+                        col.child(address)
                     }),
             )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .text_size(fs(12.))
-                    .text_color(meta_color)
-                    .child(meta),
-            )
+            .when(!meta.is_empty(), |row| {
+                row.child({
+                    let meta = div()
+                        .when(cfg!(test), |d| {
+                            d.debug_selector(move || format!("ssh-host-meta-{}", id.as_u128()))
+                        })
+                        .flex_shrink_0()
+                        .whitespace_nowrap()
+                        .text_size(fs(12.))
+                        .text_color(meta_color)
+                        .child(meta);
+                    #[cfg(test)]
+                    let meta = kit::probe("settings.host-meta", meta);
+                    meta
+                })
+            })
             .child(
                 div().size(px(10.)).flex_shrink_0().child(
                     Icon::empty()
@@ -512,7 +536,7 @@ impl Tty59App {
                             "icons/settings/chevron-right.svg"
                         })
                         .size(px(10.))
-                        .text_color(tk.k35),
+                        .text_color(tk.sub),
                 ),
             )
             .on_click(cx.listener(move |this, _, _w, cx| {
@@ -561,18 +585,21 @@ impl Tty59App {
                 .map(|q| host_title(q))
         });
         let fields: Vec<(&str, String)> = [
-            ("HostName", Some(p.host.clone())),
+            (t(L10nKey::SettingsHost), Some(p.host.clone())),
             (
-                "User",
+                t(L10nKey::SettingsUser),
                 Some(if p.user.is_empty() {
                     "$USER".to_string()
                 } else {
                     p.user.clone()
                 }),
             ),
-            ("Port", Some(p.port.to_string())),
-            ("IdentityFile", p.identity_files.first().cloned()),
-            ("ProxyJump", jump),
+            (t(L10nKey::SettingsPort), Some(p.port.to_string())),
+            (
+                t(L10nKey::SettingsKeyFile),
+                p.identity_files.first().cloned(),
+            ),
+            (t(L10nKey::SettingsJumpHost), jump),
             (
                 t(L10nKey::SettingsDefinedIn),
                 Some(ssh_group_label(ssh_group_key(p)).to_string()),
@@ -600,7 +627,7 @@ impl Tty59App {
                                 div()
                                     .w(px(96.))
                                     .flex_shrink_0()
-                                    .text_color(tk.k45)
+                                    .text_color(tk.sub)
                                     .child(k.to_string()),
                             )
                             .child(
@@ -719,7 +746,7 @@ impl Tty59App {
                         .w(px(SSH_LABEL_W))
                         .flex_shrink_0()
                         .text_size(fs(12.))
-                        .text_color(tk.k45)
+                        .text_color(tk.sub)
                         .child(label),
                 )
                 .child(
@@ -730,9 +757,8 @@ impl Tty59App {
                         .max_w(px(FORM_FIELD_W)),
                 )
         };
-        // The secrets are not ssh_config keywords, so they are the only two
-        // labels here that are translated. Neither reaches the config file:
-        // `save_ssh_form_secrets` files them in the system keychain.
+        // The secrets get their own row shape: neither reaches the config
+        // file, `save_ssh_form_secrets` files them in the system keychain.
         let secret = |label: &'static str, input: &Entity<InputState>| {
             let focused = self.settings_input_focused(input, cx);
             h_flex()
@@ -742,7 +768,7 @@ impl Tty59App {
                         .w(px(SSH_LABEL_W))
                         .flex_shrink_0()
                         .text_size(fs(12.))
-                        .text_color(tk.k45)
+                        .text_color(tk.sub)
                         .child(label),
                 )
                 .child(
@@ -755,18 +781,34 @@ impl Tty59App {
         };
         let fields = v_flex()
             .gap(px(6.))
-            .child(field("Alias", &form.name, false))
-            .child(field("HostName", &form.host, host_error.is_some()))
-            .child(field("User", &form.user, false))
-            .child(field("Port", &form.port, errors.port.is_some()))
+            .child(field(t(L10nKey::SettingsName), &form.name, false))
+            .child(field(
+                t(L10nKey::SettingsHost),
+                &form.host,
+                host_error.is_some(),
+            ))
+            .child(field(t(L10nKey::SettingsUser), &form.user, false))
+            .child(field(
+                t(L10nKey::SettingsPort),
+                &form.port,
+                errors.port.is_some(),
+            ))
             .when(form.wants_password(), |v| {
                 v.child(secret(t(L10nKey::SettingsPassword), &form.password))
             })
-            .child(field("IdentityFile", &form.identity_files, false))
+            .child(field(
+                t(L10nKey::SettingsKeyFile),
+                &form.identity_files,
+                false,
+            ))
             .when(form.wants_passphrase(), |v| {
                 v.child(secret(t(L10nKey::SettingsKeyPassphrase), &form.passphrase))
             })
-            .child(field("ProxyJump", &form.jump, errors.jump.is_some()));
+            .child(field(
+                t(L10nKey::SettingsJumpHost),
+                &form.jump,
+                errors.jump.is_some(),
+            ));
 
         v_flex()
             .gap(px(14.))
@@ -800,7 +842,7 @@ impl Tty59App {
                             if saved {
                                 t(L10nKey::Save)
                             } else {
-                                t(L10nKey::SettingsAddHost)
+                                t(L10nKey::SettingsSaveHost)
                             },
                             BtnKind::Primary,
                         )
@@ -810,14 +852,14 @@ impl Tty59App {
                         ),
                     )
                     .child(
-                        kit::button("ssh-form-cancel", t(L10nKey::Cancel), BtnKind::Secondary)
+                        kit::button("ssh-form-cancel", t(L10nKey::Cancel), BtnKind::Link)
                             .on_click(cx.listener(|this, _, _w, cx| this.cancel_ssh_form(cx))),
                     )
                     .child(
                         div()
                             .pl(px(4.))
                             .text_size(fs(11.5))
-                            .text_color(tk.k4)
+                            .text_color(tk.sub)
                             .child(t(L10nKey::SettingsStoredInTty59)),
                     )
                     .child(div().flex_1())
@@ -918,6 +960,84 @@ fn ssh_command(p: &SshProfile) -> String {
     cmd
 }
 
+/// "9 hosts from 3 sources": each count picks its own plural form, and the
+/// catalog template owns the word order around them.
+fn hosts_from_sources_text(hosts: usize, sources: usize) -> String {
+    t_fmt(
+        L10nKey::SettingsHostsFromFiles,
+        &[
+            ("hosts", &t_plural(L10nKey::SettingsHostCount, hosts, &[])),
+            (
+                "sources",
+                &t_plural(L10nKey::SettingsSourceCount, sources, &[]),
+            ),
+        ],
+    )
+}
+
 fn visible_is_empty(profiles: &[SshProfile], query: &str) -> bool {
     !profiles.iter().any(|p| ssh_row_matches(p, query))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hosts_from_sources_text;
+    use crate::ui::i18n::{default_language_code, set_locale};
+
+    /// The two counts are independent: a sentence can be "9 hosts from 1
+    /// source" and each half has to agree with its own number.
+    #[test]
+    fn host_and_source_counts_agree_with_their_own_numbers() {
+        for (locale, cases) in [
+            (
+                "en",
+                vec![
+                    (1, 1, "1 host from 1 source"),
+                    (9, 1, "9 hosts from 1 source"),
+                    (9, 3, "9 hosts from 3 sources"),
+                    (1, 3, "1 host from 3 sources"),
+                    (0, 0, "0 hosts from 0 sources"),
+                ],
+            ),
+            (
+                "ru-RU",
+                vec![
+                    (1, 1, "1 хост из 1 источника"),
+                    (2, 2, "2 хоста из 2 источников"),
+                    (5, 5, "5 хостов из 5 источников"),
+                    (11, 11, "11 хостов из 11 источников"),
+                    (21, 21, "21 хост из 21 источника"),
+                    (22, 22, "22 хоста из 22 источников"),
+                    (21, 2, "21 хост из 2 источников"),
+                    (2, 21, "2 хоста из 21 источника"),
+                    (22, 1, "22 хоста из 1 источника"),
+                    (11, 22, "11 хостов из 22 источников"),
+                ],
+            ),
+            (
+                "zh-CN",
+                vec![
+                    (1, 1, "1 台主机，来自 1 个来源"),
+                    (9, 3, "9 台主机，来自 3 个来源"),
+                ],
+            ),
+            (
+                "ja-JP",
+                vec![
+                    (1, 1, "1 か所から 1 台のホスト"),
+                    (9, 3, "3 か所から 9 台のホスト"),
+                ],
+            ),
+        ] {
+            set_locale(locale);
+            for (hosts, sources, expected) in cases {
+                assert_eq!(
+                    hosts_from_sources_text(hosts, sources),
+                    expected,
+                    "{locale}: {hosts} hosts, {sources} sources"
+                );
+            }
+        }
+        set_locale(default_language_code());
+    }
 }

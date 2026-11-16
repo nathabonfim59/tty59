@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The side panel's error states now offer a way out: **Initialize repository**
+  on the Changes tab outside a repository, **Refresh** under a failed GitHub
+  list or detail, and **Retry** under an unreadable folder or a failed search
+  in the Files tab.
 - **A zoomed pane says so**: it wears a "Zoomed · 1 of N panes" badge in
   its top-right corner with the zoom shortcut beside it, and clicking the
   badge brings the other panes back. The pane's right-click menu reads
@@ -51,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When git status cannot be read for a known repository and nothing has been
+  read yet, the Changes tab now shows "Couldn't read git status" with git's own
+  reason, **Retry** and **Copy error**, instead of "Loading…" indefinitely.
 - **bash marks the first command of a new pane again** on distributions
   whose `/etc/profile.d` extends `PROMPT_COMMAND`, as systemd 258's
   `80-systemd-osc-context.sh` does (Ubuntu 26.04). That first line had no

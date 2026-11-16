@@ -11,6 +11,79 @@ use crate::ui::i18n::{L10nKey, t};
 
 use super::{FocusZone, PaneSummary, ProjectFilter, State, ViewMode};
 
+/// What an agent row paints with: `rungs`, the surface ladder its hover and
+/// selected fills step through — the panel pair, not the window's, because
+/// the Inbox and the board each list many rows at once — `title`, the row's
+/// top rung, and `caption`, the one under it that the reason, preview and
+/// meta lines share.
+struct AgentRowPaints {
+    rungs: crate::ui::presets::Surface,
+    title: gpui::Hsla,
+    caption: gpui::Hsla,
+}
+
+fn agent_row_paints(card: bool, selected: bool, cx: &gpui::App) -> AgentRowPaints {
+    let sf = cx.global::<crate::ui::presets::Surfaces>();
+    // A card carries the rail's tinted fill, so it steps on the rail's
+    // rungs; a list row sits on the window fill, where `sidebar`'s ladder
+    // is the same panel pair (the sidebar neutral *is* the window fill).
+    let rungs = match card {
+        true => sf.rail,
+        false => sf.sidebar,
+    };
+    let chrome = crate::ui::theme::chrome_ink(cx);
+    AgentRowPaints {
+        rungs,
+        // The panel title ink: authored foreground floored once per theme
+        // across both panel ladders' base/hover/selected fills, so the title
+        // stays the top rung on every row state of both panels.
+        title: gpui::rgb(chrome.panel_title).into(),
+        // Twelve pixels of regular caption lose enough edge contrast to
+        // antialiasing that the muted ink, floored for the panel's resting
+        // fills, falls under 4.5 on the stronger selected fill — selected
+        // rows draw the caption ink cached against that fill instead.
+        caption: if selected {
+            gpui::rgb(chrome.selected_caption).into()
+        } else {
+            cx.theme().muted_foreground
+        },
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RenderedAgentRow {
+    pub key: super::PaneKey,
+    pub card: bool,
+    pub title: String,
+    pub reason: String,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RenderedReaderHeader {
+    pub key: super::PaneKey,
+    pub title: String,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static RENDERED_ROWS: std::cell::RefCell<Vec<RenderedAgentRow>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static RENDERED_HEADERS: std::cell::RefCell<Vec<RenderedReaderHeader>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn take_rendered_rows() -> Vec<RenderedAgentRow> {
+    RENDERED_ROWS.with(|rows| std::mem::take(&mut *rows.borrow_mut()))
+}
+
+#[cfg(test)]
+pub(super) fn take_rendered_headers() -> Vec<RenderedReaderHeader> {
+    RENDERED_HEADERS.with(|headers| std::mem::take(&mut *headers.borrow_mut()))
+}
+
 impl State {
     pub(super) fn label(self) -> &'static str {
         t(match self {
@@ -32,21 +105,83 @@ impl State {
     }
 }
 
+/// The pill's group, so its count can follow the pill's pressed state.
+const PILL_GROUP: &str = "agent-mode-pill";
+
 impl Tty59App {
-    pub(in crate::ui) fn agent_mode_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// The Agents pill. `count` is what the strip already counted this frame,
+    /// so the number it says and the width the strip budgeted for it are one
+    /// scan of the panes.
+    pub(in crate::ui) fn agent_mode_button(
+        &self,
+        count: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let active = self.agent_mode_active();
-        let count = self
-            .agent_vision
-            .state
-            .attention_count(&self.agent_vision.panes, &self.agent_vision.reads)
-            .total();
-        let label = if active {
-            t(L10nKey::VisionWorkbench).to_string()
+        // The count is data beside the word, only above zero, and only while the
+        // pill says Agents: Workbench is the mode, not a tally.
+        let shown = (!active && count > 0).then_some(count);
+        let word = SharedString::from(t(if active {
+            L10nKey::VisionWorkbench
         } else {
-            format!("{} ({count})", t(L10nKey::VisionAgents))
+            L10nKey::VisionAgents
+        }));
+        let accessible = match shown {
+            Some(count) => SharedString::from(format!("{word} {count}")),
+            None => word.clone(),
         };
-        Button::new("agent-mode-toggle")
-            .label(label)
+        // The word and the count are our own children, not the button's, so
+        // their size, weight and figures are the ones `StripMetrics` measured
+        // rather than whatever the button gives its text.
+        let run = || {
+            div()
+                .flex_none()
+                .line_height(gpui::relative(1.))
+                .text_size(gpui::rems(crate::ui::tab_strip::PILL_TEXT))
+                .font_weight(FontWeight::NORMAL)
+                .not_italic()
+                .font_features(self.strip_metrics.features())
+        };
+        let word = run().child(word);
+        #[cfg(test)]
+        let word = word.debug_selector(|| "agent-mode-label".into());
+        let tally = shown.map(|count| {
+            // Muted at rest and hovered; the pressed fill reduces the muted
+            // ink's contrast below the text floor, so it takes the foreground
+            // the word beside it already has.
+            let foreground = cx.theme().foreground;
+            let count = run()
+                .id("agent-mode-count")
+                // gpui only listens for a press on an element that has a
+                // hitbox, and `group_active` alone does not give it one; the
+                // pill's own cursor does, and changes nothing on screen.
+                .cursor_default()
+                .text_color(cx.theme().muted_foreground)
+                .group_active(PILL_GROUP, move |style| style.text_color(foreground))
+                .child(count.to_string());
+            #[cfg(test)]
+            let count = count.debug_selector(|| "agent-mode-count".into()).child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    |_, _, window, _| {
+                        crate::ui::tab_strip::record_pill_count_ink(window.text_style().color)
+                    },
+                )
+                .absolute()
+                .size_0(),
+            );
+            count
+        });
+        let text = h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(crate::ui::tab_strip::PILL_COUNT_GAP))
+            .child(word)
+            .children(tally);
+        let pill = Button::new("agent-mode-toggle")
+            .group(PILL_GROUP)
+            .accessible_label(accessible)
+            .child(text)
             .small()
             .custom(
                 gpui_component::button::ButtonCustomVariant::new(cx)
@@ -56,18 +191,20 @@ impl Tty59App {
                     .active(rgb(cx.global::<crate::ui::presets::Surfaces>().rail.pressed).into()),
             )
             .h(px(crate::ui::tab_strip::TITLEBAR_SEARCH_H))
-            .px(px(10.))
+            .px(px(crate::ui::tab_strip::PILL_PAD_X))
+            .w(px(self.strip_metrics.pill_w(active, count)))
             .rounded(px(crate::ui::tab_strip::TITLEBAR_SEARCH_RADIUS))
             .bg(crate::ui::tab_strip::titlebar_search_fill(cx))
-            .text_size(gpui::rems(0.8125))
             .tooltip_element(crate::ui::tab_strip::chord_tooltip(
                 t(L10nKey::VisionToggle),
                 "ToggleAgentVision",
                 cx,
             ))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_click(cx.listener(|app, _, window, cx| app.toggle_agent_vision(window, cx)))
-            .into_any_element()
+            .on_click(cx.listener(|app, _, window, cx| app.toggle_agent_vision(window, cx)));
+        #[cfg(test)]
+        let pill = pill.debug_selector(|| "agent-mode-pill".into());
+        pill.into_any_element()
     }
 
     pub(in crate::ui) fn agent_view_switch(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -234,37 +371,40 @@ impl Tty59App {
     fn agent_row(&self, pane: &PaneSummary, card: bool, cx: &mut Context<Self>) -> AnyElement {
         let key = pane.location.key;
         let selected = self.agent_vision.state.selected() == Some(key);
-        let sf = cx.global::<crate::ui::presets::Surfaces>().window;
+        let paints = agent_row_paints(card, selected, cx);
         let project = self
             .agent_vision
             .projects
             .iter()
             .find(|project| project.group == pane.location.group)
             .map_or("", |project| project.name.as_str());
-        let title = match pane.pane_marker() {
-            Some(marker) => format!("{} · {marker}", pane.location.tab_title),
-            None => pane.location.tab_title.clone(),
-        };
-        let reason = pane.reason.as_deref().unwrap_or(pane.state.label());
+        let exited = pane.state == State::Exited;
+        let title = pane.heading();
+        let now = crate::core::config::unix_now();
+        let reason = pane.reason_line(now);
         let mut meta = format!("{} · {}", pane.agent_name(), project);
-        if let Some(since) = pane.since_ms {
-            let age = crate::core::config::unix_now().saturating_sub(since / 1000);
+        if let Some(since) = pane.since_ms.filter(|_| !exited) {
+            let age = now.saturating_sub(since / 1000);
             meta.push_str(&format!(" · {}", crate::ui::home::compact_age(age)));
         }
-        let status = if pane.state == State::Exited || pane.state == State::Idle {
-            div()
-                .size(px(6.))
-                .rounded_full()
-                .border_1()
-                .border_color(cx.theme().muted_foreground)
-                .when(pane.state == State::Idle, |dot| {
-                    dot.bg(cx.theme().muted_foreground)
-                })
-                .into_any_element()
-        } else {
-            self.row_status_dot(Some(pane.state.status()), 0, rgb(sf.base).into())
-                .unwrap_or_else(|| div().into_any_element())
-        };
+        #[cfg(test)]
+        RENDERED_ROWS.with(|rows| {
+            rows.borrow_mut().push(RenderedAgentRow {
+                key,
+                card,
+                title: title.clone(),
+                reason: reason.clone(),
+            });
+        });
+        // The rail's mark, so one agent reads the same in both places: Idle
+        // and Exited have no status role and so no dot (the reason line says
+        // the state), and the hollow ring stays Waiting's alone.
+        let status = self.row_status_dot(
+            Some(pane.state.status()),
+            0,
+            rgb(paints.rungs.base).into(),
+            cx,
+        );
         let row = h_flex()
             .id(SharedString::from(format!(
                 "agent-{}-{}",
@@ -285,11 +425,21 @@ impl Tty59App {
                     .border_color(cx.theme().border)
             })
             .when(selected, |row| {
-                row.bg(rgb(sf.selected)).text_color(rgb(sf.text_selected))
+                row.bg(rgb(paints.rungs.selected))
+                    .text_color(rgb(paints.rungs.text_selected))
             })
             .when(!selected, |row| {
-                row.text_color(rgb(sf.text_resting))
-                    .hover(|style| style.bg(rgb(sf.hover)))
+                row.text_color(rgb(paints.rungs.text_resting))
+                    .hover(|style| {
+                        let style = style.bg(rgb(paints.rungs.hover));
+                        #[cfg(test)]
+                        let style = {
+                            let mut style = style;
+                            crate::ui::paint_probe::note("agent-row-hover", &mut style);
+                            style
+                        };
+                        style
+                    })
             })
             .anchor_scroll(selected.then(|| {
                 if card {
@@ -298,17 +448,10 @@ impl Tty59App {
                     self.agent_vision.inbox_anchor.clone()
                 }
             }))
-            .child(
-                div()
+            .child({
+                let icon = div()
                     .flex_shrink_0()
                     .self_start()
-                    .map(|icon| {
-                        #[cfg(test)]
-                        let icon = icon.debug_selector(move || {
-                            format!("agent-row-icon-{}-{}", key.host.0, key.pane)
-                        });
-                        icon
-                    })
                     .child(self.tab_avatar_plain(
                         SharedString::from(format!("agent-icon-{}-{}", key.host.0, key.pane)),
                         pane.agent,
@@ -316,35 +459,73 @@ impl Tty59App {
                         None,
                         22.,
                         cx,
-                    )),
-            )
+                    ));
+                #[cfg(test)]
+                let icon = icon
+                    .debug_selector(move || format!("agent-row-icon-{}-{}", key.host.0, key.pane));
+                icon
+            })
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .gap_1()
-                    .child(
-                        div()
+                    .child({
+                        let title_el = div()
                             .truncate()
                             .text_sm()
+                            .text_color(paints.title)
                             .when(selected, |row| row.font_weight(FontWeight::MEDIUM))
-                            .map(|title| {
-                                #[cfg(test)]
-                                let title = title.debug_selector(move || {
-                                    format!("agent-row-title-{}-{}", key.host.0, key.pane)
-                                });
-                                title
+                            .when(exited, |title| title.text_color(paints.caption))
+                            .child(title);
+                        #[cfg(test)]
+                        let title_el = {
+                            let mut title_el = title_el;
+                            crate::ui::paint_probe::note("agent-row-title", &mut title_el);
+                            title_el.debug_selector(move || {
+                                format!("agent-row-title-{}-{}", key.host.0, key.pane)
                             })
-                            .child(title),
-                    )
-                    .child(div().truncate().text_xs().child(reason.to_string()))
-                    .when(card, |column| {
+                        };
+                        title_el
+                    })
+                    .child({
+                        let reason_el = div()
+                            .truncate()
+                            .text_xs()
+                            .text_color(paints.caption)
+                            .child(reason);
+                        #[cfg(test)]
+                        let reason_el = {
+                            let mut reason_el = reason_el;
+                            crate::ui::paint_probe::note("agent-row-reason", &mut reason_el);
+                            crate::ui::paint_probe::note(
+                                if selected {
+                                    "agent-row-reason-sel"
+                                } else {
+                                    "agent-row-reason-plain"
+                                },
+                                &mut reason_el,
+                            );
+                            reason_el.debug_selector(move || {
+                                format!("agent-row-reason-{}-{}", key.host.0, key.pane)
+                            })
+                        };
+                        reason_el
+                    })
+                    .when(card && !exited, |column| {
                         column.when_some(pane.last_line.clone(), |column, line| {
                             column.child(
                                 div()
                                     .truncate()
                                     .text_xs()
-                                    .text_color(cx.theme().muted_foreground)
+                                    .text_color(paints.caption)
+                                    .map(|preview| {
+                                        #[cfg(test)]
+                                        let preview = preview.debug_selector(move || {
+                                            format!("agent-row-preview-{}-{}", key.host.0, key.pane)
+                                        });
+                                        preview
+                                    })
                                     .child(line),
                             )
                         })
@@ -353,7 +534,7 @@ impl Tty59App {
                         div()
                             .truncate()
                             .text_xs()
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(paints.caption)
                             .child(meta),
                     ),
             )
@@ -363,14 +544,18 @@ impl Tty59App {
                 !card
                     || (pane.state == State::Done
                         && self.agent_vision.reads.attention(pane).is_some()),
-                |row| row.child(status),
+                |row| row.children(status),
             )
             .on_click(
                 cx.listener(move |app, _, window, cx| app.open_agent_terminal(key, window, cx)),
             );
         #[cfg(test)]
-        let row =
-            row.debug_selector(move || format!("agent-row-frame-{}-{}", key.host.0, key.pane));
+        let row = {
+            let mut row =
+                row.debug_selector(move || format!("agent-row-frame-{}-{}", key.host.0, key.pane));
+            crate::ui::paint_probe::note("agent-row", &mut row);
+            row
+        };
         row.into_any_element()
     }
 
@@ -454,12 +639,23 @@ impl Tty59App {
                 .agent_vision
                 .state
                 .inbox_rows(&panes, &self.agent_vision.reads);
+            // Whether the list shows nothing at all, project filter included.
+            // A search that matched nothing says so, and an empty list has no
+            // "select an agent" instruction to give. (The selection itself is
+            // already cleared by the focus reconcile that runs every frame.)
+            let list_empty = rows.attention.is_empty() && rows.other.is_empty();
+            let searching = !self.agent_vision.input.read(cx).value().trim().is_empty();
             let selected = self.agent_vision.state.selected().and_then(|key| {
                 self.agent_vision
                     .panes
                     .iter()
                     .find(|pane| pane.location.key == key)
             });
+            let empty_text = if list_empty && searching {
+                L10nKey::VisionNoAgents
+            } else {
+                L10nKey::VisionEmpty
+            };
             let other_count = rows.other.len();
             let list = v_flex()
                 .w(px(320.))
@@ -495,13 +691,16 @@ impl Tty59App {
                                 .child(t(L10nKey::VisionNeedsYou)),
                         )
                         .when(rows.attention.is_empty(), |list| {
-                            list.child(
-                                div()
-                                    .p_3()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(t(L10nKey::VisionEmpty)),
-                            )
+                            let empty = div()
+                                .p_3()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(t(empty_text));
+                            #[cfg(test)]
+                            let empty = empty.debug_selector(move || {
+                                format!("agent-inbox-empty-{empty_text:?}")
+                            });
+                            list.child(empty)
                         })
                         .children(
                             rows.attention
@@ -535,6 +734,14 @@ impl Tty59App {
                 .h_full()
                 .when_some(selected, |reader, pane| {
                     let key = pane.location.key;
+                    let heading = pane.heading();
+                    #[cfg(test)]
+                    RENDERED_HEADERS.with(|headers| {
+                        headers.borrow_mut().push(RenderedReaderHeader {
+                            key,
+                            title: heading.clone(),
+                        });
+                    });
                     reader
                         .child(
                             v_flex()
@@ -554,13 +761,10 @@ impl Tty59App {
                                                 .truncate()
                                                 .text_sm()
                                                 .font_weight(FontWeight::MEDIUM)
-                                                .child(match pane.pane_marker() {
-                                                    Some(marker) => format!(
-                                                        "{} · {marker}",
-                                                        pane.location.tab_title
-                                                    ),
-                                                    None => pane.location.tab_title.clone(),
-                                                }),
+                                                .when(pane.state == State::Exited, |title| {
+                                                    title.text_color(cx.theme().muted_foreground)
+                                                })
+                                                .child(heading),
                                         )
                                         .child(
                                             div()
@@ -616,14 +820,15 @@ impl Tty59App {
                                 }),
                         )
                 })
-                .when(selected.is_none(), |reader| {
-                    reader.child(
-                        div()
-                            .p_4()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(t(L10nKey::VisionSelect)),
-                    )
+                .when(selected.is_none() && !list_empty, |reader| {
+                    let hint = div()
+                        .p_4()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(t(L10nKey::VisionSelect));
+                    #[cfg(test)]
+                    let hint = hint.debug_selector(|| "agent-reader-hint".into());
+                    reader.child(hint)
                 });
             h_flex()
                 .size_full()
@@ -643,5 +848,410 @@ impl Tty59App {
             })
             .child(div().flex_1().min_h_0().min_w_0().child(body))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::cli_agent::{AgentDetectionSession, AgentSessionState};
+    use crate::core::config::Config;
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::ui::paint_probe::{self, hsla24};
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    /// Two live agents — one Waiting, one Working — rendered through the
+    /// real `Tty59App` window, the same fixture `ui_tests` drives. The
+    /// daemon streams come back with the window: dropping them ends the
+    /// sessions and the agents vanish mid-test.
+    fn agents_window(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, mut streams) = crate::ui::app::test_window::harness_with_tabs(cx, 3);
+        for (index, stream) in streams.iter_mut().take(2).enumerate() {
+            DaemonMsg::AgentStatus(Some(AgentSessionState {
+                status: match index {
+                    0 => crate::core::cli_agent::AgentStatus::Waiting,
+                    _ => crate::core::cli_agent::AgentStatus::Working,
+                },
+                since_ms: Some(index as u64 + 1),
+                message: Some(format!("Approve task {index}")),
+                detection: Some(AgentDetectionSession {
+                    kind: "codex".into(),
+                    epoch: 1,
+                    exited: false,
+                    source: None,
+                    rule: None,
+                }),
+                ..Default::default()
+            }))
+            .encode(stream)
+            .unwrap();
+        }
+        for _ in 0..200 {
+            if app.update_in(&mut vcx, |app, window, cx| {
+                app.refresh_agent_vision(window, cx);
+                app.agent_vision.panes.len()
+            }) == 2
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.update_in(&mut vcx, |app, window, cx| {
+            assert_eq!(app.agent_vision.panes.len(), 2);
+            app.set_agent_mode(ViewMode::Inbox, window, cx);
+            // Working agents raise no attention event, so they land in the
+            // collapsed Other group — the row toggle flips the same field.
+            app.agent_vision.state.show_other = true;
+            let key = app.agent_vision.panes[0].location.key;
+            app.agent_vision.state.focus_list_item(key);
+        });
+        vcx.run_until_parked();
+        (app, vcx, streams)
+    }
+
+    /// The rows the Inbox and the board paint — read off the rendered
+    /// elements, not a recomputed expectation — carry the panel ladder's
+    /// fills and its fg-seeded title ink, with the muted caption a step
+    /// under it. Asserted against the theme's own tokens per theme and
+    /// mode, so a reverted `.text_color` or a wrong ladder fails by
+    /// assertion.
+    #[gpui::test]
+    fn agent_rows_paint_theme_inks_and_panel_rungs(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = agents_window(cx);
+        let _probe = paint_probe::scope();
+        // The selected-caption assert only bites where the lifted ink differs
+        // from muted; the fixture must reach at least one such theme.
+        let mut distinguished = false;
+        for id in ["light", "dark"] {
+            vcx.update(|_, cx| {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: id.into(),
+                    ..Default::default()
+                }));
+                crate::ui::theme::apply_theme(None, cx);
+            });
+            let (sf, muted, muted_alpha, semantics, panel_title, sel_caption) =
+                vcx.update(|_, cx| {
+                    (
+                        cx.global::<crate::ui::presets::Surfaces>().clone(),
+                        hsla24(cx.theme().muted_foreground),
+                        cx.theme().muted_foreground.a,
+                        crate::ui::theme::semantics(cx),
+                        crate::ui::theme::chrome_ink(cx).panel_title,
+                        crate::ui::theme::chrome_ink(cx).selected_caption,
+                    )
+                });
+            distinguished |= sel_caption != muted;
+            for (mode, rungs, cards) in [
+                (ViewMode::Inbox, sf.sidebar, false),
+                (ViewMode::Kanban, sf.rail, true),
+            ] {
+                app.update_in(&mut vcx, |app, window, cx| {
+                    app.set_agent_mode(mode, window, cx);
+                    let key = app.agent_vision.panes[0].location.key;
+                    app.agent_vision.state.focus_list_item(key);
+                });
+                vcx.run_until_parked();
+                paint_probe::clear();
+                vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+
+                let kind = if cards { "card" } else { "row" };
+                let titles = paint_probe::all("agent-row-title");
+                let reasons = paint_probe::all("agent-row-reason");
+                assert_eq!(titles.len(), 2, "{id}/{kind}: two agents render two titles");
+                assert_eq!(
+                    reasons.len(),
+                    2,
+                    "{id}/{kind}: two agents render two reasons"
+                );
+                for title in &titles {
+                    assert_eq!(
+                        title.text,
+                        Some(panel_title),
+                        "{id}/{kind}: title is not the floored panel title ink"
+                    );
+                    assert_eq!(
+                        title.text_alpha,
+                        Some(1.0),
+                        "{id}/{kind}: title ink lost its alpha"
+                    );
+                    assert_eq!(
+                        title.opacity, None,
+                        "{id}/{kind}: the title div must not carry opacity"
+                    );
+                }
+                let sel_reasons = paint_probe::all("agent-row-reason-sel");
+                assert_eq!(
+                    sel_reasons.len(),
+                    1,
+                    "{id}/{kind}: the fixture marks exactly one selected row"
+                );
+                assert_eq!(
+                    sel_reasons[0].text,
+                    Some(sel_caption),
+                    "{id}/{kind}: a selected caption is not the lifted ink"
+                );
+                assert_eq!(
+                    sel_reasons[0].text_alpha,
+                    Some(1.0),
+                    "{id}/{kind}: the lifted caption lost its alpha"
+                );
+                let plain_reasons = paint_probe::all("agent-row-reason-plain");
+                assert_eq!(
+                    plain_reasons.len(),
+                    1,
+                    "{id}/{kind}: the fixture leaves one row unselected"
+                );
+                for reason in &plain_reasons {
+                    assert_eq!(
+                        reason.text,
+                        Some(muted),
+                        "{id}/{kind}: reason is not the muted caption ink"
+                    );
+                    assert_eq!(
+                        reason.text_alpha,
+                        Some(muted_alpha),
+                        "{id}/{kind}: reason alpha drifted from the theme's"
+                    );
+                }
+                let rows = paint_probe::all("agent-row");
+                assert_eq!(
+                    rows.len(),
+                    2,
+                    "{id}/{kind}: the Waiting and the Working agent must both render"
+                );
+                let resting = match cards {
+                    true => Some(rungs.base),
+                    false => None,
+                };
+                for row in &rows {
+                    assert!(
+                        row.fill == resting || row.fill == Some(rungs.selected),
+                        "{id}/{kind}: row fill {:?} is neither the card base nor selected",
+                        row.fill
+                    );
+                }
+                assert!(
+                    rows.iter().any(|row| row.fill == Some(rungs.selected)),
+                    "{id}/{kind}: no row paints the selected rung"
+                );
+                let hovers = paint_probe::all("agent-row-hover");
+                assert!(
+                    !hovers.is_empty(),
+                    "{id}/{kind}: no hover refinements were observed"
+                );
+                for hover in &hovers {
+                    assert_eq!(
+                        hover.fill,
+                        Some(rungs.hover),
+                        "{id}/{kind}: hover reached a non-panel rung"
+                    );
+                }
+
+                if cards {
+                    continue;
+                }
+                let dots = paint_probe::all("row-status-dot");
+                assert!(!dots.is_empty(), "{id}: no row status marks were observed");
+                let marks = [
+                    semantics.warning.ink,
+                    semantics.info.ink,
+                    semantics.success.ink,
+                ];
+                let mut inks = Vec::new();
+                for dot in &dots {
+                    let ink = dot.fill.or(dot.border).expect("a mark is a fill or a ring");
+                    inks.push(ink);
+                    assert!(
+                        marks.contains(&ink),
+                        "{id}: row mark {ink:#08x} is not a semantic role ink"
+                    );
+                    let mark_alpha = match dot.fill {
+                        Some(_) => dot.fill_alpha,
+                        None => dot.border_alpha,
+                    };
+                    assert_eq!(
+                        mark_alpha,
+                        Some(1.0),
+                        "{id}: a status mark must stay opaque"
+                    );
+                }
+                // The fixture's two Inbox rows are a Waiting ring and a
+                // Working mark — both must be among the observed marks.
+                for want in [semantics.warning.ink, semantics.info.ink] {
+                    assert!(
+                        inks.contains(&want),
+                        "{id}: the Waiting ring and the Working mark must both render"
+                    );
+                }
+            }
+        }
+        assert!(
+            distinguished,
+            "no fixture theme distinguishes the selected caption from muted, so its wiring cannot be proven"
+        );
+    }
+
+    /// The panel ladders themselves — every builtin plus a weak custom
+    /// palette forked onto disk and reloaded through the theme registry —
+    /// keep the cached panel title ink at the 4.5 text contract on base,
+    /// hover and selected, the muted caption at the same floor, and the
+    /// panel rungs distinct. The fork's grey foreground clears nothing, so
+    /// `panel_title` has to lift rather than read the palette raw; a second
+    /// phase forks generated-grid palettes whose resolved foreground
+    /// actually misses a panel fill, where a raw-foreground title would
+    /// fail where `panel_title` still clears.
+    #[gpui::test]
+    fn panel_ladders_hold_ink_floors_on_builtins_and_customs(cx: &mut TestAppContext) {
+        // The external contract is WCAG AA for text; the presets constant it
+        // is derived from is private to presets.
+        const FLOOR: f32 = 4.5;
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let mut weak = crate::ui::presets::by_id(cx, "light");
+            weak.id = "b1weak".into();
+            weak.name = "B1 Weak".into();
+            weak.foreground = 0x8a8a8a;
+            weak.path = None;
+            crate::ui::presets::fork_to_file(&weak).expect("the weak theme writes to disk");
+            crate::ui::presets::load_registry(cx);
+        });
+        let themes = cx.update(|cx| crate::ui::presets::all(cx));
+        assert!(
+            themes.iter().any(|theme| theme.id.ends_with("-custom")),
+            "the forked custom theme must be in the sweep"
+        );
+        for theme in themes {
+            cx.update(|cx| {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: theme.id.clone(),
+                    ..Default::default()
+                }));
+                crate::ui::theme::apply_theme(None, cx);
+            });
+            let (sf, muted, sel_caption, title) = cx.update(|cx| {
+                (
+                    cx.global::<crate::ui::presets::Surfaces>().clone(),
+                    theme.neutrals().muted_foreground,
+                    crate::ui::theme::chrome_ink(cx).selected_caption,
+                    crate::ui::theme::chrome_ink(cx).panel_title,
+                )
+            });
+            for (kind, rungs) in [("row", sf.sidebar), ("card", sf.rail)] {
+                for (name, surface, caption) in [
+                    ("base", rungs.base, muted),
+                    ("hover", rungs.hover, muted),
+                    ("selected", rungs.selected, sel_caption),
+                ] {
+                    assert!(
+                        crate::ui::presets::contrast(title, surface) >= FLOOR,
+                        "{}/{kind}: title {title:#08x} unreadable on {name} {surface:#08x}",
+                        theme.id
+                    );
+                    assert!(
+                        crate::ui::presets::contrast(caption, surface) >= FLOOR,
+                        "{}/{kind}: caption {caption:#08x} unreadable on {name} {surface:#08x}",
+                        theme.id
+                    );
+                }
+                assert!(
+                    crate::ui::presets::contrast(title, rungs.base)
+                        >= crate::ui::presets::contrast(muted, rungs.base),
+                    "{}/{kind}: the title must never trail its caption",
+                    theme.id
+                );
+                assert!(
+                    crate::ui::presets::contrast(rungs.selected, rungs.base)
+                        > crate::ui::presets::contrast(rungs.hover, rungs.base),
+                    "{}/{kind}: selected must stay the stronger mark",
+                    theme.id
+                );
+            }
+        }
+
+        // A raw-`m.foreground` title only diverges from `panel_title` on a
+        // palette whose resolved foreground — already floored on the window
+        // base — still misses 4.5 on a panel state fill. Fork a couple of
+        // those grid cases per polarity so the sweep's title assertion can
+        // tell the lifted ink apart from the seed.
+        let mut witnesses = 0usize;
+        let mut per_side = [0usize; 2];
+        for theme in crate::ui::presets::generated_theme_grid() {
+            let side = usize::from(theme.dark);
+            if per_side[side] >= 2 {
+                continue;
+            }
+            let r = theme.resolve();
+            let panel = [
+                r.sf.sidebar.base,
+                r.sf.sidebar.hover,
+                r.sf.sidebar.selected,
+                r.sf.rail.base,
+                r.sf.rail.hover,
+                r.sf.rail.selected,
+            ];
+            if panel
+                .iter()
+                .all(|&fill| crate::ui::presets::contrast(r.m.foreground, fill) >= FLOOR)
+            {
+                continue;
+            }
+            let mut witness = theme;
+            witness.id = format!("b1grid{witnesses}");
+            witness.path = None;
+            crate::ui::presets::fork_to_file(&witness).expect("the witness theme writes to disk");
+            per_side[side] += 1;
+            witnesses += 1;
+            if witnesses >= 4 {
+                break;
+            }
+        }
+        cx.update(|cx| crate::ui::presets::load_registry(cx));
+        let loaded: Vec<_> = cx
+            .update(|cx| crate::ui::presets::all(cx))
+            .into_iter()
+            .filter(|theme| theme.id.starts_with("b1grid"))
+            .collect();
+        assert!(
+            witnesses > 0 && loaded.len() == witnesses,
+            "the grid must yield weak-panel palettes and every fork must load ({witnesses} forked, {} loaded)",
+            loaded.len()
+        );
+        for theme in loaded {
+            cx.update(|cx| {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: theme.id.clone(),
+                    ..Default::default()
+                }));
+                crate::ui::theme::apply_theme(None, cx);
+            });
+            let title = cx.update(|cx| crate::ui::theme::chrome_ink(cx).panel_title);
+            let r = theme.resolve();
+            for (kind, rungs) in [("row", r.sf.sidebar), ("card", r.sf.rail)] {
+                for (name, surface) in [
+                    ("base", rungs.base),
+                    ("hover", rungs.hover),
+                    ("selected", rungs.selected),
+                ] {
+                    assert!(
+                        crate::ui::presets::contrast(title, surface) >= FLOOR,
+                        "{}/{kind}: weak-panel title {title:#08x} unreadable on {name} {surface:#08x}",
+                        theme.id
+                    );
+                }
+            }
+        }
     }
 }

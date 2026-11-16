@@ -3,6 +3,7 @@ use super::L10nKey;
 pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
     Some(match key {
         L10nKey::VisionToggle => "Рабочий обзор агентов",
+        L10nKey::VisionTogglePalette => "Агенты: переключить Входящие / Доску",
         L10nKey::VisionAgents => "Агенты",
         L10nKey::VisionWorkbench => "Терминалы",
         L10nKey::VisionInbox => "Входящие",
@@ -27,11 +28,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::VisionDone => "Завершены",
         L10nKey::VisionIdle => "Бездействуют",
         L10nKey::VisionExited => "Завершили сеанс",
+        L10nKey::VisionExitedAge => "Завершён · {age}",
         L10nKey::VisionPane => "панель {i}/{n}",
-        L10nKey::VisionDefault => "Открывать окна в режиме агентов",
-        L10nKey::VisionDefaultDesc => {
-            "Новые окна открывают входящие. Терминалы доступны на верхней панели."
-        }
+        L10nKey::VisionDefault => "Открывать новые окна во входящих",
+        L10nKey::VisionDefaultDesc => "Рабочий стол доступен в один клик на верхней панели.",
         L10nKey::SettingsNoMatchesShort => "Нет совпадений",
         L10nKey::SettingsModifiedTitle => "Изменено",
         L10nKey::SettingsMatchCount => "Совпадений: {count}",
@@ -54,10 +54,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNoThemesMatch => "Темы не найдены",
         L10nKey::SettingsRestoreChanged => "Сбросить {count} изменений",
         L10nKey::SettingsShortcutsHint => {
-            "Нажмите на сочетание и введите новые клавиши. Чтобы задать последовательность, сразу нажмите второе сочетание. Esc отменяет, ⌫ очищает."
+            "Нажмите на сочетание, затем новые клавиши. Два сочетания подряд задают последовательность. Esc отменяет."
         }
         L10nKey::SettingsShortcutsHintTmux => {
-            "Профиль tmux: команды панелей и вкладок вызываются через префикс. Нажмите на сочетание, чтобы изменить его. Esc отменяет, ⌫ очищает."
+            "Профиль tmux: команды панелей и вкладок вызываются через префикс. Нажмите на сочетание, чтобы изменить его. Esc отменяет."
         }
         L10nKey::SettingsShortcutConflict => {
             "{keys} уже назначено команде «{action}». При замене сочетание будет снято с неё."
@@ -67,14 +67,15 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchShortcuts => "Поиск команд и клавиш",
         L10nKey::SettingsHostsDesc => "Недавние хосты. Поиск находит любой сохранённый хост.",
         L10nKey::SettingsAddHost => "Добавить хост",
+        L10nKey::SettingsSaveHost => "Сохранить хост",
         L10nKey::SettingsNoHostsMatch => "Нет хостов по запросу «{query}»",
-        L10nKey::SettingsHostsFromFiles => "Хостов: {count}, источников: {files}",
+        L10nKey::SettingsHostsFromFiles => "{hosts} из {sources}",
         L10nKey::SettingsMoreHosts => "Ещё хостов: {count}",
         L10nKey::SettingsShowRecentOnly => "Только недавние",
         L10nKey::SettingsShowAll => "Показать все",
         L10nKey::SettingsUnsaved => "Не сохранено",
         L10nKey::SettingsNever => "Никогда",
-        L10nKey::SettingsDefinedIn => "Задан в",
+        L10nKey::SettingsDefinedIn => "Источник",
         L10nKey::SettingsConnectInNewTab => "Подключиться в новой вкладке",
         L10nKey::SettingsCopied => "Скопировано",
         L10nKey::SettingsNavMobile => "Телефон",
@@ -142,7 +143,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSaveError => "Не удалось сохранить изменения: {error}",
         L10nKey::SettingsRetrySave => "Повторить сохранение",
         L10nKey::SettingsNavGeneral => "Общие",
-        L10nKey::SettingsEditShortcuts => "Изменить сочетания…",
+        L10nKey::SettingsEditShortcuts => "Изменить сочетания",
         L10nKey::SettingsModifiedOnly => "Только изменённые",
         L10nKey::SettingsModified => "Изменено",
         L10nKey::SettingsResetValue => "Сбросить",
@@ -195,7 +196,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SearchTabTerminals => "Терминалы",
         L10nKey::SearchTabHosts => "Хосты",
         L10nKey::SearchTabSymbols => "Символы",
-        L10nKey::SearchPlaceholderAll => "Поиск файлов, команд, терминалов и хостов…",
+        L10nKey::SearchPlaceholderAll => "Поиск терминалов, хостов и команд…",
         L10nKey::SearchPlaceholderActions => "Поиск команд…",
         L10nKey::SearchPlaceholderTerminals => "Поиск открытых вкладок, оболочек и агентов…",
         L10nKey::SearchPlaceholderHosts => "Поиск хостов или user@host для подключения…",
@@ -267,6 +268,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirUnreadable => "Не удалось прочитать",
         L10nKey::TreeSearchCapped => "Первые {n} совпадений",
         L10nKey::TreeSearchFailed => "Ошибка поиска",
+        L10nKey::TreeRetry => "Повторить",
         L10nKey::FileChangedOnDisk => "Файл изменён на диске",
         L10nKey::Reload => "Обновить",
         L10nKey::KeepMine => "Оставить мой",
@@ -415,6 +417,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsInheritedByEveryHost => "Наследуется всеми хостами",
         L10nKey::SettingsNoSavedHosts => "Сохранённых хостов ещё нет.",
         L10nKey::SettingsNothingMatches => "Нет совпадений для {query}.",
+        L10nKey::SettingsNoSettingsMatch => "Нет настроек по запросу «{query}».",
+        L10nKey::SettingsClearSearch => "Сбросить поиск",
         L10nKey::SettingsInTty59 => "Настройки tty59",
         L10nKey::SettingsImportFromSshConfig => "Импорт из ~/.ssh/config",
         L10nKey::SettingsExpandAllGroups => "Развернуть все группы",
@@ -819,7 +823,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsShowTrayIcon => "Значок в трее",
         L10nKey::SettingsShowTrayIconDesc => {
-            "Уведомляет, когда агент ждёт ввода, и переходит к его панели."
+            "Держит tty59 в системном трее и отмечает агентов, которым нужен ввод."
         }
         L10nKey::SettingsTabs => "Вкладки",
         L10nKey::SettingsNewTabPosition => "Место новой вкладки",
@@ -835,13 +839,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsTabBarPositionDesc => "Полоса сверху или боковая панель слева.",
         L10nKey::SidebarListTerminal => "Терминал",
         L10nKey::SidebarListAgents => "Агенты",
-        L10nKey::SidebarNoAgents => "В этом рабочем пространстве нет агентов",
-        L10nKey::SettingsSidebarAgentsToggle => "Переключатель Терминал | Агенты",
+        L10nKey::SidebarNoAgents => "Нет запущенных агентов",
+        L10nKey::SettingsSidebarAgentsToggle => "Показывать переключатель «Терминалы / Агенты»",
         L10nKey::SettingsSidebarAgentsToggleDesc => {
-            "Показывать переключатель списков внизу боковой панели рабочего стола."
+            "Переключает между терминалами и агентами внизу боковой панели."
         }
         L10nKey::SettingsSearchSidebarAgentsToggleKeywords => {
-            "боковая панель терминал агенты список переключатель"
+            "боковая панель терминал агенты список переключатель рабочий стол"
         }
         L10nKey::SettingsSidebarGrouping => "Автогруппировка",
         L10nKey::SettingsSidebarGroupingDesc => {
@@ -885,7 +889,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "В tmux команды панелей и вкладок используют префикс (Ctrl-B C)."
         }
         L10nKey::SettingsPrefix => "Префикс",
-        L10nKey::SettingsPressKeys => "Нажмите клавиши… · ⌫ снимает сочетание",
+        L10nKey::SettingsPressKeys => "Нажмите клавиши… · Backspace снимает сочетание",
         L10nKey::SettingsPauseToSaveEsc => "пауза сохраняет · Esc",
         L10nKey::SettingsKeybindingsIntroDesc => {
             "Нажмите на сочетание и введите новые клавиши. Для последовательности вроде Ctrl-B X нажимайте клавиши подряд. Esc отменяет, Backspace очищает."
@@ -941,7 +945,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsUpdateDiscard => "Удалить загрузку",
         L10nKey::SettingsAutoDownload => "Скачивать обновления в фоне",
         L10nKey::SettingsAutoDownloadDesc => {
-            "Скачивать обновления в фоне, чтобы для установки хватило перезапуска. Установка всегда требует подтверждения."
+            "Так для установки хватит перезапуска. Без вашего подтверждения ничего не устанавливается."
         }
         L10nKey::SettingsUpdateChannel => "Канал обновлений",
         L10nKey::SettingsUpdateChannelDesc => {
@@ -999,7 +1003,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsVersionAvailable => "Доступна версия {version}.",
         L10nKey::SettingsCheckUpdatesDesc => {
-            "Открывает страницу выпуска, если обновление на месте недоступно."
+            "Проверять наличие новой версии при каждом запуске tty59."
         }
         L10nKey::SettingsCheckUpdatesOnLaunch => "Проверять обновления при запуске",
         L10nKey::SettingsCommandLine => "Командная строка",
@@ -1146,7 +1150,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "обратный поиск история нечёткий приглашение ctrl-r reverse search fuzzy history recall fzf prompt"
         }
         L10nKey::SettingsSearchHostsKeywords => {
-            "хост соединение сохранённый профиль импорт управление добавить изменить быстрое подключение ssh host connection saved profile import ssh_config manage add edit quick connect"
+            "хост соединение сохранённый профиль импорт управление добавить изменить быстрое подключение ssh host connection saved profile import ssh_config manage add edit quick connect hostname identityfile proxyjump alias"
         }
         L10nKey::SettingsSearchItalicFontKeywords => "шрифт наклон курсив typeface oblique",
         L10nKey::SettingsSearchKeybindingsKeywords => {
@@ -1279,6 +1283,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchThemeKeywords => {
             "оформление цвет схема тёмная светлая палитра фон акцент система автоматически appearance color colours scheme dark light palette background foreground accent sync system os auto follow"
         }
+        L10nKey::SettingsSearchMachineKeywords => {
+            "машина компьютер локальная удалённая подключено machine computer local remote"
+        }
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => {
             "буфер обмена пробелы копировать clipboard whitespace copy"
         }
@@ -1322,16 +1329,21 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpTransferSummaryRunning => "Передаётся: {count} · {pct}%",
         L10nKey::SftpTransferSummaryFailed => "С ошибками: {count}",
         L10nKey::SftpTransferSummaryIdle => "Передачи",
+        // B3-R: finished-transfer summaries.
+        L10nKey::SftpTransferSummaryDownloads => "{count} скачиваний завершено",
+        L10nKey::SftpTransferSummaryUploads => "{count} загрузок завершено",
+        L10nKey::SftpTransferSummaryBoth => "{downloads} · {uploads}",
+        L10nKey::SearchHostsHelper => "Введите user@host, чтобы подключиться.",
         L10nKey::SftpTransferProgress => "{done} / {total} ({pct}%)",
-        L10nKey::SftpTransferDone => "готово",
-        L10nKey::SftpTransferCancelled => "отменено",
-        L10nKey::SftpTransferError => "ошибка",
+        L10nKey::SftpTransferDone => "Готово",
+        L10nKey::SftpTransferCancelled => "Отменено",
+        L10nKey::SftpTransferError => "Сбой",
         L10nKey::SftpTransferListFailed => "Не удалось проверить передачи: {error}",
         L10nKey::SftpPasteUploadFailed => "Не удалось загрузить {name} на {host}: {error}",
         L10nKey::LinkFileOpenFailed => "Не удалось открыть {path}: {error}",
         L10nKey::ForwardDisconnected => "Отключено",
         L10nKey::ForwardDisconnectedFrom => "Отключено от {host}",
-        L10nKey::SshEditProfile => "Изменить соединение…",
+        L10nKey::SshEditProfile => "Изменить хост",
         L10nKey::ForwardTooltipAdd => "Добавить проброс",
         L10nKey::ForwardTooltipRemove => "Удалить",
         L10nKey::ForwardTooltipTurnOn => "Включить",
@@ -1346,7 +1358,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ForwardSocksLabel => "SOCKS",
         L10nKey::ForwardAdd => "Добавить",
         L10nKey::ForwardPortLabel => "Удалённый порт",
-        L10nKey::ForwardPortHere => "доступен на localhost:{port}",
+        L10nKey::ForwardPortHere => "Доступен на localhost:{port}",
         L10nKey::ForwardNeedsPort => "Порт: число от 1 до 65535.",
         L10nKey::ForwardAdvancedToggle => "Дополнительно",
         L10nKey::ForwardSimpleToggle => "Простой",
@@ -1462,12 +1474,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorGitRevertChange => "Отменить изменение",
         L10nKey::EditorGitToggleGutter => "Показать или скрыть метки изменений Git",
         L10nKey::EditorGitPeekRevert => "Отменить",
-        L10nKey::EditorGitPeekSummary => {
-            "Строки: −{removed} +{added} относительно версии в индексе"
-        }
+        L10nKey::EditorGitPeekSummary => "{changes} относительно версии в индексе",
         L10nKey::EditorGitPeekAddedOnly => "Это новые строки: в версии в индексе здесь ничего нет.",
         L10nKey::EditorGitPeekChange => "Просмотреть изменение",
-        L10nKey::EditorGitPeekKeys => "Enter отменяет изменение · Esc закрывает",
+        L10nKey::EditorGitPeekKeys => "Esc закрывает",
         L10nKey::EditorProblemsTitle => "Проблемы",
         L10nKey::EditorProblemsToggle => "Показать/скрыть проблемы",
         L10nKey::EditorProblemsNone => "В открытых файлах нет проблем.",
@@ -1557,10 +1567,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::LspRenameSymbolAction => "Переименовать символ…",
         L10nKey::LspRenamePlaceholder => "Новое имя для {name}",
         L10nKey::LspRenameFailed => "Не удалось переименовать {name}",
-        L10nKey::LspServerMissing => "{name} не установлен",
+        L10nKey::LspServerMissing => "Нет языкового сервера",
         L10nKey::LspServerStarting => "{name} запускается…",
         L10nKey::LspServerDown => "{name} остановлен",
-        L10nKey::LspProblemsTooltip => "Ошибок: {errors}, предупреждений: {warnings}",
+        L10nKey::LspProblemsTooltip => "{errors}, {warnings}",
         L10nKey::SearchTabLocations => "Места",
         L10nKey::SearchPlaceholderLocations => "Фильтр найденных мест…",
         L10nKey::SearchLocationsNone => "Ничего не найдено",
@@ -1568,6 +1578,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelInfoTitle => "Сведения",
         L10nKey::PanelChangesTitle => "Изменения",
         L10nKey::PanelScmTitle => "Изменения",
+        // B3-P: the Changes tab's accessible name and tooltip.
+        L10nKey::PanelChangesTabCount => {
+            "Изменения, {count} изменённых файлов. Файл, частично добавленный в индекс, считается один раз."
+        }
+        L10nKey::PanelChangesTabCapped => {
+            "Изменения, более 10\u{a0}000 изменённых файлов. Файл, частично добавленный в индекс, считается один раз."
+        }
         L10nKey::PanelFilesTitle => "Файлы",
         L10nKey::PanelSearchTitle => "Поиск",
         L10nKey::PanelGitHubTitle => "GitHub",
@@ -1582,6 +1599,15 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelNotAGitRepoHint => {
             "Перейдите в репозиторий командой cd, и здесь появятся незакоммиченные изменения."
         }
+        L10nKey::PanelInitRepo => "Инициализировать репозиторий",
+        L10nKey::PanelScmStatusFailed => "Не удалось прочитать статус git",
+        L10nKey::PanelScmStatusRetry => "Повторить",
+        L10nKey::PanelCopyError => "Скопировать ошибку",
+        L10nKey::PanelScmGitExitStatus => "git завершился со статусом {code}",
+        L10nKey::PanelScmGitSignal => "git остановлен сигналом",
+        L10nKey::PanelScmGitUnusableRoot => "git rev-parse не вернул пригодных данных",
+        L10nKey::PanelScmGitPanicked => "git status аварийно завершился",
+        L10nKey::PanelScmGitPanickedWithReason => "git status аварийно завершился: {reason}",
         L10nKey::PanelNoChanges => "Нет незакоммиченных изменений.",
         L10nKey::PanelNoChangesHint => "Рабочее дерево чистое.",
         L10nKey::PanelMoreChangedFiles => {
@@ -1629,6 +1655,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmNothingToCommit => "Нет изменений для коммита",
         L10nKey::ScmNetworkBusy => "Для этого репозитория ещё выполняется другая сетевая операция",
         L10nKey::ScmCommitNeedsMessage => "Сначала напишите сообщение коммита",
+        L10nKey::ScmCommitHasConflicts => "Сначала разрешите конфликты: {count}",
         L10nKey::ScmDetailFilesFailed => "Не удалось прочитать список файлов",
         L10nKey::ScmTimeNow => "сейчас",
         L10nKey::ScmTimeMinutes => "{n} мин",
@@ -1697,6 +1724,23 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmDiscardAllConfirm => {
             "Отменить все изменения вне индекса и удалить неотслеживаемые файлы? Изменения в индексе сохранятся. Вернуть их будет нельзя."
         }
+        L10nKey::ScmDiscardManyConfirm => {
+            "Отменить изменения в файлах: {count}? Вернуть их будет нельзя."
+        }
+        L10nKey::ScmDeleteUntrackedConfirm => {
+            "Удалить {path}? Файл не отслеживается, Git не сможет его восстановить."
+        }
+        L10nKey::ScmDeleteUntrackedFolderConfirm => {
+            "Удалить {path} со всем содержимым? Папка не отслеживается, Git не сможет её восстановить."
+        }
+        L10nKey::ScmDeleteUntrackedManyConfirm => {
+            "Удалить неотслеживаемые элементы: {count}? Git не сможет их восстановить."
+        }
+        L10nKey::ScmDeleteUntracked => "Удалить неотслеживаемое",
+        L10nKey::ScmDiscardEverythingConfirm => "Отменить все изменения вне индекса?",
+        L10nKey::ScmDiscardEverythingDetail => {
+            "Правки отслеживаемых файлов вне индекса будут отменены, а неотслеживаемые файлы и папки удалены. Изменения в индексе сохранятся. Здесь отменить это будет нельзя."
+        }
         L10nKey::ScmAmendConfirm => {
             "Изменить последний коммит? Он будет заменён новым. Тем, кто уже получил прежний, придётся согласовать историю."
         }
@@ -1709,6 +1753,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmSwitchRepository => "Сменить репозиторий",
         L10nKey::ScmFilesChanged => "Изменено файлов: {count}",
         L10nKey::ScmStagedFileCount => "Файлов в индексе: {count}",
+        L10nKey::ScmConflictCount => "Неразрешённых конфликтов: {count}",
         L10nKey::WindowStop => "Остановить",
         L10nKey::WindowDelete => "Удалить",
         L10nKey::WindowThisWorkspace => "эта рабочая область",
@@ -1766,7 +1811,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptTitle => "Новая вкладка worktree",
         L10nKey::WorktreePromptName => "Имя worktree",
         L10nKey::WorktreePromptBranch => "Новая ветка",
-        L10nKey::WorktreePromptBase => "Начать с",
+        L10nKey::WorktreePromptBase => "Базовая ветка",
         L10nKey::WorktreePromptCreating => "Создание…",
         L10nKey::WorktreePromptCreate => "Создать",
         L10nKey::AppNewWorktreeFailed => "Не удалось создать worktree: {error}",
@@ -1861,6 +1906,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::NotifyTurnFinished => "Ответ завершён",
         L10nKey::TabTooltipMore => "Ещё",
         L10nKey::TabTooltipShowSidebar => "Показать боковую панель",
+        L10nKey::TabStripHiddenTabs => "Ещё вкладок: {count}",
         L10nKey::TabTooltipHideSidebar => "Скрыть боковую панель",
         L10nKey::TabTooltipHideDetailPanel => "Скрыть панель сведений",
         L10nKey::TabTooltipShowDetailPanel => "Показать панель сведений",
@@ -2040,6 +2086,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelSearchInContents => "В содержимом файлов",
         L10nKey::PanelFilesNameMatches => "Имена файлов",
         L10nKey::SwitcherHintNewWindow => "Новое окно",
+        L10nKey::SwitcherHintMachine => "Машина",
         L10nKey::SwitcherLocalHost => "локальный",
         L10nKey::SwitcherConnectingTo => "Подключение к {machine}…",
         L10nKey::SwitcherFormName => "Имя",
@@ -2052,9 +2099,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SshPromptPassphraseFor => "Парольная фраза для {key_path}",
         L10nKey::SshPromptTwoFactor => "Двухфакторная аутентификация",
         L10nKey::SshPromptUnknownHost => "Неизвестный хост {host}",
-        L10nKey::SshPromptHostKeyChanged => "Ключ хоста ИЗМЕНИЛСЯ. Возможна подмена соединения",
+        L10nKey::SshPromptHostKeyChanged => "Ключ хоста изменился",
         L10nKey::SshPromptHostKeyChangedBody => {
-            "Ключ хоста отличается от ранее принятого. Это может быть атакой."
+            "Ключ для {host}:{port} больше не совпадает с тем, которому вы доверяли. Возможно, кто-то перехватывает соединение."
         }
         L10nKey::SshPromptConnect => "Подключиться",
         L10nKey::SshPromptUnlock => "Разблокировать",
@@ -2305,9 +2352,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneDragHandleTooltip => "Перетащите, чтобы переместить панель",
         L10nKey::AppWorktreeRemoved => "Worktree «{branch}» удалён",
         L10nKey::AppWorktreeRemoveFailed => "Не удалось удалить worktree: {error}",
-        L10nKey::WorktreePromptAgent => "Запустить",
+        L10nKey::WorktreePromptAgent => "Запуск через",
         L10nKey::WorktreePromptShell => "Оболочка",
-        L10nKey::WorktreePromptTask => "Задача",
+        L10nKey::WorktreePromptTask => "Первая задача",
         L10nKey::WorktreePromptSetup => "Сначала запускается .tty59/setup",
         L10nKey::WorktreePromptSetupHint => {
             "Нет .tty59/setup. Добавьте его, чтобы выполнять `{command}` в новых worktree"
@@ -2449,6 +2496,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
             "Интеграция оболочки tty59 не включилась в этой панели. Встроенное дополнение и меню Ctrl+R недоступны. Возможные причины: свои аргументы запуска оболочки, обёртка PTY или неподдерживаемая оболочка."
         }
         L10nKey::PaneTitleDisconnected => "{title}: нет соединения",
+        L10nKey::PaneTitleNotConnected => "{title}: не подключено",
         L10nKey::PaneTitleProcessExited => "{title}: процесс завершён",
         L10nKey::LoopbackForwardFailed => "Не удалось пробросить :{port}: {error}",
         L10nKey::TrayTooltipAgents => "tty59: {parts}",
@@ -2492,7 +2540,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::GitHubNoIssues => "Задачи не найдены.",
         L10nKey::GitHubNoPulls => "Запросы на слияние не найдены.",
-        L10nKey::GitHubSignInHint => "Войдите командой `gh auth login` в терминале и обновите.",
+        L10nKey::GitHubSignInHint => "Войдите командой {command} в терминале и обновите.",
         L10nKey::GitHubNotFoundSignedOut => {
             "GitHub не нашёл репозиторий. Если он закрытый, сначала войдите."
         }
@@ -2503,7 +2551,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::GitHubRateLimited => "Лимит запросов GitHub исчерпан.",
         L10nKey::GitHubRateLimitResetIn => "Сброс через {n} мин.",
         L10nKey::GitHubRateLimitSignedOut => {
-            "Без входа GitHub разрешает 60 запросов в час. Войдите через `gh auth login`, чтобы лимит стал больше."
+            "Без входа GitHub разрешает 60 запросов в час. Войдите через {command}, чтобы лимит стал больше."
         }
         L10nKey::GitHubForbidden => "GitHub отклонил запрос.",
         L10nKey::GitHubNetworkError => "Не удалось подключиться к GitHub.",
@@ -2549,15 +2597,63 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchCopyJoinWrappedKeywords => {
             "буфер обмена копирование перенос склеить строки claude clipboard copy wrap unwrap join lines raw"
         }
+        // B3-L: settings terminology and host/source counts.
+        L10nKey::SettingsPort => "Порт",
+        L10nKey::SettingsCopyJoinWrappedWithKey => {
+            "{desc} {key} или команда «{command}» копируют их как на экране."
+        }
+        L10nKey::SettingsCopyJoinWrappedUnbound => {
+            "{desc} Команда «{command}» копирует их как на экране."
+        }
+        L10nKey::SettingsKeyFile => "Файл ключа",
+        L10nKey::SettingsSearchVisionDefaultKeywords => {
+            "режим агентов агенты входящие рабочий стол окна верхняя панель agent mode inbox workbench start windows"
+        }
+        L10nKey::SettingsHostCount => "{count} хостов",
+        L10nKey::SettingsSourceCount => "{count} источников",
+        // B3-A: the agents rail's empty and no-match states.
+        L10nKey::SidebarAgentsEmptyHint => {
+            "Агенты, запущенные в этом рабочем пространстве, появятся здесь."
+        }
+        L10nKey::SidebarNewAgent => "Новый агент",
+        L10nKey::SidebarNothingMatches => "Ничего не найдено по запросу «{query}»",
         L10nKey::SettingsCopyJoinWrapped => "Склеивать перенесённые строки при копировании",
         L10nKey::SettingsCopyJoinWrappedDesc => {
-            "В панели Claude Code склеивать строки, которые Claude перенёс у края панели, чтобы абзац вставлялся одной строкой. ⌘⌥C или «Копировать как есть» копируют их как на экране"
+            "В панели Claude Code склеивать строки, которые Claude перенёс у края панели, чтобы абзац вставлялся одной строкой."
         }
         L10nKey::MermaidRendering => "Отрисовка диаграммы…",
         L10nKey::MermaidRenderError => "Ошибка диаграммы",
         L10nKey::MermaidViewerFullScreen => "Во весь экран",
         L10nKey::MermaidViewerFit => "Вместить",
         L10nKey::MermaidViewerExit => "Выйти из полноэкранного режима (Esc)",
+        // B3-E: editor status, empty hint and gutter peek.
+        L10nKey::LspMissingBody => {
+            "Не удалось запустить {name}. tty59 ищет в PATH: {programs}. Проверьте, что сервер {name} установлен и запускается."
+        }
+        L10nKey::LspErrorCount => "{count} ошибок",
+        L10nKey::LspWarningCount => "{count} предупреждений",
+        L10nKey::EditorEmptyOpenHint => "Открыть файл: {chord}",
+        L10nKey::EditorEmptyTreeAlt => "или выберите его в дереве файлов",
+        L10nKey::EditorEmptyOpenUnbound => "Выберите файл в дереве файлов",
+        L10nKey::EditorGitPeekLinesAdded => "{count} строк добавлено",
+        L10nKey::EditorGitPeekLinesRemoved => "{count} строк удалено",
+        L10nKey::EditorGitPeekChanges => "{removed}, {added}",
+        // B5 S2: settings save failure and unassigned shortcuts.
+        L10nKey::SettingsSaveFailedTitle => "Не удалось сохранить настройки",
+        L10nKey::SettingsSaveFailedBody => {
+            "Всё равно выйти? Изменения с момента последнего успешного сохранения будут отменены."
+        }
+        L10nKey::SettingsStay => "Остаться",
+        L10nKey::SettingsLeave => "Выйти",
+        L10nKey::SettingsShortcutAdd => "Добавить",
+        L10nKey::SettingsShortcutsRecordingHint => {
+            "Нажмите новые клавиши. Esc отменяет, Backspace очищает это сочетание."
+        }
+        // B5 remote: SFTP delete title with host, symlink label, SSH prompt extras.
+        L10nKey::SftpDeleteTitleOnHost => "Удалить «{name}» на {host}?",
+        L10nKey::SftpSymlinkAria => "{name}, символическая ссылка",
+        L10nKey::SshPromptPassphrasePlaceholder => "Парольная фраза",
+        L10nKey::SshPromptSaveToKeychain => "Сохранить в связке ключей",
     })
 }
 
@@ -2588,6 +2684,39 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::SettingsMoreHosts, "few") => "Ещё {count} хоста",
         (L10nKey::SettingsMoreHosts, "many") => "Ещё {count} хостов",
         (L10nKey::SettingsMoreHosts, "other") => "Ещё {count} хостов",
+        // The two halves of `SettingsHostsFromFiles`, counted separately. The
+        // source count follows "из", so it takes the genitive.
+        (L10nKey::SettingsHostCount, "zero") => "0 хостов",
+        (L10nKey::SettingsHostCount, "one") => "{count} хост",
+        (L10nKey::SettingsHostCount, "few") => "{count} хоста",
+        (L10nKey::SettingsHostCount, "many") => "{count} хостов",
+        (L10nKey::SettingsHostCount, "other") => "{count} хостов",
+        (L10nKey::SettingsSourceCount, "zero") => "0 источников",
+        (L10nKey::SettingsSourceCount, "one") => "{count} источника",
+        (L10nKey::SettingsSourceCount, "few") => "{count} источников",
+        (L10nKey::SettingsSourceCount, "many") => "{count} источников",
+        (L10nKey::SettingsSourceCount, "other") => "{count} источников",
+        // B3-E: plural forms.
+        (L10nKey::LspErrorCount, "zero") => "Нет ошибок",
+        (L10nKey::LspErrorCount, "one") => "{count} ошибка",
+        (L10nKey::LspErrorCount, "few") => "{count} ошибки",
+        (L10nKey::LspErrorCount, "many") => "{count} ошибок",
+        (L10nKey::LspErrorCount, "other") => "{count} ошибки",
+        (L10nKey::LspWarningCount, "zero") => "Нет предупреждений",
+        (L10nKey::LspWarningCount, "one") => "{count} предупреждение",
+        (L10nKey::LspWarningCount, "few") => "{count} предупреждения",
+        (L10nKey::LspWarningCount, "many") => "{count} предупреждений",
+        (L10nKey::LspWarningCount, "other") => "{count} предупреждения",
+        (L10nKey::EditorGitPeekLinesAdded, "zero") => "Нет добавленных строк",
+        (L10nKey::EditorGitPeekLinesAdded, "one") => "{count} строка добавлена",
+        (L10nKey::EditorGitPeekLinesAdded, "few") => "{count} строки добавлены",
+        (L10nKey::EditorGitPeekLinesAdded, "many") => "{count} строк добавлено",
+        (L10nKey::EditorGitPeekLinesAdded, "other") => "{count} строки добавлены",
+        (L10nKey::EditorGitPeekLinesRemoved, "zero") => "Нет удалённых строк",
+        (L10nKey::EditorGitPeekLinesRemoved, "one") => "{count} строка удалена",
+        (L10nKey::EditorGitPeekLinesRemoved, "few") => "{count} строки удалены",
+        (L10nKey::EditorGitPeekLinesRemoved, "many") => "{count} строк удалено",
+        (L10nKey::EditorGitPeekLinesRemoved, "other") => "{count} строки удалены",
         (L10nKey::SettingsMoreAgents, "zero") => "Других агентов нет",
         (L10nKey::SettingsMoreAgents, "one") => "Доступен ещё {count} агент",
         (L10nKey::SettingsMoreAgents, "few") => "Доступны ещё {count} агента",
@@ -2744,6 +2873,16 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::ScmStagedFileCount, "few") => "В индексе {count} файла",
         (L10nKey::ScmStagedFileCount, "many") => "В индексе {count} файлов",
         (L10nKey::ScmStagedFileCount, "other") => "В индексе {count} файлов",
+        (L10nKey::ScmCommitHasConflicts, "zero") => "Нет неразрешённых конфликтов",
+        (L10nKey::ScmCommitHasConflicts, "one") => "Сначала разрешите {count} конфликт",
+        (L10nKey::ScmCommitHasConflicts, "few") => "Сначала разрешите {count} конфликта",
+        (L10nKey::ScmCommitHasConflicts, "many") => "Сначала разрешите {count} конфликтов",
+        (L10nKey::ScmCommitHasConflicts, "other") => "Сначала разрешите {count} конфликта",
+        (L10nKey::ScmConflictCount, "zero") => "Нет конфликтов",
+        (L10nKey::ScmConflictCount, "one") => "{count} конфликт",
+        (L10nKey::ScmConflictCount, "few") => "{count} конфликта",
+        (L10nKey::ScmConflictCount, "many") => "{count} конфликтов",
+        (L10nKey::ScmConflictCount, "other") => "{count} конфликта",
         (L10nKey::PanelMoreChangedFiles, "zero") => "Других изменённых файлов нет.",
         (L10nKey::PanelMoreChangedFiles, "one") => {
             "…и ещё {count} изменённый файл. Посмотрите его командой git diff."
@@ -2881,6 +3020,20 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubSkippedCount, "few") => "Пропущено {count} проверки",
         (L10nKey::GitHubSkippedCount, "many") => "Пропущено {count} проверок",
         (L10nKey::GitHubSkippedCount, "other") => "Пропущено {count} проверок",
+        // B3-P: plural forms.
+        (L10nKey::PanelChangesTabCount, "zero") => "Изменения, нет изменённых файлов",
+        (L10nKey::PanelChangesTabCount, "one") => {
+            "Изменения, {count} изменённый файл. Файл, частично добавленный в индекс, считается один раз."
+        }
+        (L10nKey::PanelChangesTabCount, "few") => {
+            "Изменения, {count} изменённых файла. Файл, частично добавленный в индекс, считается один раз."
+        }
+        (L10nKey::PanelChangesTabCount, "many") => {
+            "Изменения, {count} изменённых файлов. Файл, частично добавленный в индекс, считается один раз."
+        }
+        (L10nKey::PanelChangesTabCount, "other") => {
+            "Изменения, {count} изменённых файла. Файл, частично добавленный в индекс, считается один раз."
+        }
         (L10nKey::GitHubShowHiddenComments, "zero") => "Других комментариев нет",
         (L10nKey::GitHubShowHiddenComments, "one") => "Показать ещё {count} комментарий",
         (L10nKey::GitHubShowHiddenComments, "few") => "Показать ещё {count} комментария",
@@ -2891,6 +3044,22 @@ pub fn translate_variant_ru(key: L10nKey, branch: &'static str) -> Option<&'stat
         (L10nKey::GitHubShowAllReviewers, "few") => "Показать всех {count} рецензентов",
         (L10nKey::GitHubShowAllReviewers, "many") => "Показать всех {count} рецензентов",
         (L10nKey::GitHubShowAllReviewers, "other") => "Показать всех {count} рецензентов",
+        // B3-R: plural forms.
+        (L10nKey::SftpTransferSummaryDownloads, "zero") => "Нет завершённых скачиваний",
+        (L10nKey::SftpTransferSummaryDownloads, "one") => "{count} скачивание завершено",
+        (L10nKey::SftpTransferSummaryDownloads, "few") => "{count} скачивания завершены",
+        (L10nKey::SftpTransferSummaryDownloads, "many") => "{count} скачиваний завершено",
+        (L10nKey::SftpTransferSummaryDownloads, "other") => "{count} скачивания завершены",
+        (L10nKey::SftpTransferSummaryUploads, "zero") => "Нет завершённых загрузок",
+        (L10nKey::SftpTransferSummaryUploads, "one") => "{count} загрузка завершена",
+        (L10nKey::SftpTransferSummaryUploads, "few") => "{count} загрузки завершены",
+        (L10nKey::SftpTransferSummaryUploads, "many") => "{count} загрузок завершено",
+        (L10nKey::SftpTransferSummaryUploads, "other") => "{count} загрузки завершены",
+        (L10nKey::TabStripHiddenTabs, "zero") => "Других вкладок нет",
+        (L10nKey::TabStripHiddenTabs, "one") => "Ещё {count} вкладка",
+        (L10nKey::TabStripHiddenTabs, "few") => "Ещё {count} вкладки",
+        (L10nKey::TabStripHiddenTabs, "many") => "Ещё {count} вкладок",
+        (L10nKey::TabStripHiddenTabs, "other") => "Ещё {count} вкладки",
         _ => return None,
     };
     Some(value)

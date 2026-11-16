@@ -49,6 +49,22 @@ fn agent_search_matches_title_kind_project_and_reason_together() {
     assert!(pane.matches_search("", "Payments"));
 }
 
+#[test]
+fn exited_agent_is_titled_and_searched_by_its_agent_name_not_the_reverted_tab() {
+    crate::ui::i18n::set_locale("en");
+    let workspace = WorkspaceId::new();
+    let mut pane = agent(workspace, 1, AgentStatus::Waiting, Some(30), false);
+    pane.location.tab_title = "~/demo/billing-service".into();
+    pane.reason = Some("Allow Bash: pnpm test".into());
+    assert!(pane.matches_search("billing-service", ""));
+    assert!(pane.matches_search("codex pnpm", ""));
+
+    pane.state = State::Exited;
+    assert!(pane.matches_search("codex exited", ""));
+    assert!(!pane.matches_search("billing-service", ""));
+    assert!(!pane.matches_search("pnpm", ""));
+}
+
 fn repo_group(path: &str) -> Option<GroupKey> {
     Some(GroupKey::Auto(AutoKey::Repo(path.into())))
 }

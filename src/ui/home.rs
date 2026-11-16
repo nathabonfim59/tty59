@@ -359,7 +359,7 @@ impl Tty59App {
                                 crate::ui::dialog::button(
                                     "home-remote-status-action",
                                     label,
-                                    crate::ui::dialog::Tone::Secondary,
+                                    crate::ui::dialog::Tone::Primary,
                                     true,
                                     crate::ui::dialog::popover_rungs(cx),
                                     cx,
@@ -367,6 +367,7 @@ impl Tty59App {
                                         this.run_strip_action(action.clone(), window, cx);
                                     }),
                                 )
+                                .h(gpui::px(crate::ui::dialog::PANEL_BUTTON_H))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
                             )
                         }),

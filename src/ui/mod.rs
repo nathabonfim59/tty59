@@ -28,6 +28,8 @@ pub mod lsp;
 pub mod machine_mirror;
 pub(crate) mod markdown_mermaid;
 pub mod notice;
+#[cfg(test)]
+pub(crate) mod paint_probe;
 pub(crate) mod palette;
 pub mod pane;
 pub mod pane_drag;
@@ -58,6 +60,7 @@ pub mod ssh_prompt;
 pub mod switcher;
 pub mod tab_sidebar;
 pub mod tab_strip;
+pub(crate) mod text_elision;
 pub mod theme;
 pub mod tray;
 pub mod tree_sync;

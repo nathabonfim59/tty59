@@ -22,6 +22,7 @@ use crate::ui::editor_session::{self, TabEditor};
 use crate::ui::editor_text::{self, EditorConfig, Indent, LineEnding, TextFormat};
 use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::lsp::LspStatus;
 use crate::ui::zoom::SCROLL_GESTURE_IDLE;
 
 mod gutter;
@@ -29,9 +30,11 @@ mod nav;
 pub(crate) mod outline;
 mod problems;
 mod split;
+pub(crate) mod status;
 mod strip;
 
 pub(crate) use nav::KEY_CONTEXT as NAV_KEY_CONTEXT;
+pub(crate) use strip::{HEADER_HYSTERESIS, header_inline};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -377,6 +380,29 @@ pub(crate) struct EditorPanelState {
     problems: problems::ProblemsPane,
     /// The header's list of every open file, while it is open.
     strip_picker: Option<strip::StripPicker>,
+    /// Whether the docked header — a code editor's or a diff's — was last
+    /// found not to fit the title bar's share of the column, so it is kept
+    /// inside it a little past the point it would fit again. Written by
+    /// `editor_header_latch_sync` alone.
+    header_inline: bool,
+    /// Whether a docked diff was last found too narrow to seat its header
+    /// beside the terminal's floor, so it is kept filled a little past the
+    /// point it would fit again. Written by `editor_header_latch_sync` alone.
+    diff_fill: bool,
+    /// How many tiers of a filled diff's secondary parts were last found to
+    /// need the second line (none, the chip with the Refreshing word, those
+    /// and the terminal's name, all three with the summary), so each is kept
+    /// there a little past the point it would fit again. Written by
+    /// `editor_header_latch_sync` alone.
+    pub(crate) diff_wrap: crate::ui::diff_overlay::WrapState,
+    /// What the `+N` button's glyphs measure at the current font and size.
+    /// Drawing only reads it; `editor_header_latch_sync` re-measures when the
+    /// font or size it is for has changed.
+    overflow_glyphs: strip::OverflowMetrics,
+    /// What the diff header's fixed words and figures measure. Read by the
+    /// diff header's budget; `editor_overflow_refresh` measures it again when
+    /// the size, the fonts, the feature set or the language it is for changes.
+    pub(crate) diff_header: crate::ui::diff_overlay::DiffHeaderMetrics,
     /// The focus of a panel with no file in it. Without one there is nothing
     /// in the panel to hold the focus, so closing the last file handed it to
     /// the terminal and the next ⌘W closed the terminal instead of the panel.
@@ -410,6 +436,22 @@ impl EditorPanelState {
             }
         })
         .detach();
+        cx.observe_window_bounds(window, |this, window, cx| {
+            this.editor_header_latch_sync(window, cx)
+        })
+        .detach();
+        cx.observe_in(&cx.entity(), window, |this, _, window, cx| {
+            this.editor_header_latch_sync(window, cx)
+        })
+        .detach();
+        cx.observe_global_in::<crate::core::config::Config>(window, |this, window, cx| {
+            this.editor_overflow_refresh(window, cx)
+        })
+        .detach();
+        cx.observe_global_in::<gpui_component::Theme>(window, |this, window, cx| {
+            this.editor_overflow_refresh(window, cx)
+        })
+        .detach();
         Self {
             buffers: Vec::new(),
             next_untitled: 1,
@@ -430,6 +472,15 @@ impl EditorPanelState {
             nav: nav::EditorNav::new(cx),
             problems: Default::default(),
             strip_picker: None,
+            header_inline: false,
+            diff_fill: false,
+            diff_wrap: crate::ui::diff_overlay::WrapState::default(),
+            overflow_glyphs: strip::OverflowMetrics::measure(window, cx),
+            diff_header: crate::ui::diff_overlay::DiffHeaderMetrics::measure(
+                window,
+                cx,
+                &cx.global::<crate::core::config::Config>().font_family,
+            ),
             empty_focus: cx.focus_handle(),
             had_focus: None,
         }
@@ -2167,9 +2218,12 @@ impl Tty59App {
                             Some(BarKind::GoToLine | BarKind::Rename { .. })
                         ) {
                             this.editor.bar = None;
-                            cx.notify();
                         }
+                        // A Save As stays up, with its focus cue gone: the
+                        // bar draws the ring from the focus it has now.
+                        cx.notify();
                     }
+                    InputEvent::Focus => cx.notify(),
                     _ => {}
                 }
             },
@@ -3243,6 +3297,25 @@ impl Tty59App {
     }
 }
 
+/// The chord the keymap has for Go to File right now, as the text a hint
+/// shows, or `None` while it is unbound. The first installed binding — the
+/// shipped chord, else the first one the config adds — and every stroke of it
+/// is spelled, the way the other key hints read the installed map.
+fn quick_open_chord(cx: &gpui::App) -> Option<String> {
+    let keymap = cx.key_bindings();
+    let keymap = keymap.borrow();
+    let binding = keymap
+        .bindings_for_action(&crate::core::actions::QuickOpenFile)
+        .next()?;
+    let chord = binding
+        .keystrokes()
+        .iter()
+        .map(|stroke| gpui_component::kbd::Kbd::format(stroke.inner()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!chord.is_empty()).then_some(chord)
+}
+
 fn dirs_home() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -3298,17 +3371,19 @@ impl Tty59App {
         let body = self.render_editor_body(
             self.tab_code().and_then(TabCode::active_id),
             self.tab_code().map_or(0, TabCode::focused_slot),
+            window,
             cx,
         );
         let conflict_banner = self
             .active_buffer()
             .and_then(|f| f.conflict.map(|c| (f.id(), c)))
             .map(|(id, c)| self.render_editor_conflict_banner(id, c, cx));
-        let bar = self.render_editor_bar(cx);
+        let bar = self.render_editor_bar(window, cx);
 
+        // Only the hoisted header takes a trail, and it is not drawn here.
         let header = chrome
             .renders_own_header()
-            .then(|| self.render_editor_header(chrome, window, cx));
+            .then(|| self.render_editor_header(chrome, 0., window, cx));
         let editor_col = v_flex()
             .flex_1()
             .min_w_0()
@@ -3363,7 +3438,7 @@ impl Tty59App {
                     this.toggle_code_panel(window, cx);
                 }))
                 .child(h_flex().flex_1().min_h_0().w_full().child(editor_col))
-                .child(self.render_code_status_bar(window, cx))
+                .child(self.render_code_status_bar(chrome, window, cx))
                 .into_any_element(),
         )
     }
@@ -3374,6 +3449,7 @@ impl Tty59App {
         &self,
         id: Option<BufferId>,
         slot: usize,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
@@ -3484,7 +3560,7 @@ impl Tty59App {
                                 .into_any_element(),
                         )
                     })
-                    .children(self.render_editor_gutter_peek(id, cx))
+                    .children(self.render_editor_gutter_peek(id, window, cx))
                     .context_menu(move |menu, _window, cx| {
                         Self::editor_body_menu(menu, &app, id, cx)
                     })
@@ -3759,28 +3835,28 @@ impl Tty59App {
     pub(crate) fn render_editor_header_only(
         &self,
         chrome: DocumentChrome,
+        trail: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        self.render_editor_header(chrome, window, cx)
+        self.render_editor_header(chrome, trail, window, cx)
             .into_any_element()
     }
 
+    /// `trail` is what the title bar leaves at the header's right end, read
+    /// only when the header is the hoisted one; a header drawn by its own
+    /// column or overlay has none to give up.
     fn render_editor_header(
         &self,
         chrome: DocumentChrome,
+        trail: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        // `TITLE_BAR_LEAD` is the room macOS's traffic lights need. Only a
-        // header that starts at the left edge of the window has them to clear,
-        // and a docked column never does.
-        let lead = if self.left_panel_open(cx) || chrome.is_dock() {
-            crate::ui::app::CONTENT_INSET
-        } else {
-            crate::ui::app::TITLE_BAR_LEAD
-        };
-        let row = h_flex().id("editor-header");
+        let lead = self.editor_header_lead(chrome, cx);
+        let row = h_flex()
+            .id("editor-header")
+            .when(cfg!(test), |d| d.debug_selector(|| "editor-header".into()));
         let row = if chrome.header_is_title_strip() {
             crate::ui::app::title_bar_drag(row, "editor-header", window, cx)
         } else {
@@ -3793,38 +3869,42 @@ impl Tty59App {
             crate::ui::tab_strip::RAIL_TILE,
             crate::ui::tab_strip::RAIL_TILE_GLYPH,
         );
-        let cap = self.editor_strip_cap(chrome, cx);
+        let cap = self.editor_strip_cap(chrome, trail, window, cx);
         let (shown, hidden) = self
             .tab_code()
             .map(|c| c.strip_split(cap))
             .unwrap_or_default();
         let active_id = self.tab_code().and_then(TabCode::active_id);
-        let files: Vec<(usize, SharedString, String, bool, bool)> = shown
+        let files: Vec<(usize, SharedString, Option<String>, bool, bool)> = shown
             .into_iter()
             .filter_map(|(pos, id)| {
                 let f = self.buffer(id)?;
+                let active = Some(id) == active_id;
+                // The breadcrumbs over the text spell out the focused group's
+                // active file (the strip lists that group's files only) and
+                // carry its full path on hover, so its tab does not repeat it.
+                // An untitled buffer has no path there, so it keeps its label.
                 let tip = if f.untitled.is_some() {
-                    f.label().to_string()
+                    Some(f.label().to_string())
+                } else if active {
+                    None
                 } else {
-                    f.path.display().to_string()
+                    Some(f.path.display().to_string())
                 };
-                Some((pos, f.label(), tip, Some(id) == active_id, f.dirty))
+                Some((pos, f.label(), tip, active, f.dirty))
             })
             .collect();
         let strip = if files.is_empty() {
-            div()
-                .min_w_0()
-                .px(px(8.))
-                .text_ellipsis()
-                .text_size(gpui::rems(strip::CELL_TEXT))
-                .text_color(cx.theme().muted_foreground)
-                .child(SharedString::from(t(L10nKey::EditorNoFileOpen)))
-                .into_any_element()
+            // Nothing to name here: the body says no file is open.
+            div().min_w_0().into_any_element()
         } else {
             h_flex()
                 .id("editor-file-tabs")
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "editor-file-tabs".into())
+                })
                 .min_w_0()
-                .gap(px(2.))
+                .gap(px(strip::TAB_GAP))
                 .overflow_hidden()
                 .children(files.into_iter().map(|(pos, name, tip, active, dirty)| {
                     self.render_file_tab(pos, name, tip, active, dirty, cx)
@@ -3837,7 +3917,7 @@ impl Tty59App {
             // shows no rule, but its tiles sit in the band the traffic lights
             // hang over and have to keep the title bar's line.
             .title_strip_row(px(TITLE_BAR_BORDER), cx.theme().transparent)
-            .gap(px(2.))
+            .gap(px(strip::HEADER_GAP))
             // The whole reserve, not the reserve less the first control's own
             // inset. The filled editor leads with the back pill, whose 8pt of
             // inner padding is *inside* its hover box — carving it out of here
@@ -3849,44 +3929,57 @@ impl Tty59App {
             .pl(px(lead))
             // The glyph, not the tile, lands on `CONTENT_INSET`, the column
             // the file name starts on at the other end of the bar.
-            .pr(px(crate::ui::app::CONTENT_INSET - (tile - glyph) / 2.))
+            .pr(px(strip::HEADER_TRAIL))
             .children(back)
             .child(strip)
             .children(self.render_strip_overflow(&hidden, cap, cx))
             .child(
-                div().occlude().flex_none().child(
-                    crate::ui::tab_strip::chrome_tile_sized(
-                        Button::new("editor-new-file").icon(Icon::new(IconName::Plus)),
-                        tile,
-                        glyph,
-                        false,
-                        cx,
-                    )
-                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-                    .tooltip(t(L10nKey::EditorNewFile))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.editor_new_file(window, cx);
-                    })),
-                ),
+                div()
+                    .occlude()
+                    .flex_none()
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "editor-new-file".into())
+                    })
+                    .child(
+                        crate::ui::tab_strip::chrome_tile_sized(
+                            Button::new("editor-new-file").icon(Icon::new(IconName::Plus)),
+                            tile,
+                            glyph,
+                            false,
+                            cx,
+                        )
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                        .tooltip(t(L10nKey::EditorNewFile))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.editor_new_file(window, cx);
+                        })),
+                    ),
             )
             // Whatever is left of the bar stays a place to drag the window by.
             .child(div().flex_1().h_full())
             .child(self.document_layout_switch(chrome, cx))
             .child(
-                div().occlude().flex_none().ml(px(4.)).child(
-                    crate::ui::tab_strip::chrome_tile_sized(
-                        Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
-                        tile,
-                        glyph,
-                        false,
-                        cx,
-                    )
-                    .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
-                    .tooltip(t(L10nKey::EditorBackToTerminal))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.toggle_code_panel(window, cx);
-                    })),
-                ),
+                div()
+                    .occlude()
+                    .flex_none()
+                    .ml(px(strip::CLOSE_LEAD))
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(|| "editor-panel-close".into())
+                    })
+                    .child(
+                        crate::ui::tab_strip::chrome_tile_sized(
+                            Button::new("editor-panel-close").icon(Icon::new(IconName::Close)),
+                            tile,
+                            glyph,
+                            false,
+                            cx,
+                        )
+                        .rounded(px(crate::ui::tab_strip::RAIL_TILE_RADIUS))
+                        .tooltip(t(L10nKey::EditorBackToTerminal))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_code_panel(window, cx);
+                        })),
+                    ),
             )
     }
 
@@ -3897,7 +3990,7 @@ impl Tty59App {
         &self,
         pos: usize,
         name: SharedString,
-        tip: String,
+        tip: Option<String>,
         active: bool,
         dirty: bool,
         cx: &mut Context<Self>,
@@ -3921,8 +4014,8 @@ impl Tty59App {
                 cx.stop_propagation();
                 this.editor_close_file(pos, window, cx);
             }));
-        // Unsaved is a state, not an alarm: the dot is in caption ink, the
-        // same as the `+N` button's, not the warning hue.
+        // Unsaved is the design system's 5px amber dot, the same mark as the
+        // `+N` button's and the picker's, in the theme's cached warning ink.
         let slot_el = div()
             .flex_none()
             .size(px(slot))
@@ -3930,16 +4023,27 @@ impl Tty59App {
             .items_center()
             .justify_center()
             .when(dirty, |d| {
-                d.child(
-                    div()
-                        .group_hover(group.clone(), |s| s.invisible())
-                        .size(px(6.))
-                        .rounded_full()
-                        .bg(muted),
-                )
+                let dot = div()
+                    .when(cfg!(test), |d| {
+                        d.debug_selector(move || format!("editor-file-tab-dot-{pos}"))
+                    })
+                    .group_hover(group.clone(), |s| s.invisible())
+                    .size(px(crate::ui::tab_strip::ROW_STATUS_DOT))
+                    .rounded_full()
+                    .bg(gpui::rgb(crate::ui::theme::semantics(cx).warning.ink));
+                #[cfg(test)]
+                let dot = {
+                    let mut dot = dot;
+                    crate::ui::paint_probe::note("editor-dirty-dot", &mut dot);
+                    dot
+                };
+                d.child(dot)
             });
         div()
             .id(("editor-file-tab", pos))
+            .when(cfg!(test), |d| {
+                d.debug_selector(move || format!("editor-file-tab-{pos}"))
+            })
             .role(gpui::Role::Tab)
             .aria_label(match dirty {
                 true => format!("{name}, {}", t(L10nKey::SettingsUnsaved)),
@@ -3948,8 +4052,7 @@ impl Tty59App {
             .aria_selected(active)
             .group(group.clone())
             .occlude()
-            .flex_none()
-            .min_w_0()
+            .min_w(px(strip::TAB_MIN_W))
             .max_w(px(strip::CELL_MAX_W))
             .h(px(strip::CELL_H))
             .flex()
@@ -3994,8 +4097,10 @@ impl Tty59App {
                             .child(close),
                     ),
             )
-            .tooltip(move |window, cx| {
-                gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+            .when_some(tip, |tab, tip| {
+                tab.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                })
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.editor_activate(pos, window, cx);
@@ -4013,41 +4118,63 @@ impl Tty59App {
             .into_any_element()
     }
 
-    fn render_editor_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn render_editor_bar(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let bar = self.editor.bar.as_ref()?;
         let label = match bar.kind {
             BarKind::GoToLine => t(L10nKey::EditorGoToLine),
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAs),
             BarKind::Rename { .. } => t(L10nKey::LspRenameSymbol),
         };
+        // The bar is already a row, so an idle field inside it is not a second
+        // box: no fill, no border, no shadow. While it has the focus it is the
+        // stock field, fill and ring included: the ring is a half-opacity
+        // colour, and its contrast with the bar is measured over that fill. The
+        // border keeps its 1px of layout either way, so the field does not
+        // resize with focus.
+        let mut input = Input::new(&bar.input).small();
+        if !bar.input.read(cx).focus_handle(cx).is_focused(window) {
+            input = input
+                .bg(gpui::transparent_black())
+                .border_color(gpui::transparent_black())
+                .shadow_none();
+        }
         Some(
-            h_flex()
-                .flex_none()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .px(px(crate::ui::app::CONTENT_INSET))
-                .py_1()
-                .border_b_1()
-                .border_color(cx.theme().sidebar_border)
-                .text_sm()
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(Input::new(&bar.input).small()),
-                )
-                .into_any_element(),
+            status::probe(
+                h_flex()
+                    .flex_none()
+                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .px(px(crate::ui::app::CONTENT_INSET))
+                    .py_1()
+                    .border_b(crate::ui::theme::hairline(window))
+                    .border_color(cx.theme().sidebar_border),
+                "editor-bar",
+            )
+            .child(status::probe(
+                div()
+                    .flex_none()
+                    .text_size(gpui::rems(crate::ui::right_panel::META))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+                "editor-bar-label",
+            ))
+            .child(status::probe(
+                div().flex_1().min_w_0().child(input),
+                "editor-bar-input",
+            ))
+            .into_any_element(),
         )
     }
 
-    fn render_code_status_bar(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
+    fn render_code_status_bar(
+        &self,
+        chrome: DocumentChrome,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        use status::{Content, Lsp, Readout};
+
         // No path here: the breadcrumbs over the text show where the file is.
         let muted = cx.theme().muted_foreground;
         let active = self.active_buffer();
@@ -4076,9 +4203,23 @@ impl Tty59App {
                 }
             }
         });
-        let wrap: Option<bool> = active.map(|f| f.wrap);
-        let is_markdown = active.is_some_and(|f| f.language() == "markdown");
-        let preview = active.is_some_and(|f| f.preview);
+        let wrap: Option<SharedString> = active.map(|f| {
+            let label = if f.wrap {
+                t(L10nKey::EditorWrapOn)
+            } else {
+                t(L10nKey::EditorWrapOff)
+            };
+            label.into()
+        });
+        let preview: Option<SharedString> =
+            active.filter(|f| f.language() == "markdown").map(|f| {
+                let label = if f.preview {
+                    t(L10nKey::EditorEdit)
+                } else {
+                    t(L10nKey::EditorPreview)
+                };
+                label.into()
+            });
         let indent: Option<SharedString> = active.map(|f| {
             let key = if f.indent.hard_tabs {
                 L10nKey::EditorIndentTabs
@@ -4087,14 +4228,90 @@ impl Tty59App {
             };
             t_fmt(key, &[("n", &f.indent.size.to_string())]).into()
         });
-        let line_ending: Option<&'static str> = active.map(|f| f.format.line_ending.label());
+        let line_ending: Option<SharedString> =
+            active.map(|f| SharedString::from(f.format.line_ending.label()));
         let encoding: Option<SharedString> = active.map(|f| f.format.encoding_label().into());
-        let language: Option<&'static str> = active.and_then(|f| language_label(f.language()));
-        let (lsp_lead, lsp_tail) = match self.render_lsp_status(cx) {
-            Some((el, true)) => (Some(el), None),
-            Some((el, false)) => (None, Some(el)),
-            None => (None, None),
+        let language: Option<SharedString> = active
+            .and_then(|f| language_label(f.language()))
+            .map(SharedString::from);
+        let zoom: Option<SharedString> = active_id
+            .map(|_| cx.global::<crate::core::config::Config>().editor_zoom)
+            .filter(|zoom| *zoom != 1.0)
+            .map(|zoom| format!("{}%", (zoom * 100.).round()).into());
+        let lsp_status = self.lsp_status_now(cx);
+
+        // What the bar would say with room for everything; which of it fits
+        // the document column is `status`'s decision.
+        let face = status::Face::new(window, cx);
+        let content = Content {
+            lead: match &lsp_status {
+                Some(LspStatus::Missing(_)) => Some(t(L10nKey::LspServerMissing).into()),
+                _ => None,
+            },
+            lsp: match &lsp_status {
+                Some(LspStatus::Starting(name)) => Some(Lsp::State(
+                    t_fmt(L10nKey::LspServerStarting, &[("name", name)]).into(),
+                )),
+                Some(LspStatus::Down(name)) => Some(Lsp::State(
+                    t_fmt(L10nKey::LspServerDown, &[("name", name)]).into(),
+                )),
+                Some(LspStatus::Running {
+                    errors, warnings, ..
+                }) => Some(Lsp::Counts {
+                    errors: errors.to_string().into(),
+                    warnings: warnings.to_string().into(),
+                }),
+                _ => None,
+            },
+            cursor,
+            language,
+            eol: line_ending,
+            wrap,
+            preview,
+            zoom,
+            indent,
+            encoding,
         };
+        // The column the bar is the foot of, less the row's own inset.
+        let column = match chrome {
+            DocumentChrome::Fill => DocumentChrome::Fill,
+            DocumentChrome::Dock | DocumentChrome::DockHoisted => DocumentChrome::Dock,
+        };
+        // `column` is never `DockHoisted`, the one chrome that reads a `trail`.
+        let room = px((self.editor_header_w(column, 0., window, cx)
+            - 2. * crate::ui::app::CONTENT_INSET)
+            .max(0.));
+        let kept = status::kept(window, &face, &content, room);
+        let lsp_lead = match (&lsp_status, kept.has(Readout::Lead)) {
+            (Some(LspStatus::Missing(name)), true) => content
+                .lead
+                .clone()
+                .map(|label| crate::ui::lsp::editor::render_lsp_missing(*name, label, cx)),
+            _ => None,
+        };
+        let lsp_tail = match (&lsp_status, kept.has(Readout::Problems)) {
+            (Some(LspStatus::Starting(_) | LspStatus::Down(_)), true) => {
+                content.lsp.as_ref().and_then(|lsp| match lsp {
+                    Lsp::State(text) => {
+                        Some(crate::ui::lsp::editor::render_lsp_state(text.clone()))
+                    }
+                    Lsp::Counts { .. } => None,
+                })
+            }
+            (
+                Some(LspStatus::Running {
+                    name,
+                    errors,
+                    warnings,
+                }),
+                true,
+            ) => Some(crate::ui::lsp::editor::render_lsp_counts(
+                name, *errors, *warnings, &face, cx,
+            )),
+            _ => None,
+        };
+        let shown =
+            |readout: Readout, text: Option<SharedString>| text.filter(|_| kept.has(readout));
 
         // Metadata, not a toolbar: caption ink on the plane's own fill, set
         // off by a hairline in the divider tone rather than a control border.
@@ -4116,95 +4333,105 @@ impl Tty59App {
                 .hover(move |s| s.bg(hover).text_color(fg))
                 .child(label)
         };
-        h_flex()
+        // Tabular figures, so the position does not jitter sideways as the
+        // caret walks from line 9 to line 10: the same features the width
+        // memo keys the cursor's text on.
+        let cursor_features = face.features(true);
+        status::probe(face.pin(h_flex()), "editor-status")
             .flex_none()
             .w_full()
             .h(px(28.))
             .items_center()
-            .gap(px(14.))
+            .gap(px(status::ROW_GAP))
             .px(px(crate::ui::app::CONTENT_INSET))
             .border_t(crate::ui::theme::hairline(window))
             .border_color(cx.theme().sidebar_border)
-            .text_size(gpui::rems(11.5 / 16.))
             .text_color(muted)
             .whitespace_nowrap()
             .children(lsp_lead)
             .child(div().flex_1())
             // The counts open the Problems list.
-            .children(lsp_tail.map(|status| {
-                div()
-                    .id("status-problems")
-                    .flex_none()
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_editor_problems(cx)))
-                    .child(status)
+            .children(lsp_tail.map(|tail| {
+                status::probe(
+                    div().id("status-problems").flex_none().cursor_pointer(),
+                    "editor-status-problems",
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_editor_problems(cx)))
+                .child(tail)
             }))
-            .when(is_markdown, |this| {
-                let label = if preview {
-                    t(L10nKey::EditorEdit)
-                } else {
-                    t(L10nKey::EditorPreview)
-                };
-                this.child(item("status-md-preview", label.into()).on_click(
-                    cx.listener(|this, _, window, cx| this.toggle_document_preview(window, cx)),
-                ))
-            })
-            .when_some(wrap, |this, wrap| {
-                let label = if wrap {
-                    t(L10nKey::EditorWrapOn)
-                } else {
-                    t(L10nKey::EditorWrapOff)
-                };
-                this.child(item("status-wrap", label.into()).on_click(
+            .children(
+                shown(Readout::Preview, content.preview.clone()).map(|label| {
+                    status::probe(item("status-md-preview", label), "editor-status-preview")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_document_preview(window, cx)
+                        }))
+                }),
+            )
+            .children(shown(Readout::Wrap, content.wrap.clone()).map(|label| {
+                status::probe(item("status-wrap", label), "editor-status-wrap").on_click(
                     cx.listener(|this, _, window, cx| this.toggle_document_wrap(window, cx)),
-                ))
-            })
-            // Tabular figures, so the position does not jitter sideways as
-            // the caret walks from line 9 to line 10. A click asks for a line
-            // to go to.
-            .when_some(cursor, |this, t| {
-                this.child(
-                    item("status-cursor", t)
-                        .font_features(crate::ui::theme::tabular_figures())
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.editor_go_to_line(window, cx)),
-                        ),
                 )
-            })
-            .when_some(indent, |this, t| this.child(div().flex_none().child(t)))
-            .when_some(encoding, |this, t| this.child(div().flex_none().child(t)))
-            .when_some(line_ending, |this, eol| {
-                this.child(
-                    item("status-eol", eol.into())
-                        .on_click(cx.listener(|this, _, _w, cx| this.toggle_line_ending(cx))),
+            }))
+            // A click asks for a line to go to.
+            .children(shown(Readout::Cursor, content.cursor.clone()).map(|t| {
+                status::probe(item("status-cursor", t), "editor-status-cursor")
+                    .font_features(cursor_features)
+                    .on_click(cx.listener(|this, _, window, cx| this.editor_go_to_line(window, cx)))
+            }))
+            .children(shown(Readout::Indent, content.indent.clone()).map(|t| {
+                status::probe(
+                    div().id("status-indent").flex_none().child(t),
+                    "editor-status-indent",
                 )
-            })
-            .when_some(language, |this, l| this.child(div().flex_none().child(l)))
+            }))
+            .children(shown(Readout::Encoding, content.encoding.clone()).map(|t| {
+                status::probe(
+                    div().id("status-encoding").flex_none().child(t),
+                    "editor-status-encoding",
+                )
+            }))
+            .children(shown(Readout::Eol, content.eol.clone()).map(|eol| {
+                status::probe(item("status-eol", eol), "editor-status-eol")
+                    .on_click(cx.listener(|this, _, _w, cx| this.toggle_line_ending(cx)))
+            }))
+            .children(shown(Readout::Language, content.language.clone()).map(|l| {
+                status::probe(
+                    div().id("status-language").flex_none().child(l),
+                    "editor-status-language",
+                )
+            }))
             // The editor's zoom, next to the language, only while it is not
             // 100 % — the status bar reports state, and "100 %" is the state
             // nobody needs told about. A click resets, like Ctrl+0.
-            .when(
-                active_id.is_some() && {
-                    let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
-                    zoom != 1.0
-                },
-                |this| {
-                    let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
-                    let label = format!("{}%", (zoom * 100.).round());
-                    this.child(
-                        item("status-editor-zoom", label.into()).on_click(cx.listener(
-                            |this, _, window, cx| {
-                                if let Some(id) = this.tab_code().and_then(TabCode::active_id) {
-                                    this.editor_zoom_reset(id, None, window, cx);
-                                }
-                            },
-                        )),
-                    )
-                },
-            )
+            .children(shown(Readout::Zoom, content.zoom.clone()).map(|label| {
+                status::probe(item("status-editor-zoom", label), "editor-status-zoom").on_click(
+                    cx.listener(|this, _, window, cx| {
+                        if let Some(id) = this.tab_code().and_then(TabCode::active_id) {
+                            this.editor_zoom_reset(id, None, window, cx);
+                        }
+                    }),
+                )
+            }))
     }
 
+    /// The panel with no file in it: one way to open one, the keymap's own,
+    /// and the file tree as the alternative. With no chord bound, the tree is
+    /// the one thing it says.
     fn render_editor_empty(&self, cx: &Context<Self>) -> gpui::Div {
+        let muted = cx.theme().muted_foreground;
+        let (first, second) = match quick_open_chord(cx) {
+            Some(chord) => (
+                t_fmt(L10nKey::EditorEmptyOpenHint, &[("chord", &chord)]),
+                Some(t(L10nKey::EditorEmptyTreeAlt)),
+            ),
+            None => (t(L10nKey::EditorEmptyOpenUnbound).to_string(), None),
+        };
+        #[cfg(test)]
+        status::observe::say("editor-empty-open", &first);
+        #[cfg(test)]
+        if let Some(line) = second {
+            status::observe::say("editor-empty-tree", line);
+        }
         v_flex()
             .track_focus(&self.editor.empty_focus)
             .on_mouse_down(
@@ -4215,19 +4442,17 @@ impl Tty59App {
             .items_center()
             .justify_center()
             .gap_2()
-            .child(
-                Icon::new(IconName::File)
-                    .large()
-                    .text_color(cx.theme().muted_foreground),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(crate::ui::i18n::t(
-                        crate::ui::i18n::L10nKey::OpenFileFromTree,
-                    )),
-            )
+            .child(Icon::new(IconName::File).large().text_color(muted))
+            .child(status::probe(
+                div().text_sm().text_color(muted).child(first),
+                "editor-empty-open",
+            ))
+            .children(second.map(|line| {
+                status::probe(
+                    div().text_xs().text_color(muted).child(line),
+                    "editor-empty-tree",
+                )
+            }))
     }
 
     fn render_editor_conflict_banner(
@@ -4757,7 +4982,8 @@ mod zoom_gpui_tests {
     /// The full-screen diagram viewer in the real editor tree, where hit
     /// testing, the wheel-zoom wrapper and the scrolling preview all sit
     /// around it: Ctrl+wheel zooms the *diagram* (and not the text, whatever
-    /// `mouse_zoom_modifier` says), a drag and a plain wheel pan it, and
+    /// `mouse_zoom_modifier` says), a middle drag and a plain wheel pan it (a
+    /// left drag does not), and
     /// every change is in the frame the event asked for — nothing here
     /// draws by hand.
     #[gpui::test]
@@ -4826,12 +5052,12 @@ mod zoom_gpui_tests {
             "the text zoom and the terminal stay where they were"
         );
 
-        // A left drag pans it.
+        // Only a middle drag pans it.
         let from = zoomed.center();
         let to = gpui::point(from.x - px(30.), from.y - px(10.));
-        vcx.simulate_mouse_down(from, gpui::MouseButton::Left, gpui::Modifiers::none());
-        vcx.simulate_mouse_move(to, Some(gpui::MouseButton::Left), gpui::Modifiers::none());
-        vcx.simulate_mouse_up(to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_down(from, gpui::MouseButton::Middle, gpui::Modifiers::none());
+        vcx.simulate_mouse_move(to, Some(gpui::MouseButton::Middle), gpui::Modifiers::none());
+        vcx.simulate_mouse_up(to, gpui::MouseButton::Middle, gpui::Modifiers::none());
         vcx.run_until_parked();
         let dragged = painted(&mut vcx);
         near(
@@ -4843,6 +5069,23 @@ mod zoom_gpui_tests {
             dragged.origin.y.as_f32(),
             zoomed.origin.y.as_f32() - 10.,
             "drag y",
+        );
+
+        // A left drag leaves the diagram where it was.
+        let left_from = dragged.center();
+        let left_to = gpui::point(left_from.x - px(30.), left_from.y - px(10.));
+        vcx.simulate_mouse_down(left_from, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.simulate_mouse_move(
+            left_to,
+            Some(gpui::MouseButton::Left),
+            gpui::Modifiers::none(),
+        );
+        vcx.simulate_mouse_up(left_to, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(
+            painted(&mut vcx).origin,
+            dragged.origin,
+            "a left drag leaves the diagram where it was"
         );
 
         // A plain wheel pans too, and leaves the scale alone.
@@ -4864,5 +5107,196 @@ mod zoom_gpui_tests {
             dragged.size.width.as_f32(),
             "wheel keeps the scale",
         );
+    }
+}
+
+/// The Go to line / Save As / Rename bar, drawn in the real app: what the
+/// F9 finding asks of it, and the input behaviour it must keep.
+#[cfg(test)]
+mod bar_gpui_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::nav::gpui_tests::{caret, open_rs};
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+    }
+
+    /// One line of text at `rems` of the interface size, as the text system
+    /// lays it out: the height a label of that size is drawn at.
+    fn line_h(vcx: &mut VisualTestContext, rems: f32) -> f32 {
+        vcx.update(|window, _| {
+            let mut style = window.text_style();
+            style.font_size = px(rems * window.rem_size().as_f32()).into();
+            style.line_height_in_pixels(window.rem_size()).as_f32()
+        })
+    }
+
+    fn open_go_to_line(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| app.editor_go_to_line(window, cx));
+        settle(vcx);
+    }
+
+    fn open_save_as(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, id: BufferId) {
+        app.update_in(vcx, |app, window, cx| {
+            app.editor_open_bar(
+                BarKind::SaveAs {
+                    id,
+                    then_close: false,
+                },
+                "a.rs".into(),
+                window,
+                cx,
+            );
+        });
+        settle(vcx);
+    }
+
+    fn bar_open(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.read_with(vcx, |app, _| app.editor.bar.is_some())
+    }
+
+    fn bar_input_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.update_in(vcx, |app, window, cx| {
+            app.editor
+                .bar
+                .as_ref()
+                .is_some_and(|b| b.input.read(cx).focus_handle(cx).is_focused(window))
+        })
+    }
+
+    fn editor_input_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.update_in(vcx, |app, window, cx| {
+            app.active_buffer()
+                .is_some_and(|f| f.input.read(cx).focus_handle(cx).is_focused(window))
+        })
+    }
+
+    /// F9: the label is the 12px token, not Tailwind's 14px `text_sm`.
+    #[gpui::test]
+    fn the_bar_label_is_the_12px_token(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let id = open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+        let want = line_h(&mut vcx, crate::ui::right_panel::META);
+        for save_as in [false, true] {
+            if save_as {
+                open_save_as(&app, &mut vcx, id);
+            } else {
+                open_go_to_line(&app, &mut vcx);
+            }
+            assert!(
+                bar_open(&app, &mut vcx),
+                "save_as={save_as}: the bar opened"
+            );
+            let label = vcx
+                .debug_bounds("editor-bar-label")
+                .expect("the bar's label is drawn");
+            assert!(
+                (label.size.height.as_f32() - want).abs() < 0.6,
+                "save_as={save_as}: the label is {:?} tall, a 12px line is {want}",
+                label.size.height
+            );
+        }
+    }
+
+    /// F9: the bar's one separator is the hairline (0.5px at the test
+    /// window's 2x), not a whole-pixel `border_b_1`. Read off the layout: what
+    /// the bar is taller than its input and its two equal paddings.
+    #[gpui::test]
+    fn the_bar_separator_is_one_hairline(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+        open_go_to_line(&app, &mut vcx);
+        let bar = vcx.debug_bounds("editor-bar").expect("the bar");
+        let input = vcx.debug_bounds("editor-bar-input").expect("its input");
+        let hairline = vcx.update(|window, _| crate::ui::theme::hairline(window).as_f32());
+        assert!(
+            (hairline - 0.5).abs() < 0.001,
+            "the test window is 2x, so a hairline is half a pixel, not {hairline}"
+        );
+        let pad = input.top().as_f32() - bar.top().as_f32();
+        let separator = bar.size.height.as_f32() - input.size.height.as_f32() - 2. * pad;
+        assert!(
+            (separator - hairline).abs() < 0.01,
+            "the bar's separator is {separator}px (bar {bar:?}, input {input:?}), not a {hairline}px hairline"
+        );
+    }
+
+    /// F9, kept: the input's box does not change when the focus leaves it, so
+    /// the idle border can go quiet without the field resizing under the
+    /// caret. A Save As is left up on blur (a Go to line is not).
+    #[gpui::test]
+    fn the_input_keeps_its_box_when_the_focus_moves_and_save_as_stays(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let id = open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+        open_save_as(&app, &mut vcx, id);
+        assert!(bar_input_focused(&app, &mut vcx), "the bar starts focused");
+        let focused = vcx.debug_bounds("editor-bar-input").expect("the input");
+
+        app.update_in(&mut vcx, |app, window, cx| app.focus_editor(window, cx));
+        settle(&mut vcx);
+        assert!(
+            bar_open(&app, &mut vcx),
+            "a half-typed Save As survives blur"
+        );
+        assert!(!bar_input_focused(&app, &mut vcx), "the focus left the bar");
+        assert!(editor_input_focused(&app, &mut vcx));
+        let idle = vcx.debug_bounds("editor-bar-input").expect("the input");
+        assert_eq!(focused, idle, "focus must not resize the field");
+    }
+
+    /// F9, kept: Go to line closes on blur; typed digits and Enter jump, close
+    /// the bar and give the focus back to the editor.
+    #[gpui::test]
+    fn go_to_line_blur_closes_and_typed_input_jumps(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+
+        open_go_to_line(&app, &mut vcx);
+        assert!(bar_input_focused(&app, &mut vcx));
+        app.update_in(&mut vcx, |app, window, cx| app.focus_editor(window, cx));
+        settle(&mut vcx);
+        assert!(!bar_open(&app, &mut vcx), "blur dismisses Go to line");
+
+        open_go_to_line(&app, &mut vcx);
+        vcx.simulate_input("5");
+        vcx.simulate_keystrokes("enter");
+        for _ in 0..3 {
+            settle(&mut vcx);
+        }
+        assert!(!bar_open(&app, &mut vcx), "Enter closes the bar");
+        assert_eq!(caret(&app, &mut vcx).line, 4, "line 5 is row 4");
+        assert!(editor_input_focused(&app, &mut vcx), "the editor has focus");
+    }
+
+    /// F9, kept: Escape dismisses the bar, not the editor, and hands the
+    /// focus back.
+    #[gpui::test]
+    fn escape_closes_the_bar_and_refocuses_the_editor(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let id = open_rs(&app, &mut vcx, "/bar/a.rs");
+        settle(&mut vcx);
+        open_save_as(&app, &mut vcx, id);
+        vcx.simulate_keystrokes("escape");
+        settle(&mut vcx);
+        assert!(!bar_open(&app, &mut vcx), "Escape closes the Save As bar");
+        assert!(
+            app.read_with(&vcx, |app, _| app.code_panel_visible()),
+            "and leaves the editor open"
+        );
+        assert!(editor_input_focused(&app, &mut vcx));
     }
 }

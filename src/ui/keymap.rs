@@ -1257,7 +1257,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             t(L10nKey::CmdCopySessionId).to_string(),
         ),
         "NewAgentTab" => (CommandGroup::Agents, t(L10nKey::CmdNewAgentTab).to_string()),
-        "ToggleAgentVision" => (CommandGroup::Agents, t(L10nKey::VisionToggle).to_string()),
+        "ToggleAgentVision" => (
+            CommandGroup::Agents,
+            t(L10nKey::VisionTogglePalette).to_string(),
+        ),
         "ToggleAgentBoard" => (CommandGroup::Agents, t(L10nKey::VisionKanban).to_string()),
         "MarkAgentHandled" => (CommandGroup::Agents, t(L10nKey::VisionHandled).to_string()),
         "FocusNextAgentNeedingAttention" => (

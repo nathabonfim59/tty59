@@ -22,6 +22,7 @@ use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
+use crate::ui::text_elision::{ElidedLabel, Mode};
 
 mod machine_scope;
 pub(crate) use machine_scope::MachineScope;
@@ -79,10 +80,23 @@ const RUN_DOT: f32 = 5.0;
 /// The list rows' corner.
 const LIST_RADIUS: f32 = 8.0;
 
-/// How much of the left column the offline card's endpoint may take. The card
-/// lives in that column too, and an unbounded `user@host:port` beside the
-/// failure text squeezed the text to nothing.
-const ENDPOINT_MAX_W: f32 = 140.0;
+/// How many lines the offline card gives the failure that took a machine down
+/// before the tooltip has to carry the rest.
+const OFFLINE_REASON_LINES: usize = 2;
+
+/// The failure band's body size, in rems: 11.5px, a notch above the muted
+/// 11px lines around it, because the failure is what the band is for.
+const ERROR_BAND_BODY_REM: f32 = 11.5 / 16.;
+
+/// What the failure band says about a machine: the dialect restatement, which
+/// already names it, or the machine's name and the plain error. The error
+/// itself is never reworded.
+fn error_band_text(error: &str, label: &str) -> String {
+    remote_connect::dialect_complaint(error, label).unwrap_or_else(|| format!("{label}: {error}"))
+}
+
+/// What sits between the parts of a row's metadata line.
+const META_SEP: &str = "  ·  ";
 
 /// The create form's rows and the rename field keep the compact height.
 const ROW_H: f32 = 34.0;
@@ -231,10 +245,6 @@ struct Row {
     preempted: bool,
     adopt: Option<Box<RemoteWorkspaceRow>>,
     remote_id: Option<WorkspaceId>,
-    /// Which `SelectWorkspaceN` reaches this workspace, zero-based — the
-    /// stable number the Workspaces menu shows too (#760). The list itself
-    /// stays most-recently-used first; the number is what does not move.
-    slot: Option<usize>,
     tabs: Vec<TabRow>,
 }
 
@@ -658,11 +668,43 @@ fn create_preset_of(layout: &Layout) -> (String, Option<HostChoice>) {
     )
 }
 
-/// What the offline card's second line has to say: the failure that took the
-/// machine down (the row truncates it) and the endpoint it would dial. A group
-/// with no failure behind it only has the endpoint to show.
+/// What the offline card's second block has to say: the failure that took the
+/// machine down (it wraps, and the tooltip holds the rest) and the endpoint it
+/// would dial on a line of its own. A group with no failure behind it only has
+/// the endpoint to show.
 fn offline_card_detail(group: &Group) -> (Option<String>, String) {
     (group.error.clone(), group_endpoint(group))
+}
+
+/// The chord that steps the machine rail, spelled from the same specs
+/// `ui::keymap` binds it with, as (modifiers, arrows) so a glyph on macOS and a
+/// word elsewhere come out the way every other chord in the app spells them.
+fn machine_chord() -> (Vec<String>, Vec<String>) {
+    let mut left = crate::ui::keymap::key_tokens("alt-left");
+    let mut right = crate::ui::keymap::key_tokens("alt-right");
+    let arrows = [left.pop(), right.pop()].into_iter().flatten().collect();
+    (left, arrows)
+}
+
+/// Whether the machine chord has anywhere to go: a rail with this computer and
+/// one other machine. With a single machine All and that machine are the same
+/// list, and teaching a chord on every open would be noise.
+fn rail_steps(rail: &[RailEntry]) -> bool {
+    rail.iter()
+        .filter(|entry| matches!(entry.scope, MachineScope::Machine(_)))
+        .count()
+        > 1
+}
+
+/// A tab's diff counts as the sidebar words them (`+3 −2`), or `None` for a
+/// clean tree so no separator is left pointing at nothing.
+fn diff_counts(added: u32, removed: u32) -> Option<String> {
+    let parts = [
+        (added > 0).then(|| format!("+{added}")),
+        (removed > 0).then(|| format!("−{removed}")),
+    ];
+    let counts: Vec<String> = parts.into_iter().flatten().collect();
+    (!counts.is_empty()).then(|| counts.join(" "))
 }
 
 /// Orphan panes are this computer's; under a remote scope they are not
@@ -683,22 +725,44 @@ fn empty_list_text(scope: &MachineScope, groups: &[Group]) -> String {
     }
 }
 
-/// The sub-line under a workspace's name: its path, led by the machine only in
-/// the blended All list. A scoped row lives on the one machine the list is
-/// about, so repeating its name there is noise.
-fn row_meta(group: &Group, row: &Row, show_machine: bool) -> Vec<String> {
-    let mut meta: Vec<String> = Vec::new();
-    if show_machine {
-        meta.push(if group.target.is_some() {
-            group.label.clone()
-        } else {
-            t(L10nKey::SwitcherLocalHost).to_string()
-        });
+/// The machine a workspace's sub-line leads with, only in the blended All
+/// list. A scoped row lives on the one machine the list is about, so repeating
+/// its name there is noise.
+fn row_machine(group: &Group, show_machine: bool) -> Option<String> {
+    show_machine.then(|| match group.target.is_some() {
+        true => group.label.clone(),
+        false => t(L10nKey::SwitcherThisComputer).to_string(),
+    })
+}
+
+/// The state word at the end of a workspace row, and whether it is this
+/// window's own. The workspace this window shows is "Current", the word the
+/// tab column uses for its active tab; "Open" is one another window has open.
+/// "Open" is what a workspace would say either way, and it is the wrong word
+/// for one another client is driving.
+fn row_badge(row: &Row, group: &Group) -> Option<(&'static str, bool)> {
+    if row.preempted {
+        Some((t(L10nKey::SwitcherStatusTakenOver), false))
+    } else if row.current {
+        Some((t(L10nKey::SwitcherActiveTab), true))
+    } else if row.open {
+        Some((t(L10nKey::SwitcherOpen), false))
+    } else if group.target.is_some() && group.link == Link::Offline {
+        // Said in words where the other states go, not as a dot: the normal
+        // case carries nothing extra, so the exception is the only thing that
+        // speaks.
+        Some((t(L10nKey::SwitcherOffline), false))
+    } else {
+        None
     }
-    if !row.path.is_empty() {
-        meta.push(row.path.clone());
-    }
-    meta
+}
+
+/// Which separators the sub-line draws, for the parts it has: one after the
+/// machine when a path follows it, one before the time when anything precedes
+/// it. Each belongs to the part after it, so no dot is left pointing at
+/// nothing.
+fn meta_separators(machine: bool, path: bool, when: bool) -> (bool, bool) {
+    (machine && path, when && (machine || path))
 }
 
 /// One of the scoped list's section headings.
@@ -1014,8 +1078,6 @@ impl Tty59App {
 
         let mut groups: Vec<Group> = Vec::new();
         let mut index: HashMap<String, usize> = HashMap::new();
-        let slots = crate::ui::windows::menu_order(cx);
-        let slot_of = |id: WorkspaceId| slots.iter().position(|(slot, _)| *slot == id);
         {
             let app: &App = cx;
             let store = WorkspaceStore::all(app);
@@ -1079,7 +1141,6 @@ impl Tty59App {
                     preempted: false,
                     adopt: None,
                     remote_id: w.host.as_ref().map(|r| r.workspace),
-                    slot: slot_of(w.id),
                     tabs: self.tab_rows_for(w.id, self.switcher_mru(), app),
                 });
             }
@@ -1181,7 +1242,6 @@ impl Tty59App {
                     preempted: false,
                     adopt: None,
                     remote_id: None,
-                    slot: slot_of(current),
                     tabs: self.tab_rows_for(current, self.switcher_mru(), app),
                 },
             );
@@ -1230,7 +1290,6 @@ impl Tty59App {
                     preempted: false,
                     adopt: None,
                     remote_id: None,
-                    slot: None,
                     tabs: self.tab_rows_for(ws.id, self.switcher_mru(), app),
                 })
                 .collect();
@@ -2379,7 +2438,8 @@ impl Tty59App {
         chips.push(
             h_flex()
                 .id("switcher-rail-add")
-                .flex_shrink_0()
+                .flex_none()
+                .whitespace_nowrap()
                 .items_center()
                 .gap(px(6.))
                 .h(px(RAIL_CHIP_H))
@@ -2398,17 +2458,19 @@ impl Tty59App {
                 .into_any_element(),
         );
 
+        // The chord that steps the chips used to sit pinned beside them and
+        // took the room "Add machine" needs; it is the rail's tooltip now, and
+        // the footer teaches it as keycaps.
+        let steps = rail_steps(&layout.rail);
         h_flex()
             .items_center()
-            .gap(px(8.))
             .h(px(RAIL_H))
             .px(px(COLUMN_PAD))
             .border_b_1()
             .border_color(border)
             .child(
                 // The chips scroll once the configured machines outrun the
-                // card; the hint stays pinned past them so it is always where
-                // the eye left it.
+                // card.
                 h_flex()
                     .id("switcher-rail")
                     .track_scroll(&rail_scroll)
@@ -2417,27 +2479,18 @@ impl Tty59App {
                     .items_center()
                     .gap(px(6.))
                     .overflow_x_scroll()
+                    .when(steps, |rail| {
+                        rail.tooltip(|window, cx| {
+                            // Built on hover, not per frame.
+                            let (modifiers, _) = machine_chord();
+                            gpui_component::tooltip::Tooltip::new(t_fmt(
+                                L10nKey::SwitcherMachineHint,
+                                &[("modifier", &modifiers.join("+"))],
+                            ))
+                            .build(window, cx)
+                        })
+                    })
                     .children(chips),
-            )
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .text_size(gpui::rems(12.5 / 16.))
-                    .text_color(muted)
-                    // The modifier names itself the way the footer's
-                    // shortcuts do — a glyph on macOS, a word elsewhere —
-                    // and the localized template places it.
-                    .child(t_fmt(
-                        L10nKey::SwitcherMachineHint,
-                        &[(
-                            "modifier",
-                            if cfg!(target_os = "macos") {
-                                "⌥"
-                            } else {
-                                "Alt"
-                            },
-                        )],
-                    )),
             )
             .into_any_element()
     }
@@ -2636,6 +2689,17 @@ impl Tty59App {
                 ],
                 t(L10nKey::SwitcherHintNewWindow).to_string(),
             ));
+            if rail_steps(&layout.rail) {
+                let (modifiers, arrows) = machine_chord();
+                hints.push(hint(
+                    modifiers
+                        .into_iter()
+                        .chain(arrows)
+                        .map(|key| keycap(key, cx))
+                        .collect(),
+                    t(L10nKey::SwitcherHintMachine).to_string(),
+                ));
+            }
         }
         h_flex()
             .items_center()
@@ -2756,10 +2820,27 @@ impl Tty59App {
         // The band no longer sits under a machine header, so plain errors
         // carry the machine's name themselves; the dialect restatement
         // already names it.
-        let shown = remote_connect::dialect_complaint(error, &group.label)
-            .unwrap_or_else(|| format!("{}: {error}", group.label));
+        let shown = error_band_text(error, &group.label);
         let replace_action = crate::ui::remote_workspace::mismatch_action_key(error);
         let theme = cx.theme();
+        // The failure is what this band is for, so it reads in the cached
+        // small-text meta ink — held to its 5.5:1 target on the popover fills
+        // where one ink can reach it — not the raw muted role, and the danger
+        // dot says what kind of line it is.
+        let body = div()
+            .min_w_0()
+            .flex_1()
+            .text_size(gpui::rems(ERROR_BAND_BODY_REM))
+            .text_color(gpui::rgb(crate::ui::theme::chrome_ink(cx).unpicked_meta));
+        #[cfg(test)]
+        let mut body = body;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("switcher.band-body", &mut body);
+        let dot = rail_dot(RailDotStyle::Danger, theme).mt(px(6.));
+        #[cfg(test)]
+        let mut dot = dot;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("switcher.band-dot", &mut dot);
         v_flex()
             .gap(px(4.))
             .px(px(12.))
@@ -2767,10 +2848,11 @@ impl Tty59App {
             .border_t_1()
             .border_color(theme.danger.opacity(0.4))
             .child(
-                div()
-                    .text_size(gpui::rems(11. / 16.))
-                    .text_color(theme.muted_foreground)
-                    .child(shown),
+                h_flex()
+                    .items_start()
+                    .gap(px(6.))
+                    .child(dot)
+                    .child(body.child(shown)),
             )
             .child(
                 h_flex()
@@ -2913,38 +2995,61 @@ impl Tty59App {
     /// route cannot be rebuilt (#485).
     fn render_offline_card(&self, group: &Group, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let fg = theme.foreground;
+        // The failure and the endpoint are small text on the popover card:
+        // the cached small-text meta ink, held to its 5.5:1 target where one
+        // ink can reach it, not the raw muted role.
+        let meta = gpui::rgb(crate::ui::theme::chrome_ink(cx).unpicked_meta);
         let Some(choice) = connect_choice(group) else {
             return div().into_any_element();
         };
         let muted_text = gpui::rems(11. / 16.);
-        // The failure truncates first and the endpoint is capped at
-        // ENDPOINT_MAX_W, truncating as well: the two share the column, so
-        // neither string can push the other out of the card.
-        let detail: AnyElement = match offline_card_detail(group) {
-            (Some(error), endpoint) => h_flex()
-                .items_center()
-                .gap(px(6.))
-                .min_w_0()
-                .text_size(muted_text)
-                .text_color(muted)
-                .child(div().flex_1().min_w_0().truncate().child(error))
-                .child(
-                    div()
-                        .flex_shrink_1()
-                        .min_w_0()
-                        .max_w(px(ENDPOINT_MAX_W))
-                        .truncate()
-                        .child(endpoint),
-                )
-                .into_any_element(),
-            (None, endpoint) => div()
-                .truncate()
-                .text_size(muted_text)
-                .text_color(muted)
-                .child(endpoint)
-                .into_any_element(),
-        };
+        // The failure is the one thing here worth reading in full, so it
+        // wraps (two lines, the tooltip has the rest) and the endpoint sits on
+        // a line of its own, cut in the middle so the port stays visible.
+        let (error, endpoint) = offline_card_detail(group);
+        let endpoint = gpui::SharedString::from(endpoint);
+        let detail_box = v_flex()
+            .gap(px(2.))
+            .min_w_0()
+            .text_size(muted_text)
+            .text_color(meta);
+        #[cfg(test)]
+        let mut detail_box = detail_box;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("switcher.offline-detail", &mut detail_box);
+        let detail: AnyElement = detail_box
+            .children(error.map(|error| {
+                let error = gpui::SharedString::from(error);
+                div()
+                    .id("switcher-offline-reason")
+                    .line_clamp(OFFLINE_REASON_LINES)
+                    .tooltip({
+                        let error = error.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(error.clone()).build(window, cx)
+                        }
+                    })
+                    .child(error)
+            }))
+            .child(
+                div()
+                    .id("switcher-offline-endpoint")
+                    .min_w_0()
+                    .tooltip({
+                        let endpoint = endpoint.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(endpoint.clone())
+                                .build(window, cx)
+                        }
+                    })
+                    .child(ElidedLabel::new(
+                        "switcher-offline-endpoint-label",
+                        endpoint,
+                        Mode::Middle,
+                    )),
+            )
+            .into_any_element();
         v_flex()
             .gap(px(4.))
             .mx(px(4.))
@@ -2968,12 +3073,21 @@ impl Tty59App {
             .child(detail)
             .child(
                 h_flex().pt(px(2.)).child(
-                    Button::new(gpui::SharedString::from(format!(
-                        "switcher-connect-machine:{}",
-                        group.key
-                    )))
-                    .label(t(L10nKey::Connect))
-                    .xsmall()
+                    // The Primary recipe on the library's own button, so the
+                    // card's one answer reads as the answer without the
+                    // accent, and the id, focus and click stay the library's.
+                    crate::ui::dialog::primary_button(
+                        gpui::SharedString::from(format!("switcher-connect-machine:{}", group.key)),
+                        t(L10nKey::Connect),
+                        true,
+                        rungs(cx),
+                        cx,
+                    )
+                    // The button's own test handle, so a click test aims at
+                    // the real control.
+                    .when(cfg!(test), |b| {
+                        b.debug_selector(|| "switcher-connect-machine".into())
+                    })
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.connect_to_host(choice.clone(), cx);
                     })),
@@ -3198,13 +3312,22 @@ impl Tty59App {
         }
 
         let theme = cx.theme();
-        let (fg, muted, warn) = (theme.foreground, theme.muted_foreground, theme.warning);
+        let warn = theme.warning;
         // The picked row is a neutral step of the popover's own ladder, not
         // a solid accent slab: it is where the cursor is, not an action, and
         // a saturated block with white text was the loudest thing on screen.
         // The row keeps its own inks, so a warning still reads as one.
         let sf = rungs(cx);
         let (hover, picked_bg) = (gpui::rgb(sf.hover), gpui::rgb(sf.selected));
+        // Quiet inks come floored on the fills they sit on, derived once per
+        // theme change: plain muted falls short of 4.5:1 on the picked rung
+        // and on the hovered one.
+        let ink = crate::ui::theme::chrome_ink(cx);
+        let secondary: gpui::Hsla = if picked {
+            gpui::rgb(ink.selected_meta).into()
+        } else {
+            gpui::rgb(ink.unpicked_meta).into()
+        };
         let rref = RowRef::of(group, row);
         let click_ref = rref.clone();
         let menu_ref = rref.clone();
@@ -3219,23 +3342,13 @@ impl Tty59App {
         // A machine with no link cannot show this row's panes right now; the
         // row stays, muted, and opening it is what asks for the connection.
         let unlit = group.target.is_some() && matches!(group.link, Link::Offline | Link::Failed);
-
-        // "Open" is what this workspace would say either way, and it is the
-        // wrong word for one another client is driving.
-        let badge = if row.preempted {
-            Some((t(L10nKey::SwitcherStatusTakenOver), false))
-        } else if row.current {
-            Some((t(L10nKey::SwitcherThisWindow), true))
-        } else if row.open {
-            Some((t(L10nKey::SwitcherOpen), false))
-        } else if group.target.is_some() && group.link == Link::Offline {
-            // Said in words where the other states go, not as a dot: the
-            // normal case carries nothing extra, so the exception is the
-            // only thing that speaks.
-            Some((t(L10nKey::SwitcherOffline), false))
-        } else {
-            None
+        let name_ink: gpui::Hsla = match (unlit, picked) {
+            (true, _) => gpui::rgb(ink.quiet_name).into(),
+            (false, true) => gpui::rgb(sf.text_selected).into(),
+            (false, false) => gpui::rgb(ink.unpicked_title).into(),
         };
+
+        let badge = row_badge(row, group);
 
         // Two lines rather than one: the left column is only LEFT_W wide, and a
         // workspace name plus path plus badge plus timestamp on one row pushes
@@ -3252,7 +3365,6 @@ impl Tty59App {
             Link::Failed => Some(theme.danger),
             Link::Local | Link::Connected | Link::Offline => None,
         };
-        let meta = row_meta(group, row, show_machine);
         let row_fill = if picked {
             picked_bg
         } else {
@@ -3268,10 +3380,12 @@ impl Tty59App {
             .relative()
             .flex_shrink_0()
             .size(px(WS_AVATAR))
-            .child(
-                div()
+            .child({
+                // An unlit machine no longer fades its disc: the container
+                // opacity dragged the letter under 4.5:1, and the quiet name
+                // beside it already says the machine is away.
+                let letter = div()
                     .size(px(WS_AVATAR))
-                    .when(unlit, |d| d.opacity(0.5))
                     .rounded_full()
                     .bg(theme.secondary)
                     .flex()
@@ -3279,9 +3393,14 @@ impl Tty59App {
                     .justify_center()
                     .text_size(gpui::rems(11. / 16.))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(fg.opacity(0.6))
-                    .child(initial),
-            )
+                    .text_color(gpui::rgb(ink.avatar_ink))
+                    .child(initial);
+                #[cfg(test)]
+                let mut letter = letter;
+                #[cfg(test)]
+                crate::ui::paint_probe::note("switcher.avatar", &mut letter);
+                letter
+            })
             .children(state_dot.map(|state_dot| {
                 // The ring is the row's own fill, so the dot reads as cut
                 // out of the disc whichever state the row is in.
@@ -3319,80 +3438,110 @@ impl Tty59App {
                     .flex_1()
                     .min_w_0()
                     .gap(px(2.))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(6.))
+                    .child(h_flex().items_center().gap(px(6.)).min_w_0().child({
+                        let name = div()
                             .min_w_0()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(gpui::rems(13. / 16.))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(match unlit {
-                                        true => muted,
-                                        false => fg,
-                                    })
-                                    .child(row.name.clone()),
-                            )
-                            // The workspace's number — what Go to Workspace N
-                            // and the Workspaces menu call it — so the slot a
-                            // shortcut reaches can be read off the list that
-                            // does not sort by it (#760).
-                            .children(row.slot.map(|slot| {
-                                div()
-                                    .flex_shrink_0()
-                                    .text_size(gpui::rems(11. / 16.))
-                                    .text_color(muted)
-                                    .child((slot + 1).to_string())
-                            })),
-                    )
-                    .child(
-                        h_flex()
+                            .truncate()
+                            .text_size(gpui::rems(13. / 16.))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(name_ink)
+                            .child(row.name.clone());
+                        #[cfg(test)]
+                        let mut name = name;
+                        #[cfg(test)]
+                        crate::ui::paint_probe::note("switcher.name", &mut name);
+                        name
+                    }))
+                    .child({
+                        // The path gives way first, from its middle so the last
+                        // segment (the one that tells two workspaces apart)
+                        // survives, and the timestamp never does: with all of
+                        // it in one truncating string the row ended in
+                        // `~/repo/025/tty59 · …` every time. Each separator
+                        // belongs to the part after it, so a row missing a part
+                        // has no dot pointing at nothing.
+                        let machine = row_machine(group, show_machine);
+                        let path = gpui::SharedString::from(row.path.clone());
+                        let (has_path, has_when) = (!path.is_empty(), !row.when.is_empty());
+                        let (after_machine, before_when) =
+                            meta_separators(machine.is_some(), has_path, has_when);
+                        let meta_line = h_flex()
+                            .id(("switcher-row-meta", key))
                             .items_center()
                             .min_w_0()
                             .text_size(gpui::rems(11.5 / 16.))
-                            .text_color(muted)
-                            // The path gives way first and the timestamp
-                            // never does: with both in one truncating string
-                            // the row ended in `~/repo/025/tty59 · …` every
-                            // time, a dangling dot where the time had been.
-                            .child(div().min_w_0().truncate().child(meta.join("  ·  ")))
-                            .when(!row.when.is_empty(), |line| {
+                            .text_color(secondary)
+                            .when(has_path, |line| {
+                                line.tooltip({
+                                    let path = path.clone();
+                                    move |window, cx| {
+                                        gpui_component::tooltip::Tooltip::new(path.clone())
+                                            .build(window, cx)
+                                    }
+                                })
+                            })
+                            .children(machine.map(|machine| {
+                                h_flex()
+                                    .flex_none()
+                                    .whitespace_nowrap()
+                                    .child(machine)
+                                    .when(after_machine, |m| m.child(META_SEP))
+                            }))
+                            .when(has_path, |line| {
+                                line.child(ElidedLabel::new(
+                                    ("switcher-row-path", key),
+                                    path,
+                                    Mode::Path,
+                                ))
+                            })
+                            .when(has_when, |line| {
                                 line.child(
-                                    div()
-                                        .flex_shrink_0()
+                                    h_flex()
+                                        .flex_none()
                                         .whitespace_nowrap()
-                                        .child(format!("  ·  {}", row.when)),
+                                        .when(before_when, |w| w.child(META_SEP))
+                                        .child(row.when.clone()),
                                 )
-                            }),
-                    ),
+                            });
+                        #[cfg(test)]
+                        let mut meta_line = meta_line;
+                        #[cfg(test)]
+                        crate::ui::paint_probe::note("switcher.meta", &mut meta_line);
+                        meta_line
+                    }),
             )
             // Tab count over state, both words rather than chips: a filled
             // pill reads as a button, and these are states. Only "taken over"
             // keeps a colour — it is the one that warns.
-            .child(
-                v_flex()
+            .child({
+                let side = v_flex()
                     .flex_shrink_0()
                     .items_end()
                     .gap(px(2.))
-                    .text_size(gpui::rems(11.5 / 16.))
-                    .text_color(muted)
-                    // In words, the way the tab column's header says it: a
-                    // bare `1` here sat a few pixels from the slot number after
-                    // the name, and the two read as the same thing twice.
+                    .text_size(gpui::rems(12. / 16.))
+                    .text_color(secondary)
+                    // In words, the way the tab column's header says it.
                     .when(!row.tabs.is_empty(), |c| c.child(tab_count(row.tabs.len())))
                     .children(badge.map(|(label, _here)| {
-                        div()
+                        let tag = div()
                             .text_size(gpui::rems(11. / 16.))
                             .text_color(match row.preempted {
                                 true => warn,
-                                false => muted,
+                                false => secondary,
                             })
-                            .child(label)
-                    })),
-            )
+                            .child(label);
+                        #[cfg(test)]
+                        let mut tag = tag;
+                        #[cfg(test)]
+                        crate::ui::paint_probe::note("switcher.badge", &mut tag);
+                        tag
+                    }));
+                #[cfg(test)]
+                let mut side = side;
+                #[cfg(test)]
+                crate::ui::paint_probe::note("switcher.side", &mut side);
+                side
+            })
             .child(
                 div()
                     .invisible()
@@ -3424,6 +3573,10 @@ impl Tty59App {
                 }
             }));
 
+        #[cfg(test)]
+        let mut line = line;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("switcher.row", &mut line);
         // A held Ctrl makes every click a right click on macOS. Drop the menu
         // and take the right-button press as the pick instead, or clicking
         // during the gesture does nothing at all.
@@ -3826,22 +3979,17 @@ impl Tty59App {
             // The second line is what tells two tabs on the same repo apart —
             // the branch, then the diff counts, the same words the tab sidebar
             // uses, all secondary. A named tab off any repo shows its path.
+            // The counts are a child of their own: only the branch shrinks, so
+            // a long one cannot take them (or their separator) with it.
             let meta = match tab.git.as_ref() {
-                Some(g) => {
-                    let mut parts = vec![g.branch.clone()];
-                    let counts = [
-                        (g.added > 0).then(|| format!("+{}", g.added)),
-                        (g.removed > 0).then(|| format!("−{}", g.removed)),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>();
-                    if !counts.is_empty() {
-                        parts.push(counts.join(" "));
-                    }
-                    Some(parts.join("  ·  "))
+                Some(g) => Some((
+                    gpui::SharedString::from(g.branch.clone()),
+                    diff_counts(g.added, g.removed),
+                    Mode::Middle,
+                )),
+                None if tab.named && !tab.path.is_empty() => {
+                    Some((gpui::SharedString::from(tab.path.clone()), None, Mode::Path))
                 }
-                None if tab.named && !tab.path.is_empty() => Some(tab.path.clone()),
                 None => None,
             };
             let running = tab.status == Some(crate::core::cli_agent::AgentStatus::Working);
@@ -3883,12 +4031,32 @@ impl Tty59App {
                                     .text_color(fg)
                                     .child(tab.label.clone()),
                             )
-                            .children(meta.map(|meta| {
-                                div()
-                                    .truncate()
+                            .children(meta.map(|(text, counts, mode)| {
+                                h_flex()
+                                    .id(("switcher-tab-meta", index))
+                                    .items_center()
+                                    .min_w_0()
                                     .text_size(gpui::rems(11.5 / 16.))
                                     .text_color(muted)
-                                    .child(meta)
+                                    .tooltip({
+                                        let text = text.clone();
+                                        move |window, cx| {
+                                            gpui_component::tooltip::Tooltip::new(text.clone())
+                                                .build(window, cx)
+                                        }
+                                    })
+                                    .child(ElidedLabel::new(
+                                        ("switcher-tab-meta-label", index),
+                                        text,
+                                        mode,
+                                    ))
+                                    .children(counts.map(|counts| {
+                                        h_flex()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .child(META_SEP)
+                                            .child(counts)
+                                    }))
                             })),
                     )
                     .children(tab.waited.clone().map(|waited| {
@@ -4035,7 +4203,6 @@ impl Group {
                 preempted: false,
                 adopt: Some(Box::new(r.clone())),
                 remote_id: Some(r.id),
-                slot: None,
                 // A workspace this client has never adopted has no local id to
                 // hang a machine-tree lookup on. The tab column says so.
                 tabs: Vec::new(),
@@ -4375,12 +4542,12 @@ mod tests {
     }
 
     /// The workspace row's shape: a `flex_1` column, and in it a truncating
-    /// name sized by its own text beside the slot number. gpui measures that
+    /// name sized by its own text. gpui measures that
     /// name once against the column's zero basis, and used to answer the
     /// content-size measure after it from the same cache — so every name in
     /// the list read "…" with the whole column free beside it.
     #[gpui::test]
-    fn a_truncating_name_beside_its_number_takes_the_room_it_has(cx: &mut gpui::TestAppContext) {
+    fn a_truncating_name_in_the_row_column_takes_the_room_it_has(cx: &mut gpui::TestAppContext) {
         use gpui::{AvailableSpace, InteractiveElement as _, point, size};
 
         let vcx = cx.add_empty_window();
@@ -4397,17 +4564,13 @@ mod tests {
                     .child(div().flex_shrink_0().size(px(WS_AVATAR)))
                     .child(
                         v_flex().flex_1().min_w_0().child(
-                            h_flex()
-                                .gap(px(6.))
-                                .min_w_0()
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .truncate()
-                                        .debug_selector(|| "name".into())
-                                        .child("pale-seal"),
-                                )
-                                .child(div().flex_shrink_0().child("1")),
+                            h_flex().gap(px(6.)).min_w_0().child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .debug_selector(|| "name".into())
+                                    .child("pale-seal"),
+                            ),
                         ),
                     )
             },
@@ -4591,7 +4754,6 @@ mod tests {
             preempted: false,
             adopt: None,
             remote_id: None,
-            slot: None,
             tabs,
         }
     }
@@ -4976,25 +5138,101 @@ mod tests {
 
     #[test]
     fn a_scoped_row_drops_the_machine_from_its_metadata_line() {
-        let api = row("api", vec![]);
         let devbox = named_group("devbox", vec![]);
         assert_eq!(
-            row_meta(&devbox, &api, true),
-            vec!["devbox".to_string(), "~/code".to_string()]
+            row_machine(&devbox, true).as_deref(),
+            Some("devbox"),
+            "the blended list leads with the machine's name"
         );
         assert_eq!(
-            row_meta(&devbox, &api, false),
-            vec!["~/code".to_string()],
+            row_machine(&devbox, false),
+            None,
             "the scope already says which machine these rows are on"
         );
         let local = group(vec![]);
         assert_eq!(
-            row_meta(&local, &api, true),
-            vec![
-                t(L10nKey::SwitcherLocalHost).to_string(),
-                "~/code".to_string()
-            ]
+            row_machine(&local, true),
+            Some(t(L10nKey::SwitcherThisComputer).to_string())
         );
+    }
+
+    /// One word for "the workspace this window shows": the tab column's
+    /// "Current", not a second term. A workspace open in another window keeps
+    /// its own state word.
+    #[test]
+    fn the_workspace_this_window_shows_is_current_and_one_open_elsewhere_is_open() {
+        crate::ui::i18n::set_locale("en");
+        let g = group(vec![]);
+        let mut here = row("here", vec![]);
+        here.current = true;
+        here.open = true;
+        assert_eq!(row_badge(&here, &g), Some(("Current", true)));
+        let mut elsewhere = row("elsewhere", vec![]);
+        elsewhere.open = true;
+        assert_eq!(row_badge(&elsewhere, &g), Some(("Open", false)));
+        let mut closed = row("closed", vec![]);
+        closed.open = false;
+        assert_eq!(row_badge(&closed, &g), None);
+    }
+
+    /// Machine, path and time in that order, a separator only where something
+    /// precedes the part it leads into.
+    #[test]
+    fn the_metadata_line_draws_a_separator_only_between_parts() {
+        // (machine, path, when) -> (after the machine, before the time)
+        let cases = [
+            ((true, true, true), (true, true)),
+            ((true, true, false), (true, false)),
+            ((true, false, true), (false, true)),
+            ((true, false, false), (false, false)),
+            ((false, true, true), (false, true)),
+            ((false, true, false), (false, false)),
+            ((false, false, true), (false, false)),
+            ((false, false, false), (false, false)),
+        ];
+        for ((machine, path, when), expected) in cases {
+            assert_eq!(
+                meta_separators(machine, path, when),
+                expected,
+                "machine {machine}, path {path}, when {when}"
+            );
+        }
+    }
+
+    /// The chord is only worth teaching when there is a second machine to step
+    /// to. All is not a machine, so this computer alone and this computer with
+    /// nothing else configured both leave the rail with one stop.
+    #[test]
+    fn the_machine_chord_is_offered_from_the_second_machine_on() {
+        let rail = |groups: Vec<Group>| machine_scope::rail_entries(&groups, "All");
+        assert!(!rail_steps(&rail(vec![])), "no machine at all");
+        assert!(
+            !rail_steps(&rail(vec![group(vec![])])),
+            "this computer alone"
+        );
+        assert!(
+            !rail_steps(&rail(vec![named_group("devbox", vec![])])),
+            "one machine is the whole list"
+        );
+        assert!(
+            rail_steps(&rail(vec![group(vec![]), named_group("devbox", vec![])])),
+            "this computer and a remote one"
+        );
+    }
+
+    #[test]
+    fn the_machine_chord_is_the_alt_arrow_pair_the_keymap_binds() {
+        let (modifiers, arrows) = machine_chord();
+        assert_eq!(arrows, ["←", "→"]);
+        assert_eq!(modifiers, crate::ui::keymap::key_tokens("alt-left")[..1]);
+    }
+
+    #[test]
+    fn diff_counts_say_nothing_for_a_clean_tree() {
+        assert_eq!(diff_counts(0, 0), None, "no separator for nothing");
+        assert_eq!(diff_counts(3, 0).as_deref(), Some("+3"));
+        assert_eq!(diff_counts(0, 2).as_deref(), Some("−2"));
+        assert_eq!(diff_counts(3, 2).as_deref(), Some("+3 −2"));
     }
 
     #[test]
@@ -5229,6 +5467,38 @@ mod gpui_tests {
     use super::MachineScope;
     use crate::ui::app::Tty59App;
     use crate::ui::app::test_window::harness_with_tabs;
+
+    /// The picker lists the SSH aliases of the config the loaders read, and under
+    /// test that is the thread's own throwaway home: the three planted hosts
+    /// appear as machines, and nothing from a developer's real `~/.ssh/config`
+    /// does. Every other test of the picker rides on the same isolation.
+    #[gpui::test]
+    fn the_picker_lists_the_planted_ssh_hosts_and_no_others(cx: &mut TestAppContext) {
+        let ssh = crate::core::ssh_config::test_home().join(".ssh");
+        std::fs::create_dir_all(&ssh).expect("a .ssh dir in the test home");
+        std::fs::write(
+            ssh.join("config"),
+            "Host build-runner-eu-west-1\n  HostName 10.255.255.1\n  User ci\n\
+             Host edge-gw\n  HostName 127.0.0.1\n  Port 1\n  User ops\n\
+             Host staging-db\n  HostName staging-db.example.test\n  User deploy\n",
+        )
+        .expect("the planted config");
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let mut machines: Vec<String> = app.update(&mut vcx, |app, cx| {
+            app.switcher_groups(cx)
+                .into_iter()
+                .filter(|g| !g.key.is_empty())
+                .map(|g| g.label)
+                .collect()
+        });
+        machines.sort();
+        assert_eq!(
+            machines,
+            ["build-runner-eu-west-1", "edge-gw", "staging-db"],
+            "the planted hosts are the picker's machines, and the only ones"
+        );
+    }
 
     /// Deleting a remote workspace has to take the listing snapshot's row with
     /// it. The snapshot every window keeps for the switcher is merged into the
@@ -6701,6 +6971,327 @@ mod gpui_tests {
         });
     }
 
+    /// The card's Connect is drawn with the project's Primary recipe.
+    #[gpui::test]
+    fn the_offline_cards_connect_is_drawn_with_the_primary_recipe(cx: &mut TestAppContext) {
+        let _probe = crate::ui::paint_probe::scope();
+        let (_app, vcx, _target) = disconnected_machine(cx, super::Column::Left);
+        vcx.run_until_parked();
+
+        assert!(
+            !crate::ui::paint_probe::all("dialog.panel_primary").is_empty(),
+            "the card's Connect is not drawn with the Primary recipe"
+        );
+    }
+
+    /// A real click on the card's Connect asks for the connection. The click
+    /// is delivered without pumping the executor: `simulate_click` would run
+    /// the background connect to its end, and this test is about the click,
+    /// not about a machine answering.
+    #[gpui::test]
+    fn clicking_the_offline_cards_connect_asks_for_the_connection(cx: &mut TestAppContext) {
+        use crate::ui::remote_workspace::ConnectFlow;
+        use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput};
+
+        let (app, mut vcx, target) = disconnected_machine(cx, super::Column::Left);
+        vcx.run_until_parked();
+
+        let bounds = vcx
+            .debug_bounds("switcher-connect-machine")
+            .expect("the offline card draws its Connect button");
+        app.update(cx, |app, _| {
+            assert!(app.connect.is_none(), "nothing was asked for yet");
+        });
+
+        let position = bounds.center();
+        let modifiers = Modifiers::none();
+        vcx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+
+        app.update(cx, |app, _| {
+            let Some(ConnectFlow::Connecting { choice }) = &app.connect else {
+                panic!("clicking Connect did not ask for the connection");
+            };
+            assert_eq!(
+                choice.target, target,
+                "the scoped machine is the one dialled"
+            );
+        });
+    }
+
+    /// Builds a failed machine's error band under a probe and hands the notes
+    /// the test reads to `check`, with the theme's danger and muted inks and
+    /// the popover card's resting text ink.
+    fn with_the_failure_band(
+        cx: &mut TestAppContext,
+        check: impl FnOnce(
+            &[crate::ui::paint_probe::Painted],
+            &[crate::ui::paint_probe::Painted],
+            u32,
+            u32,
+            u32,
+        ),
+    ) {
+        use crate::ui::paint_probe::{all, hsla24};
+        use gpui_component::ActiveTheme as _;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let _probe = crate::ui::paint_probe::scope();
+        let mut group = super::tests::named_group("devbox", vec![]);
+        group.link = super::Link::Failed;
+        group.error = Some("connection refused".into());
+
+        app.update(cx, |app, cx| {
+            let (danger, muted) = {
+                let theme = cx.theme();
+                (hsla24(theme.danger), hsla24(theme.muted_foreground))
+            };
+            let role = crate::ui::theme::chrome_ink(cx).unpicked_meta;
+            let _ = app.render_error_band(&group, "connection refused", cx);
+            check(
+                &all("switcher.band-dot"),
+                &all("switcher.band-body"),
+                danger,
+                muted,
+                role,
+            );
+        });
+    }
+
+    /// The failure band leads with one dot in the danger ink.
+    #[gpui::test]
+    fn the_failure_band_carries_a_danger_dot(cx: &mut TestAppContext) {
+        with_the_failure_band(cx, |dots, _bodies, danger, _muted, _resting| {
+            assert_eq!(dots.len(), 1, "the band carries one failure dot");
+            assert_eq!(dots[0].fill, Some(danger), "and it is the danger ink");
+        });
+    }
+
+    /// The band's body reads in the cached small-text meta role floored on
+    /// the popover fills (`ChromeInk::unpicked_meta`), not the raw muted ink
+    /// it had.
+    #[gpui::test]
+    fn the_failure_band_body_reads_in_the_cached_small_meta_ink(cx: &mut TestAppContext) {
+        with_the_failure_band(cx, |_dots, bodies, _danger, muted, role| {
+            assert_eq!(bodies.len(), 1);
+            assert_eq!(
+                bodies[0].text,
+                Some(role),
+                "the body reads in the cached small-text role"
+            );
+            assert_ne!(bodies[0].text, Some(muted), "not the raw muted ink");
+        });
+    }
+
+    /// A machine that is down, with the failure that took it down: the group
+    /// the offline card is drawn for.
+    fn offline_card_group() -> super::Group {
+        let mut group = super::tests::named_group("build-box-demo", vec![]);
+        group.target = Some(crate::core::session::RemoteTarget::direct(
+            "demo",
+            "build-box",
+            22,
+        ));
+        group.link = super::Link::Offline;
+        group.error = Some("connection refused".into());
+        group
+    }
+
+    /// The offline card's failure and endpoint lines read in the cached
+    /// small-text meta role (`ChromeInk::unpicked_meta`), not the raw muted
+    /// ink they had.
+    #[gpui::test]
+    fn the_offline_cards_detail_reads_in_the_cached_small_meta_ink(cx: &mut TestAppContext) {
+        use gpui_component::ActiveTheme as _;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let _probe = crate::ui::paint_probe::scope();
+        let group = offline_card_group();
+        app.update(cx, |app, cx| {
+            let role = crate::ui::theme::chrome_ink(cx).unpicked_meta;
+            let muted = crate::ui::paint_probe::hsla24(cx.theme().muted_foreground);
+            let _ = app.render_offline_card(&group, cx);
+            let notes = crate::ui::paint_probe::all("switcher.offline-detail");
+            assert_eq!(notes.len(), 1, "one detail block on the card");
+            assert_eq!(notes[0].text, Some(role), "the cached small-text role");
+            assert_ne!(notes[0].text, Some(muted), "not the raw muted ink");
+        });
+    }
+
+    /// WCAG 2.x contrast from 8-bit sRGB, worked out here from the channels.
+    fn wcag(ink: u32, fill: u32) -> f32 {
+        let luminance = |rgb: u32| {
+            let lin = |shift: u32| {
+                let c = ((rgb >> shift) & 0xff) as f32 / 255.0;
+                match c <= 0.04045 {
+                    true => c / 12.92,
+                    false => ((c + 0.055) / 1.055).powf(2.4),
+                }
+            };
+            0.2126 * lin(16) + 0.7152 * lin(8) + 0.0722 * lin(0)
+        };
+        let (a, b) = (luminance(ink), luminance(fill));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The band's body, as the real builder paints it, clears 4.5:1 on the
+    /// popover card it sits on in every built-in and every generated theme,
+    /// and the role it reads in holds 5.5:1 on the popover's resting and
+    /// hovered fills.
+    #[gpui::test]
+    fn the_failure_band_body_clears_the_floor_in_every_theme(cx: &mut TestAppContext) {
+        use crate::ui::dialog::test_themes as themes;
+        use crate::ui::paint_probe::{all as probes, hsla24};
+        use gpui_component::ActiveTheme as _;
+
+        let mut corpus = crate::ui::presets::builtins();
+        corpus.extend(crate::ui::presets::generated_theme_grid());
+        assert_eq!(
+            corpus.len(),
+            877,
+            "the corpus is the built-ins and the grid"
+        );
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let _probe = crate::ui::paint_probe::scope();
+        let mut group = super::tests::named_group("devbox", vec![]);
+        group.link = super::Link::Failed;
+        group.error = Some("connection refused".into());
+        let offline = offline_card_group();
+        let mut misses = Vec::new();
+        let mut unreachable = Vec::new();
+        for theme in &corpus {
+            themes::apply(&mut vcx, theme);
+            crate::ui::paint_probe::clear();
+            let (fill, role, base, hover) = app.update(cx, |app, cx| {
+                let _ = app.render_error_band(&group, "connection refused", cx);
+                let _ = app.render_offline_card(&offline, cx);
+                let rungs = super::rungs(cx);
+                (
+                    hsla24(cx.theme().popover),
+                    crate::ui::theme::chrome_ink(cx).unpicked_meta,
+                    rungs.base,
+                    rungs.hover,
+                )
+            });
+            // The existing B3 small-text contract: 5.5:1 on the popover's
+            // resting and hovered fills wherever one ink can reach it on
+            // both; where none can (a mid-grey popover), the best black or
+            // white endpoint at exactly its ratio. Unreachable cases are
+            // counted and printed, never skipped.
+            let worst = |ink: u32| wcag(ink, base).min(wcag(ink, hover));
+            let best = worst(0xffffff).max(worst(0x000000));
+            if best >= 5.5 {
+                if worst(role) < 5.5 {
+                    misses.push(format!(
+                        "{}: role is {:.2}:1 on its weakest fill ({role:06x}), target 5.5 is reachable ({best:.2})",
+                        theme.id,
+                        worst(role)
+                    ));
+                }
+            } else {
+                unreachable.push(format!("{} (best {best:.2})", theme.id));
+                if !((role == 0xffffff || role == 0x000000) && worst(role) == best) {
+                    misses.push(format!(
+                        "{}: unreachable target, role {role:06x} is {:.2}:1 where the best endpoint reaches {best:.2}",
+                        theme.id,
+                        worst(role)
+                    ));
+                }
+            }
+            // The offline card's failure and endpoint lines, as the real
+            // builder paints them, on the same popover card.
+            match probes("switcher.offline-detail")
+                .last()
+                .and_then(|p| p.text)
+            {
+                None => misses.push(format!("{}: the offline detail was never drawn", theme.id)),
+                Some(ink) => {
+                    let got = wcag(ink, fill);
+                    if got < 4.5 {
+                        misses.push(format!(
+                            "{}: offline detail is {got:.2}:1 ({ink:06x} on {fill:06x})",
+                            theme.id
+                        ));
+                    }
+                }
+            }
+            let Some(ink) = probes("switcher.band-body").last().and_then(|p| p.text) else {
+                misses.push(format!("{}: the band body was never drawn", theme.id));
+                continue;
+            };
+            let got = wcag(ink, fill);
+            if got < 4.5 {
+                misses.push(format!(
+                    "{}: band body is {got:.2}:1 ({ink:06x} on {fill:06x})",
+                    theme.id
+                ));
+            }
+        }
+        println!(
+            "failure band sweep: {} themes, {} with the 5.5 target unreachable: {}",
+            corpus.len(),
+            unreachable.len(),
+            unreachable.join(", ")
+        );
+        assert!(
+            misses.is_empty(),
+            "{} misses over {} themes ({} unreachable 5.5 cases)\n{}",
+            misses.len(),
+            corpus.len(),
+            unreachable.len(),
+            misses.join("\n")
+        );
+    }
+
+    /// The band's body is 11.5px.
+    #[test]
+    fn the_failure_band_body_is_eleven_and_a_half_pixels() {
+        assert_eq!(super::ERROR_BAND_BODY_REM, 11.5 / 16.);
+    }
+
+    /// Whatever the band's looks, the words are the error's own: the machine
+    /// and the error as it came.
+    #[test]
+    fn the_failure_band_text_is_the_machine_and_the_error_as_it_came() {
+        for error in [
+            "connection refused",
+            "ssh: connect to host box port 22: Connection refused",
+        ] {
+            assert_eq!(
+                super::error_band_text(error, "devbox"),
+                format!("devbox: {error}")
+            );
+        }
+    }
+
     /// The offline card carries the failure, so the scoped error band must not
     /// repeat it. Every other state keeps the band it had: All still shows it,
     /// and a parked or in-flight machine (which has no card) keeps its own.
@@ -6879,5 +7470,319 @@ mod key_tests {
             true => assert_eq!(glyph, "⌘"),
             false => assert_eq!(glyph, "Ctrl"),
         }
+    }
+}
+
+/// Switcher F5 and F9, through the real app render: the panel is opened in a
+/// test window, a frame is drawn, and the paints the row and keycap builders
+/// actually assigned are read back from the scoped probe and held to the
+/// floors on the rungs they sit on.
+#[cfg(test)]
+mod contrast_tests {
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui_component::ActiveTheme as _;
+
+    use super::{Link, Tty59App, rungs};
+    use crate::core::session::{
+        RemoteRef, RemoteTarget, WindowView, WindowViews, WorkspaceId, WorkspaceStore,
+    };
+    use crate::ui::app::test_window::harness_with_tabs;
+    use crate::ui::dialog::test_themes::{self as themes, Misses, TEXT_FLOOR};
+    use crate::ui::paint_probe::{self as probe, Painted};
+    use crate::ui::presets::{ChromeInk, Surface};
+
+    /// This window's workspace, another local one that is open, and one on a
+    /// machine nothing is connected to: the three shapes a row takes.
+    const ROWS: usize = 3;
+
+    fn seed(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        let now = crate::ui::home::now_secs();
+        app.update_in(vcx, |app, _, cx| {
+            let local = |id: WorkspaceId, label: &str, age: u64| WindowView {
+                id,
+                open: true,
+                last_active: now.saturating_sub(age),
+                label: Some(label.into()),
+                ..WindowView::default()
+            };
+            let mut away = WindowView::on_remote(RemoteRef::new(
+                RemoteTarget::Alias {
+                    alias: "charlie-box".into(),
+                },
+                WorkspaceId::new(),
+            ));
+            away.label = Some("charlie".into());
+            away.last_active = now.saturating_sub(7200);
+            let views = vec![
+                local(app.workspace, "alpha", 0),
+                local(WorkspaceId::new(), "bravo", 60),
+                away,
+            ];
+            WorkspaceStore::install_for_test(
+                cx,
+                WindowViews {
+                    views,
+                    active: None,
+                },
+            );
+            cx.notify();
+        });
+    }
+
+    struct Frame {
+        unlit: Vec<bool>,
+        row: Vec<Painted>,
+        name: Vec<Painted>,
+        meta: Vec<Painted>,
+        side: Vec<Painted>,
+        badge: Vec<Painted>,
+        avatar: Vec<Painted>,
+        keycap: Vec<Painted>,
+    }
+
+    /// Puts the cursor on row `picked_at`, draws one frame of the app, and
+    /// returns what the builders painted in it.
+    fn capture(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, picked_at: usize) -> Frame {
+        let unlit = app.update_in(vcx, |app, _, cx| {
+            if let Some(sw) = app.switcher.as_mut() {
+                sw.left_sel = picked_at;
+            }
+            let layout = app.switcher_layout(cx);
+            let unlit: Vec<bool> = layout
+                .nav
+                .iter()
+                .map(|&(g, _)| {
+                    let group = &layout.groups[g];
+                    group.target.is_some() && matches!(group.link, Link::Offline | Link::Failed)
+                })
+                .collect();
+            cx.notify();
+            unlit
+        });
+        probe::clear();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let frame = Frame {
+            unlit,
+            row: probe::all("switcher.row"),
+            name: probe::all("switcher.name"),
+            meta: probe::all("switcher.meta"),
+            side: probe::all("switcher.side"),
+            badge: probe::all("switcher.badge"),
+            avatar: probe::all("switcher.avatar"),
+            keycap: probe::all("dialog.keycap"),
+        };
+        for (what, painted) in [
+            ("row", frame.row.len()),
+            ("name", frame.name.len()),
+            ("meta", frame.meta.len()),
+            ("side", frame.side.len()),
+            ("badge", frame.badge.len()),
+            ("avatar", frame.avatar.len()),
+            ("unlit", frame.unlit.len()),
+        ] {
+            assert_eq!(painted, ROWS, "one {what} per row reached the real render");
+        }
+        assert_eq!(
+            frame.unlit.iter().filter(|unlit| **unlit).count(),
+            1,
+            "the machine nothing is connected to makes exactly one unlit row"
+        );
+        assert!(!frame.keycap.is_empty(), "the footer draws keycaps");
+        frame
+    }
+
+    struct Inks {
+        popover: Surface,
+        chrome: ChromeInk,
+        secondary: u32,
+    }
+
+    fn inks(vcx: &mut VisualTestContext) -> Inks {
+        vcx.update(|_, cx| Inks {
+            popover: rungs(cx),
+            chrome: crate::ui::theme::chrome_ink(cx),
+            secondary: probe::hsla24(cx.theme().secondary),
+        })
+    }
+
+    fn opened(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, 1);
+        seed(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        (app, vcx, streams)
+    }
+
+    fn text(painted: &Painted, what: &str) -> u32 {
+        painted
+            .text
+            .unwrap_or_else(|| panic!("{what} paints a text colour"))
+    }
+
+    #[gpui::test]
+    fn switcher_row_inks_hold_their_floor_on_the_rung_they_are_painted_on(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = opened(cx);
+        let _probe = probe::scope();
+        let mut misses = Misses::default();
+        // The inks an unpicked row keeps (authored foreground name, muted meta,
+        // state column and badge) on its resting and hovered rungs, as
+        // painted. Kept apart so a weak palette that misses there is named
+        // without hiding what the selected-row roles do.
+        let mut unpicked = Misses::default();
+
+        for theme in &themes::themes() {
+            themes::apply(&mut vcx, theme);
+            let ink = inks(&mut vcx);
+            let id = theme.id.as_str();
+            for picked_at in 0..ROWS {
+                let frame = capture(&app, &mut vcx, picked_at);
+                for i in 0..ROWS {
+                    let picked = i == picked_at;
+                    let unlit = frame.unlit[i];
+                    if !picked {
+                        for (rung, rung_fill) in [
+                            ("resting", ink.popover.base),
+                            ("hovered", ink.popover.hover),
+                        ] {
+                            for (what, painted) in [
+                                ("name", &frame.name[i]),
+                                ("meta", &frame.meta[i]),
+                                ("state column", &frame.side[i]),
+                                ("badge", &frame.badge[i]),
+                            ] {
+                                unpicked.floor(
+                                    id,
+                                    &format!("unpicked row {i} {what} on the {rung} rung"),
+                                    text(painted, what),
+                                    rung_fill,
+                                    TEXT_FLOOR,
+                                );
+                            }
+                        }
+                    }
+                    let at = format!("{id} row {i} (picked {picked}, unlit {unlit})");
+                    let fill = if picked {
+                        ink.popover.selected
+                    } else {
+                        ink.popover.base
+                    };
+
+                    assert_eq!(
+                        frame.row[i].fill,
+                        picked.then_some(ink.popover.selected),
+                        "{at}: only the picked row paints the selected rung"
+                    );
+                    assert_eq!(frame.row[i].opacity, None, "{at}: no row fade");
+
+                    let want_name = match (unlit, picked) {
+                        (true, _) => ink.chrome.quiet_name,
+                        (false, true) => ink.popover.text_selected,
+                        (false, false) => ink.chrome.unpicked_title,
+                    };
+                    assert_eq!(text(&frame.name[i], "name"), want_name, "{at}: name ink");
+                    assert_eq!(frame.name[i].text_alpha, Some(1.0), "{at}: name alpha");
+                    assert_eq!(frame.name[i].opacity, None, "{at}: name has no fade");
+                    if unlit {
+                        for (rung, rung_fill) in [
+                            ("resting", ink.popover.base),
+                            ("hovered", ink.popover.hover),
+                            ("selected", ink.popover.selected),
+                        ] {
+                            misses.floor(
+                                id,
+                                &format!("row {i} unlit name on the {rung} rung"),
+                                want_name,
+                                rung_fill,
+                                TEXT_FLOOR,
+                            );
+                        }
+                    }
+                    if picked {
+                        misses.floor(
+                            id,
+                            &format!("row {i} picked name"),
+                            want_name,
+                            fill,
+                            TEXT_FLOOR,
+                        );
+                    }
+
+                    let want_quiet = if picked {
+                        ink.chrome.selected_meta
+                    } else {
+                        ink.chrome.unpicked_meta
+                    };
+                    for (what, painted) in [
+                        ("meta", &frame.meta[i]),
+                        ("state column", &frame.side[i]),
+                        ("badge", &frame.badge[i]),
+                    ] {
+                        assert_eq!(text(painted, what), want_quiet, "{at}: {what} ink");
+                        assert_eq!(painted.text_alpha, Some(1.0), "{at}: {what} alpha");
+                        assert_eq!(painted.opacity, None, "{at}: {what} has no fade");
+                        if picked {
+                            misses.floor(
+                                id,
+                                &format!("row {i} picked {what}"),
+                                want_quiet,
+                                fill,
+                                TEXT_FLOOR,
+                            );
+                        }
+                    }
+
+                    let avatar = &frame.avatar[i];
+                    assert_eq!(avatar.fill, Some(ink.secondary), "{at}: avatar disc");
+                    assert_eq!(
+                        text(avatar, "avatar"),
+                        ink.chrome.avatar_ink,
+                        "{at}: initial"
+                    );
+                    assert_eq!(avatar.text_alpha, Some(1.0), "{at}: initial alpha");
+                    assert_eq!(
+                        avatar.opacity, None,
+                        "{at}: an unlit machine's disc is not faded"
+                    );
+                    misses.floor(
+                        id,
+                        &format!("row {i} avatar initial"),
+                        ink.chrome.avatar_ink,
+                        ink.secondary,
+                        TEXT_FLOOR,
+                    );
+                }
+
+                for (n, cap) in frame.keycap.iter().enumerate() {
+                    assert_eq!(
+                        cap.fill,
+                        Some(ink.chrome.keycap_fill),
+                        "{id} keycap {n} fill"
+                    );
+                    assert_eq!(cap.fill_alpha, Some(1.0), "{id} keycap {n} fill alpha");
+                    assert_eq!(
+                        text(cap, "keycap"),
+                        ink.chrome.keycap_ink,
+                        "{id} keycap {n} ink"
+                    );
+                    assert_eq!(cap.text_alpha, Some(1.0), "{id} keycap {n} ink alpha");
+                    misses.floor(
+                        id,
+                        &format!("keycap {n} label"),
+                        ink.chrome.keycap_ink,
+                        ink.chrome.keycap_fill,
+                        TEXT_FLOOR,
+                    );
+                }
+            }
+        }
+        misses.assert_none("switcher row and keycap inks");
+        unpicked.assert_none("unpicked switcher row inks");
     }
 }
