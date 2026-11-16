@@ -69,6 +69,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "最近使ったホスト。検索すると保存済みのすべてのホストを探せます。"
         }
         L10nKey::SettingsAddHost => "ホストを追加",
+        L10nKey::SettingsSaveHost => "ホストを保存",
         L10nKey::SettingsNoHostsMatch => "「{query}」に一致するホストはありません",
         L10nKey::SettingsHostsFromFiles => "{sources}から {hosts}",
         L10nKey::SettingsMoreHosts => "ほかに {count} 台のホスト",
@@ -1234,6 +1235,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchThemeKeywords => {
             "外観 色 配色 ダーク ライト パレット 背景 前景 アクセント 同期 システム os 自動 theme appearance color scheme palette background foreground accent sync auto"
         }
+        L10nKey::SettingsSearchMachineKeywords => {
+            "マシン コンピュータ ローカル リモート 接続中 machine computer local remote"
+        }
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => {
             "クリップボード 空白 コピー trim trailing spaces copy whitespace clipboard"
         }
@@ -1662,6 +1666,23 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmOpenChanges => "変更を開く",
         L10nKey::ScmDiscardAllConfirm => {
             "未ステージの変更と未追跡ファイルをすべて破棄しますか？ステージ済みの変更は残ります。元に戻せません。"
+        }
+        L10nKey::ScmDiscardManyConfirm => {
+            "{count} 個のファイルの変更を破棄しますか？元に戻せません。"
+        }
+        L10nKey::ScmDeleteUntrackedConfirm => {
+            "{path} を削除しますか？未追跡のため、Git では復元できません。"
+        }
+        L10nKey::ScmDeleteUntrackedFolderConfirm => {
+            "{path} とその中身をすべて削除しますか？未追跡のため、Git では復元できません。"
+        }
+        L10nKey::ScmDeleteUntrackedManyConfirm => {
+            "未追跡の項目 {count} 個を削除しますか？Git では復元できません。"
+        }
+        L10nKey::ScmDeleteUntracked => "未追跡を削除",
+        L10nKey::ScmDiscardEverythingConfirm => "未ステージの変更をすべて破棄しますか？",
+        L10nKey::ScmDiscardEverythingDetail => {
+            "追跡済みファイルの未ステージの編集は元に戻り、未追跡のファイルとフォルダーは削除されます。ステージ済みの変更は残ります。ここでは元に戻せません。"
         }
         L10nKey::ScmAmendConfirm => {
             "直前のコミットを修正しますか？新しいコミットに置き換わるため、すでに取得した人は対応が必要になります。"

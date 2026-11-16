@@ -129,11 +129,17 @@ impl Tty59App {
             self.run_git_op(host, repo.root, op, then, window, cx);
             return;
         };
+        // A discard says what it does to which files; every other operation
+        // keeps the question and verb it has always had.
+        let (message, detail, verb) = match discard_copy(std::slice::from_ref(&op)) {
+            Some(copy) => (copy.message, copy.detail, copy.verb),
+            None => (confirm_question(&op, loss), None, confirm_verb(&op, loss)),
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
-            &confirm_question(&op, loss),
-            None,
-            &guarded_answers(confirm_verb(&op, loss)),
+            &message,
+            detail.as_deref(),
+            &guarded_answers(verb),
             cx,
         );
         cx.spawn_in(window, async move |app, cx| {
@@ -312,15 +318,25 @@ impl Tty59App {
         let Some(host) = HostRegistry::get(cx, repo.host) else {
             return;
         };
-        // Its own prompt rather than `scm_op_then`'s: that one names the file
-        // when an op carries a single path, and "Discard changes to a.rs?"
-        // would be the wrong question for a click that also sweeps the
-        // untracked files.
+        // Its own prompt rather than `scm_op_then`'s: the question follows
+        // what the sweep really holds, and one that also deletes untracked
+        // files must say so rather than ask about changes to one file.
+        let ops: Vec<GitOp> = std::iter::once(first.clone())
+            .chain(second.clone())
+            .collect();
+        let (message, detail, verb) = match discard_copy(&ops) {
+            Some(copy) => (copy.message, copy.detail, copy.verb),
+            None => (
+                t(L10nKey::ScmDiscardAllConfirm).to_string(),
+                None,
+                t(L10nKey::ScmDiscard),
+            ),
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
-            &t(L10nKey::ScmDiscardAllConfirm).to_string(),
-            None,
-            &guarded_answers(t(L10nKey::ScmDiscard)),
+            &message,
+            detail.as_deref(),
+            &guarded_answers(verb),
             cx,
         );
         cx.spawn_in(window, async move |app, cx| {
@@ -525,6 +541,86 @@ fn guarded_answers(action: &str) -> [PromptButton; 2] {
         PromptButton::new(action),
     ]
 }
+
+/// What a discard prompt says: the question, the line under it, and the verb
+/// on the button that runs it.
+#[derive(Debug, PartialEq, Eq)]
+struct PromptCopy {
+    message: String,
+    detail: Option<String>,
+    verb: &'static str,
+}
+
+/// The copy for a prompt made only of discards, `None` for every other
+/// operation — and for an empty list — so those keep [`confirm_question`] and
+/// [`confirm_verb`].
+///
+/// Tracked edits are *discarded* and untracked files are *deleted*, and a
+/// sweep that does both says both. A single file keeps its name on screen; a
+/// group gets its count, because a list of two hundred paths says less.
+fn discard_copy(ops: &[GitOp]) -> Option<PromptCopy> {
+    let mut tracked: Vec<&str> = Vec::new();
+    let mut untracked: Vec<&str> = Vec::new();
+    let mut folders = false;
+    for op in ops {
+        match op {
+            GitOp::DiscardWorktree { paths } => tracked.extend(paths.iter().map(|p| p.as_str())),
+            GitOp::DiscardUntracked { paths, directories } => {
+                untracked.extend(paths.iter().map(|p| p.as_str()));
+                folders |= *directories;
+            }
+            // One other operation in the list and it is not a discard question.
+            _ => return None,
+        }
+    }
+    let count = |n: usize| n.to_string();
+    Some(match (tracked.as_slice(), untracked.as_slice()) {
+        ([], []) => return None,
+        (_, []) => match tracked.as_slice() {
+            [only] => PromptCopy {
+                message: t_fmt(L10nKey::ScmDiscardConfirm, &[("path", *only)]),
+                detail: None,
+                verb: t(L10nKey::ScmDiscard),
+            },
+            many => PromptCopy {
+                message: t_fmt(
+                    L10nKey::ScmDiscardManyConfirm,
+                    &[("count", &count(many.len()))],
+                ),
+                detail: None,
+                verb: t(L10nKey::ScmDiscard),
+            },
+        },
+        ([], _) => match untracked.as_slice() {
+            [only] => {
+                let key = if folders || only.ends_with('/') {
+                    L10nKey::ScmDeleteUntrackedFolderConfirm
+                } else {
+                    L10nKey::ScmDeleteUntrackedConfirm
+                };
+                PromptCopy {
+                    message: t_fmt(key, &[("path", *only)]),
+                    detail: None,
+                    verb: t(L10nKey::ScmDeleteUntracked),
+                }
+            }
+            many => PromptCopy {
+                message: t_fmt(
+                    L10nKey::ScmDeleteUntrackedManyConfirm,
+                    &[("count", &count(many.len()))],
+                ),
+                detail: None,
+                verb: t(L10nKey::ScmDeleteUntracked),
+            },
+        },
+        _ => PromptCopy {
+            message: t(L10nKey::ScmDiscardEverythingConfirm).to_string(),
+            detail: Some(t(L10nKey::ScmDiscardEverythingDetail).to_string()),
+            verb: t(L10nKey::ScmDiscardAll),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,6 +721,396 @@ mod tests {
 
         // Nothing to discard means nothing to run — and no prompt to answer.
         assert!(discard_all_ops(&status_with(Vec::new())).is_empty());
+    }
+
+    fn paths(names: &[&str]) -> Vec<RepoPath> {
+        names
+            .iter()
+            .map(|n| RepoPath::from_bytes(n.as_bytes()))
+            .collect()
+    }
+
+    fn tracked(names: &[&str]) -> GitOp {
+        GitOp::DiscardWorktree {
+            paths: paths(names),
+        }
+    }
+
+    fn untracked(names: &[&str], directories: bool) -> GitOp {
+        GitOp::DiscardUntracked {
+            paths: paths(names),
+            directories,
+        }
+    }
+
+    fn copy_of(ops: &[GitOp]) -> PromptCopy {
+        discard_copy(ops).expect("a prompt made of discards has copy of its own")
+    }
+
+    fn copy(message: &str, detail: Option<&str>, verb: &'static str) -> PromptCopy {
+        PromptCopy {
+            message: message.to_string(),
+            detail: detail.map(str::to_string),
+            verb,
+        }
+    }
+
+    const COMBINED_DETAIL: &str = "Unstaged edits to tracked files are reverted and untracked \
+         files and folders are deleted. Staged changes are kept. This cannot be undone here.";
+
+    /// Tracked edits are discarded, untracked files are deleted, and a prompt
+    /// that mixes the two says both; each one names what it will touch.
+    #[test]
+    fn a_discard_prompt_says_what_it_will_do_to_what() {
+        // The literals are English, and a reused test thread keeps whatever
+        // locale the last test on it chose.
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(
+            copy_of(&[tracked(&["src/deep/a.rs"])]),
+            copy(
+                "Discard changes to src/deep/a.rs? This cannot be undone.",
+                None,
+                "Discard Changes"
+            ),
+            "one tracked file: the original wording, with its whole path"
+        );
+        assert_eq!(
+            copy_of(&[tracked(&["a.rs", "b.rs", "c.rs"])]),
+            copy(
+                "Discard changes to 3 files? This cannot be undone.",
+                None,
+                "Discard Changes"
+            ),
+            "a group of tracked files: the count, not a list"
+        );
+        assert_eq!(
+            copy_of(&[untracked(&["notes.txt"], false)]),
+            copy(
+                "Delete notes.txt? It is untracked and cannot be restored by Git.",
+                None,
+                "Delete Untracked"
+            ),
+            "an untracked file is deleted, not discarded"
+        );
+        assert_eq!(
+            copy_of(&[untracked(&["build/"], true)]),
+            copy(
+                "Delete build/ and everything in it? It is untracked and cannot be restored by Git.",
+                None,
+                "Delete Untracked"
+            ),
+            "an untracked folder takes what is inside it"
+        );
+        assert_eq!(
+            copy_of(&[untracked(&["a.log", "b.log"], false)]),
+            copy(
+                "Delete 2 untracked items? They cannot be restored by Git.",
+                None,
+                "Delete Untracked"
+            )
+        );
+        assert_eq!(
+            copy_of(&[tracked(&["a.rs", "b.rs"]), untracked(&["new.rs"], false)]),
+            copy(
+                "Discard all unstaged changes?",
+                Some(COMBINED_DETAIL),
+                "Discard All Changes"
+            ),
+            "both halves of discard-all in one question"
+        );
+    }
+
+    /// Only the question that really covers both halves gets the "all" verb,
+    /// and nothing claims an untracked file can be recovered.
+    #[test]
+    fn only_the_combined_discard_uses_the_all_verb_and_nothing_promises_recovery() {
+        crate::ui::i18n::set_locale("en");
+        let single_op_discard_all = [
+            vec![tracked(&["a.rs", "b.rs"])],
+            vec![untracked(&["new.rs"], false)],
+        ];
+        for ops in &single_op_discard_all {
+            assert_ne!(copy_of(ops).verb, "Discard All Changes", "{ops:?}");
+        }
+        for ops in [
+            vec![tracked(&["a.rs"])],
+            vec![untracked(&["a.rs"], false)],
+            vec![untracked(&["d/"], true)],
+            vec![tracked(&["a.rs"]), untracked(&["b.rs"], false)],
+        ] {
+            let c = copy_of(&ops);
+            assert!(
+                !c.message.contains("recovered")
+                    && !c.detail.as_deref().unwrap_or("").contains("recovered"),
+                "{c:?}"
+            );
+        }
+    }
+
+    /// Reset, amend, a forced push and a branch delete keep the copy they had.
+    /// Until `discard_copy` exists for real the `None` half passes trivially;
+    /// the `confirm_*` half pins the strings those operations show today.
+    #[test]
+    fn operations_that_are_not_discards_keep_their_own_confirmation() {
+        crate::ui::i18n::set_locale("en");
+        let reset = GitOp::Reset {
+            rev: "HEAD~3".into(),
+            mode: tty59_core::core::git::ops::ResetMode::Hard,
+        };
+        let amend = GitOp::Commit {
+            message: "m".into(),
+            amend: true,
+            signoff: false,
+            no_verify: false,
+            all: false,
+        };
+        let force_push = GitOp::Push {
+            remote: "origin".into(),
+            branch: "main".into(),
+            set_upstream: false,
+            force_with_lease: true,
+        };
+        let delete_branch = GitOp::DeleteBranch {
+            name: "topic".into(),
+            force: true,
+        };
+        for op in [&reset, &amend, &force_push, &delete_branch] {
+            assert!(
+                discard_copy(std::slice::from_ref(op)).is_none(),
+                "{:?} is not a discard",
+                op.label()
+            );
+        }
+        assert!(
+            discard_copy(&[tracked(&["a.rs"]), reset.clone()]).is_none(),
+            "a discard next to anything else is not the discard question"
+        );
+        assert!(discard_copy(&[GitOp::StageAll]).is_none());
+
+        let ask = |op: &GitOp| {
+            let loss = op.destructive().expect("it can lose work");
+            (confirm_question(op, loss), confirm_verb(op, loss))
+        };
+        assert_eq!(
+            ask(&reset),
+            (
+                t(L10nKey::ScmResetHardConfirm).to_string(),
+                t(L10nKey::ScmReset)
+            )
+        );
+        for op in [&amend, &force_push] {
+            assert_eq!(
+                ask(op),
+                (
+                    t(L10nKey::ScmAmendConfirm).to_string(),
+                    t(L10nKey::ScmAmendLastCommit)
+                )
+            );
+        }
+        assert_eq!(
+            ask(&delete_branch),
+            (
+                t(L10nKey::ScmDiscardAllConfirm).to_string(),
+                t(L10nKey::ScmDiscard)
+            ),
+            "a branch delete has no copy of its own today; this change leaves it alone"
+        );
+    }
+
+    // ---- real window, real repository: the prompt a discard-all opens ----
+    //
+    // These run `git`, so they run on Boat only.
+
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?} failed");
+    }
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A scratch repository with one committed file edited in the worktree and
+    /// one untracked file: exactly what discard-all sweeps. A second committed
+    /// file, `s.txt`, is edited and staged with a clean worktree: the sentinel
+    /// for "staged changes are kept".
+    fn dirty_repository() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("tty59-discard-")
+            .tempdir()
+            .expect("a scratch directory");
+        let root = std::fs::canonicalize(dir.path()).expect("it resolves");
+        git(&root, &["init", "--quiet"]);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("s.txt"), "base\n").unwrap();
+        git(&root, &["add", "a.txt", "s.txt"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "first",
+            ],
+        );
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        std::fs::write(root.join("new.txt"), "new\n").unwrap();
+        std::fs::write(root.join("s.txt"), "staged\n").unwrap();
+        git(&root, &["add", "s.txt"]);
+        (dir, root)
+    }
+
+    /// What the index holds for `path`, as git prints it.
+    fn index_bytes(root: &std::path::Path, path: &str) -> Vec<u8> {
+        let out = std::process::Command::new("git")
+            .args(["show", &format!(":{path}")])
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git show :{path} failed");
+        out.stdout
+    }
+
+    fn pump_until(
+        vcx: &mut VisualTestContext,
+        secs: u64,
+        mut until: impl FnMut(&mut VisualTestContext) -> bool,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        loop {
+            vcx.run_until_parked();
+            if until(vcx) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// The app on `root` with its status read, and the discard-all prompt open.
+    fn discard_all_prompt_open(
+        cx: &mut TestAppContext,
+        root: &std::path::Path,
+    ) -> (Entity<Tty59App>, VisualTestContext) {
+        use crate::ui::host_ops::HostId;
+
+        crate::core::config::pin_test_config_dir();
+        // The prompt's words and the Cancel button's label are asserted in
+        // English.
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let repo = RepoKey {
+            host: HostId::LOCAL,
+            root: root.to_path_buf(),
+        };
+        app.update(&mut vcx, |app, cx| {
+            let host = HostRegistry::get(cx, HostId::LOCAL).expect("the local host");
+            app.scm_refresh(host, root.to_path_buf(), cx);
+        });
+        assert!(
+            pump_until(&mut vcx, 20, |vcx| vcx.update(|_, cx| {
+                crate::terminal::git_data::status_of(cx, HostId::LOCAL, root).is_some()
+            })),
+            "the status never loaded"
+        );
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.scm_discard_all(repo, window, cx)
+        });
+        assert!(
+            pump_until(&mut vcx, 5, |vcx| vcx.has_pending_prompt()),
+            "discard-all never asked"
+        );
+        (app, vcx)
+    }
+
+    /// What the window really shows, not what a helper says it would.
+    #[gpui::test]
+    fn discard_all_opens_the_truthful_prompt(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (_dir, root) = dirty_repository();
+        let (_app, vcx) = discard_all_prompt_open(cx, &root);
+
+        assert_eq!(
+            vcx.pending_prompt(),
+            Some((
+                "Discard all unstaged changes?".to_string(),
+                COMBINED_DETAIL.to_string()
+            ))
+        );
+        vcx.simulate_prompt_answer(t(L10nKey::Cancel));
+    }
+
+    /// Answering the button named Cancel leaves the repository exactly as it
+    /// was. (This answers by label; it does not exercise Return or Escape.)
+    #[gpui::test]
+    fn cancelling_discard_all_changes_nothing(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (_dir, root) = dirty_repository();
+        let (_app, mut vcx) = discard_all_prompt_open(cx, &root);
+
+        vcx.simulate_prompt_answer(t(L10nKey::Cancel));
+        // The answer lands on the next turns of the executor; give a wrong
+        // implementation every chance to run the discard before looking.
+        let _ = pump_until(&mut vcx, 2, |_| false);
+
+        assert!(!vcx.has_pending_prompt());
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        assert!(root.join("new.txt").exists(), "Cancel deleted a file");
+    }
+
+    /// The positive control for the test above: the same fixture and the same
+    /// wait, answered with the action's own button, does run the discard. It
+    /// is what makes the Cancel test's "nothing changed" mean something.
+    #[gpui::test]
+    fn answering_discard_all_with_its_verb_runs_the_guarded_discard(cx: &mut TestAppContext) {
+        use crate::ui::host_ops::HostId;
+
+        let _serial = serial();
+        let (_dir, root) = dirty_repository();
+        let (_app, mut vcx) = discard_all_prompt_open(cx, &root);
+
+        let verb = vcx.update(|_, cx| {
+            let status = crate::terminal::git_data::status_of(cx, HostId::LOCAL, &root)
+                .expect("the status is loaded");
+            discard_copy(&discard_all_ops(&status)).map_or(t(L10nKey::ScmDiscard), |c| c.verb)
+        });
+        vcx.simulate_prompt_answer(verb);
+
+        assert!(
+            pump_until(&mut vcx, 20, |_| {
+                std::fs::read_to_string(root.join("a.txt")).is_ok_and(|s| s == "one\n")
+                    && !root.join("new.txt").exists()
+            }),
+            "the discard never ran: the tracked edit and the untracked file are still there"
+        );
+        // "Staged changes are kept", as the prompt's detail promises: the
+        // staged-only file is neither reverted nor unstaged.
+        assert_eq!(
+            std::fs::read(root.join("s.txt")).unwrap(),
+            b"staged\n",
+            "the staged edit's worktree bytes changed"
+        );
+        assert_eq!(
+            index_bytes(&root, "s.txt"),
+            b"staged\n",
+            "the staged edit left the index"
+        );
     }
 
     #[test]

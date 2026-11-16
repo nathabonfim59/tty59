@@ -842,7 +842,7 @@ impl Tty59App {
                             if saved {
                                 t(L10nKey::Save)
                             } else {
-                                t(L10nKey::SettingsAddHost)
+                                t(L10nKey::SettingsSaveHost)
                             },
                             BtnKind::Primary,
                         )
@@ -852,7 +852,7 @@ impl Tty59App {
                         ),
                     )
                     .child(
-                        kit::button("ssh-form-cancel", t(L10nKey::Cancel), BtnKind::Secondary)
+                        kit::button("ssh-form-cancel", t(L10nKey::Cancel), BtnKind::Link)
                             .on_click(cx.listener(|this, _, _w, cx| this.cancel_ssh_form(cx))),
                     )
                     .child(

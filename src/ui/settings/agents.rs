@@ -151,26 +151,16 @@ impl Tty59App {
         } else {
             t_fmt(L10nKey::SettingsMachineRemoteDesc, &[("name", &current)])
         };
-        let machine_row = h_flex()
-            .min_h(px(52.))
-            .py(px(12.))
-            .gap(px(32.))
-            .items_center()
-            .justify_between()
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .gap(px(2.))
-                    .child(div().text_size(fs(13.)).child(t(L10nKey::SettingsMachine)))
-                    .child(
-                        div()
-                            .text_size(fs(12.))
-                            .line_height(px(17.))
-                            .text_color(tk.sub)
-                            .child(machine_desc),
-                    ),
+        // Which machine is a choice for this window, not a saved setting: the
+        // row has a stable id, a search hit and a highlight, and no Reset.
+        let machine_row = self
+            .settings_row_gated_when(
+                t(L10nKey::SettingsMachine),
+                machine_desc,
+                machine,
+                false,
+                cx,
             )
-            .child(machine)
             .into_any_element();
 
         let total = HookAgent::ALL.len();

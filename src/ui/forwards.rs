@@ -1,7 +1,7 @@
 use gpui::{AnyElement, Context, Div, Entity, FontWeight, Stateful, div, prelude::*, px, rems};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
-use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
 use crate::core::ssh_profile::ForwardRule;
 use crate::daemon::protocol::{ForwardStatus, ManagedForward, SshForwardKind, SshForwardRule};
@@ -13,6 +13,15 @@ use crate::ui::text_elision::{ElidedLabel, Mode};
 
 /// The widest the disconnected strip's reason grows before it wraps.
 const REASON_MAX_W: f32 = 420.;
+
+/// The strip title's tooltip: the whole sentence, bounded by the window.
+fn title_tooltip(
+    text: gpui::SharedString,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> gpui::AnyView {
+    crate::ui::dialog::bounded_text_tooltip(text, "ssh-strip-title-tooltip-text", window, cx)
+}
 
 /// The managed-forward form's five text fields, read out of their inputs.
 ///
@@ -214,7 +223,6 @@ impl Tty59App {
 
         let theme = cx.theme();
         let (danger, foreground, muted) = (theme.danger, theme.foreground, theme.muted_foreground);
-        let theme_popover = theme.popover;
 
         // The chord was spelled "⌘⇧R" here. That is one platform's
         // rendering of one default: off macOS it names a modifier the
@@ -231,16 +239,30 @@ impl Tty59App {
         let chord = chord.map(|chord| chord.debug_selector(|| "ssh-strip-chord".into()));
 
         let bar = crate::ui::notice::pill(danger, cx)
-            .child(
-                div()
+            .child({
+                // The title names the host, and a long host name has no break to
+                // wrap at: it is elided in the middle, which keeps the end of the
+                // name that tells one host from another, and the tooltip is where
+                // the whole sentence is.
+                let full: gpui::SharedString = if host.is_empty() {
+                    t(L10nKey::ForwardDisconnected).to_string()
+                } else {
+                    t_fmt(L10nKey::ForwardDisconnectedFrom, &[("host", &host)])
+                }
+                .into();
+                let tip = full.clone();
+                let title = div()
+                    .id("ssh-strip-title")
+                    .min_w_0()
+                    .max_w_full()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(foreground)
-                    .child(if host.is_empty() {
-                        t(L10nKey::ForwardDisconnected).to_string()
-                    } else {
-                        t_fmt(L10nKey::ForwardDisconnectedFrom, &[("host", &host)])
-                    }),
-            )
+                    .tooltip(move |window, cx| title_tooltip(tip.clone(), window, cx))
+                    .child(ElidedLabel::new("ssh-strip-title-text", full, Mode::Middle));
+                #[cfg(test)]
+                let title = title.debug_selector(|| "ssh-strip-title".into());
+                title
+            })
             .children(reason.map(|reason| {
                 // The reason is whatever ssh said, and it runs long more often
                 // than not — a rejected key's account used to be one truncated
@@ -268,18 +290,22 @@ impl Tty59App {
                 line
             }))
             .children(chord)
-            .child(
+            .child({
                 // The strip's one action, as v4's primary: inverted neutral on
                 // the popover fill the pill floats on. The red is the edge
                 // and the reason; the button does not repeat it.
-                Button::new("ssh-reconnect")
-                    .label(crate::ui::i18n::t(crate::ui::i18n::L10nKey::Reconnect))
-                    .custom(crate::ui::theme::inverted_button(theme_popover, cx))
-                    .small()
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.restart_ssh_session(window, cx)),
-                    ),
-            )
+                let reconnect = crate::ui::dialog::primary_button(
+                    "ssh-reconnect",
+                    crate::ui::i18n::t(crate::ui::i18n::L10nKey::Reconnect),
+                    true,
+                    crate::ui::dialog::popover_rungs(cx),
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.restart_ssh_session(window, cx)));
+                #[cfg(test)]
+                let reconnect = reconnect.debug_selector(|| "ssh-strip-reconnect".into());
+                reconnect
+            })
             .children(profile.map(|id| {
                 // Quiet until pointed at, so Reconnect is the one thing that
                 // leads; the hover is the ghost button's own.
@@ -292,11 +318,13 @@ impl Tty59App {
                         this.open_ssh_profile_in_settings(id, window, cx)
                     }));
                 #[cfg(test)]
-                let mut edit = edit;
+                let mut edit = edit.debug_selector(|| "ssh-strip-edit-host".into());
                 #[cfg(test)]
                 crate::ui::paint_probe::note("ssh.edit-host", &mut edit);
                 edit
             }));
+        #[cfg(test)]
+        let bar = bar.debug_selector(|| "ssh-strip-pill".into());
         // The bar only. `body_area` anchors it, together with whatever else is
         // floating down there — this used to place itself at `bottom_4` and so
         // did the remote input notice, on the same container.
@@ -753,23 +781,25 @@ impl Tty59App {
                                     })),
                             )
                             .child(
-                                Button::new(("ssh-managed-forward-add", pane_id))
-                                    .label(if editing {
+                                // The panel's primary, on the panel's own
+                                // surface: the same library button, id and
+                                // disabled gate, in the shared recipe.
+                                crate::ui::dialog::primary_button(
+                                    ("ssh-managed-forward-add", pane_id),
+                                    if editing {
                                         t(L10nKey::Save)
                                     } else {
                                         t(L10nKey::ForwardAdd)
-                                    })
-                                    // v4's primary: the panel's ink as the
-                                    // fill, its opaque surface as the label.
-                                    .custom(crate::ui::theme::inverted_button(
-                                        gpui::rgb(sf.base).into(),
-                                        cx,
-                                    ))
-                                    .xsmall()
-                                    .disabled(!complete)
-                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                    },
+                                    complete,
+                                    sf,
+                                    cx,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
                                         this.add_managed_forward(pane_id, window, cx)
-                                    })),
+                                    },
+                                )),
                             ),
                     ),
             )
@@ -1780,5 +1810,602 @@ mod layout_tests {
             Some(muted),
             "muted until the button's own hover"
         );
+    }
+
+    // ---- F22: the strip inside the terminal a narrow window leaves ----------
+
+    /// What an ssh failure really says when it runs long: several clauses, no
+    /// natural break near the width of a 440px terminal.
+    const LONG_REASON: &str = "connect to 127.0.0.1:2299 failed: Connection refused (os error 111); the host key was rejected, the agent refused every identity and the jump host closed the channel before authentication finished";
+
+    /// The window of the original finding: 960x600, the left rail 260px wide and
+    /// the right panel 260px wide, which leaves the terminal 440px.
+    fn narrow_scene(
+        cx: &mut TestAppContext,
+        locale: &str,
+        ui_font_size: f32,
+        theme: &crate::ui::presets::Theme,
+        reason: &str,
+    ) -> (Entity<Tty59App>, VisualTestContext) {
+        narrow_scene_host(cx, locale, ui_font_size, theme, reason, "")
+    }
+
+    /// [`narrow_scene`] for a pane that dialled `host`, which the strip's title
+    /// names ("" = the fixture's pane, which names nothing).
+    fn narrow_scene_host(
+        cx: &mut TestAppContext,
+        locale: &str,
+        ui_font_size: f32,
+        theme: &crate::ui::presets::Theme,
+        reason: &str,
+        host: &str,
+    ) -> (Entity<Tty59App>, VisualTestContext) {
+        scene(
+            cx,
+            locale,
+            ui_font_size,
+            theme,
+            reason,
+            host,
+            (960., 600.),
+            Some((260., 260.)),
+        )
+    }
+
+    /// A saved host whose name is as long as real ones get: no break a layout
+    /// can use, longer than the terminal.
+    const LONG_SAVED_HOST: &str = "demo@this-host-name-is-deliberately-long-so-the-failure-reason-wraps-in-a-narrow-terminal.invalid";
+
+    /// [`failed_ssh_app`] for a pane that dialled `host`: the daemon reports the
+    /// remote context the way a real native-ssh pane gets one, which is where
+    /// the strip reads the name it puts in its title.
+    fn failed_ssh_app_host(
+        cx: &mut TestAppContext,
+        profile: Option<uuid::Uuid>,
+        reason: &str,
+        host: &str,
+    ) -> (Entity<Tty59App>, VisualTestContext) {
+        use crate::daemon::protocol::{DaemonMsg, RemoteContext, RemoteKind};
+        let (app, mut vcx, pane, mut daemon) = live_ssh_app(cx, profile);
+        if !host.is_empty() {
+            DaemonMsg::RemoteContext(Some(RemoteContext {
+                kind: RemoteKind::NativeSsh,
+                argv: Vec::new(),
+                target: host.into(),
+            }))
+            .encode(&mut daemon)
+            .unwrap();
+            vcx.run_until_parked();
+        }
+        fail_ssh_pane(&mut vcx, &pane, daemon, reason);
+        (app, vcx)
+    }
+
+    /// The same failed ssh pane in a window of `window` size, with the left rail
+    /// and the right panel asked for `panels` pixels, or the right panel left
+    /// closed. What the panels really get is what the layout makes of the ask
+    /// (the right panel's floor follows the locale and the UI size), so the
+    /// terminal a scene leaves is read back, never assumed.
+    fn scene(
+        cx: &mut TestAppContext,
+        locale: &str,
+        ui_font_size: f32,
+        theme: &crate::ui::presets::Theme,
+        reason: &str,
+        host: &str,
+        window: (f32, f32),
+        panels: Option<(f32, f32)>,
+    ) -> (Entity<Tty59App>, VisualTestContext) {
+        crate::ui::i18n::set_locale(locale);
+        let (app, mut vcx) = failed_ssh_app_host(cx, Some(uuid::Uuid::nil()), reason, host);
+        crate::ui::dialog::test_themes::apply(&mut vcx, theme);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<crate::core::config::Config>().clone();
+            cfg.ui_font_size = ui_font_size;
+            cx.set_global(cfg);
+        });
+        vcx.simulate_resize(gpui::size(px(window.0), px(window.1)));
+        app.update_in(&mut vcx, |app, _, cx| {
+            if let Some((rail, panel)) = panels {
+                app.sidebar_width.set(rail);
+                app.right_panel_width.set(panel);
+            }
+            app.right_panel_visible = panels.is_some();
+            cx.notify();
+        });
+        draw(&mut vcx);
+        // The window's rem is the UI font size: every `rems(..)` in the strip is
+        // measured against it, so a scene that did not take the size would
+        // prove nothing about UI24.
+        let rem = vcx.update(|window, _| window.rem_size().as_f32());
+        assert!(
+            (rem - ui_font_size).abs() < 0.5,
+            "the window drew at rem {rem}, not the UI font size {ui_font_size}"
+        );
+        (app, vcx)
+    }
+
+    fn overlaps(a: gpui::Bounds<gpui::Pixels>, b: gpui::Bounds<gpui::Pixels>) -> bool {
+        let eps = px(0.5);
+        a.left() < b.right() - eps
+            && b.left() < a.right() - eps
+            && a.top() < b.bottom() - eps
+            && b.top() < a.bottom() - eps
+    }
+
+    fn terminal_area(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        app.update_in(vcx, |app, _, _| app.pane_area.get())
+            .expect("the terminal body was painted")
+    }
+
+    fn within(inner: gpui::Bounds<gpui::Pixels>, outer: gpui::Bounds<gpui::Pixels>) -> bool {
+        let eps = px(0.5);
+        inner.left() >= outer.left() - eps
+            && inner.right() <= outer.right() + eps
+            && inner.top() >= outer.top() - eps
+            && inner.bottom() <= outer.bottom() + eps
+    }
+
+    fn both_themes() -> Vec<crate::ui::presets::Theme> {
+        let all = crate::ui::presets::builtins();
+        let dark = all
+            .iter()
+            .find(|t| t.dark)
+            .expect("a dark built-in")
+            .clone();
+        let light = all
+            .iter()
+            .find(|t| !t.dark)
+            .expect("a light built-in")
+            .clone();
+        vec![dark, light]
+    }
+
+    /// How wide each action is when nothing constrains it: the same pane in a
+    /// wide window with no right panel. A narrow terminal may move an action
+    /// to another line; it may not make it narrower than itself.
+    fn natural_actions(
+        cx: &mut TestAppContext,
+        locale: &str,
+        ui: f32,
+        theme: &crate::ui::presets::Theme,
+    ) -> (gpui::Pixels, gpui::Pixels) {
+        let (_app, mut vcx) = scene(cx, locale, ui, theme, "refused", "", (1800., 900.), None);
+        let mut width = |selector: &'static str| {
+            vcx.debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} laid out in the wide window"))
+                .size
+                .width
+        };
+        (width("ssh-strip-reconnect"), width("ssh-strip-edit-host"))
+    }
+
+    /// Everything the strip must hold in whatever terminal it was drawn in:
+    /// every node inside it, the reason readable and wrapped, each action as
+    /// wide as it is when free, the two in reading order, and no two of them
+    /// on top of one another.
+    fn strip_misses(
+        case: &str,
+        vcx: &mut VisualTestContext,
+        area: gpui::Bounds<gpui::Pixels>,
+        natural: (gpui::Pixels, gpui::Pixels),
+        ui: f32,
+    ) -> Vec<String> {
+        let mut misses = Vec::new();
+        let mut get = |selector: &'static str| vcx.debug_bounds(selector);
+        for (what, selector) in [
+            ("pill", "ssh-strip-pill"),
+            ("reason", "ssh-strip-reason"),
+            ("Reconnect", "ssh-strip-reconnect"),
+            ("Edit host", "ssh-strip-edit-host"),
+        ] {
+            match get(selector) {
+                None => misses.push(format!("{case}: {what} was not laid out")),
+                Some(b) if !within(b, area) => {
+                    misses.push(format!("{case}: {what} {b:?} leaves the terminal {area:?}"));
+                }
+                Some(_) => {}
+            }
+        }
+        // The title names the host and a long name is the one thing in the strip
+        // with no break to wrap at: it stays inside the pill, not merely inside
+        // the terminal the pill itself may overhang.
+        if let (Some(pill), Some(title)) = (get("ssh-strip-pill"), get("ssh-strip-title")) {
+            if !within(title, pill) {
+                misses.push(format!(
+                    "{case}: the title {title:?} leaves its pill {pill:?}"
+                ));
+            }
+        }
+        let (Some(reason), Some(reconnect), Some(edit)) = (
+            get("ssh-strip-reason"),
+            get("ssh-strip-reconnect"),
+            get("ssh-strip-edit-host"),
+        ) else {
+            return misses;
+        };
+        if reason.size.width < px(120.) {
+            misses.push(format!(
+                "{case}: the reason is squeezed to {:?}",
+                reason.size.width
+            ));
+        }
+        if reason.size.height < px(ui * 1.5) {
+            misses.push(format!(
+                "{case}: a long reason did not wrap: {:?} high",
+                reason.size.height
+            ));
+        }
+        let slack = px(0.5);
+        if reconnect.size.width + slack < natural.0 {
+            misses.push(format!(
+                "{case}: Reconnect is {:?} wide where it is {:?} free",
+                reconnect.size.width, natural.0
+            ));
+        }
+        if edit.size.width + slack < natural.1 {
+            misses.push(format!(
+                "{case}: Edit host is {:?} wide where it is {:?} free",
+                edit.size.width, natural.1
+            ));
+        }
+        let first = reconnect.top() < edit.top() - slack
+            || ((reconnect.top() - edit.top()).abs() <= slack && reconnect.left() < edit.left());
+        if !first {
+            misses.push(format!(
+                "{case}: Edit host {edit:?} is before Reconnect {reconnect:?}"
+            ));
+        }
+        let mut pairs = vec![
+            ("reason", reason),
+            ("Reconnect", reconnect),
+            ("Edit host", edit),
+        ];
+        if let Some(chord) = get("ssh-strip-chord") {
+            pairs.push(("chord", chord));
+        }
+        for (i, (a, ab)) in pairs.iter().enumerate() {
+            for (b, bb) in &pairs[i + 1..] {
+                if overlaps(*ab, *bb) {
+                    misses.push(format!("{case}: {a} {ab:?} overlaps {b} {bb:?}"));
+                }
+            }
+        }
+        misses
+    }
+
+    /// The scene of the original finding, exactly: en, UI16, dark, 960x600
+    /// with the rail and the right panel at 260px, which must leave a 440px
+    /// terminal. A different terminal here is a failed precondition, not a
+    /// pass or a layout miss.
+    #[gpui::test]
+    fn the_original_440px_scene_keeps_the_strip_and_both_actions_inside(cx: &mut TestAppContext) {
+        let _probe = probe::scope();
+        let theme = both_themes().remove(0);
+        let natural = natural_actions(cx, "en", 16., &theme);
+        let (app, mut vcx) = narrow_scene(cx, "en", 16., &theme, LONG_REASON);
+        let area = terminal_area(&app, &mut vcx);
+        assert!(
+            (area.size.width - px(440.)).abs() < px(1.),
+            "precondition: the scene leaves a {:?} terminal, not 440px",
+            area.size.width
+        );
+        let misses = strip_misses("en UI16 dark 440", &mut vcx, area, natural, 16.);
+        assert!(
+            misses.is_empty(),
+            "{} misses\n{}",
+            misses.len(),
+            misses.join("\n")
+        );
+    }
+
+    /// The same checks in every language, UI size and theme the finding names,
+    /// in the terminal each really leaves. The right panel's minimum follows
+    /// the locale and the font, so 260px is only a request: the terminal each
+    /// scene ends up with is printed, and every node is held to it.
+    #[gpui::test]
+    fn the_strip_stays_inside_the_terminal_in_every_language_size_and_theme(
+        cx: &mut TestAppContext,
+    ) {
+        let _probe = probe::scope();
+        let mut misses = Vec::new();
+        for locale in ["en", "ru-RU"] {
+            for ui in [16., 24.] {
+                for theme in &both_themes() {
+                    let natural = natural_actions(cx, locale, ui, theme);
+                    let (app, mut vcx) = narrow_scene(cx, locale, ui, theme, LONG_REASON);
+                    let area = terminal_area(&app, &mut vcx);
+                    let case = format!("{locale} UI{ui} {} area {:?}", theme.id, area.size.width);
+                    eprintln!("terminal for {case}");
+                    assert!(area.size.width > px(0.), "{case}: no terminal at all");
+                    misses.extend(strip_misses(&case, &mut vcx, area, natural, ui));
+                }
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+        assert!(
+            misses.is_empty(),
+            "{} misses\n{}",
+            misses.len(),
+            misses.join("\n")
+        );
+    }
+
+    /// Reconnect is clickable where it is painted in the narrow terminal: a
+    /// press at the middle of its bounds reaches the pane's respawn, which
+    /// replaces the dead leaf.
+    #[gpui::test]
+    fn reconnect_is_clickable_in_the_narrow_terminal(cx: &mut TestAppContext) {
+        let theme = both_themes().remove(0);
+        let (app, mut vcx) = narrow_scene(cx, "en", 16., &theme, LONG_REASON);
+        let area = terminal_area(&app, &mut vcx);
+        let button = vcx
+            .debug_bounds("ssh-strip-reconnect")
+            .expect("Reconnect was laid out");
+        assert!(within(button, area), "{button:?} leaves {area:?}");
+        let leaf = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, _, _| {
+                app.tabs[0]
+                    .pane
+                    .terminals()
+                    .iter()
+                    .map(|t| t.entity_id())
+                    .collect::<Vec<_>>()
+            })
+        };
+        let before = leaf(&app, &mut vcx);
+        let notified = |vcx: &mut VisualTestContext| {
+            use gpui_component::WindowExt as _;
+            vcx.update(|window, cx| window.notifications(cx).len())
+        };
+        let notices = notified(&mut vcx);
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        vcx.run_until_parked();
+        // The click reached the pane's respawn: it replaced the dead leaf, or,
+        // where the test host cannot start an ssh session, reported that it
+        // could not. Nothing else in the window answers a press on Reconnect.
+        assert!(
+            leaf(&app, &mut vcx) != before || notified(&mut vcx) > notices,
+            "the click neither restarted the pane nor reported that it could not"
+        );
+    }
+
+    /// How wide the title is when nothing constrains it: the pane that dialled
+    /// `host` in a window wider than any title.
+    fn natural_title(
+        cx: &mut TestAppContext,
+        locale: &str,
+        ui: f32,
+        theme: &crate::ui::presets::Theme,
+        host: &str,
+    ) -> gpui::Pixels {
+        let (_app, mut vcx) = scene(cx, locale, ui, theme, "refused", host, (2400., 700.), None);
+        vcx.debug_bounds("ssh-strip-title")
+            .expect("the title is laid out in the wide window")
+            .size
+            .width
+    }
+
+    /// A long saved-host name in the scene of the original finding: the title
+    /// that names it stays inside the pill, and so inside the terminal, with the
+    /// reason and both actions holding every rule of the other scenes. The pane
+    /// really dialled the long host: its title is wider than the terminal when
+    /// nothing constrains it.
+    #[gpui::test]
+    fn a_long_saved_host_name_stays_inside_the_pill_in_the_original_440px_scene(
+        cx: &mut TestAppContext,
+    ) {
+        let _probe = probe::scope();
+        let theme = both_themes().remove(0);
+        let natural = natural_actions(cx, "en", 16., &theme);
+        let free = natural_title(cx, "en", 16., &theme, LONG_SAVED_HOST);
+        let (app, mut vcx) = narrow_scene_host(cx, "en", 16., &theme, LONG_REASON, LONG_SAVED_HOST);
+        let area = terminal_area(&app, &mut vcx);
+        assert!(
+            (area.size.width - px(440.)).abs() < px(1.),
+            "precondition: the scene leaves a {:?} terminal, not 440px",
+            area.size.width
+        );
+        assert!(
+            free > area.size.width,
+            "precondition: the title is {free:?} free, no wider than the terminal, so the host never reached it"
+        );
+        let misses = strip_misses("en UI16 dark 440 long host", &mut vcx, area, natural, 16.);
+        assert!(
+            misses.is_empty(),
+            "{} misses\n{}",
+            misses.len(),
+            misses.join("\n")
+        );
+    }
+
+    /// The same in every language, UI size and theme, in the terminal each
+    /// leaves.
+    #[gpui::test]
+    fn a_long_saved_host_name_stays_inside_the_pill_in_every_language_size_and_theme(
+        cx: &mut TestAppContext,
+    ) {
+        let _probe = probe::scope();
+        let mut misses = Vec::new();
+        for locale in ["en", "ru-RU"] {
+            for ui in [16., 24.] {
+                for theme in &both_themes() {
+                    let natural = natural_actions(cx, locale, ui, theme);
+                    let free = natural_title(cx, locale, ui, theme, LONG_SAVED_HOST);
+                    let (app, mut vcx) =
+                        narrow_scene_host(cx, locale, ui, theme, LONG_REASON, LONG_SAVED_HOST);
+                    let area = terminal_area(&app, &mut vcx);
+                    let case = format!("{locale} UI{ui} {} area {:?}", theme.id, area.size.width);
+                    assert!(
+                        free > area.size.width,
+                        "{case}: the title is {free:?} free, no wider than the terminal"
+                    );
+                    misses.extend(strip_misses(&case, &mut vcx, area, natural, ui));
+                }
+            }
+        }
+        crate::ui::i18n::set_locale("en");
+        assert!(
+            misses.is_empty(),
+            "{} misses\n{}",
+            misses.len(),
+            misses.join("\n")
+        );
+    }
+
+    /// Where the title fits it is left alone: in a wide window the long name is
+    /// shown at the width it has when nothing constrains it, and the pill holds it.
+    #[gpui::test]
+    fn a_wide_window_leaves_a_long_title_whole(cx: &mut TestAppContext) {
+        let _probe = probe::scope();
+        let theme = both_themes().remove(0);
+        let free = natural_title(cx, "en", 16., &theme, LONG_SAVED_HOST);
+        let (app, mut vcx) = scene(
+            cx,
+            "en",
+            16.,
+            &theme,
+            "refused",
+            LONG_SAVED_HOST,
+            (1800., 700.),
+            None,
+        );
+        let area = terminal_area(&app, &mut vcx);
+        let title = vcx.debug_bounds("ssh-strip-title").expect("the title");
+        let pill = vcx.debug_bounds("ssh-strip-pill").expect("the pill");
+        assert!(
+            (title.size.width - free).abs() < px(0.5),
+            "the title is {:?} wide where it is {free:?} free",
+            title.size.width
+        );
+        assert!(within(title, pill), "{title:?} leaves {pill:?}");
+        assert!(within(pill, area), "{pill:?} leaves {area:?}");
+    }
+
+    /// The real tooltip of the title: the mouse moved onto it, the clock past
+    /// the show delay, a frame drawn. Where the tooltip put its content, or
+    /// `None` if it is not there.
+    fn hover_title_tooltip(vcx: &mut VisualTestContext) -> Option<gpui::Bounds<gpui::Pixels>> {
+        // Off every element first, so no tooltip of an earlier hover is up.
+        vcx.simulate_mouse_move(
+            gpui::point(px(2.), px(2.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(700));
+        vcx.run_until_parked();
+        let title = vcx
+            .debug_bounds("ssh-strip-title")
+            .expect("the title is drawn, so it can be hovered");
+        vcx.simulate_mouse_move(title.center(), None, gpui::Modifiers::default());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(700));
+        vcx.run_until_parked();
+        vcx.update(|window, _| window.refresh());
+        vcx.run_until_parked();
+        vcx.debug_bounds("ssh-strip-title-tooltip-text")
+    }
+
+    /// A long host's title is elided in the strip, so its tooltip is where the
+    /// whole name is: it exists, it is no wider than the hover maximum, and
+    /// every edge of it is inside the window, in the widest language at the
+    /// largest UI size as in the plainest.
+    #[gpui::test]
+    fn the_titles_tooltip_is_there_and_inside_the_window(cx: &mut TestAppContext) {
+        let _probe = probe::scope();
+        let theme = both_themes().remove(0);
+        for (locale, ui) in [("en", 16.), ("ru-RU", 24.)] {
+            let (_app, mut vcx) =
+                narrow_scene_host(cx, locale, ui, &theme, LONG_REASON, LONG_SAVED_HOST);
+            let window = vcx.update(|window, _| window.viewport_size());
+            let content = hover_title_tooltip(&mut vcx)
+                .unwrap_or_else(|| panic!("{locale} UI{ui}: the title has no tooltip"));
+            let rem = vcx.update(|window, _| window.rem_size().as_f32());
+            // The selector is on the content. What surrounds it, per side, in
+            // the component's own card: the outer margin (0.75 rem), the
+            // padding (0.625 rem across, 0.25 rem above and below) and the
+            // 1px border. The whole card, margin included, is inside the
+            // window on all four sides.
+            let across = 0.75 * rem + 0.625 * rem + 1.;
+            let above = 0.75 * rem + 0.25 * rem + 1.;
+            let (window_w, window_h) = (f32::from(window.width), f32::from(window.height));
+            assert!(
+                f32::from(content.left()) - across >= -0.5
+                    && f32::from(content.right()) + across <= window_w + 0.5,
+                "{locale} UI{ui}: the card, content {content:?} and {across}px of padding, border \
+                 and margin each side, is not inside the {window_w}px window"
+            );
+            assert!(
+                f32::from(content.top()) - above >= -0.5
+                    && f32::from(content.bottom()) + above <= window_h + 0.5,
+                "{locale} UI{ui}: the card, content {content:?} and {above}px of padding, border \
+                 and margin above and below, is not inside the {window_h}px window"
+            );
+            // The visible card (content with its padding and border, not the
+            // margin) is at most the hover maximum.
+            let card = f32::from(content.size.width) + 2. * (0.625 * rem + 1.);
+            assert!(
+                card <= 420. + 0.5,
+                "{locale} UI{ui}: the visible card is {card}px wide, over the 420px hover maximum"
+            );
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// A 440x300 terminal stand-in that draws what `body_area` draws for
+    /// notices: `notice::anchor` over pills. This tests the shared anchor's
+    /// geometry, not the lease or the remote-status behavior that decides
+    /// which notices exist; the real ssh strip's mount is covered by the app
+    /// scenes above.
+    struct AnchorHost {
+        long: &'static str,
+    }
+
+    impl gpui::Render for AnchorHost {
+        fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let theme = cx.theme();
+            let (danger, warning, foreground) = (theme.danger, theme.warning, theme.foreground);
+            // An ssh-like bar: a long wrapping reason and two actions that
+            // must stay whole, as the strip draws them.
+            let strip = crate::ui::notice::pill(danger, cx)
+                .child(div().min_w_0().child(self.long))
+                .child(div().flex_none().text_color(foreground).child("Reconnect"))
+                .child(div().flex_none().text_color(foreground).child("Edit host"))
+                .debug_selector(|| "stack-strip".into());
+            let notice = crate::ui::notice::pill(warning, cx)
+                .child("Not connected: typing has no effect")
+                .debug_selector(|| "stack-notice".into());
+            div()
+                .relative()
+                .w(px(440.))
+                .h(px(300.))
+                .overflow_hidden()
+                .debug_selector(|| "stack-host".into())
+                .children(crate::ui::notice::anchor(vec![
+                    notice.into_any_element(),
+                    strip.into_any_element(),
+                ]))
+        }
+    }
+
+    /// Two notices share one anchor in a 440px terminal: each inside it, one
+    /// above the other, neither on top of the other.
+    #[gpui::test]
+    fn two_notices_stack_inside_a_440px_terminal(cx: &mut TestAppContext) {
+        let _probe = probe::scope();
+        let (_app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let window = cx.add_window(|_, _| AnchorHost { long: LONG_REASON });
+        let mut host = VisualTestContext::from_window(window.into(), cx);
+        draw(&mut host);
+        let area = host.debug_bounds("stack-host").expect("the host");
+        let strip = host.debug_bounds("stack-strip").expect("the strip pill");
+        let notice = host.debug_bounds("stack-notice").expect("the notice pill");
+        assert!(within(strip, area), "{strip:?} leaves {area:?}");
+        assert!(within(notice, area), "{notice:?} leaves {area:?}");
+        assert!(!overlaps(strip, notice), "{strip:?} overlaps {notice:?}");
     }
 }

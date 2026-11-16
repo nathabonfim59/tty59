@@ -84,6 +84,17 @@ const LIST_RADIUS: f32 = 8.0;
 /// before the tooltip has to carry the rest.
 const OFFLINE_REASON_LINES: usize = 2;
 
+/// The failure band's body size, in rems: 11.5px, a notch above the muted
+/// 11px lines around it, because the failure is what the band is for.
+const ERROR_BAND_BODY_REM: f32 = 11.5 / 16.;
+
+/// What the failure band says about a machine: the dialect restatement, which
+/// already names it, or the machine's name and the plain error. The error
+/// itself is never reworded.
+fn error_band_text(error: &str, label: &str) -> String {
+    remote_connect::dialect_complaint(error, label).unwrap_or_else(|| format!("{label}: {error}"))
+}
+
 /// What sits between the parts of a row's metadata line.
 const META_SEP: &str = "  ·  ";
 
@@ -2809,10 +2820,27 @@ impl Tty59App {
         // The band no longer sits under a machine header, so plain errors
         // carry the machine's name themselves; the dialect restatement
         // already names it.
-        let shown = remote_connect::dialect_complaint(error, &group.label)
-            .unwrap_or_else(|| format!("{}: {error}", group.label));
+        let shown = error_band_text(error, &group.label);
         let replace_action = crate::ui::remote_workspace::mismatch_action_key(error);
         let theme = cx.theme();
+        // The failure is what this band is for, so it reads in the cached
+        // small-text meta ink — held to its 5.5:1 target on the popover fills
+        // where one ink can reach it — not the raw muted role, and the danger
+        // dot says what kind of line it is.
+        let body = div()
+            .min_w_0()
+            .flex_1()
+            .text_size(gpui::rems(ERROR_BAND_BODY_REM))
+            .text_color(gpui::rgb(crate::ui::theme::chrome_ink(cx).unpicked_meta));
+        #[cfg(test)]
+        let mut body = body;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("switcher.band-body", &mut body);
+        let dot = rail_dot(RailDotStyle::Danger, theme).mt(px(6.));
+        #[cfg(test)]
+        let mut dot = dot;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("switcher.band-dot", &mut dot);
         v_flex()
             .gap(px(4.))
             .px(px(12.))
@@ -2820,10 +2848,11 @@ impl Tty59App {
             .border_t_1()
             .border_color(theme.danger.opacity(0.4))
             .child(
-                div()
-                    .text_size(gpui::rems(11. / 16.))
-                    .text_color(theme.muted_foreground)
-                    .child(shown),
+                h_flex()
+                    .items_start()
+                    .gap(px(6.))
+                    .child(dot)
+                    .child(body.child(shown)),
             )
             .child(
                 h_flex()
@@ -2966,7 +2995,11 @@ impl Tty59App {
     /// route cannot be rebuilt (#485).
     fn render_offline_card(&self, group: &Group, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let (fg, muted) = (theme.foreground, theme.muted_foreground);
+        let fg = theme.foreground;
+        // The failure and the endpoint are small text on the popover card:
+        // the cached small-text meta ink, held to its 5.5:1 target where one
+        // ink can reach it, not the raw muted role.
+        let meta = gpui::rgb(crate::ui::theme::chrome_ink(cx).unpicked_meta);
         let Some(choice) = connect_choice(group) else {
             return div().into_any_element();
         };
@@ -2976,11 +3009,16 @@ impl Tty59App {
         // a line of its own, cut in the middle so the port stays visible.
         let (error, endpoint) = offline_card_detail(group);
         let endpoint = gpui::SharedString::from(endpoint);
-        let detail: AnyElement = v_flex()
+        let detail_box = v_flex()
             .gap(px(2.))
             .min_w_0()
             .text_size(muted_text)
-            .text_color(muted)
+            .text_color(meta);
+        #[cfg(test)]
+        let mut detail_box = detail_box;
+        #[cfg(test)]
+        crate::ui::paint_probe::note("switcher.offline-detail", &mut detail_box);
+        let detail: AnyElement = detail_box
             .children(error.map(|error| {
                 let error = gpui::SharedString::from(error);
                 div()
@@ -3035,12 +3073,21 @@ impl Tty59App {
             .child(detail)
             .child(
                 h_flex().pt(px(2.)).child(
-                    Button::new(gpui::SharedString::from(format!(
-                        "switcher-connect-machine:{}",
-                        group.key
-                    )))
-                    .label(t(L10nKey::Connect))
-                    .xsmall()
+                    // The Primary recipe on the library's own button, so the
+                    // card's one answer reads as the answer without the
+                    // accent, and the id, focus and click stay the library's.
+                    crate::ui::dialog::primary_button(
+                        gpui::SharedString::from(format!("switcher-connect-machine:{}", group.key)),
+                        t(L10nKey::Connect),
+                        true,
+                        rungs(cx),
+                        cx,
+                    )
+                    // The button's own test handle, so a click test aims at
+                    // the real control.
+                    .when(cfg!(test), |b| {
+                        b.debug_selector(|| "switcher-connect-machine".into())
+                    })
                     .on_click(cx.listener(move |this, _, _window, cx| {
                         this.connect_to_host(choice.clone(), cx);
                     })),
@@ -6922,6 +6969,327 @@ mod gpui_tests {
                 "a parked machine must not offer a connect that can only fail"
             );
         });
+    }
+
+    /// The card's Connect is drawn with the project's Primary recipe.
+    #[gpui::test]
+    fn the_offline_cards_connect_is_drawn_with_the_primary_recipe(cx: &mut TestAppContext) {
+        let _probe = crate::ui::paint_probe::scope();
+        let (_app, vcx, _target) = disconnected_machine(cx, super::Column::Left);
+        vcx.run_until_parked();
+
+        assert!(
+            !crate::ui::paint_probe::all("dialog.panel_primary").is_empty(),
+            "the card's Connect is not drawn with the Primary recipe"
+        );
+    }
+
+    /// A real click on the card's Connect asks for the connection. The click
+    /// is delivered without pumping the executor: `simulate_click` would run
+    /// the background connect to its end, and this test is about the click,
+    /// not about a machine answering.
+    #[gpui::test]
+    fn clicking_the_offline_cards_connect_asks_for_the_connection(cx: &mut TestAppContext) {
+        use crate::ui::remote_workspace::ConnectFlow;
+        use gpui::{MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput};
+
+        let (app, mut vcx, target) = disconnected_machine(cx, super::Column::Left);
+        vcx.run_until_parked();
+
+        let bounds = vcx
+            .debug_bounds("switcher-connect-machine")
+            .expect("the offline card draws its Connect button");
+        app.update(cx, |app, _| {
+            assert!(app.connect.is_none(), "nothing was asked for yet");
+        });
+
+        let position = bounds.center();
+        let modifiers = Modifiers::none();
+        vcx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position,
+                    pressed_button: None,
+                    modifiers,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position,
+                    modifiers,
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+
+        app.update(cx, |app, _| {
+            let Some(ConnectFlow::Connecting { choice }) = &app.connect else {
+                panic!("clicking Connect did not ask for the connection");
+            };
+            assert_eq!(
+                choice.target, target,
+                "the scoped machine is the one dialled"
+            );
+        });
+    }
+
+    /// Builds a failed machine's error band under a probe and hands the notes
+    /// the test reads to `check`, with the theme's danger and muted inks and
+    /// the popover card's resting text ink.
+    fn with_the_failure_band(
+        cx: &mut TestAppContext,
+        check: impl FnOnce(
+            &[crate::ui::paint_probe::Painted],
+            &[crate::ui::paint_probe::Painted],
+            u32,
+            u32,
+            u32,
+        ),
+    ) {
+        use crate::ui::paint_probe::{all, hsla24};
+        use gpui_component::ActiveTheme as _;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let _probe = crate::ui::paint_probe::scope();
+        let mut group = super::tests::named_group("devbox", vec![]);
+        group.link = super::Link::Failed;
+        group.error = Some("connection refused".into());
+
+        app.update(cx, |app, cx| {
+            let (danger, muted) = {
+                let theme = cx.theme();
+                (hsla24(theme.danger), hsla24(theme.muted_foreground))
+            };
+            let role = crate::ui::theme::chrome_ink(cx).unpicked_meta;
+            let _ = app.render_error_band(&group, "connection refused", cx);
+            check(
+                &all("switcher.band-dot"),
+                &all("switcher.band-body"),
+                danger,
+                muted,
+                role,
+            );
+        });
+    }
+
+    /// The failure band leads with one dot in the danger ink.
+    #[gpui::test]
+    fn the_failure_band_carries_a_danger_dot(cx: &mut TestAppContext) {
+        with_the_failure_band(cx, |dots, _bodies, danger, _muted, _resting| {
+            assert_eq!(dots.len(), 1, "the band carries one failure dot");
+            assert_eq!(dots[0].fill, Some(danger), "and it is the danger ink");
+        });
+    }
+
+    /// The band's body reads in the cached small-text meta role floored on
+    /// the popover fills (`ChromeInk::unpicked_meta`), not the raw muted ink
+    /// it had.
+    #[gpui::test]
+    fn the_failure_band_body_reads_in_the_cached_small_meta_ink(cx: &mut TestAppContext) {
+        with_the_failure_band(cx, |_dots, bodies, _danger, muted, role| {
+            assert_eq!(bodies.len(), 1);
+            assert_eq!(
+                bodies[0].text,
+                Some(role),
+                "the body reads in the cached small-text role"
+            );
+            assert_ne!(bodies[0].text, Some(muted), "not the raw muted ink");
+        });
+    }
+
+    /// A machine that is down, with the failure that took it down: the group
+    /// the offline card is drawn for.
+    fn offline_card_group() -> super::Group {
+        let mut group = super::tests::named_group("build-box-demo", vec![]);
+        group.target = Some(crate::core::session::RemoteTarget::direct(
+            "demo",
+            "build-box",
+            22,
+        ));
+        group.link = super::Link::Offline;
+        group.error = Some("connection refused".into());
+        group
+    }
+
+    /// The offline card's failure and endpoint lines read in the cached
+    /// small-text meta role (`ChromeInk::unpicked_meta`), not the raw muted
+    /// ink they had.
+    #[gpui::test]
+    fn the_offline_cards_detail_reads_in_the_cached_small_meta_ink(cx: &mut TestAppContext) {
+        use gpui_component::ActiveTheme as _;
+
+        let (app, _vcx) = crate::ui::app::test_window::harness(cx);
+        let _probe = crate::ui::paint_probe::scope();
+        let group = offline_card_group();
+        app.update(cx, |app, cx| {
+            let role = crate::ui::theme::chrome_ink(cx).unpicked_meta;
+            let muted = crate::ui::paint_probe::hsla24(cx.theme().muted_foreground);
+            let _ = app.render_offline_card(&group, cx);
+            let notes = crate::ui::paint_probe::all("switcher.offline-detail");
+            assert_eq!(notes.len(), 1, "one detail block on the card");
+            assert_eq!(notes[0].text, Some(role), "the cached small-text role");
+            assert_ne!(notes[0].text, Some(muted), "not the raw muted ink");
+        });
+    }
+
+    /// WCAG 2.x contrast from 8-bit sRGB, worked out here from the channels.
+    fn wcag(ink: u32, fill: u32) -> f32 {
+        let luminance = |rgb: u32| {
+            let lin = |shift: u32| {
+                let c = ((rgb >> shift) & 0xff) as f32 / 255.0;
+                match c <= 0.04045 {
+                    true => c / 12.92,
+                    false => ((c + 0.055) / 1.055).powf(2.4),
+                }
+            };
+            0.2126 * lin(16) + 0.7152 * lin(8) + 0.0722 * lin(0)
+        };
+        let (a, b) = (luminance(ink), luminance(fill));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The band's body, as the real builder paints it, clears 4.5:1 on the
+    /// popover card it sits on in every built-in and every generated theme,
+    /// and the role it reads in holds 5.5:1 on the popover's resting and
+    /// hovered fills.
+    #[gpui::test]
+    fn the_failure_band_body_clears_the_floor_in_every_theme(cx: &mut TestAppContext) {
+        use crate::ui::dialog::test_themes as themes;
+        use crate::ui::paint_probe::{all as probes, hsla24};
+        use gpui_component::ActiveTheme as _;
+
+        let mut corpus = crate::ui::presets::builtins();
+        corpus.extend(crate::ui::presets::generated_theme_grid());
+        assert_eq!(
+            corpus.len(),
+            877,
+            "the corpus is the built-ins and the grid"
+        );
+
+        let (app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let _probe = crate::ui::paint_probe::scope();
+        let mut group = super::tests::named_group("devbox", vec![]);
+        group.link = super::Link::Failed;
+        group.error = Some("connection refused".into());
+        let offline = offline_card_group();
+        let mut misses = Vec::new();
+        let mut unreachable = Vec::new();
+        for theme in &corpus {
+            themes::apply(&mut vcx, theme);
+            crate::ui::paint_probe::clear();
+            let (fill, role, base, hover) = app.update(cx, |app, cx| {
+                let _ = app.render_error_band(&group, "connection refused", cx);
+                let _ = app.render_offline_card(&offline, cx);
+                let rungs = super::rungs(cx);
+                (
+                    hsla24(cx.theme().popover),
+                    crate::ui::theme::chrome_ink(cx).unpicked_meta,
+                    rungs.base,
+                    rungs.hover,
+                )
+            });
+            // The existing B3 small-text contract: 5.5:1 on the popover's
+            // resting and hovered fills wherever one ink can reach it on
+            // both; where none can (a mid-grey popover), the best black or
+            // white endpoint at exactly its ratio. Unreachable cases are
+            // counted and printed, never skipped.
+            let worst = |ink: u32| wcag(ink, base).min(wcag(ink, hover));
+            let best = worst(0xffffff).max(worst(0x000000));
+            if best >= 5.5 {
+                if worst(role) < 5.5 {
+                    misses.push(format!(
+                        "{}: role is {:.2}:1 on its weakest fill ({role:06x}), target 5.5 is reachable ({best:.2})",
+                        theme.id,
+                        worst(role)
+                    ));
+                }
+            } else {
+                unreachable.push(format!("{} (best {best:.2})", theme.id));
+                if !((role == 0xffffff || role == 0x000000) && worst(role) == best) {
+                    misses.push(format!(
+                        "{}: unreachable target, role {role:06x} is {:.2}:1 where the best endpoint reaches {best:.2}",
+                        theme.id,
+                        worst(role)
+                    ));
+                }
+            }
+            // The offline card's failure and endpoint lines, as the real
+            // builder paints them, on the same popover card.
+            match probes("switcher.offline-detail")
+                .last()
+                .and_then(|p| p.text)
+            {
+                None => misses.push(format!("{}: the offline detail was never drawn", theme.id)),
+                Some(ink) => {
+                    let got = wcag(ink, fill);
+                    if got < 4.5 {
+                        misses.push(format!(
+                            "{}: offline detail is {got:.2}:1 ({ink:06x} on {fill:06x})",
+                            theme.id
+                        ));
+                    }
+                }
+            }
+            let Some(ink) = probes("switcher.band-body").last().and_then(|p| p.text) else {
+                misses.push(format!("{}: the band body was never drawn", theme.id));
+                continue;
+            };
+            let got = wcag(ink, fill);
+            if got < 4.5 {
+                misses.push(format!(
+                    "{}: band body is {got:.2}:1 ({ink:06x} on {fill:06x})",
+                    theme.id
+                ));
+            }
+        }
+        println!(
+            "failure band sweep: {} themes, {} with the 5.5 target unreachable: {}",
+            corpus.len(),
+            unreachable.len(),
+            unreachable.join(", ")
+        );
+        assert!(
+            misses.is_empty(),
+            "{} misses over {} themes ({} unreachable 5.5 cases)\n{}",
+            misses.len(),
+            corpus.len(),
+            unreachable.len(),
+            misses.join("\n")
+        );
+    }
+
+    /// The band's body is 11.5px.
+    #[test]
+    fn the_failure_band_body_is_eleven_and_a_half_pixels() {
+        assert_eq!(super::ERROR_BAND_BODY_REM, 11.5 / 16.);
+    }
+
+    /// Whatever the band's looks, the words are the error's own: the machine
+    /// and the error as it came.
+    #[test]
+    fn the_failure_band_text_is_the_machine_and_the_error_as_it_came() {
+        for error in [
+            "connection refused",
+            "ssh: connect to host box port 22: Connection refused",
+        ] {
+            assert_eq!(
+                super::error_band_text(error, "devbox"),
+                format!("devbox: {error}")
+            );
+        }
     }
 
     /// The offline card carries the failure, so the scoped error band must not

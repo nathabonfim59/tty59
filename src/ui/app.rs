@@ -3060,6 +3060,40 @@ impl Tty59App {
         self.set_preset(id, window, cx);
     }
 
+    /// Reset on a theme slot's row. The dirty-draft question comes first, so
+    /// nothing is written until it is answered. In System mode only that
+    /// slot's saved key goes back to its default; the mode, the manual preset
+    /// and the other slot stay as they are, but if it is the slot the OS is
+    /// using right now the visible theme changes with it. For the slot a
+    /// pinned mode hides the same write promises more: the visible theme,
+    /// the mode and the other slot are untouched. For the slot a pinned mode
+    /// shows, the row displays `theme_preset`, so the reset is a pick of the
+    /// default for that slot, as the dropdown's.
+    pub(crate) fn reset_theme_slot(
+        &mut self,
+        dark_slot: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.theme_draft_dirty() {
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.reset_theme_slot(dark_slot, window, cx)
+            });
+            return;
+        }
+        let defaults = Config::default();
+        let default_id = match dark_slot {
+            true => defaults.theme_preset_dark.clone(),
+            false => defaults.theme_preset_light.clone(),
+        };
+        let view = crate::ui::settings::ThemeView::of(cx);
+        if view.0 != crate::ui::settings::ThemeMode::System && view.shows(dark_slot) {
+            self.pick_slot_theme(dark_slot, &default_id, window, cx);
+        } else {
+            self.set_slot_preset(dark_slot, &default_id, window, cx);
+        }
+    }
+
     pub(crate) fn set_theme_legible_palette(
         &mut self,
         on: bool,
@@ -7572,6 +7606,8 @@ impl Tty59App {
             L10nKey::SettingsLegiblePalette => {
                 self.set_theme_legible_palette(defaults.theme_legible_palette, window, cx)
             }
+            L10nKey::SettingsLightThemeLabel => self.reset_theme_slot(false, window, cx),
+            L10nKey::SettingsDarkThemeLabel => self.reset_theme_slot(true, window, cx),
             L10nKey::SettingsOpacity => {
                 self.update_config(cx, |cfg| cfg.window_opacity = None);
                 apply_theme(Some(window), cx);
@@ -9420,6 +9456,7 @@ impl Tty59App {
             .is_none()
             .then(|| self.remote_strip_action(&status, cx))
             .flatten();
+        let popover = crate::ui::dialog::popover_rungs(cx);
         let theme = cx.theme();
         let message = match installing {
             Some(phase) => format!(
@@ -9440,17 +9477,20 @@ impl Tty59App {
                             .text_color(theme.foreground),
                     )
                     .when_some(action, |this, (label, action)| {
-                        use gpui_component::Sizable as _;
-                        use gpui_component::button::ButtonVariants as _;
                         this.child(
-                            gpui_component::button::Button::new("remote-status-action")
-                                .flex_shrink_0()
-                                .label(label)
-                                .primary()
-                                .small()
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            crate::ui::dialog::primary_button(
+                                "remote-status-action",
+                                label,
+                                true,
+                                popover,
+                                cx,
+                            )
+                            .flex_shrink_0()
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
                                     this.run_strip_action(action.clone(), window, cx);
-                                })),
+                                },
+                            )),
                         )
                     }),
             )
@@ -9474,13 +9514,12 @@ impl Tty59App {
     /// size. The window keeps its grid meanwhile and shows the pane's output
     /// laid out for the phone, so it says why, and offers the pane back.
     fn render_lease_notices(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        use gpui_component::Sizable as _;
-        use gpui_component::button::ButtonVariants as _;
         let Some(tab) = self.tabs.get(self.active) else {
             return Vec::new();
         };
         let theme = cx.theme();
-        let (info, foreground, popover) = (theme.info, theme.foreground, theme.popover);
+        let (info, foreground) = (theme.info, theme.foreground);
+        let rungs = crate::ui::dialog::popover_rungs(cx);
         tab.pane
             .terminals()
             .into_iter()
@@ -9499,14 +9538,13 @@ impl Tty59App {
                                 )),
                         )
                         .child(
-                            gpui_component::button::Button::new(gpui::SharedString::from(format!(
-                                "lease-take-back-{id}"
-                            )))
-                            .label(crate::ui::i18n::t(
-                                crate::ui::i18n::L10nKey::RemoteActionTakeBack,
-                            ))
-                            .custom(crate::ui::theme::inverted_button(popover, cx))
-                            .small()
+                            crate::ui::dialog::primary_button(
+                                gpui::SharedString::from(format!("lease-take-back-{id}")),
+                                crate::ui::i18n::t(crate::ui::i18n::L10nKey::RemoteActionTakeBack),
+                                true,
+                                rungs,
+                                cx,
+                            )
                             .on_click(move |_, _, cx| leaf.read(cx).terminal.take_back()),
                         )
                         .into_any_element(),

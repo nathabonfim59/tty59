@@ -67,6 +67,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchShortcuts => "Search actions or keys",
         L10nKey::SettingsHostsDesc => "Recently used hosts. Search to find any saved host.",
         L10nKey::SettingsAddHost => "Add host",
+        L10nKey::SettingsSaveHost => "Save host",
         L10nKey::SettingsNoHostsMatch => "No hosts match “{query}”",
         L10nKey::SettingsHostsFromFiles => "{hosts} from {sources}",
         L10nKey::SettingsMoreHosts => "{count} more hosts",
@@ -1173,6 +1174,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchThemeKeywords => {
             "appearance color colours scheme dark light palette background foreground accent sync system os auto follow"
         }
+        L10nKey::SettingsSearchMachineKeywords => "machine computer local remote connected",
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => "clipboard whitespace copy",
         L10nKey::SettingsSearchVerifyHostKeysKeywords => {
             "ssh security known_hosts fingerprint mitm host key verification"
@@ -1586,6 +1588,24 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ScmDiscardAllConfirm => {
             "Discard all unstaged and untracked changes? Staged changes are kept. \
              This cannot be undone."
+        }
+        L10nKey::ScmDiscardManyConfirm => {
+            "Discard changes to {count} files? This cannot be undone."
+        }
+        L10nKey::ScmDeleteUntrackedConfirm => {
+            "Delete {path}? It is untracked and cannot be restored by Git."
+        }
+        L10nKey::ScmDeleteUntrackedFolderConfirm => {
+            "Delete {path} and everything in it? It is untracked and cannot be restored by Git."
+        }
+        L10nKey::ScmDeleteUntrackedManyConfirm => {
+            "Delete {count} untracked items? They cannot be restored by Git."
+        }
+        L10nKey::ScmDeleteUntracked => "Delete Untracked",
+        L10nKey::ScmDiscardEverythingConfirm => "Discard all unstaged changes?",
+        L10nKey::ScmDiscardEverythingDetail => {
+            "Unstaged edits to tracked files are reverted and untracked files and folders are \
+             deleted. Staged changes are kept. This cannot be undone here."
         }
         L10nKey::ScmAmendConfirm => {
             "Amend the last commit? It will be replaced by a new one, so anyone who already has it has to reconcile."

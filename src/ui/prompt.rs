@@ -143,13 +143,16 @@ impl Focusable for TextPrompt {
 impl Render for TextPrompt {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let muted = theme.muted_foreground;
         // gpui paints the prompt as a root of its own, beside the window's
         // `Root` rather than inside it, so nothing it sets is inherited here:
         // left alone the card is set in gpui's `.SystemUIFont`, not the
         // Interface font the rest of the chrome uses (#920).
         let font_family = theme.font_family.clone();
         let rungs = dialog::popover_rungs(cx);
+        // The detail is small text under the question: the cached small-text
+        // meta ink, held to its 5.5:1 target on the popover's resting and
+        // hovered fills where one ink can reach it, not the raw muted role.
+        let meta = crate::ui::theme::chrome_ink(cx).unpicked_meta;
 
         // Answer 0 goes rightmost, where the native dialogs put it and where
         // `confirm_answers` expects it to land.
@@ -189,11 +192,15 @@ impl Render for TextPrompt {
                     .child(self.message.clone()),
             )
             .children(self.detail.clone().map(|detail| {
-                div()
+                let line = div()
                     .text_size(rems(TAB_TEXT))
                     .line_height(rems(TAB_TEXT * 1.45))
-                    .text_color(muted)
-                    .child(detail)
+                    .text_color(gpui::rgb(meta));
+                #[cfg(test)]
+                let mut line = line;
+                #[cfg(test)]
+                crate::ui::paint_probe::note("prompt.detail", &mut line);
+                line.child(detail)
             }));
 
         // Buttons never shrink, so a row too long for the card — a locale
@@ -364,6 +371,139 @@ mod tests {
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
         assert_eq!(answer.try_recv().ok().flatten(), Some(0));
+    }
+
+    /// WCAG 2.x contrast from 8-bit sRGB, worked out here from the channels
+    /// rather than by the presets' own helper.
+    fn wcag(ink: u32, fill: u32) -> f32 {
+        let luminance = |rgb: u32| {
+            let lin = |shift: u32| {
+                let c = ((rgb >> shift) & 0xff) as f32 / 255.0;
+                match c <= 0.04045 {
+                    true => c / 12.92,
+                    false => ((c + 0.055) / 1.055).powf(2.4),
+                }
+            };
+            0.2126 * lin(16) + 0.7152 * lin(8) + 0.0722 * lin(0)
+        };
+        let (a, b) = (luminance(ink), luminance(fill));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// Mounts the real prompt, with `detail`, in the test window and returns
+    /// the paint the detail line was given, then answers it so the next
+    /// theme starts with no prompt open.
+    fn mounted_detail_paint(
+        vcx: &mut gpui::VisualTestContext,
+    ) -> Option<crate::ui::paint_probe::Painted> {
+        crate::ui::paint_probe::clear();
+        let _answer = vcx.update(|window, cx| {
+            super::install(cx);
+            window.prompt(
+                gpui::PromptLevel::Warning,
+                "Discard all unstaged changes?",
+                Some("Unstaged edits are reverted. Staged changes are kept."),
+                &crate::ui::confirm_answers("Discard", "Cancel"),
+                cx,
+            )
+        });
+        vcx.run_until_parked();
+        let paint = crate::ui::paint_probe::all("prompt.detail").last().copied();
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        paint
+    }
+
+    /// The prompt's detail line reads at the text floor on the card it is
+    /// drawn on, in every built-in and every generated theme. The card's fill
+    /// is the theme's popover colour, which `floating_surface` paints.
+    #[gpui::test]
+    fn the_detail_clears_the_text_floor_on_the_card_in_every_theme(cx: &mut TestAppContext) {
+        use crate::ui::dialog::test_themes as themes;
+        use crate::ui::paint_probe::hsla24;
+        use gpui_component::ActiveTheme as _;
+
+        let mut all = crate::ui::presets::builtins();
+        all.extend(crate::ui::presets::generated_theme_grid());
+        assert_eq!(all.len(), 877, "the corpus is the built-ins and the grid");
+
+        let (_app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let _probe = crate::ui::paint_probe::scope();
+        let mut misses = Vec::new();
+        let mut unreachable = Vec::new();
+        for theme in &all {
+            themes::apply(&mut vcx, theme);
+            let (fill, role, base, hover) = vcx.update(|_, cx| {
+                let rungs = crate::ui::dialog::popover_rungs(cx);
+                (
+                    hsla24(cx.theme().popover),
+                    crate::ui::theme::chrome_ink(cx).unpicked_meta,
+                    rungs.base,
+                    rungs.hover,
+                )
+            });
+            // The small-text role follows the existing B3 contract: 5.5:1 on
+            // the popover's resting and hovered fills wherever one ink can
+            // reach it on both; where none can (a mid-grey popover), the
+            // best black or white endpoint at exactly its ratio. Unreachable
+            // cases are counted and printed, never skipped.
+            let worst = |ink: u32| wcag(ink, base).min(wcag(ink, hover));
+            let best = worst(0xffffff).max(worst(0x000000));
+            if best >= 5.5 {
+                if worst(role) < 5.5 {
+                    misses.push(format!(
+                        "{}: role is {:.2}:1 on its weakest fill ({role:06x}), target 5.5 is reachable ({best:.2})",
+                        theme.id,
+                        worst(role)
+                    ));
+                }
+            } else {
+                unreachable.push(format!("{} (best {best:.2})", theme.id));
+                if !((role == 0xffffff || role == 0x000000) && worst(role) == best) {
+                    misses.push(format!(
+                        "{}: unreachable target, role {role:06x} is {:.2}:1 where the best endpoint reaches {best:.2}",
+                        theme.id,
+                        worst(role)
+                    ));
+                }
+            }
+            let Some(ink) = mounted_detail_paint(&mut vcx).and_then(|p| p.text) else {
+                misses.push(format!("{}: the detail was never drawn", theme.id));
+                continue;
+            };
+            let got = wcag(ink, fill);
+            if got < 4.5 {
+                misses.push(format!(
+                    "{}: detail is {got:.2}:1 ({ink:06x} on {fill:06x})",
+                    theme.id
+                ));
+            }
+        }
+        println!(
+            "prompt detail sweep: {} themes, {} with the 5.5 target unreachable: {}",
+            all.len(),
+            unreachable.len(),
+            unreachable.join(", ")
+        );
+        assert!(
+            misses.is_empty(),
+            "{} misses over {} themes ({} unreachable 5.5 cases)\n{}",
+            misses.len(),
+            all.len(),
+            unreachable.len(),
+            misses.join("\n")
+        );
+    }
+
+    /// The ink is the cached small-text meta role floored on the popover
+    /// fills (`ChromeInk::unpicked_meta`), not an ink derived here.
+    #[gpui::test]
+    fn the_detail_reads_in_the_cached_small_meta_ink(cx: &mut TestAppContext) {
+        let (_app, mut vcx) = crate::ui::app::test_window::harness(cx);
+        let _probe = crate::ui::paint_probe::scope();
+        let role = vcx.update(|_, cx| crate::ui::theme::chrome_ink(cx).unpicked_meta);
+        let ink = mounted_detail_paint(&mut vcx).and_then(|p| p.text);
+        assert_eq!(ink, Some(role));
     }
 
     #[gpui::test]

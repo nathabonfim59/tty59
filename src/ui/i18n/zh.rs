@@ -63,6 +63,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchShortcuts => "搜索操作或按键",
         L10nKey::SettingsHostsDesc => "最近使用的主机。搜索可找到任意已保存的主机。",
         L10nKey::SettingsAddHost => "添加主机",
+        L10nKey::SettingsSaveHost => "保存主机",
         L10nKey::SettingsNoHostsMatch => "没有与“{query}”匹配的主机",
         L10nKey::SettingsHostsFromFiles => "{hosts}，来自 {sources}",
         L10nKey::SettingsMoreHosts => "还有 {count} 台主机",
@@ -1094,6 +1095,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchThemeKeywords => {
             "外观 颜色 主题 配色 深色 浅色 背景 前景 强调色 跟随系统 appearance color scheme dark light palette"
         }
+        L10nKey::SettingsSearchMachineKeywords => {
+            "机器 电脑 本地 远程 已连接 machine computer local remote"
+        }
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => {
             "复制时去除空格 去除末尾空格 剪贴板 空白 trim trailing spaces copy whitespace"
         }
@@ -1481,6 +1485,17 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmOpenChanges => "查看改动",
         L10nKey::ScmDiscardAllConfirm => {
             "放弃所有未暂存的改动和未跟踪的文件？已暂存的改动会保留。此操作无法撤销。"
+        }
+        L10nKey::ScmDiscardManyConfirm => "放弃对 {count} 个文件的更改？此操作无法撤销。",
+        L10nKey::ScmDeleteUntrackedConfirm => "删除 {path}？它未被跟踪，Git 无法恢复。",
+        L10nKey::ScmDeleteUntrackedFolderConfirm => {
+            "删除 {path} 及其中的所有内容？它未被跟踪，Git 无法恢复。"
+        }
+        L10nKey::ScmDeleteUntrackedManyConfirm => "删除 {count} 个未跟踪的项目？Git 无法恢复它们。",
+        L10nKey::ScmDeleteUntracked => "删除未跟踪项",
+        L10nKey::ScmDiscardEverythingConfirm => "放弃所有未暂存的更改？",
+        L10nKey::ScmDiscardEverythingDetail => {
+            "已跟踪文件中未暂存的改动会被还原，未跟踪的文件和文件夹会被删除。已暂存的改动会保留。此处无法撤销此操作。"
         }
         L10nKey::ScmAmendConfirm => {
             "修补上一次提交？它会被一个新提交取代，已经获取旧提交的协作者需要自行同步。"

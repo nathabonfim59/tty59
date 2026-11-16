@@ -67,6 +67,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchShortcuts => "Поиск команд и клавиш",
         L10nKey::SettingsHostsDesc => "Недавние хосты. Поиск находит любой сохранённый хост.",
         L10nKey::SettingsAddHost => "Добавить хост",
+        L10nKey::SettingsSaveHost => "Сохранить хост",
         L10nKey::SettingsNoHostsMatch => "Нет хостов по запросу «{query}»",
         L10nKey::SettingsHostsFromFiles => "{hosts} из {sources}",
         L10nKey::SettingsMoreHosts => "Ещё хостов: {count}",
@@ -1281,6 +1282,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchThemeKeywords => {
             "оформление цвет схема тёмная светлая палитра фон акцент система автоматически appearance color colours scheme dark light palette background foreground accent sync system os auto follow"
         }
+        L10nKey::SettingsSearchMachineKeywords => {
+            "машина компьютер локальная удалённая подключено machine computer local remote"
+        }
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => {
             "буфер обмена пробелы копировать clipboard whitespace copy"
         }
@@ -1704,6 +1708,23 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmOpenChanges => "Открыть изменения",
         L10nKey::ScmDiscardAllConfirm => {
             "Отменить все изменения вне индекса и удалить неотслеживаемые файлы? Изменения в индексе сохранятся. Вернуть их будет нельзя."
+        }
+        L10nKey::ScmDiscardManyConfirm => {
+            "Отменить изменения в файлах: {count}? Вернуть их будет нельзя."
+        }
+        L10nKey::ScmDeleteUntrackedConfirm => {
+            "Удалить {path}? Файл не отслеживается, Git не сможет его восстановить."
+        }
+        L10nKey::ScmDeleteUntrackedFolderConfirm => {
+            "Удалить {path} со всем содержимым? Папка не отслеживается, Git не сможет её восстановить."
+        }
+        L10nKey::ScmDeleteUntrackedManyConfirm => {
+            "Удалить неотслеживаемые элементы: {count}? Git не сможет их восстановить."
+        }
+        L10nKey::ScmDeleteUntracked => "Удалить неотслеживаемое",
+        L10nKey::ScmDiscardEverythingConfirm => "Отменить все изменения вне индекса?",
+        L10nKey::ScmDiscardEverythingDetail => {
+            "Правки отслеживаемых файлов вне индекса будут отменены, а неотслеживаемые файлы и папки удалены. Изменения в индексе сохранятся. Здесь отменить это будет нельзя."
         }
         L10nKey::ScmAmendConfirm => {
             "Изменить последний коммит? Он будет заменён новым. Тем, кто уже получил прежний, придётся согласовать историю."

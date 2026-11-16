@@ -41,6 +41,9 @@ mod shell;
 mod shortcuts;
 mod theme_picker;
 
+#[cfg(test)]
+mod a33_tests;
+
 /// The settings nav, and the page's padding either side of its column.
 const NAV_W: f32 = 220.;
 const PAGE_PAD: f32 = 112.;
@@ -344,7 +347,12 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: Appearance,
-            title: SettingsThemeIntroTitle,
+            title: SettingsLightThemeLabel,
+            keywords: SettingsSearchThemeKeywords,
+        },
+        SearchEntry {
+            section: Appearance,
+            title: SettingsDarkThemeLabel,
             keywords: SettingsSearchThemeKeywords,
         },
         SearchEntry {
@@ -579,6 +587,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
             section: Ssh,
             title: WarnBeforeClosing,
             keywords: SettingsSearchWarnBeforeClosingKeywords,
+        },
+        SearchEntry {
+            section: Agents,
+            title: SettingsMachine,
+            keywords: SettingsSearchMachineKeywords,
         },
         SearchEntry {
             section: Agents,
@@ -942,7 +955,8 @@ impl SearchEntry {
             L10nKey::SettingsBackdrop => "window_backdrop",
             L10nKey::SettingsSyncWithSystem => "theme_follow_system",
             L10nKey::SettingsLegiblePalette => "theme_legible_palette",
-            L10nKey::SettingsThemeIntroTitle => "theme_preset",
+            L10nKey::SettingsLightThemeLabel => "theme_preset_light",
+            L10nKey::SettingsDarkThemeLabel => "theme_preset_dark",
             L10nKey::SettingsAppHttpProxy => "http_proxy",
             L10nKey::SettingsOpenFilesCommand => "link_file_command",
             L10nKey::OpenFilesWith => "link_file_open",
@@ -1047,7 +1061,16 @@ impl SearchEntry {
             3
         }
     }
-    fn modified(&self, cfg: &Config) -> bool {
+    /// `modified` against the live config, reading the theme mode only for the
+    /// rows whose answer depends on it.
+    fn modified_in(&self, cx: &App) -> bool {
+        let view = match self.title {
+            L10nKey::SettingsLightThemeLabel | L10nKey::SettingsDarkThemeLabel => ThemeView::of(cx),
+            _ => ThemeView::default(),
+        };
+        self.modified(cx.global::<Config>(), view)
+    }
+    fn modified(&self, cfg: &Config, view: ThemeView) -> bool {
         let defaults = Config::default();
         match self.title {
             L10nKey::SettingsDimInactivePanes => {
@@ -1157,11 +1180,8 @@ impl SearchEntry {
             L10nKey::SettingsLegiblePalette => {
                 cfg.theme_legible_palette != defaults.theme_legible_palette
             }
-            L10nKey::SettingsThemeIntroTitle => {
-                cfg.theme_preset != defaults.theme_preset
-                    || cfg.theme_preset_light != defaults.theme_preset_light
-                    || cfg.theme_preset_dark != defaults.theme_preset_dark
-            }
+            L10nKey::SettingsLightThemeLabel => view.slot_modified(cfg, false),
+            L10nKey::SettingsDarkThemeLabel => view.slot_modified(cfg, true),
             L10nKey::SettingsAppHttpProxy => cfg.http_proxy != defaults.http_proxy,
             L10nKey::SettingsOpenFilesCommand => {
                 cfg.link_file_command != defaults.link_file_command
@@ -1425,6 +1445,59 @@ pub(crate) enum ThemeMode {
     Light,
     Dark,
     System,
+}
+
+/// How the Appearance page reads the theme config, taken once per render from
+/// the same `theme_mode` the cards use, so a row, the search index, the
+/// modified list and navigation all agree on which slot a pinned mode shows.
+///
+/// System follows the OS and shows each slot's own key. A pinned Light or Dark
+/// shows only its slot, and that row's dropdown reads and writes
+/// `theme_preset`; the other slot is hidden, and its value is its own key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct ThemeView(pub(crate) ThemeMode);
+
+impl Default for ThemeView {
+    fn default() -> Self {
+        Self(ThemeMode::System)
+    }
+}
+
+impl ThemeView {
+    pub(crate) fn of(cx: &App) -> Self {
+        Self(Tty59App::theme_mode(cx))
+    }
+
+    /// Whether the mode shows this slot's row on the plain page.
+    pub(crate) fn shows(self, dark_slot: bool) -> bool {
+        match self.0 {
+            ThemeMode::System => true,
+            ThemeMode::Light => !dark_slot,
+            ThemeMode::Dark => dark_slot,
+        }
+    }
+
+    /// The theme id the slot's row displays: `theme_preset` for the one slot a
+    /// pinned mode shows, the slot's own saved key for every other row.
+    pub(crate) fn value(self, cfg: &Config, dark_slot: bool) -> &str {
+        match (self.0, self.shows(dark_slot)) {
+            (ThemeMode::System, _) | (_, false) => match dark_slot {
+                true => cfg.theme_preset_dark.as_str(),
+                false => cfg.theme_preset_light.as_str(),
+            },
+            (_, true) => cfg.theme_preset.as_str(),
+        }
+    }
+
+    /// The slot's row differs from the default it would be reset to.
+    pub(crate) fn slot_modified(self, cfg: &Config, dark_slot: bool) -> bool {
+        let defaults = Config::default();
+        let default = match dark_slot {
+            true => &defaults.theme_preset_dark,
+            false => &defaults.theme_preset_light,
+        };
+        self.value(cfg, dark_slot) != default.as_str()
+    }
 }
 
 fn ssh_group_key(p: &SshProfile) -> &str {
@@ -3031,7 +3104,7 @@ mod tests {
                 entry.title
             );
             assert!(
-                !entry.modified(&defaults),
+                !entry.modified(&defaults, ThemeView::default()),
                 "default {:?} is modified",
                 entry.title
             );
@@ -3152,7 +3225,7 @@ mod tests {
         cfg.notify_threshold_secs += 1;
         let changed = settings_search_entries()
             .iter()
-            .filter(|e| e.modified(&cfg))
+            .filter(|e| e.modified(&cfg, ThemeView::default()))
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsNotifyThreshold]);
@@ -3186,7 +3259,7 @@ mod tests {
         cfg.auto_hide_titlebar_buttons = true;
         let changed = settings_search_entries()
             .iter()
-            .filter(|e| e.modified(&cfg))
+            .filter(|e| e.modified(&cfg, ThemeView::default()))
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsAutoHideTitlebarButtons]);
@@ -3204,7 +3277,7 @@ mod tests {
         assert!(entry.section == SettingsSection::General);
         assert_eq!(entry.config_key(), "editor_mermaid_colors");
         assert!(!entry.description().is_empty());
-        assert!(!entry.modified(&Config::default()));
+        assert!(!entry.modified(&Config::default(), ThemeView::default()));
         for locale in ["en", "zh-CN", "ja-JP", "ru-RU"] {
             crate::ui::i18n::set_locale(locale);
             let name = t(L10nKey::SettingsEditorMermaidColors);
@@ -3225,7 +3298,7 @@ mod tests {
         });
         let changed = settings_search_entries()
             .iter()
-            .filter(|e| e.modified(&cfg))
+            .filter(|e| e.modified(&cfg, ThemeView::default()))
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(changed, vec![L10nKey::SettingsEditorMermaidColors]);
@@ -3239,7 +3312,7 @@ mod tests {
             .unwrap();
         assert_eq!(entry.config_key(), "tab_group_shortcuts");
         assert!(!entry.description().is_empty());
-        assert!(!entry.modified(&Config::default()));
+        assert!(!entry.modified(&Config::default(), ThemeView::default()));
 
         let activation = settings_search_entries()
             .iter()
@@ -3247,14 +3320,14 @@ mod tests {
             .unwrap();
         assert_eq!(activation.config_key(), "tab_group_activation");
         assert!(!activation.description().is_empty());
-        assert!(!activation.modified(&Config::default()));
+        assert!(!activation.modified(&Config::default(), ThemeView::default()));
 
         let mut cfg = Config::default();
         cfg.tab_group_shortcuts = true;
         cfg.tab_group_activation = TabGroupActivation::First;
         let changed = settings_search_entries()
             .iter()
-            .filter(|e| e.modified(&cfg))
+            .filter(|e| e.modified(&cfg, ThemeView::default()))
             .map(|e| e.title)
             .collect::<Vec<_>>();
         assert_eq!(
@@ -3538,13 +3611,18 @@ mod tests {
             "Blur",
             "blur"
         ));
-        // Keyword hit: the label says "Theme" and nothing more, but the index
-        // says that row answers "palette".
-        assert!(row_matches_query(
-            SettingsSection::Appearance,
-            t(L10nKey::SettingsThemeIntroTitle),
-            "palette"
-        ));
+        // Keyword hit: the label says "Light theme" and nothing more, but the
+        // index says that row answers "palette".
+        for slot in [
+            L10nKey::SettingsLightThemeLabel,
+            L10nKey::SettingsDarkThemeLabel,
+        ] {
+            assert!(row_matches_query(
+                SettingsSection::Appearance,
+                t(slot),
+                "palette"
+            ));
+        }
         // A row on some other page is not a hit just because the query matches
         // an entry elsewhere.
         assert!(!row_matches_query(
