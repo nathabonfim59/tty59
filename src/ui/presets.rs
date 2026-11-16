@@ -380,12 +380,36 @@ pub mod state {
     pub const TEXT_STEP: f32 = 1.4;
 }
 
+/// How much of a surface the Primary button's hover takes over its fill.
+const PRIMARY_HOVER_WASH: f32 = 0.14;
+
+/// The Primary button's label and hover fill on one surface, cached with the
+/// surface by `apply_theme` so a button reads two numbers and derives nothing.
+/// The fill is the theme's foreground and is never touched.
+///
+/// `ink` is the surface itself, as authored, wherever that already clears the
+/// text floor on the fill; only where it does not is it walked toward the
+/// better of white and black until it does. `hover` is the fill with
+/// `PRIMARY_HOVER_WASH` of the surface over it, as authored, wherever that
+/// clears the floor under the final `ink`. Otherwise it is repaired (see
+/// `primary_hover`): first the nearest point on the way back toward the fill
+/// that clears the floor and sits a panel hover's step off the fill, then, where
+/// none does, the nearest such point away from the label; only where neither
+/// exists is it the fill itself, an exception with no visible hover.
+#[derive(Debug, Clone, Copy)]
+pub struct PrimaryInk {
+    pub ink: u32,
+    pub hover: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Surface {
     pub base: u32,
     pub hover: u32,
     pub selected: u32,
     pub pressed: u32,
+    /// The Primary button's label and hover on this surface.
+    pub primary: PrimaryInk,
     /// The top rung. No surface paints it today; the ladder tests hold the
     /// rungs below it apart against it.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -567,6 +591,7 @@ impl Theme {
             base,
             hover,
             selected,
+            primary: primary_ink(base, fg),
             pressed: raise(base, pole, state::PRESSED),
             cursor: raise(base, pole, state::CURSOR),
             text_resting,
@@ -1067,6 +1092,64 @@ impl Theme {
             path: None,
         }
     }
+}
+
+/// The Primary button's cached label and hover on a surface whose fill is
+/// `fill`, the theme's foreground (see [`PrimaryInk`]). The authored hover is
+/// blended by gpui exactly as the button used to paint it and packed the way
+/// every painted colour is, so a hover that already passes is the old paint to
+/// the byte.
+fn primary_ink(base: u32, fill: u32) -> PrimaryInk {
+    let ink = legible_across(&[fill], base, TEXT_FLOOR);
+    let surface: Hsla = gpui::rgb(base).into();
+    let authored = pack(Hsla::from(gpui::rgb(fill)).blend(surface.opacity(PRIMARY_HOVER_WASH)));
+    PrimaryInk {
+        ink,
+        hover: primary_hover(fill, ink, authored),
+    }
+}
+
+/// The Primary's hover fill, given its rest `fill`, its final `ink` and the
+/// `authored` hover (the fill with a wash of the surface over it).
+///
+/// An authored hover that clears the text floor against the label is kept
+/// exactly: it is what the button has always painted. One that does not is
+/// repaired, and a repaired hover has to be seen: a step off the rest fill of at
+/// least a panel row's hover, as well as 4.5:1 with the label.
+///
+/// It is looked for first on the way from the authored hover back to the rest
+/// fill, the nearest point to the authored one, with the correction's headroom
+/// where the interval has room for it and without it where it does not; then
+/// away from the label (toward white or black, whichever has more contrast with
+/// it), the nearest point to the rest fill, which only raises the label's
+/// contrast. Only when neither way has such a point is the hover the rest fill
+/// itself: no visible hover is possible there.
+fn primary_hover(fill: u32, ink: u32, authored: u32) -> u32 {
+    if contrast(ink, authored) >= TEXT_FLOOR {
+        return authored;
+    }
+    let seen = |floor: f32| {
+        move |c: u32| contrast(ink, c) >= floor && contrast(c, fill) >= state::PANEL_HOVER
+    };
+    if let Some(c) = first_on_path(authored, fill, seen(TEXT_CORRECTED))
+        .or_else(|| first_on_path(authored, fill, seen(TEXT_FLOOR)))
+    {
+        return c;
+    }
+    let pole = match contrast(0xffffff, ink) >= contrast(0x000000, ink) {
+        true => 0xffffff,
+        false => 0x000000,
+    };
+    first_on_path(fill, pole, seen(TEXT_FLOOR)).unwrap_or(fill)
+}
+
+/// The first colour on the walk from `from` to `to`, in 256 steps rounded to 8
+/// bits per channel, that `qualifies`. Derived once per theme change with the
+/// rest of the surface, never in a render.
+fn first_on_path(from: u32, to: u32, qualifies: impl Fn(u32) -> bool) -> Option<u32> {
+    (0..=255u32)
+        .map(|k| mix(from, to, k as f32 / 255.))
+        .find(|&c| qualifies(c))
 }
 
 fn bisect_contrast(from: u32, toward: u32, against: u32, target: f32) -> u32 {

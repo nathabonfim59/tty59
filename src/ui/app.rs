@@ -9415,6 +9415,7 @@ impl Tty59App {
             .is_none()
             .then(|| self.remote_strip_action(&status, cx))
             .flatten();
+        let popover = crate::ui::dialog::popover_rungs(cx);
         let theme = cx.theme();
         let message = match installing {
             Some(phase) => format!(
@@ -9435,17 +9436,20 @@ impl Tty59App {
                             .text_color(theme.foreground),
                     )
                     .when_some(action, |this, (label, action)| {
-                        use gpui_component::Sizable as _;
-                        use gpui_component::button::ButtonVariants as _;
                         this.child(
-                            gpui_component::button::Button::new("remote-status-action")
-                                .flex_shrink_0()
-                                .label(label)
-                                .primary()
-                                .small()
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            crate::ui::dialog::primary_button(
+                                "remote-status-action",
+                                label,
+                                true,
+                                popover,
+                                cx,
+                            )
+                            .flex_shrink_0()
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
                                     this.run_strip_action(action.clone(), window, cx);
-                                })),
+                                },
+                            )),
                         )
                     }),
             )
@@ -9469,13 +9473,12 @@ impl Tty59App {
     /// size. The window keeps its grid meanwhile and shows the pane's output
     /// laid out for the phone, so it says why, and offers the pane back.
     fn render_lease_notices(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        use gpui_component::Sizable as _;
-        use gpui_component::button::ButtonVariants as _;
         let Some(tab) = self.tabs.get(self.active) else {
             return Vec::new();
         };
         let theme = cx.theme();
-        let (info, foreground, popover) = (theme.info, theme.foreground, theme.popover);
+        let (info, foreground) = (theme.info, theme.foreground);
+        let rungs = crate::ui::dialog::popover_rungs(cx);
         tab.pane
             .terminals()
             .into_iter()
@@ -9494,14 +9497,13 @@ impl Tty59App {
                                 )),
                         )
                         .child(
-                            gpui_component::button::Button::new(gpui::SharedString::from(format!(
-                                "lease-take-back-{id}"
-                            )))
-                            .label(crate::ui::i18n::t(
-                                crate::ui::i18n::L10nKey::RemoteActionTakeBack,
-                            ))
-                            .custom(crate::ui::theme::inverted_button(popover, cx))
-                            .small()
+                            crate::ui::dialog::primary_button(
+                                gpui::SharedString::from(format!("lease-take-back-{id}")),
+                                crate::ui::i18n::t(crate::ui::i18n::L10nKey::RemoteActionTakeBack),
+                                true,
+                                rungs,
+                                cx,
+                            )
                             .on_click(move |_, _, cx| leaf.read(cx).terminal.take_back()),
                         )
                         .into_any_element(),

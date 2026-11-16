@@ -1103,23 +1103,6 @@ pub(crate) fn tabular_figures() -> gpui::FontFeatures {
     gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".to_string(), 1)]))
 }
 
-/// The v4 primary button: an inverted neutral — body ink as the fill, the
-/// surface it sits on as the label — rather than the accent, which stays with
-/// focus and the things that are on. `surface` is the opaque fill under the
-/// button, so the label reads as cut out of it. Disabled, gpui-component
-/// drops the fill to 15% of itself, the faint well the rest of v4 uses.
-pub(crate) fn inverted_button(
-    surface: Hsla,
-    cx: &App,
-) -> gpui_component::button::ButtonCustomVariant {
-    let ink = cx.theme().foreground;
-    gpui_component::button::ButtonCustomVariant::new(cx)
-        .color(ink)
-        .foreground(surface)
-        .hover(ink.blend(surface.opacity(0.14)))
-        .active(ink.blend(surface.opacity(0.24)))
-}
-
 pub(crate) fn apply_cursor_hide_mode(cx: &mut App) {
     let mode = if cx.global::<Config>().mouse_hide_while_typing {
         gpui::CursorHideMode::OnTypingAndAction
