@@ -131,6 +131,12 @@ src/ui/lsp/tests.rs|.canonicalize()
 # directory, never workspace-path production code.
 src/ui/scm/rows_window_tests.rs|std::fs::
 src/ui/scm/rows_window_tests.rs|Command::new("git")
+
+# This cfg(test) module lives in its own file and creates/removes neutral
+# fixtures in a per-test local temp dir, never a workspace path.
+src/terminal/view/gpui_tests/path_links.rs|std::fs::create_dir_all
+src/terminal/view/gpui_tests/path_links.rs|std::fs::write
+src/terminal/view/gpui_tests/path_links.rs|std::fs::remove_dir_all
 EOF
 )
 
