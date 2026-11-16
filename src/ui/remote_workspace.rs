@@ -2943,20 +2943,40 @@ mod tests {
             .to_string()
     }
 
-    /// A live `Connected` over a socketpair, served by a real control server in
-    /// a thread — what a connect that finally landed hands `finish_connect`.
+    /// The client end of a fixture link, handed to the platform's own
+    /// `RemoteHost` constructor: a socketpair on Unix, a loopback connection on
+    /// Windows (see `test_stream_pair`).
     #[cfg(unix)]
+    fn host_over_test_stream(
+        client: crate::daemon::transport::Stream,
+        connection_key: &str,
+        hello: &tty59_core::daemon::control::ControlHello,
+    ) -> std::io::Result<std::sync::Arc<RemoteHost>> {
+        RemoteHost::over_unix(client, connection_key, hello)
+    }
+
+    #[cfg(windows)]
+    fn host_over_test_stream(
+        client: crate::daemon::transport::Stream,
+        connection_key: &str,
+        hello: &tty59_core::daemon::control::ControlHello,
+    ) -> std::io::Result<std::sync::Arc<RemoteHost>> {
+        RemoteHost::over_tcp(client, connection_key, hello)
+    }
+
+    /// A live `Connected` over a fixture stream, served by a real control server in
+    /// a thread — what a connect that finally landed hands `finish_connect`.
     fn fake_connected(connection_key: &str) -> remote_connect::Connected {
         use tty59_core::daemon::control::ControlHello;
         use tty59_core::host::local::LocalHost;
         use tty59_core::host::server::{Services, serve_with};
 
-        let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (client, server) = crate::terminal::view::test_stream_pair();
         std::thread::spawn(move || {
             let _ = serve_with(server, LocalHost::new(), Services::none());
         });
         let hello = ControlHello::host_rpc("test-token", "test-client");
-        let host = RemoteHost::over_unix(client, connection_key, &hello)
+        let host = host_over_test_stream(client, connection_key, &hello)
             .expect("the fake server answers the hello");
         remote_connect::Connected {
             host,
@@ -2967,14 +2987,13 @@ mod tests {
 
     /// Like `fake_connected`, but the far end announces `instance` in its
     /// hello, so a test can play a server that came back as another process.
-    #[cfg(unix)]
     fn fake_connected_as(connection_key: &str, instance: &str) -> remote_connect::Connected {
         use std::io::Read as _;
         use tty59_core::daemon::control::{
             CONTROL_VERSION, ControlClientMsg, ControlHello, ControlHelloOk, ControlServerMsg,
         };
 
-        let (server, client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (client, server) = crate::terminal::view::test_stream_pair();
         let instance = instance.to_string();
         std::thread::spawn(move || {
             let mut server = server;
@@ -2994,7 +3013,7 @@ mod tests {
             while matches!(server.read(&mut sink), Ok(n) if n > 0) {}
         });
         let hello = ControlHello::host_rpc("test-token", "test-client");
-        let host = RemoteHost::over_unix(client, connection_key, &hello)
+        let host = host_over_test_stream(client, connection_key, &hello)
             .expect("the fake server answers the hello");
         remote_connect::Connected {
             host,
@@ -3005,7 +3024,6 @@ mod tests {
 
     /// The switcher's own connect landing on `target`, the way a click on a
     /// machine ends: `finish_connect` installs the link.
-    #[cfg(unix)]
     fn the_switcher_connects(
         app: &gpui::Entity<crate::ui::app::Tty59App>,
         vcx: &mut gpui::VisualTestContext,
@@ -3032,7 +3050,6 @@ mod tests {
     /// workspace, registered like a real window: a connect that resyncs it runs
     /// inside that window's update lease, which is why the resync is deferred.
     /// The second is a window the registry does not know.
-    #[cfg(unix)]
     fn two_machines_with_an_open_workspace_each(
         cx: &mut gpui::TestAppContext,
     ) -> (
@@ -3078,7 +3095,6 @@ mod tests {
         (app, vcx, machines)
     }
 
-    #[cfg(unix)]
     fn prime_as_informed(cx: &mut gpui::TestAppContext, workspaces: &[WorkspaceId]) {
         cx.update(|cx| {
             for ws in workspaces {
@@ -3096,7 +3112,6 @@ mod tests {
     /// baseline from the install, that reconnect is a "first sighting", the
     /// stale panes are asked back one by one from a server that has never
     /// heard of them, and the workspace stays `Attached` over a frozen screen.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_server_replaced_after_the_switchers_connect_replaces_the_window(
         cx: &mut gpui::TestAppContext,
@@ -3148,7 +3163,6 @@ mod tests {
     /// attempt in between to have recorded the new process. The link it
     /// installs is the evidence, and the windows on that machine are as stale
     /// as after a supervised reconnect.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_switcher_connect_to_a_replaced_server_replaces_the_window(cx: &mut gpui::TestAppContext) {
         let (app, mut vcx, [(restarted, restarted_ws), (steady, steady_ws)]) =
@@ -3176,7 +3190,6 @@ mod tests {
     /// whose connect was refused for the dialect used to die with the attempt,
     /// so the update the refusal button ran had nothing left to finish and the
     /// user had to create the workspace all over again.
-    #[cfg(unix)]
     #[gpui::test]
     fn a_create_refused_for_dialect_runs_once_the_machine_connects(cx: &mut gpui::TestAppContext) {
         use gpui::VisualContext as _;
