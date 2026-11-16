@@ -2313,7 +2313,7 @@ mod tests {
         }
         let mut told_apart = 0;
         for query in &queries {
-            let order = search_result_order(query, false, &cfg);
+            let order = search_result_order(query, false, &cfg, ThemeView::default());
             let keys: Vec<(u8, usize)> = order.iter().map(|e| (e.rank(query), page(e))).collect();
             assert!(
                 keys.windows(2).all(|w| w[0] <= w[1]),
@@ -2366,7 +2366,8 @@ mod tests {
 
         let results = app.read_with(&vcx, |_, cx| {
             let cfg = cx.global::<Config>();
-            search_result_order("e", false, cfg).len() + search_result_actions("e", false).len()
+            search_result_order("e", false, cfg, ThemeView::of(cx)).len()
+                + search_result_actions("e", false).len()
         });
         assert!(
             results > 10,
