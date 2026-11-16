@@ -47,7 +47,11 @@ fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tty59-rows-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(&dir).unwrap()
+    // `canonicalize` answers `\\?\C:\…` on Windows. Git takes the submodule
+    // source path from its command line and reads that prefix as a UNC
+    // hostname ("hostname contains invalid characters"), so the root every
+    // fixture path derives from is handed out in the plain local spelling.
+    tty59_core::core::path_spelling::local_spelling_buf(std::fs::canonicalize(&dir).unwrap())
 }
 
 /// One `git` child, run once; its whole `Output` is kept so a failing setup
