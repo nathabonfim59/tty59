@@ -67,6 +67,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchShortcuts => "Search actions or keys",
         L10nKey::SettingsHostsDesc => "Recently used hosts. Search to find any saved host.",
         L10nKey::SettingsAddHost => "Add host",
+        L10nKey::SettingsSaveHost => "Save host",
         L10nKey::SettingsNoHostsMatch => "No hosts match “{query}”",
         L10nKey::SettingsHostsFromFiles => "{hosts} from {sources}",
         L10nKey::SettingsMoreHosts => "{count} more hosts",
@@ -1173,6 +1174,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsSearchThemeKeywords => {
             "appearance color colours scheme dark light palette background foreground accent sync system os auto follow"
         }
+        L10nKey::SettingsSearchMachineKeywords => "machine computer local remote connected",
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => "clipboard whitespace copy",
         L10nKey::SettingsSearchVerifyHostKeysKeywords => {
             "ssh security known_hosts fingerprint mitm host key verification"

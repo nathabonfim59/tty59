@@ -134,6 +134,7 @@ impl Tty59App {
             label,
             leading,
             open,
+            false,
             &tk,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -244,6 +245,7 @@ impl Tty59App {
             label,
             None,
             open,
+            false,
             &tk,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -448,7 +450,7 @@ impl Tty59App {
         let entry = settings_search_entries()
             .iter()
             .find(|entry| t(entry.title) == label);
-        let modified = entry.is_some_and(|entry| entry.modified(cx.global::<Config>()));
+        let modified = entry.is_some_and(|entry| entry.modified_in(cx));
         let capture = self
             .active_settings()
             .is_some_and(|s| s.search_rows.borrow().is_some());
@@ -482,10 +484,11 @@ impl Tty59App {
         // The reset sits on the label's own line, beside the name it resets,
         // so a changed row keeps the height of an unchanged one. Rows the
         // catalog cannot reset in place still say they differ.
-        let resettable = entry.filter(|e| {
-            e.title != L10nKey::SettingsSearchKeybindingsTitle
-                && e.title != L10nKey::SettingsThemeIntroTitle
-        });
+        let resettable = entry.filter(|e| e.title != L10nKey::SettingsSearchKeybindingsTitle);
+        #[cfg(test)]
+        let reset_debug_id = format!("{element_id}-reset");
+        #[cfg(test)]
+        let tag_debug_id = format!("{element_id}-modified-tag");
         let title_line = h_flex()
             .gap(px(8.))
             .items_center()
@@ -509,6 +512,11 @@ impl Tty59App {
                         }));
                     #[cfg(test)]
                     let reset = kit::probe("settings.reset", reset);
+                    #[cfg(test)]
+                    let reset = reset.debug_selector({
+                        let id = reset_debug_id.clone();
+                        move || id.clone()
+                    });
                     line.child(reset)
                 }
                 None => {
@@ -519,6 +527,11 @@ impl Tty59App {
                         .child(t(L10nKey::SettingsModified));
                     #[cfg(test)]
                     let tag = kit::probe("settings.modified-tag", tag);
+                    #[cfg(test)]
+                    let tag = tag.debug_selector({
+                        let id = tag_debug_id.clone();
+                        move || id.clone()
+                    });
                     line.child(tag)
                 }
             });
@@ -1168,10 +1181,11 @@ impl Tty59App {
         let search = s.search.clone();
         let modified_only = s.modified_only;
         let cfg = cx.global::<Config>();
+        let view = ThemeView::of(cx);
         let modified_in = |target: SettingsSection| {
             settings_search_entries()
                 .iter()
-                .filter(|e| e.section == target && e.modified(cfg))
+                .filter(|e| e.section == target && e.modified(cfg, view))
                 .count()
         };
         let counts: Vec<(SettingsSection, usize)> = SettingsSection::ALL
@@ -1367,7 +1381,12 @@ impl Tty59App {
             return;
         };
         let query = s.search.read(cx).value().trim().to_lowercase();
-        let entries = search_result_order(&query, s.modified_only, cx.global::<Config>());
+        let entries = search_result_order(
+            &query,
+            s.modified_only,
+            cx.global::<Config>(),
+            ThemeView::of(cx),
+        );
         let actions = search_result_actions(&query, s.modified_only);
         let count = entries.len() + actions.len();
         if count > 0 {
@@ -1437,6 +1456,7 @@ impl Tty59App {
         let query = state.search.read(cx).value().trim().to_lowercase();
         let modified_only = state.modified_only;
         let selection = state.search_selection;
+        let view = ThemeView::of(cx);
         *state.search_rows.borrow_mut() = Some(Vec::new());
         // Build each page that has a match once, and keep only the matching
         // rows. Discarded page chrome never enters the element tree, so the
@@ -1445,7 +1465,7 @@ impl Tty59App {
             if !settings_search_entries().iter().any(|entry| {
                 entry.section == section
                     && entry_matches(entry, &query)
-                    && (!modified_only || entry.modified(cx.global::<Config>()))
+                    && (!modified_only || entry.modified(cx.global::<Config>(), view))
             }) {
                 continue;
             }
@@ -1469,7 +1489,11 @@ impl Tty59App {
                     self.render_settings_mobile(cx);
                 }
                 SettingsSection::Agents => {
-                    self.render_command_line_rows(cx);
+                    // The whole page, so the Machine row is built by the same
+                    // helper the page uses and captured as itself. The agent
+                    // rows are not settings rows and are discarded with the
+                    // rest of the page's chrome.
+                    self.render_settings_agents(cx);
                 }
                 SettingsSection::About => {
                     self.render_settings_about(cx);
@@ -1484,7 +1508,7 @@ impl Tty59App {
             .borrow_mut()
             .take()
             .unwrap_or_default();
-        let matches = search_result_order(&query, modified_only, cx.global::<Config>());
+        let matches = search_result_order(&query, modified_only, cx.global::<Config>(), view);
         let actions = search_result_actions(&query, modified_only);
 
         let mut groups: Vec<AnyElement> = Vec::new();
@@ -1708,10 +1732,13 @@ pub(crate) fn search_result_order<'a>(
     query: &str,
     modified_only: bool,
     cfg: &Config,
+    view: ThemeView,
 ) -> Vec<&'a SearchEntry> {
     let mut matches: Vec<&SearchEntry> = settings_search_entries()
         .iter()
-        .filter(|entry| entry_matches(entry, query) && (!modified_only || entry.modified(cfg)))
+        .filter(|entry| {
+            entry_matches(entry, query) && (!modified_only || entry.modified(cfg, view))
+        })
         .collect();
     matches.sort_by_key(|entry| {
         (

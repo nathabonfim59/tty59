@@ -33,6 +33,7 @@ pub(crate) struct Painted {
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     static PAINTED: RefCell<HashMap<&'static str, Vec<Painted>>> = RefCell::new(HashMap::new());
+    static LABELS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 pub(crate) fn hsla24(color: gpui::Hsla) -> u32 {
@@ -72,6 +73,20 @@ pub(crate) fn note<E: gpui::Styled>(key: &'static str, element: &mut E) {
     PAINTED.with(|p| p.borrow_mut().entry(key).or_default().push(painted));
 }
 
+/// Records the visible label a settings button was built with, by its id, so a
+/// test reads the text the production code chose instead of repeating its
+/// choice.
+pub(crate) fn note_label(id: &str, label: &str) {
+    if ENABLED.get() {
+        LABELS.with(|l| l.borrow_mut().insert(id.to_string(), label.to_string()));
+    }
+}
+
+/// The label the button `id` was last built with this frame.
+pub(crate) fn label(id: &str) -> Option<String> {
+    LABELS.with(|l| l.borrow().get(id).cloned())
+}
+
 /// Every note recorded for `key`, in the order the elements were built.
 pub(crate) fn all(key: &'static str) -> Vec<Painted> {
     PAINTED.with(|p| p.borrow().get(key).cloned().unwrap_or_default())
@@ -80,6 +95,7 @@ pub(crate) fn all(key: &'static str) -> Vec<Painted> {
 /// Drops all notes; call between draws so a frame's notes stand alone.
 pub(crate) fn clear() {
     PAINTED.with(|p| p.borrow_mut().clear());
+    LABELS.with(|l| l.borrow_mut().clear());
 }
 
 /// Turns capture on for the current thread and drops stale notes; the

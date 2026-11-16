@@ -32,7 +32,7 @@ impl Swatch {
 }
 
 impl Tty59App {
-    fn theme_mode(cx: &App) -> ThemeMode {
+    pub(crate) fn theme_mode(cx: &App) -> ThemeMode {
         let cfg = cx.global::<Config>();
         if cfg.theme_follow_system {
             ThemeMode::System
@@ -46,6 +46,7 @@ impl Tty59App {
     pub(crate) fn render_theme_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let tk = Tk::of(cx);
         let mode = Self::theme_mode(cx);
+        let view = ThemeView(mode);
         let cfg = cx.global::<Config>();
         let (light_id, dark_id) = (
             cfg.theme_preset_light.clone(),
@@ -142,44 +143,36 @@ impl Tty59App {
             )
             .into_any_element(),
         ];
-        let slots: Vec<bool> = match mode {
-            ThemeMode::System => vec![false, true],
-            ThemeMode::Light => vec![false],
-            ThemeMode::Dark => vec![true],
-        };
-        for dark_slot in slots {
-            let desc = match (mode, dark_slot) {
-                (ThemeMode::System, false) => t(L10nKey::SettingsThemeSlotLightDesc),
-                (ThemeMode::System, true) => t(L10nKey::SettingsThemeSlotDarkDesc),
-                _ => t(L10nKey::SettingsThemeSlotDesc),
+        // A pinned mode draws only its own slot. The other one is drawn when a
+        // search or a jump needs the row itself (to Reset it, to land on it),
+        // dimmed and with its dropdown disabled: it is not the theme in use.
+        let (capturing, focused) = self.active_settings().map_or((false, None), |s| {
+            (s.search_rows.borrow().is_some(), s.focused_setting)
+        });
+        for dark_slot in [false, true] {
+            let (label, key) = match dark_slot {
+                true => (
+                    t(L10nKey::SettingsDarkThemeLabel),
+                    L10nKey::SettingsDarkThemeLabel,
+                ),
+                false => (
+                    t(L10nKey::SettingsLightThemeLabel),
+                    L10nKey::SettingsLightThemeLabel,
+                ),
             };
-            let label = if dark_slot {
-                t(L10nKey::SettingsDarkThemeLabel)
-            } else {
-                t(L10nKey::SettingsLightThemeLabel)
+            let shown = view.shows(dark_slot);
+            if !shown && !capturing && focused != Some(key) {
+                continue;
+            }
+            // A slot that is not the one in use says when it is.
+            let desc = match (shown && mode != ThemeMode::System, dark_slot) {
+                (true, _) => t(L10nKey::SettingsThemeSlotDesc),
+                (false, false) => t(L10nKey::SettingsThemeSlotLightDesc),
+                (false, true) => t(L10nKey::SettingsThemeSlotDarkDesc),
             };
-            let control = self.theme_slot_dropdown(dark_slot, cx);
+            let control = self.theme_slot_dropdown(dark_slot, view, shown, cx);
             rows.push(
-                h_flex()
-                    .min_h(px(52.))
-                    .py(px(12.))
-                    .gap(px(32.))
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        v_flex()
-                            .min_w_0()
-                            .gap(px(2.))
-                            .child(div().text_size(fs(13.)).child(label))
-                            .child(
-                                div()
-                                    .text_size(fs(12.))
-                                    .line_height(px(17.))
-                                    .text_color(tk.sub)
-                                    .child(desc),
-                            ),
-                    )
-                    .child(control)
+                self.settings_row_gated_when(label, desc, control, !shown, cx)
                     .into_any_element(),
             );
         }
@@ -201,14 +194,19 @@ impl Tty59App {
         self.settings_group(Some(t(L10nKey::SettingsThemeIntroTitle)), None, rows, cx)
     }
 
-    fn theme_slot_dropdown(&self, dark_slot: bool, cx: &mut Context<Self>) -> AnyElement {
+    /// One slot's dropdown. It shows the slot's own value (`theme_preset` only
+    /// for the slot a pinned mode uses). Not `enabled`, it is the disabled
+    /// control of a slot the mode does not use: no click handler, no popover,
+    /// even if the menu state still names it.
+    fn theme_slot_dropdown(
+        &self,
+        dark_slot: bool,
+        view: ThemeView,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tk = Tk::of(cx);
-        let cfg = cx.global::<Config>();
-        let current_id = match (cfg.theme_follow_system, dark_slot) {
-            (false, _) => cfg.theme_preset.clone(),
-            (true, true) => cfg.theme_preset_dark.clone(),
-            (true, false) => cfg.theme_preset_light.clone(),
-        };
+        let current_id = view.value(cx.global::<Config>(), dark_slot).to_string();
         let current = presets::by_id(cx, &current_id);
         let id: SharedString = if dark_slot {
             "theme-slot-dark"
@@ -216,7 +214,7 @@ impl Tty59App {
             "theme-slot-light"
         }
         .into();
-        let open = self.settings_menu_open(&id);
+        let open = enabled && self.settings_menu_open(&id);
 
         let mut themes: Vec<presets::Theme> = presets::all(cx)
             .into_iter()
@@ -244,11 +242,14 @@ impl Tty59App {
             current.name.clone(),
             Some(leading),
             open,
+            !enabled,
             &tk,
         )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.toggle_settings_menu(toggle.clone(), start, true, window, cx)
-        }));
+        .when(enabled, |trigger| {
+            trigger.on_click(cx.listener(move |this, _, window, cx| {
+                this.toggle_settings_menu(toggle.clone(), start, true, window, cx)
+            }))
+        });
 
         let popover = open.then(|| self.theme_popover(&id, dark_slot, &current_id, themes, cx));
         div()

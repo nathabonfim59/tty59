@@ -63,6 +63,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchShortcuts => "搜索操作或按键",
         L10nKey::SettingsHostsDesc => "最近使用的主机。搜索可找到任意已保存的主机。",
         L10nKey::SettingsAddHost => "添加主机",
+        L10nKey::SettingsSaveHost => "保存主机",
         L10nKey::SettingsNoHostsMatch => "没有与“{query}”匹配的主机",
         L10nKey::SettingsHostsFromFiles => "{hosts}，来自 {sources}",
         L10nKey::SettingsMoreHosts => "还有 {count} 台主机",
@@ -1093,6 +1094,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchThemeKeywords => {
             "外观 颜色 主题 配色 深色 浅色 背景 前景 强调色 跟随系统 appearance color scheme dark light palette"
+        }
+        L10nKey::SettingsSearchMachineKeywords => {
+            "机器 电脑 本地 远程 已连接 machine computer local remote"
         }
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => {
             "复制时去除空格 去除末尾空格 剪贴板 空白 trim trailing spaces copy whitespace"

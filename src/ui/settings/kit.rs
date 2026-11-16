@@ -405,6 +405,8 @@ impl RenderOnce for Btn {
         // `Switch`; a production button builds the element it did before.
         #[cfg(test)]
         let debug_selector = self.id.to_string();
+        #[cfg(test)]
+        crate::ui::paint_probe::note_label(&self.id.to_string(), &self.label);
         let base = h_flex()
             .id(self.id)
             .flex_shrink_0()
@@ -673,14 +675,23 @@ pub(crate) const CONTROL_W: f32 = 180.;
 
 /// The trigger of a dropdown: a raised button with the current value, an
 /// optional mark before it, and a chevron, [`CONTROL_W`] wide.
+///
+/// `disabled` is the settings kit's disabled look (the switch's and button's:
+/// faded, no hover lift, no pointer). The caller owns the behavior and must
+/// not attach a click handler to a disabled trigger.
 pub(crate) fn select_trigger(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
     leading: Option<AnyElement>,
     open: bool,
+    disabled: bool,
     tk: &Tk,
 ) -> Stateful<Div> {
-    h_flex()
+    #[cfg(test)]
+    let id: ElementId = id.into();
+    #[cfg(test)]
+    let debug_selector = id.to_string();
+    let trigger = h_flex()
         .id(id)
         .h(px(26.))
         .w(px(CONTROL_W))
@@ -690,16 +701,22 @@ pub(crate) fn select_trigger(
         .gap(px(8.))
         .items_center()
         .rounded(px(6.))
-        .bg(if open { tk.k05 } else { tk.btn })
+        .bg(if open && !disabled { tk.k05 } else { tk.btn })
         .shadow(tk.raised())
-        .hover(move |s| s.shadow(tk.raised_hover()))
-        .cursor_pointer()
+        .when(!disabled, |d| {
+            d.hover(move |s| s.shadow(tk.raised_hover()))
+                .cursor_pointer()
+        })
+        .when(disabled, |d| d.opacity(0.45).cursor_default())
         .text_size(fs(12.5))
         .text_color(tk.fg)
         .whitespace_nowrap()
         .children(leading)
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
-        .child(chevron_down(tk))
+        .child(chevron_down(tk));
+    #[cfg(test)]
+    let trigger = trigger.debug_selector(move || debug_selector.clone());
+    trigger
 }
 
 pub(crate) fn chevron_down(tk: &Tk) -> Icon {

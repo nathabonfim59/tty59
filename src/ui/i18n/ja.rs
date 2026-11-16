@@ -69,6 +69,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
             "最近使ったホスト。検索すると保存済みのすべてのホストを探せます。"
         }
         L10nKey::SettingsAddHost => "ホストを追加",
+        L10nKey::SettingsSaveHost => "ホストを保存",
         L10nKey::SettingsNoHostsMatch => "「{query}」に一致するホストはありません",
         L10nKey::SettingsHostsFromFiles => "{sources}から {hosts}",
         L10nKey::SettingsMoreHosts => "ほかに {count} 台のホスト",
@@ -1233,6 +1234,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchThemeKeywords => {
             "外観 色 配色 ダーク ライト パレット 背景 前景 アクセント 同期 システム os 自動 theme appearance color scheme palette background foreground accent sync auto"
+        }
+        L10nKey::SettingsSearchMachineKeywords => {
+            "マシン コンピュータ ローカル リモート 接続中 machine computer local remote"
         }
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => {
             "クリップボード 空白 コピー trim trailing spaces copy whitespace clipboard"

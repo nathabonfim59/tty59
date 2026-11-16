@@ -67,6 +67,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchShortcuts => "Поиск команд и клавиш",
         L10nKey::SettingsHostsDesc => "Недавние хосты. Поиск находит любой сохранённый хост.",
         L10nKey::SettingsAddHost => "Добавить хост",
+        L10nKey::SettingsSaveHost => "Сохранить хост",
         L10nKey::SettingsNoHostsMatch => "Нет хостов по запросу «{query}»",
         L10nKey::SettingsHostsFromFiles => "{hosts} из {sources}",
         L10nKey::SettingsMoreHosts => "Ещё хостов: {count}",
@@ -1280,6 +1281,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         }
         L10nKey::SettingsSearchThemeKeywords => {
             "оформление цвет схема тёмная светлая палитра фон акцент система автоматически appearance color colours scheme dark light palette background foreground accent sync system os auto follow"
+        }
+        L10nKey::SettingsSearchMachineKeywords => {
+            "машина компьютер локальная удалённая подключено machine computer local remote"
         }
         L10nKey::SettingsSearchTrimTrailingSpacesKeywords => {
             "буфер обмена пробелы копировать clipboard whitespace copy"

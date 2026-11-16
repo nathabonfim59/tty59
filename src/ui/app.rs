@@ -3060,6 +3060,40 @@ impl Tty59App {
         self.set_preset(id, window, cx);
     }
 
+    /// Reset on a theme slot's row. The dirty-draft question comes first, so
+    /// nothing is written until it is answered. In System mode only that
+    /// slot's saved key goes back to its default; the mode, the manual preset
+    /// and the other slot stay as they are, but if it is the slot the OS is
+    /// using right now the visible theme changes with it. For the slot a
+    /// pinned mode hides the same write promises more: the visible theme,
+    /// the mode and the other slot are untouched. For the slot a pinned mode
+    /// shows, the row displays `theme_preset`, so the reset is a pick of the
+    /// default for that slot, as the dropdown's.
+    pub(crate) fn reset_theme_slot(
+        &mut self,
+        dark_slot: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.theme_draft_dirty() {
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.reset_theme_slot(dark_slot, window, cx)
+            });
+            return;
+        }
+        let defaults = Config::default();
+        let default_id = match dark_slot {
+            true => defaults.theme_preset_dark.clone(),
+            false => defaults.theme_preset_light.clone(),
+        };
+        let view = crate::ui::settings::ThemeView::of(cx);
+        if view.0 != crate::ui::settings::ThemeMode::System && view.shows(dark_slot) {
+            self.pick_slot_theme(dark_slot, &default_id, window, cx);
+        } else {
+            self.set_slot_preset(dark_slot, &default_id, window, cx);
+        }
+    }
+
     pub(crate) fn set_theme_legible_palette(
         &mut self,
         on: bool,
@@ -7565,6 +7599,8 @@ impl Tty59App {
             L10nKey::SettingsLegiblePalette => {
                 self.set_theme_legible_palette(defaults.theme_legible_palette, window, cx)
             }
+            L10nKey::SettingsLightThemeLabel => self.reset_theme_slot(false, window, cx),
+            L10nKey::SettingsDarkThemeLabel => self.reset_theme_slot(true, window, cx),
             L10nKey::SettingsOpacity => {
                 self.update_config(cx, |cfg| cfg.window_opacity = None);
                 apply_theme(Some(window), cx);
