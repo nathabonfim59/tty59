@@ -4821,6 +4821,8 @@ mod gpui_tests {
     /// Retry that succeeds clears both and puts the value on disk.
     #[gpui::test]
     fn a_failed_write_stays_until_a_real_write_lands(cx: &mut TestAppContext) {
+        // Other test Apps share this file; keep their saves outside our transaction.
+        let _config_writes = crate::core::config::lock_test_config_writes();
         let (app, mut vcx) = harness(cx);
         assert!(
             vcx.debug_bounds("settings-save-banner").is_none(),

@@ -29,12 +29,21 @@ impl Config {
     #[cfg(test)]
     pub fn try_save(&self) -> std::io::Result<()> {
         assert_scratch_config_dir("Config::try_save");
-        // GUI tests have separate App globals but share the process's scratch
-        // directory. Serialize their writes just as a real UI event loop does.
-        static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = WRITE_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = lock_test_config_writes();
         self.0.try_save()
     }
+}
+
+#[cfg(test)]
+static TEST_CONFIG_WRITE_LOCK: parking_lot::ReentrantMutex<()> =
+    parking_lot::ReentrantMutex::new(());
+
+/// Keep another test's App from saving over a write before its disk assertion.
+/// The owning test's synchronous UI saves re-enter on the same thread. Do not
+/// wait for a writer on another thread while holding this guard.
+#[cfg(test)]
+pub(crate) fn lock_test_config_writes() -> parking_lot::ReentrantMutexGuard<'static, ()> {
+    TEST_CONFIG_WRITE_LOCK.lock()
 }
 
 #[cfg(test)]
