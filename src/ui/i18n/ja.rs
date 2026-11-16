@@ -3,6 +3,7 @@ use super::L10nKey;
 pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
     Some(match key {
         L10nKey::VisionToggle => "エージェント作業ビュー",
+        L10nKey::VisionTogglePalette => "エージェント: 受信トレイ / カンバンを切り替え",
         L10nKey::VisionAgents => "エージェント",
         L10nKey::VisionWorkbench => "ワークベンチ",
         L10nKey::VisionInbox => "受信トレイ",

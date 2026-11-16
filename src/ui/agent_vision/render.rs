@@ -105,6 +105,9 @@ impl State {
     }
 }
 
+/// The pill's group, so its count can follow the pill's pressed state.
+const PILL_GROUP: &str = "agent-mode-pill";
+
 impl Tty59App {
     /// The Agents pill. `count` is what the strip already counted this frame,
     /// so the number it says and the width the strip budgeted for it are one
@@ -115,24 +118,69 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.agent_mode_active();
-        let label = SharedString::from(if active {
-            t(L10nKey::VisionWorkbench).to_string()
+        // The count is data beside the word, only above zero, and only while the
+        // pill says Agents: Workbench is the mode, not a tally.
+        let shown = (!active && count > 0).then_some(count);
+        let word = SharedString::from(t(if active {
+            L10nKey::VisionWorkbench
         } else {
-            format!("{} ({count})", t(L10nKey::VisionAgents))
+            L10nKey::VisionAgents
+        }));
+        let accessible = match shown {
+            Some(count) => SharedString::from(format!("{word} {count}")),
+            None => word.clone(),
+        };
+        // The word and the count are our own children, not the button's, so
+        // their size, weight and figures are the ones `StripMetrics` measured
+        // rather than whatever the button gives its text.
+        let run = || {
+            div()
+                .flex_none()
+                .line_height(gpui::relative(1.))
+                .text_size(gpui::rems(crate::ui::tab_strip::PILL_TEXT))
+                .font_weight(FontWeight::NORMAL)
+                .not_italic()
+                .font_features(self.strip_metrics.features())
+        };
+        let word = run().child(word);
+        #[cfg(test)]
+        let word = word.debug_selector(|| "agent-mode-label".into());
+        let tally = shown.map(|count| {
+            // Muted at rest and hovered; the pressed fill reduces the muted
+            // ink's contrast below the text floor, so it takes the foreground
+            // the word beside it already has.
+            let foreground = cx.theme().foreground;
+            let count = run()
+                .id("agent-mode-count")
+                // gpui only listens for a press on an element that has a
+                // hitbox, and `group_active` alone does not give it one; the
+                // pill's own cursor does, and changes nothing on screen.
+                .cursor_default()
+                .text_color(cx.theme().muted_foreground)
+                .group_active(PILL_GROUP, move |style| style.text_color(foreground))
+                .child(count.to_string());
+            #[cfg(test)]
+            let count = count.debug_selector(|| "agent-mode-count".into()).child(
+                gpui::canvas(
+                    |_, _, _| (),
+                    |_, _, window, _| {
+                        crate::ui::tab_strip::record_pill_count_ink(window.text_style().color)
+                    },
+                )
+                .absolute()
+                .size_0(),
+            );
+            count
         });
-        // The label is our own child, not the button's, so its size, weight and
-        // figures are the ones `StripMetrics` measured rather than whatever the
-        // button gives its text.
-        let text = div()
+        let text = h_flex()
             .flex_none()
-            .line_height(gpui::relative(1.))
-            .text_size(gpui::rems(crate::ui::tab_strip::PILL_TEXT))
-            .font_weight(FontWeight::NORMAL)
-            .not_italic()
-            .font_features(self.strip_metrics.features())
-            .child(label.clone());
+            .items_center()
+            .gap(px(crate::ui::tab_strip::PILL_COUNT_GAP))
+            .child(word)
+            .children(tally);
         let pill = Button::new("agent-mode-toggle")
-            .accessible_label(label)
+            .group(PILL_GROUP)
+            .accessible_label(accessible)
             .child(text)
             .small()
             .custom(

@@ -77,6 +77,7 @@ macro_rules! l10n_keys {
 
 l10n_keys! {
     VisionToggle,
+    VisionTogglePalette,
     VisionAgents,
     VisionWorkbench,
     VisionInbox,
@@ -2101,6 +2102,22 @@ pub fn t_plural(key: L10nKey, count: usize, args: &[(&str, &str)]) -> String {
         args,
         Some(count),
     )
+}
+
+/// The templates a plural-aware key reads in the current language, one for
+/// each category in the order Zero, One, Few, Many, Other, chosen by the same
+/// selection [`t_plural`] makes: for a measurement of every word the key can
+/// ever show. Nothing is formatted and nothing is allocated.
+pub(crate) fn plural_templates(key: L10nKey) -> [&'static str; 5] {
+    let locale = current_locale_index();
+    [
+        PluralCategory::Zero,
+        PluralCategory::One,
+        PluralCategory::Few,
+        PluralCategory::Many,
+        PluralCategory::Other,
+    ]
+    .map(|category| translate_variant(locale, key, category.as_str()))
 }
 
 fn apply_template(template: &'static str, args: &[(&str, &str)], count: Option<usize>) -> String {

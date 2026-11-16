@@ -4356,8 +4356,11 @@ mod drop_gpui_tests {
         app.update_in(&mut vcx, |app, window, cx| {
             app.file_tree_drop_paths(vec![from.join("note.txt")], root.clone(), window, cx);
         });
+        // The copy creates the destination before it has written the bytes, so
+        // the file existing is not the copy being done: wait for what the file
+        // holds, which is what is asserted next.
         wait_until(&mut vcx, "the copy never landed", |_| {
-            root.join("note.txt").exists()
+            std::fs::read_to_string(root.join("note.txt")).is_ok_and(|text| text == "hello")
         });
         settle(&app, &mut vcx, &root);
 
