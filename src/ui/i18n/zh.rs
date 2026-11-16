@@ -1981,6 +1981,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptAgent => "启动方式",
         L10nKey::WorktreePromptShell => "终端",
         L10nKey::WorktreePromptTask => "首个任务",
+        L10nKey::WorktreePromptTaskPlaceholder => "发给 agent 的首条消息（可选）",
         L10nKey::WorktreePromptSetup => "先运行 .tty59/setup",
         L10nKey::WorktreePromptSetupHint => {
             "没有 .tty59/setup。加一个，新 worktree 就会先运行 `{command}`"
