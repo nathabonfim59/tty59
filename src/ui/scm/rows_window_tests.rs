@@ -47,10 +47,16 @@ fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tty59-rows-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(&dir).unwrap()
+    // `canonicalize` answers `\\?\C:\…` on Windows. Git takes the submodule
+    // source path from its command line and reads that prefix as a UNC
+    // hostname ("hostname contains invalid characters"), so the root every
+    // fixture path derives from is handed out in the plain local spelling.
+    tty59_core::core::path_spelling::local_spelling_buf(std::fs::canonicalize(&dir).unwrap())
 }
 
-fn git_ok(root: &Path, args: &[&str]) -> bool {
+/// One `git` child, run once; its whole `Output` is kept so a failing setup
+/// step can say what git said.
+fn git_output(root: &Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
         .args([
             "-c",
@@ -66,12 +72,18 @@ fn git_ok(root: &Path, args: &[&str]) -> bool {
         .current_dir(root)
         .output()
         .expect("git runs")
-        .status
-        .success()
 }
 
 fn git(root: &Path, args: &[&str]) {
-    assert!(git_ok(root, args), "git {args:?} failed");
+    let out = git_output(root, args);
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {}: {}\nstdout: {}\nstderr: {}",
+        root.display(),
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
 }
 
 fn file(i: usize) -> String {
@@ -96,11 +108,15 @@ fn big_repo(name: &str) -> PathBuf {
     std::fs::create_dir_all(&sub).unwrap();
 
     git(&sub, &["init", "-q", "-b", "main"]);
+    git(&sub, &["config", "core.longpaths", "true"]);
+    git(&sub, &["config", "core.autocrlf", "false"]);
     write(&sub, "readme.txt", "sub\n");
     git(&sub, &["add", "-A"]);
     git(&sub, &["commit", "-qm", "sub"]);
 
     git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "core.longpaths", "true"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
     for i in 0..BASE {
         write(&root, &file(i), &format!("line {i}\n"));
     }
@@ -120,9 +136,13 @@ fn big_repo(name: &str) -> PathBuf {
     git(&root, &["checkout", "-q", "main"]);
     write(&root, "conflict.txt", "main\n");
     git(&root, &["commit", "-qam", "main"]);
+    let merge = git_output(&root, &["merge", "-q", "side"]);
     assert!(
-        !git_ok(&root, &["merge", "-q", "side"]),
-        "the merge stops on the conflict"
+        !merge.status.success(),
+        "the merge stops on the conflict: {}\nstdout: {}\nstderr: {}",
+        merge.status,
+        String::from_utf8_lossy(&merge.stdout),
+        String::from_utf8_lossy(&merge.stderr),
     );
 
     for i in 0..STAGED + EDITED {
@@ -305,7 +325,6 @@ fn first_row_top(vcx: &mut VisualTestContext, group: ScmGroup) -> f32 {
 
 /// The bug. With 600-odd rows expanded, a frame builds what one viewport can
 /// show — at the top of the list and at its bottom.
-#[cfg(unix)]
 #[gpui::test]
 fn a_long_changes_list_builds_only_the_rows_on_screen(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -357,7 +376,6 @@ fn a_long_changes_list_builds_only_the_rows_on_screen(cx: &mut TestAppContext) {
 /// default UI size and the largest. The fixture's rows cover every variant a
 /// row can take — a conflict, a staged rename, a submodule, a name that
 /// truncates.
-#[cfg(unix)]
 #[gpui::test]
 fn every_row_stands_on_the_pitch_at_any_scroll_and_ui_size(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -416,7 +434,6 @@ fn every_row_stands_on_the_pitch_at_any_scroll_and_ui_size(cx: &mut TestAppConte
 /// Folding a group or a tree directory hides exactly its rows and moves
 /// everything after it up by exactly their height; unfolding puts every row
 /// back where it was.
-#[cfg(unix)]
 #[gpui::test]
 fn folding_hides_exactly_the_folded_rows(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -542,7 +559,6 @@ fn mouse(vcx: &mut VisualTestContext, button: MouseButton, at: gpui::Point<Pixel
 /// and is still the selected row after the list scrolls away and back.
 /// Selection is the overlay's focused path, so nothing about it depends on
 /// which rows a frame built.
-#[cfg(unix)]
 #[gpui::test]
 fn a_deep_row_is_clicked_where_it_is_drawn_and_stays_selected(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -600,7 +616,6 @@ fn a_deep_row_is_clicked_where_it_is_drawn_and_stays_selected(cx: &mut TestAppCo
 /// teardown: a menu the panel left behind would fail it as a leaked handle.
 /// The row stays built because the panel records it as the one a menu is
 /// open on (`menu_row`), and that record is what the run's pin reads.
-#[cfg(unix)]
 #[gpui::test]
 fn a_context_menu_on_a_row_scrolled_far_away_stays_with_its_row(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -686,7 +701,6 @@ fn a_context_menu_on_a_row_scrolled_far_away_stays_with_its_row(cx: &mut TestApp
 /// Once the list has drawn, a parked panel draws nothing more — part way down
 /// a long list as much as at its top. The window a measurement can ask to
 /// redraw is the window a measurement can ask to redraw forever.
-#[cfg(unix)]
 #[gpui::test]
 fn a_scrolled_long_list_goes_quiet(cx: &mut TestAppContext) {
     let _serial = serial();

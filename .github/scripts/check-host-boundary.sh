@@ -126,6 +126,11 @@ src/ui/lsp/servers.rs|std::fs::read_to_string
 # fixtures into a local temp dir.
 src/ui/lsp/tests.rs|std::fs::write
 src/ui/lsp/tests.rs|.canonicalize()
+# The Changes list's windowing tests live in their own file too. It is
+# cfg(test) fixture code that builds a repository beneath a local temporary
+# directory, never workspace-path production code.
+src/ui/scm/rows_window_tests.rs|std::fs::
+src/ui/scm/rows_window_tests.rs|Command::new("git")
 EOF
 )
 
