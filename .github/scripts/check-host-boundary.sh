@@ -126,6 +126,12 @@ src/ui/lsp/servers.rs|std::fs::read_to_string
 # fixtures into a local temp dir.
 src/ui/lsp/tests.rs|std::fs::write
 src/ui/lsp/tests.rs|.canonicalize()
+
+# This cfg(test) module lives in its own file and creates/removes neutral
+# fixtures in a per-test local temp dir, never a workspace path.
+src/terminal/view/gpui_tests/path_links.rs|std::fs::create_dir_all
+src/terminal/view/gpui_tests/path_links.rs|std::fs::write
+src/terminal/view/gpui_tests/path_links.rs|std::fs::remove_dir_all
 EOF
 )
 
