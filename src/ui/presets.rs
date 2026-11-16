@@ -243,6 +243,218 @@ pub(crate) const PORT_CHIP_WASH: f32 = 0.06;
 
 impl Global for ChromeInk {}
 
+/// F23: one size class's highlight fill (a colour and the alpha it is painted
+/// at) and the ink the matched glyphs are drawn in on it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SearchMarkPair {
+    pub fill: u32,
+    pub alpha: f32,
+    pub ink: u32,
+}
+
+/// A palette the bounded derivation could not satisfy, with every input.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SearchMarkMiss {
+    pub rows: [u32; 2],
+    pub seed: u32,
+    pub yellow: u32,
+    pub ink_floor: f32,
+}
+
+impl SearchMarkMiss {
+    /// Every input of the miss and what the authored pair does with it, for the
+    /// sweep's failure text: the rows, the seed ink, the yellow, the class floor,
+    /// and per row the authored highlight against the row and the seed on it.
+    pub(crate) fn describe(&self) -> String {
+        let [base, hover] = self.rows;
+        let parts = self.rows.map(|row| {
+            let comp = mark_composite(row, self.yellow, SEARCH_MARK_ALPHAS[0]);
+            format!(
+                "row {row:06x}: authored highlight {comp:06x} is {:.3}:1 off it, seed {:06x} on it is {:.3}:1",
+                contrast(comp, row),
+                self.seed,
+                contrast(self.seed, comp)
+            )
+        });
+        format!(
+            "rows {base:06x}/{hover:06x}, seed {:06x}, yellow {:06x}, ink floor {}; {}; {}",
+            self.seed, self.yellow, self.ink_floor, parts[0], parts[1]
+        )
+    }
+}
+
+/// The alphas the fill is tried at: the authored 35%, then fixed steps of five
+/// points up to the yellow itself. Finite by construction.
+const SEARCH_MARK_ALPHAS: [f32; 14] = [
+    0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00,
+];
+
+/// `fill` at `alpha` laid over `row`, composited and rounded to eight bits the
+/// way the painter's translucent fills are.
+fn mark_composite(row: u32, fill: u32, alpha: f32) -> u32 {
+    pack(Hsla::from(gpui::rgb(row)).blend(Hsla::from(gpui::rgb(fill)).opacity(alpha)))
+}
+
+/// The lowest contrast `comp` has against `row` when the rasteriser lands one
+/// level away from the model's eight-bit composite in any channel: the eight
+/// corners `comp ± 1` per channel (each clamped to 0..=255), the row exact. The
+/// model blends in f32 and rounds to eight bits; the native light capture
+/// painted #a8802f where the model said #a77f2f, one level away in two channels
+/// (3.024:1 on the #e9e9e9 hover row in the model, 2.985:1 painted). Nothing is
+/// claimed about why the paint differs, only that it can by one level. No
+/// headroom constant: the floor is the floor, the pixel just may not sit one
+/// level off it.
+pub(crate) fn contrast_robust(comp: u32, row: u32) -> f32 {
+    let level = |shift: u32, up: bool| {
+        let v = (comp >> shift & 0xff) as i32 + if up { 1 } else { -1 };
+        v.clamp(0, 255) as u32
+    };
+    let mut worst = f32::MAX;
+    for corner in 0..8u32 {
+        let (r, g, b) = (
+            level(16, corner & 4 != 0),
+            level(8, corner & 2 != 0),
+            level(0, corner & 1 != 0),
+        );
+        worst = worst.min(contrast(r << 16 | g << 8 | b, row));
+    }
+    worst
+}
+
+/// The derivation itself, on explicit colours (so a palette written out by hand
+/// can be put through exactly what a theme is): the highlight and ink for text
+/// of `ink_floor`'s class, over exactly the two `rows` the hit row paints on.
+///
+/// Joint, bounded and verified: a candidate is accepted only when the
+/// highlight stands 3:1 off BOTH rows, judged at its worst corner
+/// (`contrast_robust`: the eight-bit composite one level away in any channel),
+/// and the ink clears `ink_floor` on BOTH highlighted fills, every ratio
+/// recomputed from the eight-bit values the painter produces. The authored pair
+/// (`yellow` at 35%, `seed` as the text) is kept whenever it passes; otherwise
+/// the fill's alpha is raised in fixed steps toward the yellow itself, and as a
+/// last bounded step the fill is walked off the rows. No candidate that fails a
+/// ratio is ever returned.
+pub(crate) fn search_mark_pair_for(
+    rows: [u32; 2],
+    seed: u32,
+    yellow: u32,
+    ink_floor: f32,
+) -> Result<SearchMarkPair, SearchMarkMiss> {
+    let separated = |comps: &[u32; 2]| {
+        comps
+            .iter()
+            .zip(rows)
+            .all(|(&comp, row)| contrast_robust(comp, row) >= ACCENT_FLOOR)
+    };
+    // Inside the candidate predicate, so a candidate short of it is never
+    // accepted early: the authored text is kept at the class floor, while
+    // any corrected (or pole) ink needs the corrected target, 4.6 for
+    // normal text and the floor itself (5.0) for small text.
+    let reads = |ink: u32, comps: &[u32; 2]| {
+        let need = if ink == seed {
+            ink_floor
+        } else {
+            ink_floor.max(TEXT_CORRECTED)
+        };
+        comps.iter().all(|&c| contrast(ink, c) >= need)
+    };
+    let inked = |comps: &[u32; 2]| {
+        let ink = legible_across(comps, seed, ink_floor);
+        reads(ink, comps).then_some(ink)
+    };
+
+    for alpha in SEARCH_MARK_ALPHAS {
+        let comps = rows.map(|row| mark_composite(row, yellow, alpha));
+        if !separated(&comps) {
+            continue;
+        }
+        if let Some(ink) = inked(&comps) {
+            return Ok(SearchMarkPair {
+                fill: yellow,
+                alpha,
+                ink,
+            });
+        }
+    }
+
+    // Opaque, and the fill itself moved off both rows by one joint walk.
+    let fill = legible_across(&rows, yellow, ACCENT_FLOOR);
+    let comps = [fill, fill];
+    if separated(&comps) {
+        if let Some(ink) = inked(&comps) {
+            return Ok(SearchMarkPair {
+                fill,
+                alpha: 1.,
+                ink,
+            });
+        }
+        for pole in [0xffffff, 0x000000] {
+            if reads(pole, &comps) {
+                return Ok(SearchMarkPair {
+                    fill,
+                    alpha: 1.,
+                    ink: pole,
+                });
+            }
+        }
+    }
+    Err(SearchMarkMiss {
+        rows,
+        seed,
+        yellow,
+        ink_floor,
+    })
+}
+
+/// Text of this many logical pixels or fewer is the small class: regular
+/// weight at 12px or less derives to the 5.0 target instead of 4.5.
+pub(crate) const SEARCH_SMALL_TEXT_PX: f32 = 12.0;
+/// The ink floor the small class is derived to.
+const SEARCH_SMALL_TEXT_TARGET: f32 = 5.0;
+
+/// What one size class paints a matched search term with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SearchMark {
+    /// A fill and an ink that every ratio was recomputed for.
+    Fill(SearchMarkPair),
+    /// The joint derivation found no pair for this palette. Nothing new is
+    /// painted: no fill and no ink, the matched glyphs keep the row's own ink
+    /// and are underlined in it. That keeps the row text at the sidebar's
+    /// existing 4.5; it makes NO small-text (5.0) claim.
+    Unavailable(SearchMarkMiss),
+}
+
+/// The matched-text marks of both text size classes, derived once per theme
+/// change by `apply_theme` (the painter reads it and derives nothing).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SearchMarks {
+    pub(crate) normal: SearchMark,
+    pub(crate) small: SearchMark,
+}
+
+impl Global for SearchMarks {}
+
+impl SearchMarks {
+    /// The class for text painted at `px` logical pixels.
+    pub(crate) fn for_text_px(&self, px: f32) -> SearchMark {
+        if px <= SEARCH_SMALL_TEXT_PX {
+            self.small
+        } else {
+            self.normal
+        }
+    }
+
+    /// The misses of both classes, if any, for one diagnostic per theme.
+    pub(crate) fn misses(&self) -> impl Iterator<Item = &SearchMarkMiss> {
+        [&self.normal, &self.small]
+            .into_iter()
+            .filter_map(|mark| match mark {
+                SearchMark::Fill(_) => None,
+                SearchMark::Unavailable(miss) => Some(miss),
+            })
+    }
+}
+
 /// The colour every step-toward-the-ink chrome fill moves toward, cached per
 /// theme by `apply_theme` (see `Theme::resolve`). The painters of the fills
 /// that are not in `Surfaces` (the settings washes, a port chip) read it.
@@ -854,6 +1066,12 @@ impl Theme {
         self.settings_ink_from(&self.resolve())
     }
 
+    /// The matched-text marks `apply_theme` caches for this theme.
+    #[cfg(test)]
+    pub fn search_marks(&self) -> SearchMarks {
+        self.search_marks_from(&self.resolve())
+    }
+
     pub(crate) fn settings_ink_from(&self, r: &Resolved) -> SettingsInk {
         let sem = self.semantics_with(&r.m);
         let sub_share = if self.dark { 0.55 } else { 0.65 };
@@ -950,6 +1168,54 @@ impl Theme {
                 m.muted_foreground,
                 CHROME_SMALL_META_TARGET,
             ),
+        }
+    }
+
+    /// The ink and the translucent fill of a matched-text highlight in the
+    /// project-search hit row, for one text size class: `ink_floor` is 4.5 for
+    /// normal text and 5.0 for text of 12px or less. Painted on exactly the two
+    /// fills the row has, the sidebar base and the popover hover rung.
+    ///
+    /// Joint, bounded and verified: a candidate is accepted only when the
+    /// highlight stands 3:1 off BOTH rows at its worst corner (the eight-bit
+    /// composite one level away in any channel, `contrast_robust`) and the ink
+    /// clears `ink_floor` on BOTH highlighted fills, every ratio recomputed from
+    /// the eight-bit values the painter produces. The authored pair (the yellow
+    /// role at 35%, the sidebar's own text) is kept whenever it passes;
+    /// otherwise the fill's alpha is raised in fixed steps toward the yellow
+    /// itself, and as a last bounded step the fill is walked off the rows. No
+    /// candidate that fails a ratio is ever returned.
+    pub(crate) fn search_mark_pair(
+        &self,
+        r: &Resolved,
+        ink_floor: f32,
+    ) -> Result<SearchMarkPair, SearchMarkMiss> {
+        search_mark_pair_for(
+            [r.sf.sidebar.base, r.sf.popover.hover],
+            r.sf.sidebar.text_resting,
+            self.ansi_ink_with(&r.m, 3),
+            ink_floor,
+        )
+    }
+
+    /// Both size classes' matched-text marks, cached by `apply_theme`: normal
+    /// text at the 4.5 floor, text of 12px or less at the 5.0 target. A class
+    /// the joint derivation cannot satisfy is `Unavailable`, never a
+    /// best-effort colour.
+    pub(crate) fn search_marks_from(&self, r: &Resolved) -> SearchMarks {
+        self.search_marks_at(r, TEXT_FLOOR, SEARCH_SMALL_TEXT_TARGET)
+    }
+
+    /// `search_marks_from` with the two class floors named, so a test can put
+    /// an unsatisfiable floor through the very same constructor the cache uses.
+    pub(crate) fn search_marks_at(&self, r: &Resolved, normal: f32, small: f32) -> SearchMarks {
+        let mark = |floor: f32| match self.search_mark_pair(r, floor) {
+            Ok(pair) => SearchMark::Fill(pair),
+            Err(miss) => SearchMark::Unavailable(miss),
+        };
+        SearchMarks {
+            normal: mark(normal),
+            small: mark(small),
         }
     }
 
@@ -3774,6 +4040,521 @@ ansi:
     fn every_role_holds_its_floor_in_every_builtin_and_generated_theme() {
         let misses: Vec<String> = sweep_themes().iter().flat_map(role_misses).collect();
         assert_no_misses("role floors", misses);
+    }
+
+    // --- F23: the matched text of a project-search hit ----------------------
+
+    /// The two fills a hit row is painted on, written out from the row itself:
+    /// the sidebar's base and, under the pointer, the popover's hover rung.
+    fn mark_rows(r: &Resolved) -> [u32; 2] {
+        [r.sf.sidebar.base, r.sf.popover.hover]
+    }
+
+    /// Every theme the sweeps cover, plus a ladder of mid-grey and weak-ink
+    /// palettes where one ink has the least room to serve a fill and the rows
+    /// both: backgrounds from near-black to near-white, foregrounds that are
+    /// black, white, mid-grey and a hair off the background.
+    fn mark_themes() -> Vec<Theme> {
+        let mut themes = sweep_themes();
+        for step in 0..=16u32 {
+            let level = 0x18 + step * 0x0e;
+            let bg = level << 16 | level << 8 | level;
+            let near = (level as i32 + if level < 0x80 { 0x24 } else { -0x24 }) as u32;
+            for fg in [0x000000, 0xffffff, 0x808080, near << 16 | near << 8 | near] {
+                themes.push(crossover_theme(bg, fg));
+            }
+        }
+        themes
+    }
+
+    /// The painter's own arithmetic, written out here rather than read from
+    /// the derivation: `fill` at `alpha` over `row`, eight bits per channel.
+    fn painted(row: u32, fill: u32, alpha: f32) -> u32 {
+        composite(row, fill, alpha)
+    }
+
+    /// Every ratio the finding is about, for one theme and size class, checked
+    /// against literals (3.0 and the class's text floor), listing each miss
+    /// with the exact theme and pair. Nothing is excluded and nothing is
+    /// defaulted: a palette the derivation cannot satisfy is a miss.
+    fn mark_misses(t: &Theme, text_floor: f32, class: &str) -> Vec<String> {
+        let r = t.resolve();
+        let rows = mark_rows(&r);
+        let pair = match t.search_mark_pair(&r, text_floor) {
+            Ok(pair) => pair,
+            Err(miss) => {
+                return vec![format!(
+                    "{} {class}: unsatisfied, {}",
+                    t.id,
+                    miss.describe()
+                )];
+            }
+        };
+        let mut misses = Vec::new();
+        for (state, row) in ["resting", "hover"].into_iter().zip(rows) {
+            let comp = painted(row, pair.fill, pair.alpha);
+            // The model's eight-bit composite AND its eight +/-1 level corners
+            // (the rasteriser may land one level away): the worst of them is
+            // held to the 3.0 floor, authored pair or repaired alike.
+            let highlight = contrast_robust(comp, row);
+            if highlight < 3.0 {
+                misses.push(format!(
+                    "{} {class} {state}: worst-case highlight {comp:06x} on row {row:06x} is {highlight:.3}:1 (< 3.0)",
+                    t.id
+                ));
+            }
+            let text = contrast(pair.ink, comp);
+            if text < text_floor {
+                misses.push(format!(
+                    "{} {class} {state}: ink {:06x} on highlight {comp:06x} is {text:.3}:1 (< {text_floor})",
+                    t.id, pair.ink
+                ));
+            }
+            // A corrected ink carries headroom for anti-aliasing: 4.6 for
+            // normal text, 5.0 for small. An authored one is left as it is.
+            if pair.ink != r.sf.sidebar.text_resting && text < text_floor.max(4.6) {
+                misses.push(format!(
+                    "{} {class} {state}: corrected ink {:06x} has no headroom ({text:.3}:1)",
+                    t.id, pair.ink
+                ));
+            }
+        }
+        misses
+    }
+
+    #[test]
+    fn search_match_text_and_highlight_hold_their_floors_in_every_theme() {
+        let misses: Vec<String> = mark_themes()
+            .iter()
+            .flat_map(|t| {
+                // 4.5 is normal text; 5.0 is text at 12px or smaller.
+                let mut all = mark_misses(t, 4.5, "normal");
+                all.extend(mark_misses(t, 5.0, "small"));
+                all
+            })
+            .collect();
+        assert_no_misses("search match", misses);
+    }
+
+    /// A pair that already passes is never touched: the authored yellow at 35%
+    /// and the sidebar's own text come back as they were. The fill is held at
+    /// its authored alpha whenever it separates 3:1 from both rows AND some one
+    /// ink can serve both composites at the class's corrected target: the
+    /// oracle for that is independent of the derivation (a common ink exists
+    /// exactly when white or black does, since contrast only grows away from
+    /// both fills). Separating from the rows alone says nothing about an ink.
+    #[test]
+    fn search_match_keeps_what_already_passes() {
+        let (mut kept_whole, mut kept_fill) = (0, 0);
+        for t in mark_themes() {
+            let r = t.resolve();
+            let rows = mark_rows(&r);
+            let (yellow, seed) = (t.ansi_ink(3), r.sf.sidebar.text_resting);
+            for floor in [4.5, 5.0] {
+                let Ok(pair) = t.search_mark_pair(&r, floor) else {
+                    continue; // reported by the floors test, with the palette
+                };
+                let comps = rows.map(|row| painted(row, yellow, 0.35));
+                let fill_passes = comps
+                    .iter()
+                    .zip(rows)
+                    .all(|(&comp, row)| contrast(comp, row) >= 3.0);
+                let corrected = if floor < 4.6 { 4.6 } else { floor };
+                let common_ink = [0xffffff, 0x000000]
+                    .into_iter()
+                    .any(|pole| comps.iter().all(|&c| contrast(pole, c) >= corrected));
+                let whole = comps.iter().all(|&c| contrast(seed, c) >= floor);
+                if fill_passes && (common_ink || whole) {
+                    assert_eq!(
+                        (pair.fill, pair.alpha),
+                        (yellow, 0.35),
+                        "{} @{floor}: a passing authored fill was moved",
+                        t.id
+                    );
+                    kept_fill += 1;
+                }
+                if fill_passes && whole {
+                    assert_eq!(pair.ink, seed, "{} @{floor}: a passing ink moved", t.id);
+                    kept_whole += 1;
+                }
+            }
+        }
+        let (built_fill, built_whole) = (kept_fill, kept_whole);
+
+        // No built-in or generated palette has an authored 35% highlight that
+        // clears 3:1 on the hover rung (the counts are printed), so the
+        // "already passing is untouched" rule would never be exercised by them.
+        // A palette written out by hand does: the default dark theme's own row
+        // and yellow, with the rows one step apart and a white seed text. Its
+        // ratios are asserted here from the painter arithmetic and the
+        // contrast formula, with headroom, BEFORE the derivation is asked
+        // anything, so the case is demonstrably an already-passing one.
+        let rows = [0x141416, 0x18181a];
+        let (yellow, seed) = (0xffffc3, 0xffffff);
+        let comps = rows.map(|row| painted(row, yellow, 0.35));
+        for (&comp, row) in comps.iter().zip(rows) {
+            let highlight = contrast(comp, row);
+            assert!(
+                highlight >= 3.1,
+                "synthetic highlight {comp:06x} on row {row:06x} is {highlight:.3}:1 (< 3.1)"
+            );
+            let text = contrast(seed, comp);
+            assert!(
+                text >= 5.4,
+                "synthetic seed {seed:06x} on {comp:06x} is {text:.3}:1 (< 5.4, the small-text floor with headroom)"
+            );
+        }
+        for floor in [4.5, 5.0] {
+            let pair = search_mark_pair_for(rows, seed, yellow, floor)
+                .expect("the synthetic authored palette is satisfiable");
+            assert_eq!(
+                pair,
+                SearchMarkPair {
+                    fill: yellow,
+                    alpha: 0.35,
+                    ink: seed
+                },
+                "@{floor}: the synthetic palette already passes and must come back untouched"
+            );
+            kept_fill += 1;
+            kept_whole += 1;
+        }
+
+        assert!(kept_fill > 0, "no theme kept its authored fill");
+        eprintln!(
+            "search match: authored fill kept {kept_fill}x ({built_fill} in built-in and generated themes), \
+             whole pair kept {kept_whole}x ({built_whole} in built-in and generated themes)"
+        );
+    }
+
+    /// The hand-written authored fixture of `search_match_keeps_what_already_passes`
+    /// (3.146 / 3.168 raw) also holds the 3.0 floor at its worst corner, so the
+    /// robust derivation keeps it for a reason that is asserted here, apart from
+    /// that test's own (unchanged) oracle.
+    #[test]
+    fn the_authored_keep_fixture_holds_at_its_worst_corner() {
+        let rows = [0x141416, 0x18181a];
+        let comps = rows.map(|row| painted(row, 0xffffc3, 0.35));
+        for (&comp, row) in comps.iter().zip(rows) {
+            let worst = contrast_robust(comp, row);
+            assert!(
+                worst >= 3.0,
+                "fixture highlight {comp:06x} on {row:06x} is {worst:.3}:1 at its worst corner (< 3.0)"
+            );
+        }
+    }
+
+    /// The native RED pair, from the candidate the light capture failed (panels
+    /// F23, light theme, hover row #e9e9e9). That derivation chose #976500 at
+    /// 0.8; its eight-bit model composite on the hover row is #a77f2f (3.024:1,
+    /// accepted), the rasteriser painted #a8802f (one level up in R and G,
+    /// 2.985:1, under the 3.0 native floor). Pinned here as literals from the
+    /// capture and the model's own numbers; the robust predicate (the composite
+    /// and its eight +/-1 level corners) must REJECT the old model composite, the
+    /// production derivation must move off that pair, and every composite of the
+    /// new pair must hold 3.0 at its worst corner on both rows, both classes.
+    #[test]
+    fn search_match_light_hover_native_red_pair_is_rejected_and_repaired() {
+        // NATIVE, the capture's bytes alone.
+        let (native_fill, native_row) = (0xa8802f, 0xe9e9e9);
+        let native = contrast(native_fill, native_row);
+        assert!(
+            (native - 2.985).abs() < 0.001 && native < 3.0,
+            "native highlight on the hover row: {native:.4}:1, the capture says 2.985 (< 3.0)"
+        );
+
+        // OLD MODEL: the pair the failed derivation chose and what the model said.
+        let (old_fill, old_alpha) = (0x976500, 0.8);
+        let old_model = painted(native_row, old_fill, old_alpha);
+        assert_eq!(
+            old_model, 0xa77f2f,
+            "the old model composite on the hover row"
+        );
+        assert!(
+            contrast(old_model, native_row) >= 3.0,
+            "the old model accepted its pair: {:.3}:1",
+            contrast(old_model, native_row)
+        );
+        let deltas = [16, 8, 0].map(|shift| {
+            ((old_model >> shift) & 0xff) as i32 - ((native_fill >> shift) & 0xff) as i32
+        });
+        assert_eq!(deltas, [-1, -1, 0], "model minus native, per channel");
+        // THE ROBUST PREDICATE rejects it: its worst corner is at most the native pixel's ratio.
+        let worst = contrast_robust(old_model, native_row);
+        assert!(
+            worst < 3.0 && worst <= native + 1e-6,
+            "worst corner of the old model composite is {worst:.4}:1 (native {native:.4}:1)"
+        );
+
+        // THE NEW DERIVATION, on the default light theme.
+        let t = builtins().into_iter().find(|t| t.id == "light").unwrap();
+        let r = t.resolve();
+        assert_eq!(
+            r.sf.popover.hover, native_row,
+            "the hover row the capture shows"
+        );
+        assert_eq!(
+            t.ansi_ink_with(&r.m, 3),
+            old_fill,
+            "the yellow the failed derivation started from"
+        );
+        let rows = mark_rows(&r);
+        for floor in [4.5, 5.0] {
+            let new = t
+                .search_mark_pair(&r, floor)
+                .expect("the default light theme is satisfiable");
+            assert_ne!(
+                (new.fill, new.alpha),
+                (old_fill, old_alpha),
+                "@{floor}: the production pair is still the old accepted pair"
+            );
+            for (state, row) in ["resting", "hover"].into_iter().zip(rows) {
+                let comp = painted(row, new.fill, new.alpha);
+                let highlight = contrast_robust(comp, row);
+                assert!(
+                    highlight >= 3.0,
+                    "@{floor} {state}: repaired highlight {comp:06x} on {row:06x} is {highlight:.3}:1 at its worst corner (< 3.0)"
+                );
+                assert!(
+                    contrast(new.ink, comp) >= floor,
+                    "@{floor} {state}: ink {:06x} on {comp:06x} is under {floor}",
+                    new.ink
+                );
+            }
+            assert_ne!(
+                painted(rows[1], new.fill, new.alpha),
+                native_fill,
+                "@{floor}: the repaired hover composite is the red native pixel"
+            );
+        }
+    }
+
+    /// Ties the model to the native capture it came from: the default dark
+    /// theme's hit row is #18181a, the highlight composites to #696955 and the
+    /// text #c9c9cb reads 3.38:1 on it (panels F23, full dark 1x PNG). If the
+    /// painter arithmetic here drifted from the capture, the floors above
+    /// would be checking the wrong colours.
+    #[test]
+    fn search_match_model_reproduces_the_native_capture_of_the_default_dark_theme() {
+        let t = builtins().into_iter().find(|t| t.id == "dark").unwrap();
+        let r = t.resolve();
+        assert_eq!(r.sf.sidebar.base, 0x18181a, "the row the capture shows");
+        assert_eq!(
+            r.sf.sidebar.text_resting, 0xc9c9cb,
+            "the text the capture shows"
+        );
+
+        // NATIVE, from the capture's own bytes and nothing of the model: the
+        // composite the full PNG holds (#696955) under the text it holds
+        // (#c9c9cb) is the 3.38:1 the finding reports, 3.1:1 off its row.
+        let (native_mark, native_text, native_row) = (0x696955, 0xc9c9cb, 0x18181a);
+        let native = contrast(native_text, native_mark);
+        assert!(
+            (native - 3.3846).abs() < 0.001,
+            "native text on native highlight: {native:.4}:1, the capture says 3.38"
+        );
+        assert!(
+            (contrast(native_mark, native_row) - 3.1682).abs() < 0.001,
+            "native highlight on native row: {:.4}:1",
+            contrast(native_mark, native_row)
+        );
+
+        // MODEL, the painter arithmetic the derivation uses. It is not the
+        // GPU: the native fill is 8-bit blending by the rasteriser, the model
+        // is f32 through HSL and a round to nearest, so a channel may land one
+        // level away. That is the only difference allowed, per channel, and the
+        // contrast it may move is exactly what one level per channel moves
+        // the native pair, computed here, not a tolerance chosen to pass.
+        let comp = painted(r.sf.sidebar.base, t.ansi_ink(3), 0.35);
+        let exact = gpui::Rgba::from(
+            Hsla::from(gpui::rgb(r.sf.sidebar.base))
+                .blend(Hsla::from(gpui::rgb(t.ansi_ink(3))).opacity(0.35)),
+        );
+        let deltas = [16, 8, 0]
+            .map(|shift| ((comp >> shift) & 0xff) as i32 - ((native_mark >> shift) & 0xff) as i32);
+        eprintln!(
+            "model composite {comp:06x} (before rounding {:.3}/{:.3}/{:.3}) vs native {native_mark:06x}: per-channel {deltas:?}",
+            exact.r * 255.0,
+            exact.g * 255.0,
+            exact.b * 255.0
+        );
+        assert!(
+            deltas.iter().all(|d| d.abs() <= 1),
+            "model composite {comp:06x} is more than one level from the native {native_mark:06x}: {deltas:?}"
+        );
+        let mut reach = (f32::MAX, f32::MIN);
+        for dr in -1i32..=1 {
+            for dg in -1i32..=1 {
+                for db in -1i32..=1 {
+                    let c = (((native_mark >> 16) as i32 + dr) as u32) << 16
+                        | ((((native_mark >> 8) & 0xff) as i32 + dg) as u32) << 8
+                        | (((native_mark & 0xff) as i32 + db) as u32);
+                    let ratio = contrast(native_text, c);
+                    reach = (reach.0.min(ratio), reach.1.max(ratio));
+                }
+            }
+        }
+        let before = contrast(r.sf.sidebar.text_resting, comp);
+        assert!(
+            before >= reach.0 && before <= reach.1,
+            "model: authored text on the model highlight is {before:.3}:1, outside the {:.3}..{:.3} one level per channel allows around the native {native:.3}",
+            reach.0,
+            reach.1
+        );
+        assert!(before < 4.5, "the authored text must fail the floor");
+        let pair = t
+            .search_mark_pair(&r, 4.5)
+            .expect("the default dark theme is satisfiable");
+        assert_ne!(pair.ink, r.sf.sidebar.text_resting, "the old text failed");
+        // Recorded, not asserted: whether the hover rung also separates from
+        // the authored fill decides if the alpha has to rise.
+        eprintln!(
+            "default dark: fill {:06x} alpha {} ink {:06x}; hover row {:06x}",
+            pair.fill, pair.alpha, pair.ink, r.sf.popover.hover
+        );
+    }
+
+    /// The cache holds BOTH size classes as `Fill` in every theme the sweeps
+    /// cover, none `Unavailable`, and the class follows the text size: 12px and
+    /// below is the small class, anything above the normal one. Each class
+    /// equals what the derivation gives at its own literal floor (4.5, 5.0).
+    #[test]
+    fn search_marks_hold_both_classes_in_every_theme() {
+        // The sweep is exactly the 13 built-ins and the 864-palette generated
+        // grid (877), plus the 68 mid-grey crossover palettes: a catalog change
+        // that shrinks it must not let "zero Unavailable" pass on less.
+        let themes = mark_themes();
+        assert_eq!(sweep_themes().len(), 877, "built-ins + generated grid");
+        let swept = themes.len();
+        assert_eq!(swept, 877 + 17 * 4, "the whole mark sweep");
+        let mut unavailable = Vec::new();
+        for t in themes {
+            let r = t.resolve();
+            let marks = t.search_marks_from(&r);
+            for miss in marks.misses() {
+                unavailable.push(format!("{}: {}", t.id, miss.describe()));
+            }
+            let class = |floor: f32| match t.search_mark_pair(&r, floor) {
+                Ok(pair) => SearchMark::Fill(pair),
+                Err(miss) => SearchMark::Unavailable(miss),
+            };
+            assert_eq!(marks.normal, class(4.5), "{}: normal class", t.id);
+            assert_eq!(marks.small, class(5.0), "{}: small class", t.id);
+            assert_eq!(marks.for_text_px(12.0), marks.small, "{}: 12px", t.id);
+            assert_eq!(marks.for_text_px(10.9), marks.small, "{}: 10.9px", t.id);
+            assert_eq!(marks.for_text_px(12.01), marks.normal, "{}: 12.01px", t.id);
+            assert_eq!(marks.for_text_px(13.0), marks.normal, "{}: 13px", t.id);
+        }
+        // Printed (visible with --nocapture, and in the failure output) as well as asserted.
+        eprintln!(
+            "search marks: {swept} themes swept (877 sweep + 68 crossover), {} Unavailable",
+            unavailable.len()
+        );
+        assert_no_misses("search marks left Unavailable", unavailable);
+    }
+
+    /// The 12px boundary is the text size the hit row really paints: the row's
+    /// `TEXT_MONO` rems at the window's rem (`ui_font_size`, clamped 12..24).
+    /// 16 (the default) is 13px, normal; 14 is 11.375px, small; the largest
+    /// size that is still small is 14.769 (12 / (13/16)).
+    #[test]
+    fn the_hit_row_text_size_lands_on_the_documented_side_of_twelve_px() {
+        // Two distinct marks, so a class chosen wrongly cannot compare equal.
+        let pair = |ink| {
+            SearchMark::Fill(SearchMarkPair {
+                fill: 0xffff00,
+                alpha: 0.5,
+                ink,
+            })
+        };
+        let marks = SearchMarks {
+            normal: pair(0x000000),
+            small: pair(0x111111),
+        };
+        let row_px = |ui_font_size: f32| crate::ui::right_panel::TEXT_MONO * ui_font_size;
+        assert_eq!(marks.for_text_px(row_px(16.0)), marks.normal);
+        assert_eq!(marks.for_text_px(row_px(15.0)), marks.normal);
+        assert_eq!(marks.for_text_px(row_px(14.0)), marks.small);
+        assert_eq!(marks.for_text_px(row_px(12.0)), marks.small);
+        assert_ne!(marks.normal, marks.small);
+    }
+
+    /// Satisfiability evidence behind the zero-exclusion claim, stated as a
+    /// test and not a proof: every one of the 256 grey backgrounds, against
+    /// black, white, mid-grey and near-background foregrounds, and against
+    /// four yellows (a pure one, a near-black, a near-white and a mid-grey),
+    /// leaves both classes with a pair. Any `Unavailable` fails with the
+    /// palette named; nothing is excluded or defaulted.
+    #[test]
+    fn every_grey_background_leaves_both_classes_a_pair() {
+        let mut unavailable = Vec::new();
+        for level in 0..=255u32 {
+            let bg = level << 16 | level << 8 | level;
+            let near_level = if level < 0x80 {
+                level + 0x24
+            } else {
+                level - 0x24
+            };
+            let near = near_level << 16 | near_level << 8 | near_level;
+            for fg in [0x000000, 0xffffff, 0x808080, near] {
+                for yellow in [(255, 255, 0), (8, 8, 0), (248, 248, 232), (128, 128, 120)] {
+                    let mut t = crossover_theme(bg, fg);
+                    t.ansi16[3] = yellow;
+                    t.ansi16[11] = yellow;
+                    let marks = t.search_marks();
+                    for miss in marks.misses() {
+                        unavailable.push(format!(
+                            "bg {bg:06x} fg {fg:06x} yellow {yellow:?}: {}",
+                            miss.describe()
+                        ));
+                    }
+                }
+            }
+        }
+        assert_no_misses("grey-background sweep left Unavailable", unavailable);
+    }
+
+    /// A floor no pair can reach (above the 21:1 ceiling) is `Unavailable`, in
+    /// the class it was asked for, carrying every input; the other class,
+    /// asked at its real floor, is unaffected. Nothing is returned that falls
+    /// short: the same call at a reachable floor is a `Fill`.
+    #[test]
+    fn an_unsatisfiable_floor_is_unavailable_and_never_a_colour() {
+        let t = builtins().into_iter().find(|t| t.id == "dark").unwrap();
+        let r = t.resolve();
+        let rows = mark_rows(&r);
+        let seed = r.sf.sidebar.text_resting;
+        let yellow = t.ansi_ink(3);
+
+        let marks = t.search_marks_at(&r, 25.0, 25.0);
+        let expected = SearchMarkMiss {
+            rows,
+            seed,
+            yellow,
+            ink_floor: 25.0,
+        };
+        assert_eq!(marks.normal, SearchMark::Unavailable(expected));
+        assert_eq!(marks.small, SearchMark::Unavailable(expected));
+        assert_eq!(marks.misses().count(), 2, "both classes are reported");
+        let text = expected.describe();
+        for part in [
+            format!("{:06x}", rows[0]),
+            format!("{:06x}", rows[1]),
+            format!("{seed:06x}"),
+            format!("{yellow:06x}"),
+            "ink floor 25".to_string(),
+        ] {
+            assert!(text.contains(&part), "{part} missing from {text}");
+        }
+
+        let mixed = t.search_marks_at(&r, TEXT_FLOOR, 25.0);
+        assert!(matches!(mixed.normal, SearchMark::Fill(_)));
+        assert!(matches!(mixed.small, SearchMark::Unavailable(_)));
+        assert_eq!(mixed.misses().count(), 1);
+        assert_eq!(
+            search_mark_pair_for(rows, seed, yellow, 25.0),
+            Err(expected)
+        );
     }
 
     /// Owner exception to the 3:1 mark floor: a dark off-switch track is the
