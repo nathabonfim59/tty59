@@ -505,7 +505,7 @@ impl ScmData {
     /// Keep `.git` from being watched for a while, so a fixture that mends a
     /// repository on disk is not healed by the watcher's invalidation: the
     /// only way back from a failed probe is then the one under test.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub fn hold_watch_closed(&mut self, host: HostId, root: &Path) {
         self.watch_mut(host, root).retry_at = Some(Instant::now() + Duration::from_secs(3600));
     }

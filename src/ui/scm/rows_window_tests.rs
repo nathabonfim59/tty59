@@ -305,7 +305,6 @@ fn first_row_top(vcx: &mut VisualTestContext, group: ScmGroup) -> f32 {
 
 /// The bug. With 600-odd rows expanded, a frame builds what one viewport can
 /// show — at the top of the list and at its bottom.
-#[cfg(unix)]
 #[gpui::test]
 fn a_long_changes_list_builds_only_the_rows_on_screen(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -357,7 +356,6 @@ fn a_long_changes_list_builds_only_the_rows_on_screen(cx: &mut TestAppContext) {
 /// default UI size and the largest. The fixture's rows cover every variant a
 /// row can take — a conflict, a staged rename, a submodule, a name that
 /// truncates.
-#[cfg(unix)]
 #[gpui::test]
 fn every_row_stands_on_the_pitch_at_any_scroll_and_ui_size(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -416,7 +414,6 @@ fn every_row_stands_on_the_pitch_at_any_scroll_and_ui_size(cx: &mut TestAppConte
 /// Folding a group or a tree directory hides exactly its rows and moves
 /// everything after it up by exactly their height; unfolding puts every row
 /// back where it was.
-#[cfg(unix)]
 #[gpui::test]
 fn folding_hides_exactly_the_folded_rows(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -542,7 +539,6 @@ fn mouse(vcx: &mut VisualTestContext, button: MouseButton, at: gpui::Point<Pixel
 /// and is still the selected row after the list scrolls away and back.
 /// Selection is the overlay's focused path, so nothing about it depends on
 /// which rows a frame built.
-#[cfg(unix)]
 #[gpui::test]
 fn a_deep_row_is_clicked_where_it_is_drawn_and_stays_selected(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -600,7 +596,6 @@ fn a_deep_row_is_clicked_where_it_is_drawn_and_stays_selected(cx: &mut TestAppCo
 /// teardown: a menu the panel left behind would fail it as a leaked handle.
 /// The row stays built because the panel records it as the one a menu is
 /// open on (`menu_row`), and that record is what the run's pin reads.
-#[cfg(unix)]
 #[gpui::test]
 fn a_context_menu_on_a_row_scrolled_far_away_stays_with_its_row(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -686,7 +681,6 @@ fn a_context_menu_on_a_row_scrolled_far_away_stays_with_its_row(cx: &mut TestApp
 /// Once the list has drawn, a parked panel draws nothing more — part way down
 /// a long list as much as at its top. The window a measurement can ask to
 /// redraw is the window a measurement can ask to redraw forever.
-#[cfg(unix)]
 #[gpui::test]
 fn a_scrolled_long_list_goes_quiet(cx: &mut TestAppContext) {
     let _serial = serial();

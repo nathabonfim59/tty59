@@ -7022,7 +7022,7 @@ mod changes_count_gpui_tests {
 /// Changes render, and a folder that is not a repository must offer
 /// Initialize repository through its real body. Each fails on c700 because the
 /// button is absent, not because an API is.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod status_lifecycle_witness_gpui_tests {
     use super::*;
     use crate::daemon::protocol::DaemonMsg;
