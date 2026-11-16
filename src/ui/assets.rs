@@ -49,6 +49,7 @@ fn agent_icon(path: &str) -> Option<&'static [u8]> {
         "icons/search.svg" => include_bytes!("../../assets/icons/search.svg"),
         "icons/github.svg" => include_bytes!("../../assets/icons/github.svg"),
         "icons/copy.svg" => include_bytes!("../../assets/icons/copy.svg"),
+        "icons/link.svg" => include_bytes!("../../assets/icons/link.svg"),
         "icons/folder.svg" => include_bytes!("../../assets/icons/folder.svg"),
         "icons/file.svg" => include_bytes!("../../assets/icons/file.svg"),
         "icons/image.svg" => include_bytes!("../../assets/icons/image.svg"),
@@ -193,6 +194,17 @@ mod tests {
                 "{path} is not registered in `agent_icon`"
             );
         }
+    }
+
+    #[test]
+    fn the_symbolic_link_glyph_resolves() {
+        // The SFTP list draws it by path; one that is on disk but missing
+        // from the match above renders as nothing.
+        let svg = Assets
+            .load("icons/link.svg")
+            .unwrap()
+            .expect("`icons/link.svg` is not registered in `agent_icon`");
+        assert!(svg.starts_with(b"<svg"), "an SVG, not an empty file");
     }
 
     fn glyph(name: &str) -> String {

@@ -566,21 +566,44 @@ pub fn install_title(request: &InstallRequest) -> String {
     t_fmt(L10nKey::RemoteInstallTitle, &[("machine", &request.host)])
 }
 
+/// A byte count the way the SFTP rows, the transfer tray and the installer
+/// all print it: `B`, `KB`, `MB`, `GB`, `TB`, scaled by 1024, one decimal only
+/// below 10 and none when it would be `.0`.
+///
+/// Integer arithmetic throughout, so no `u64` is rounded through `f64` and
+/// `u64::MAX` cannot overflow. Rounding is half-up on the exact value, and a
+/// value that rounds up to 1024 of its unit is shown in the next one
+/// (1023.95 KB is `1 MB`, not `1024 KB`). `TB` is the last unit: bigger sizes
+/// stay in it (`1024 TB`) rather than inventing one.
 pub fn human_bytes(n: u64) -> String {
-    const KIB: f64 = 1024.0;
-    let n = n as f64;
-    if n < KIB {
-        return format!("{} {}", n as u64, t(L10nKey::RemoteInstallBytes));
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    if n < 1024 {
+        return format!("{n} {}", UNITS[0]);
     }
-    let units = ["KiB", "MiB", "GiB"];
-    let mut value = n / KIB;
-    for (i, unit) in units.iter().enumerate() {
-        if value < KIB || i == units.len() - 1 {
-            return format!("{value:.1} {unit}");
+    let bytes = u128::from(n);
+    let last = UNITS.len() - 1;
+    let mut unit = 1;
+    loop {
+        let scale = 1u128 << (10 * unit);
+        if unit < last && bytes >= scale << 10 {
+            unit += 1;
+            continue;
         }
-        value /= KIB;
+        let tenths = (bytes * 10 + scale / 2) / scale;
+        if tenths < 100 {
+            let (whole, frac) = (tenths / 10, tenths % 10);
+            return match frac {
+                0 => format!("{whole} {}", UNITS[unit]),
+                _ => format!("{whole}.{frac} {}", UNITS[unit]),
+            };
+        }
+        let whole = (bytes + scale / 2) / scale;
+        if unit < last && whole >= 1024 {
+            unit += 1;
+            continue;
+        }
+        return format!("{whole} {}", UNITS[unit]);
     }
-    unreachable!("the loop returns on its last iteration")
 }
 
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -1011,7 +1034,7 @@ mod tests {
                 "{needle:?} missing from:\n{detail}"
             );
         }
-        assert!(detail.contains("9.0 MiB"), "{detail}");
+        assert!(detail.contains("9 MB"), "{detail}");
         assert_eq!(
             install_title(&request),
             t_fmt(
@@ -1023,14 +1046,36 @@ mod tests {
 
     #[test]
     fn human_bytes_reads_in_binary_units() {
-        crate::ui::i18n::set_locale("en");
-        assert_eq!(
-            human_bytes(512),
-            format!("512 {}", t(L10nKey::RemoteInstallBytes))
-        );
-        assert_eq!(human_bytes(1024), "1.0 KiB");
-        assert_eq!(human_bytes(1_572_864), "1.5 MiB");
-        assert_eq!(human_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+        // Literals, not the arithmetic under test: the table fx-d approved.
+        let table: [(u64, &str); 24] = [
+            (0, "0 B"),
+            (1, "1 B"),
+            (1023, "1023 B"),
+            (1024, "1 KB"),
+            (1025, "1 KB"),
+            (1536, "1.5 KB"),
+            (10188, "9.9 KB"),
+            (10189, "10 KB"),
+            (10239, "10 KB"),
+            (10240, "10 KB"),
+            (10752, "11 KB"),
+            (1_048_000, "1023 KB"),
+            (1_048_524, "1 MB"),
+            (1_048_576, "1 MB"),
+            (10_380_902, "9.9 MB"),
+            (10_485_759, "10 MB"),
+            (10_485_760, "10 MB"),
+            (1_073_741_823, "1 GB"),
+            (1_073_741_824, "1 GB"),
+            (1_610_612_736, "1.5 GB"),
+            (1_099_511_627_775, "1 TB"),
+            (1_099_511_627_776, "1 TB"),
+            (1_125_899_906_842_624, "1024 TB"),
+            (u64::MAX, "16777216 TB"),
+        ];
+        for (bytes, want) in table {
+            assert_eq!(human_bytes(bytes), want, "{bytes} bytes");
+        }
     }
 
     #[test]

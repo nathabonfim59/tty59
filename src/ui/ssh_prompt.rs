@@ -1,10 +1,10 @@
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, IntoElement, ParentElement as _, Styled as _,
-    Subscription, Window, div, prelude::*, px, rems,
+    AnyElement, App, Context, Entity, FocusHandle, IntoElement, ParentElement as _, SharedString,
+    Styled as _, Subscription, Window, div, prelude::*, px, rems,
 };
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
 
 use crate::core::keychain::{CredentialStore as _, OsCredentialStore};
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, SshPhase};
@@ -37,6 +37,26 @@ pub(crate) struct PromptEndpoint {
     pub port: u16,
 }
 
+/// How a private key's identity reads on the passphrase sheet: the file name
+/// in the title, the whole path in a line of its own under the field.
+///
+/// Built once, from the path, when the prompt model is, so painting the sheet
+/// splits and copies nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyDisplay {
+    pub name: SharedString,
+    pub path: SharedString,
+}
+
+impl KeyDisplay {
+    fn of(key_path: &str) -> Self {
+        Self {
+            name: SharedString::from(crate::ui::path_display::split_path_leaf(key_path).1),
+            path: SharedString::from(key_path.to_string()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PromptModel {
     Password {
@@ -46,7 +66,11 @@ pub(crate) enum PromptModel {
         rejected: bool,
     },
     KeyPassphrase {
+        /// The key's path exactly as the daemon sent it: what the keychain is
+        /// keyed by and what is sent back. Never shown from here; the sheet
+        /// reads [`KeyDisplay`].
         key_path: String,
+        display: KeyDisplay,
         comment: String,
         rejected: bool,
     },
@@ -121,6 +145,7 @@ impl PromptModel {
                 comment,
                 rejected,
             } => PromptModel::KeyPassphrase {
+                display: KeyDisplay::of(&key_path),
                 key_path,
                 comment,
                 rejected,
@@ -772,8 +797,13 @@ impl Tty59App {
                 ),
                 false,
             ),
-            PromptModel::KeyPassphrase { key_path, .. } => (
-                t_fmt(L10nKey::SshPromptPassphraseFor, &[("key_path", key_path)]),
+            // The file name, not the path: a long path end-truncated the one
+            // part that says which key this is. The path is under the field.
+            PromptModel::KeyPassphrase { display, .. } => (
+                t_fmt(
+                    L10nKey::SshPromptPassphraseFor,
+                    &[("key_path", &display.name)],
+                ),
                 false,
             ),
             PromptModel::KeyboardInteractive { name, .. } => {
@@ -843,8 +873,20 @@ impl Tty59App {
                 )
             }
             PromptModel::KeyPassphrase {
-                comment, rejected, ..
+                comment,
+                rejected,
+                display,
+                ..
             } => {
+                // The whole path, in secondary caption type: it wraps rather
+                // than truncates, so a deep path still says where the key is.
+                let path_line = div()
+                    .text_size(rems(META))
+                    .text_color(muted)
+                    .child(display.path.clone());
+                #[cfg(test)]
+                let path_line =
+                    gpui::InteractiveElement::debug_selector(path_line, || "ssh-key-path".into());
                 let body = dialog::body()
                     .when(*rejected, |c| {
                         c.child(line(
@@ -856,6 +898,7 @@ impl Tty59App {
                         c.child(line(comment.clone(), muted))
                     })
                     .child(self.render_ssh_input(0, cx))
+                    .child(path_line)
                     .child(self.render_ssh_remember(cx));
                 (
                     body,
@@ -1032,15 +1075,17 @@ impl Tty59App {
     }
 
     fn render_ssh_remember(&self, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .child(
-                Checkbox::new("ssh-remember")
-                    .label(t(L10nKey::RememberKeychain))
-                    .small()
-                    .checked(self.ssh_prompt.remember)
-                    .on_click(cx.listener(|this, _, _w, cx| this.toggle_ssh_remember(cx))),
-            )
-            .into_any_element()
+        let row = h_flex();
+        #[cfg(test)]
+        let row = gpui::InteractiveElement::debug_selector(row, || "ssh-remember-row".into());
+        row.child(
+            Checkbox::new("ssh-remember")
+                .label(t(L10nKey::SshPromptSaveToKeychain))
+                .with_size(Size::Medium)
+                .checked(self.ssh_prompt.remember)
+                .on_click(cx.listener(|this, _, _w, cx| this.toggle_ssh_remember(cx))),
+        )
+        .into_any_element()
     }
 
     /// The action sits on the right, backing out on its left.
@@ -1072,6 +1117,17 @@ impl Tty59App {
     }
 }
 
+/// The placeholder a sheet's field starts with, by what the sheet asks for.
+fn input_placeholder(model: &PromptModel) -> Option<L10nKey> {
+    match model {
+        PromptModel::Password { .. } => Some(L10nKey::SettingsPassword),
+        PromptModel::KeyPassphrase { .. } => Some(L10nKey::SshPromptPassphrasePlaceholder),
+        PromptModel::KeyboardInteractive { .. }
+        | PromptModel::HostKeyUnknown { .. }
+        | PromptModel::HostKeyChanged { .. } => None,
+    }
+}
+
 fn build_inputs(
     model: &PromptModel,
     window: &mut Window,
@@ -1087,7 +1143,17 @@ fn build_inputs(
                 }
                 PromptModel::HostKeyUnknown { .. } | PromptModel::HostKeyChanged { .. } => false,
             };
-            cx.new(|cx| InputState::new(window, cx).masked(masked))
+            // What the field wants, named once at construction: a blank well
+            // says nothing about whether it takes a password or a passphrase.
+            // Keyboard-interactive rows carry their own label above the field.
+            let placeholder = input_placeholder(model);
+            cx.new(|cx| {
+                let input = InputState::new(window, cx).masked(masked);
+                match placeholder {
+                    Some(key) => input.placeholder(t(key)),
+                    None => input,
+                }
+            })
         })
         .collect()
 }
@@ -1286,10 +1352,92 @@ mod tests {
             m,
             PromptModel::KeyPassphrase {
                 key_path: "~/.ssh/id_ed25519".into(),
+                display: KeyDisplay {
+                    name: "id_ed25519".into(),
+                    path: "~/.ssh/id_ed25519".into(),
+                },
                 comment: String::new(),
                 rejected: true,
             }
         );
+    }
+
+    #[test]
+    fn each_sheet_names_what_its_field_asks_for() {
+        let model = |kind| PromptModel::from_prompt(kind, Some(endpoint()), false).unwrap();
+        assert_eq!(
+            input_placeholder(&model(AuthPromptKind::Password {
+                user: "deploy".into(),
+                host: "10.0.0.5".into(),
+            })),
+            Some(L10nKey::SettingsPassword)
+        );
+        assert_eq!(
+            input_placeholder(&model(AuthPromptKind::KeyPassphrase {
+                key_path: "~/.ssh/id_ed25519".into(),
+                comment: String::new(),
+                rejected: false,
+            })),
+            Some(L10nKey::SshPromptPassphrasePlaceholder)
+        );
+        // Keyboard-interactive rows carry their own label; host-key sheets
+        // have no field to describe.
+        assert_eq!(
+            input_placeholder(&model(AuthPromptKind::KeyboardInteractive {
+                name: String::new(),
+                instructions: String::new(),
+                prompts: vec![],
+                stored_rejected: false,
+            })),
+            None
+        );
+        assert_eq!(
+            input_placeholder(&model(AuthPromptKind::HostKeyUnknown {
+                host: "h".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint_sha256: "SHA256:x".into(),
+                previously_known_as: None,
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn passphrase_display_is_the_file_name_and_the_untouched_path() {
+        let deep = format!("/srv/{}/id_deploy", "d".repeat(300));
+        let cases: [(&str, &str); 6] = [
+            ("/home/u/.ssh/id_deploy", "id_deploy"),
+            ("/home/ü/鍵/まい/id_ed25519", "id_ed25519"),
+            ("C:\\Users\\dev/.ssh\\id_rsa", "id_rsa"),
+            ("id_bare", "id_bare"),
+            (&deep, "id_deploy"),
+            // No file name after the last separator: the path itself is all
+            // there is to show.
+            ("/home/u/.ssh/", "/home/u/.ssh/"),
+        ];
+        for (path, name) in cases {
+            let model = PromptModel::from_prompt(
+                AuthPromptKind::KeyPassphrase {
+                    key_path: path.into(),
+                    comment: String::new(),
+                    rejected: false,
+                },
+                None,
+                false,
+            )
+            .unwrap();
+            let PromptModel::KeyPassphrase {
+                key_path, display, ..
+            } = model
+            else {
+                panic!("a key passphrase prompt builds a KeyPassphrase model");
+            };
+            assert_eq!(&*display.name, name, "{path}");
+            assert_eq!(&*display.path, path, "{path}");
+            // What the keychain files the secret under is the daemon's string.
+            assert_eq!(key_path, path, "{path}");
+        }
     }
 
     #[test]
@@ -1625,5 +1773,169 @@ mod changed_card_tests {
                 remember: true
             }
         );
+    }
+}
+
+/// The key passphrase sheet in the real app tree: a path of any length stays
+/// inside the card, and the secret is still filed under the daemon's own path.
+#[cfg(test)]
+mod passphrase_card_tests {
+    use super::*;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
+
+    fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.executor().allow_parking();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+            crate::ui::keymap::init(cx);
+        });
+        let window = cx.add_window(|window, cx| {
+            let app =
+                cx.new(|cx| Tty59App::with_session(None, Some(Session::default()), window, cx));
+            gpui_component::Root::new(app, window, cx)
+        });
+        cx.background_executor.run_until_parked();
+        let app = window
+            .update(cx, |root, _, _| {
+                root.view()
+                    .clone()
+                    .downcast::<Tty59App>()
+                    .unwrap_or_else(|_| panic!("window root wraps a Tty59App"))
+            })
+            .unwrap();
+        let vcx = VisualTestContext::from_window(window.into(), cx);
+        (app, vcx)
+    }
+
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+    }
+
+    /// Raises the passphrase sheet for `key_path`. The returned pair keeps the
+    /// routed attempt waiting: dropping it abandons the sheet.
+    fn raise(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        key_path: &str,
+    ) -> Box<dyn std::any::Any> {
+        let (pending, rx, asker) = crate::ui::remote_connect::PendingAuth::for_test(
+            tty59_core::host::HostId(0x15),
+            AuthPromptKind::KeyPassphrase {
+                key_path: key_path.into(),
+                comment: String::new(),
+                rejected: false,
+            },
+        );
+        app.update_in(vcx, |app, window, cx| {
+            let outcome = app.raise_routed_auth(pending, window, cx);
+            assert!(matches!(
+                outcome,
+                crate::ui::remote_workspace::SheetOutcome::Raised
+            ));
+        });
+        settle(vcx);
+        Box::new((rx, asker))
+    }
+
+    /// (path line height, path line left, path line right, card left, card
+    /// right), in logical pixels.
+    fn measure(vcx: &mut VisualTestContext) -> (f32, f32, f32, f32, f32) {
+        let path = vcx
+            .debug_bounds("ssh-key-path")
+            .expect("the passphrase sheet draws the key's path under the field");
+        let card = vcx
+            .debug_bounds("ssh-prompt-card")
+            .expect("the passphrase sheet is drawn by the app's render");
+        (
+            f32::from(path.size.height),
+            f32::from(path.left()),
+            f32::from(path.right()),
+            f32::from(card.left()),
+            f32::from(card.right()),
+        )
+    }
+
+    /// A bounding box cannot tell text that spills out of it from text that
+    /// fits, so the rule is checked from both sides: the line is inside the
+    /// card, *and* a path too long for one line takes more than one line
+    /// instead of running on past the edge.
+    #[gpui::test]
+    fn a_long_key_path_wraps_inside_the_card_and_the_secret_keeps_the_real_path(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx) = harness(cx);
+        let short = "/home/u/.ssh/id_deploy";
+        let unbroken = format!("/srv/{}/id_deploy", "d".repeat(300));
+        let segmented = format!("/home/u/{}id_deploy", "keys-and-more/".repeat(40));
+
+        let _waiting = raise(&app, &mut vcx, short);
+        let (one_line, ..) = measure(&mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.cancel_ssh_prompt(window, cx)
+        });
+        settle(&mut vcx);
+
+        for path in [unbroken.as_str(), segmented.as_str()] {
+            let _waiting = raise(&app, &mut vcx, path);
+            let (height, left, right, card_left, card_right) = measure(&mut vcx);
+            assert!(
+                left >= card_left - 0.5 && right <= card_right + 0.5,
+                "the path line ({left}..{right}) must stay inside the card ({card_left}..{card_right})"
+            );
+            assert!(
+                height >= one_line * 1.5,
+                "a {}-char path must wrap onto more lines than one ({height} vs {one_line}), \
+                 not run past the card",
+                path.len()
+            );
+            // The daemon's string is what the keychain is keyed by and what
+            // goes back; the display strings never replace it.
+            app.read_with(&vcx, |app, _| match &app.ssh_prompt.model {
+                Some(PromptModel::KeyPassphrase {
+                    key_path, display, ..
+                }) => {
+                    assert_eq!(key_path, path);
+                    assert_eq!(&*display.path, path);
+                }
+                other => panic!("a passphrase sheet is up, got {other:?}"),
+            });
+            app.update_in(&mut vcx, |app, window, cx| {
+                app.cancel_ssh_prompt(window, cx)
+            });
+            settle(&mut vcx);
+        }
+    }
+
+    /// The remember toggle is the toolkit checkbox, reached the way a user
+    /// reaches it: a click on its row toggles `remember`, and a second click
+    /// toggles it back. The box's own size and border are not observable from
+    /// here (the toolkit draws them inside); those are native-capture gates.
+    #[gpui::test]
+    fn clicking_the_save_to_keychain_row_toggles_remember(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        let _waiting = raise(&app, &mut vcx, "/home/u/.ssh/id_deploy");
+        assert!(!app.read_with(&vcx, |app, _| app.ssh_prompt.remember));
+
+        for expected in [true, false] {
+            let row = vcx
+                .debug_bounds("ssh-remember-row")
+                .expect("the passphrase sheet draws the remember row");
+            // Near the leading edge, where the box is, not the middle of the
+            // label.
+            let at = gpui::point(row.left() + gpui::px(8.), row.center().y);
+            vcx.simulate_click(at, gpui::Modifiers::none());
+            settle(&mut vcx);
+            assert_eq!(
+                app.read_with(&vcx, |app, _| app.ssh_prompt.remember),
+                expected,
+                "a click on the checkbox must flip remember to {expected}"
+            );
+        }
     }
 }
