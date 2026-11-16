@@ -1309,6 +1309,10 @@ pub(crate) struct SettingsState {
     pub(crate) shortcut_search: Entity<InputState>,
     pub(crate) modified_only: bool,
     pub(crate) save_error: Option<String>,
+    /// Where the failed write was headed, resolved when it failed and never in
+    /// render. `None` when the config directory is unavailable: the banner then
+    /// has no path tooltip rather than an invented one.
+    pub(crate) save_error_path: Option<SharedString>,
     pub(crate) saved_config: Config,
     pub(crate) search_active: bool,
     pub(crate) search_return_offset: gpui::Point<gpui::Pixels>,
@@ -2096,8 +2100,39 @@ impl Tty59App {
         let save_failed = self
             .active_settings()
             .is_some_and(|s| s.save_error.is_some());
-        if !save_failed && !self.ssh_form_dirty(cx) && !self.theme_draft_dirty() {
+        let other_edits = self.ssh_form_dirty(cx) || self.theme_draft_dirty();
+        if !save_failed && !other_edits {
             action(self, window, cx);
+            return;
+        }
+        if !other_edits {
+            // The write failing is the only thing in the way: saving is not
+            // on offer here (Retry is on the banner), so the question is
+            // whether to go on without it. Leaving puts the settings back to
+            // what is on disk rather than carrying values that never landed.
+            let answer = window.prompt::<gpui::PromptButton>(
+                gpui::PromptLevel::Warning,
+                t(L10nKey::SettingsSaveFailedTitle),
+                Some(t(L10nKey::SettingsSaveFailedBody)),
+                // Stay first: a default Enter on the dialog keeps the page and
+                // its unsaved values, and only a deliberate pick of Leave
+                // discards them.
+                &[
+                    gpui::PromptButton::cancel(t(L10nKey::SettingsStay)),
+                    gpui::PromptButton::new(t(L10nKey::SettingsLeave)),
+                ],
+                cx,
+            );
+            cx.spawn_in(window, async move |this, cx| {
+                if !matches!(answer.await, Ok(1)) {
+                    return;
+                }
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.discard_unsaved_settings(window, cx);
+                    action(this, window, cx);
+                });
+            })
+            .detach();
             return;
         }
         let answer = window.prompt::<gpui::PromptButton>(
@@ -2161,12 +2196,10 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ssh_form_dirty(cx)
-            || self.theme_draft_dirty()
-            || self
-                .active_settings()
-                .is_some_and(|s| s.save_error.is_some())
-        {
+        // A failed write is not asked about here: the banner above the page
+        // stays through section changes and keeps the values until a write
+        // lands, so only leaving Settings has anything to confirm.
+        if self.ssh_form_dirty(cx) || self.theme_draft_dirty() {
             self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
                 this.navigate_settings(target, setting, window, cx)
             });
@@ -4661,6 +4694,306 @@ mod gpui_tests {
         vcx.run_until_parked();
     }
 
+    /// Two paints: the first lays the page out, the second reads the bounds
+    /// and focus that layout produced.
+    fn settle(vcx: &mut VisualTestContext) {
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    /// A settings page whose next write is refused (a quarantined config will
+    /// not save) and one toggle changed on it: the failed write of an
+    /// interactive edit, with the value still held in memory.
+    fn fail_a_write(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, secs: u64) {
+        app.update_in(vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+            cx.global_mut::<Config>().quarantined = true;
+            app.set_notify_threshold(secs, cx);
+        });
+        vcx.simulate_resize(size(px(960.), px(700.)));
+        settle(vcx);
+    }
+
+    /// The threshold `config.json` holds on disk right now, read the way
+    /// anyone reading the file would.
+    fn threshold_on_disk() -> Option<u64> {
+        let path = crate::core::config::config_path("config.json")?;
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()?
+            .get("notify_threshold_secs")?
+            .as_u64()
+    }
+
+    fn click_retry(vcx: &mut VisualTestContext) {
+        let retry = vcx
+            .debug_bounds("settings-save-retry")
+            .expect("the banner offers Retry");
+        vcx.simulate_click(retry.center(), gpui::Modifiers::default());
+        settle(vcx);
+    }
+
+    /// F17: a refused write is said in the banner, with the file it was meant
+    /// for, and nothing but a write that really lands takes it down: a Retry
+    /// that fails again keeps the error, the path and the unsaved value; a
+    /// Retry that succeeds clears both and puts the value on disk.
+    #[gpui::test]
+    fn a_failed_write_stays_until_a_real_write_lands(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_none(),
+            "no banner before anything failed"
+        );
+        fail_a_write(&app, &mut vcx, 91);
+        let expected_path = crate::core::config::config_path("config.json")
+            .expect("the test config dir is pinned")
+            .display()
+            .to_string();
+        let held = |vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, _, cx| {
+                let s = app.active_settings().unwrap();
+                (
+                    s.save_error.clone(),
+                    s.save_error_path.as_ref().map(|p| p.to_string()),
+                    cx.global::<Config>().notify_threshold_secs,
+                    s.saved_config.notify_threshold_secs,
+                )
+            })
+        };
+
+        let (error, path, held_value, saved_value) = held(&mut vcx);
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("repair it before saving")),
+            "the refusal's own reason is kept: {error:?}"
+        );
+        assert_eq!(path, Some(expected_path.clone()), "where it was headed");
+        assert_eq!(held_value, 91, "the unsaved value is still held");
+        assert_ne!(saved_value, 91, "and is not recorded as saved");
+        assert!(vcx.debug_bounds("settings-save-banner").is_some());
+        assert_ne!(threshold_on_disk(), Some(91), "nothing was written");
+
+        // Retry while the write is still refused.
+        click_retry(&mut vcx);
+        let (error, path, held_value, saved_value) = held(&mut vcx);
+        assert!(error.is_some(), "a failed Retry keeps the error");
+        assert_eq!(path, Some(expected_path), "and the path");
+        assert_eq!(held_value, 91, "and the unsaved value");
+        assert_ne!(saved_value, 91);
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_some(),
+            "and the banner"
+        );
+
+        // The obstacle goes away; Retry now really writes.
+        app.update_in(&mut vcx, |_, _, cx| {
+            cx.global_mut::<Config>().quarantined = false;
+        });
+        settle(&mut vcx);
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_some(),
+            "fixing the cause alone does not dismiss the banner"
+        );
+        click_retry(&mut vcx);
+        let (error, path, held_value, saved_value) = held(&mut vcx);
+        assert_eq!(error, None, "a write that landed clears the error");
+        assert_eq!(path, None, "and the path");
+        assert_eq!(held_value, 91);
+        assert_eq!(saved_value, 91, "and the value is now what is saved");
+        assert!(vcx.debug_bounds("settings-save-banner").is_none());
+        assert_eq!(threshold_on_disk(), Some(91), "it is on disk");
+    }
+
+    /// F17: moving between sections, or jumping to a shortcut from search,
+    /// neither asks about the failed write nor dismisses it; the banner and
+    /// the held value ride along.
+    #[gpui::test]
+    fn a_failed_write_survives_moving_around_settings_without_a_prompt(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        fail_a_write(&app, &mut vcx, 92);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.navigate_settings(SettingsSection::Appearance, None, window, cx);
+        });
+        settle(&mut vcx);
+        assert!(!vcx.has_pending_prompt(), "a section change does not ask");
+        app.update_in(&mut vcx, |app, _, cx| {
+            let s = app.active_settings().unwrap();
+            assert!(s.section == SettingsSection::Appearance, "it moved");
+            assert!(s.save_error.is_some(), "the failure is still held");
+            assert!(s.save_error_path.is_some(), "with its path");
+            assert_eq!(cx.global::<Config>().notify_threshold_secs, 92);
+        });
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_some(),
+            "the banner is on the new section too"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_shortcut_search("NewTab".to_string(), window, cx);
+        });
+        settle(&mut vcx);
+        assert!(
+            !vcx.has_pending_prompt(),
+            "opening a shortcut from search does not ask"
+        );
+        app.update_in(&mut vcx, |app, _, _| {
+            let s = app.active_settings().unwrap();
+            assert!(s.section == SettingsSection::Keybindings, "it moved");
+            assert!(s.save_error.is_some());
+        });
+        assert!(vcx.debug_bounds("settings-save-banner").is_some());
+    }
+
+    /// F17: closing Settings over a failed write asks the failure's own
+    /// question, Stay or Leave. Stay (the cancel button, the default) changes
+    /// nothing; Leave puts the settings back to what is on disk and closes.
+    #[gpui::test]
+    fn closing_over_a_failed_write_asks_stay_or_leave(cx: &mut TestAppContext) {
+        use crate::ui::i18n::t;
+        let (app, mut vcx) = harness(cx);
+        fail_a_write(&app, &mut vcx, 94);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_settings_checked(window, cx);
+        });
+        vcx.run_until_parked();
+        let (title, body) = vcx.pending_prompt().expect("the failure is asked about");
+        assert_eq!(title, "Settings couldn't be saved");
+        assert!(body.starts_with("Leave anyway?"), "{body:?}");
+
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsStay));
+        settle(&mut vcx);
+        assert!(!vcx.has_pending_prompt());
+        app.update_in(&mut vcx, |app, _, cx| {
+            let s = app
+                .active_settings()
+                .expect("Stay leaves Settings open where it was");
+            assert!(s.save_error.is_some(), "Stay keeps the failure");
+            assert!(s.save_error_path.is_some());
+            assert_eq!(cx.global::<Config>().notify_threshold_secs, 94);
+        });
+        assert!(vcx.debug_bounds("settings-save-banner").is_some());
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_settings_checked(window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(vcx.has_pending_prompt());
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsLeave));
+        settle(&mut vcx);
+        assert!(!vcx.has_pending_prompt());
+        app.update_in(&mut vcx, |app, _, cx| {
+            assert!(app.active_settings().is_none(), "Leave closes Settings");
+            assert_eq!(
+                cx.global::<Config>().notify_threshold_secs,
+                Config::default().notify_threshold_secs,
+                "and the value that never landed is not carried on"
+            );
+        });
+    }
+
+    /// F17: leaving by another door (here, opening a new host from outside the
+    /// page) asks the same question, and Leave clears the failure and its
+    /// path before going on to where it was headed.
+    #[gpui::test]
+    fn leaving_by_another_door_clears_the_failure_on_leave(cx: &mut TestAppContext) {
+        use crate::ui::i18n::t;
+        let (app, mut vcx) = harness(cx);
+        fail_a_write(&app, &mut vcx, 95);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_ssh_profile_new_from_target("new.example.com".into(), window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.pending_prompt().map(|(title, _)| title).as_deref(),
+            Some("Settings couldn't be saved")
+        );
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsStay));
+        settle(&mut vcx);
+        app.update_in(&mut vcx, |app, _, _| {
+            let s = app.active_settings().unwrap();
+            assert!(s.section == SettingsSection::General, "Stay goes nowhere");
+            assert!(s.ssh_form.is_none());
+            assert!(s.save_error.is_some());
+        });
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_ssh_profile_new_from_target("new.example.com".into(), window, cx);
+        });
+        vcx.run_until_parked();
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsLeave));
+        settle(&mut vcx);
+        assert!(!vcx.has_pending_prompt());
+        app.update_in(&mut vcx, |app, _, cx| {
+            let s = app.active_settings().unwrap();
+            assert_eq!(s.save_error, None, "Leave drops the failure");
+            assert_eq!(s.save_error_path, None, "and its path");
+            assert!(s.ssh_form.is_some(), "and goes on to the new host");
+            assert_eq!(
+                cx.global::<Config>().notify_threshold_secs,
+                Config::default().notify_threshold_secs
+            );
+        });
+        assert!(vcx.debug_bounds("settings-save-banner").is_none());
+    }
+
+    /// F17: a failed write on top of an edited host form is not the plain
+    /// failure case: saving the form is on offer, so the existing
+    /// Save / Discard / Keep Editing question is the one asked.
+    #[gpui::test]
+    fn a_failed_write_beside_an_edited_form_keeps_the_save_discard_question(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::i18n::t;
+        let (app, mut vcx) = harness(cx);
+        let profile = crate::core::ssh_profile::SshProfile::new("beside");
+        let id = profile.id;
+        app.update_in(&mut vcx, |app, window, cx| {
+            cx.global_mut::<Config>().ssh_profiles.push(profile);
+            app.open_ssh_profile_in_settings(id, window, cx);
+            let host = app
+                .active_settings()
+                .unwrap()
+                .ssh_form
+                .as_ref()
+                .unwrap()
+                .host
+                .clone();
+            host.update(cx, |input, cx| {
+                input.set_value("edited.example", window, cx)
+            });
+            cx.global_mut::<Config>().quarantined = true;
+            app.set_notify_threshold(96, cx);
+        });
+        settle(&mut vcx);
+        assert!(app.update_in(&mut vcx, |app, _, cx| {
+            app.active_settings().unwrap().save_error.is_some() && app.ssh_form_dirty(cx)
+        }));
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_settings_checked(window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            vcx.pending_prompt().map(|(title, _)| title).as_deref(),
+            Some("Save changes before leaving?"),
+            "the form's own question, not the failure-only one"
+        );
+        vcx.simulate_prompt_answer(t(L10nKey::SettingsKeepEditing));
+        settle(&mut vcx);
+        app.update_in(&mut vcx, |app, _, _| {
+            let s = app.active_settings().expect("Keep Editing stays");
+            assert!(s.save_error.is_some());
+        });
+    }
+
     /// A second window that counts its own view renders. Nothing in the
     /// settings path notifies or draws it, so a count that moves after a
     /// toggle can only come from the `cx.refresh_windows()` in the setter.
@@ -5284,21 +5617,23 @@ mod gpui_tests {
     }
 
     /// Below the row width where label and control still fit beside each
-    /// other, the row stacks: the control moves under the labels on a line of
-    /// its own. Stacking must not let the description escape the row either —
-    /// it wraps inside the narrower column too. Structure under the simplified
-    /// test metrics, not native pixels; the native pair is the headless
-    /// Wayland before/after capture.
+    /// other, a COMPACT control (these switches) stays beside its labels: the
+    /// labels wrap in the narrower column and the description stays inside the
+    /// row, but the switch does not drop under them (settings F16: only a
+    /// control wider than the compact limit stacks; that wide case is the
+    /// shell `small_controls_stay_inline_and_wide_ones_stack_at_minimum_size`
+    /// test). Structure under the simplified test metrics, not native pixels;
+    /// the native pair is the headless Wayland before/after capture.
     #[gpui::test]
-    fn settings_row_layout_stacks_the_control_below_the_labels_when_narrow(
+    fn settings_row_layout_keeps_compact_controls_beside_wrapped_labels_when_narrow(
         cx: &mut TestAppContext,
     ) {
         crate::core::config::pin_test_config_dir();
         let (app, mut vcx) = harness(cx);
         for fixture in [&MERMAID_ROW, &LANGUAGE_SERVERS_ROW] {
             let key = fixture.key;
-            // An 800px viewport leaves a 468px page column, below the 500px
-            // stacking threshold, so this row must be stacked.
+            // An 800px viewport leaves a 468px page column, narrow enough that
+            // the labels wrap, where a compact switch still stays inline.
             let laid = searched_row_layout(&app, &mut vcx, fixture, size(px(800.), px(700.)));
             assert_inside(laid.wrapper, laid.row, "the row");
             assert_inside(laid.row, laid.labels, "the label column");
@@ -5309,8 +5644,8 @@ mod gpui_tests {
                 "{key:?}: the switch must have positive size: {laid:?}"
             );
             assert!(
-                laid.control.top() >= laid.labels.bottom() - px(0.5),
-                "{key:?}: stacking puts the control below the labels: {laid:?}"
+                laid.control.left() >= laid.labels.right() - px(0.5),
+                "{key:?}: the compact switch stays beside the labels: {laid:?}"
             );
             assert_cannot_fit_one_line(
                 &mut vcx,

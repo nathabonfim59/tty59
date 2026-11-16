@@ -54,10 +54,10 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNoThemesMatch => "一致するテーマがありません",
         L10nKey::SettingsRestoreChanged => "変更した {count} 件を戻す",
         L10nKey::SettingsShortcutsHint => {
-            "ショートカットをクリックして新しいキーを押します。続けて別の組み合わせを押すとシーケンスになります。Esc で取消、Backspace で解除。"
+            "ショートカットをクリックし、新しいキーを押します。続けて2つ押すとシーケンスになります。Esc で取消。"
         }
         L10nKey::SettingsShortcutsHintTmux => {
-            "tmux プリセット：ペインとタブの操作はプレフィックスキーを使います。クリックで変更、Esc で取消、Backspace で解除。"
+            "tmux プリセット：ペインとタブの操作はプレフィックスキーを使います。クリックで変更、Esc で取消。"
         }
         L10nKey::SettingsShortcutConflict => {
             "{keys} は「{action}」で使われています。置き換えるとそちらから外れます。"
@@ -2578,6 +2578,22 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorGitPeekLinesAdded => "{count} 行追加",
         L10nKey::EditorGitPeekLinesRemoved => "{count} 行削除",
         L10nKey::EditorGitPeekChanges => "{removed}、{added}",
+        // B5 S2: settings save failure and unassigned shortcuts.
+        L10nKey::SettingsSaveFailedTitle => "設定を保存できませんでした",
+        L10nKey::SettingsSaveFailedBody => {
+            "このまま離れますか？最後に保存できた時点以降の変更は破棄されます。"
+        }
+        L10nKey::SettingsStay => "とどまる",
+        L10nKey::SettingsLeave => "離れる",
+        L10nKey::SettingsShortcutAdd => "追加",
+        L10nKey::SettingsShortcutsRecordingHint => {
+            "新しいキーを押してください。Esc で取消、Backspace でこのショートカットを解除。"
+        }
+        // B5 remote: SFTP delete title with host, symlink label, SSH prompt extras.
+        L10nKey::SftpDeleteTitleOnHost => "{host} 上の「{name}」を削除しますか？",
+        L10nKey::SftpSymlinkAria => "{name}、シンボリックリンク",
+        L10nKey::SshPromptPassphrasePlaceholder => "パスフレーズ",
+        L10nKey::SshPromptSaveToKeychain => "キーチェーンに保存",
     })
 }
 

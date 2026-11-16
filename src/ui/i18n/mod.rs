@@ -1980,6 +1980,18 @@ l10n_keys! {
     EditorGitPeekLinesAdded,
     EditorGitPeekLinesRemoved,
     EditorGitPeekChanges,
+    // B5 S2: settings save failure and unassigned shortcuts.
+    SettingsSaveFailedTitle,
+    SettingsSaveFailedBody,
+    SettingsStay,
+    SettingsLeave,
+    SettingsShortcutAdd,
+    SettingsShortcutsRecordingHint,
+    // B5 remote: SFTP delete title with host, symlink label, SSH prompt extras.
+    SftpDeleteTitleOnHost,
+    SftpSymlinkAria,
+    SshPromptPassphrasePlaceholder,
+    SshPromptSaveToKeychain,
 }
 
 /// The source control strings that are translated but not yet displayed.
@@ -2315,18 +2327,29 @@ mod tests {
         set_locale(default_language_code());
     }
 
-    /// The shortcut helper sentences say "Backspace", the word the keycaps and
-    /// the other shortcut copy use, not the ⌫ glyph; and the button that opens
-    /// the shortcuts page is a navigation, so it carries no "…" that would
-    /// promise a dialog.
+    /// The shortcut helper sentences name keys in words ("Backspace", the word
+    /// the keycaps and the other shortcut copy use), never with the ⌫ glyph.
+    /// Backspace help belongs to the recording state only: the resting helper
+    /// lines say nothing about it, while the recording helper and the
+    /// "press keys" prompt do. And the button that opens the shortcuts page is
+    /// a navigation, so it carries no "…" that would promise a dialog.
     #[test]
     fn shortcut_copy_names_keys_in_words_and_the_page_link_has_no_ellipsis() {
         for lang in SUPPORTED_LANGUAGES {
             set_locale(lang.code);
             let code = lang.code;
+            // Resting state: no Backspace help, in words or as the glyph.
             for key in [
                 L10nKey::SettingsShortcutsHint,
                 L10nKey::SettingsShortcutsHintTmux,
+            ] {
+                let text = t(key);
+                assert!(!text.contains('⌫'), "{code} {key:?}: {text:?}");
+                assert!(!text.contains("Backspace"), "{code} {key:?}: {text:?}");
+            }
+            // Recording state: Backspace in words, never the glyph.
+            for key in [
+                L10nKey::SettingsShortcutsRecordingHint,
                 L10nKey::SettingsPressKeys,
             ] {
                 let text = t(key);

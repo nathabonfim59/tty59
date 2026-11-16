@@ -54,10 +54,10 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNoThemesMatch => "Темы не найдены",
         L10nKey::SettingsRestoreChanged => "Сбросить {count} изменений",
         L10nKey::SettingsShortcutsHint => {
-            "Нажмите на сочетание и введите новые клавиши. Чтобы задать последовательность, сразу нажмите второе сочетание. Esc отменяет, Backspace очищает."
+            "Нажмите на сочетание, затем новые клавиши. Два сочетания подряд задают последовательность. Esc отменяет."
         }
         L10nKey::SettingsShortcutsHintTmux => {
-            "Профиль tmux: команды панелей и вкладок вызываются через префикс. Нажмите на сочетание, чтобы изменить его. Esc отменяет, Backspace очищает."
+            "Профиль tmux: команды панелей и вкладок вызываются через префикс. Нажмите на сочетание, чтобы изменить его. Esc отменяет."
         }
         L10nKey::SettingsShortcutConflict => {
             "{keys} уже назначено команде «{action}». При замене сочетание будет снято с неё."
@@ -2596,6 +2596,22 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorGitPeekLinesAdded => "{count} строк добавлено",
         L10nKey::EditorGitPeekLinesRemoved => "{count} строк удалено",
         L10nKey::EditorGitPeekChanges => "{removed}, {added}",
+        // B5 S2: settings save failure and unassigned shortcuts.
+        L10nKey::SettingsSaveFailedTitle => "Не удалось сохранить настройки",
+        L10nKey::SettingsSaveFailedBody => {
+            "Всё равно выйти? Изменения с момента последнего успешного сохранения будут отменены."
+        }
+        L10nKey::SettingsStay => "Остаться",
+        L10nKey::SettingsLeave => "Выйти",
+        L10nKey::SettingsShortcutAdd => "Добавить",
+        L10nKey::SettingsShortcutsRecordingHint => {
+            "Нажмите новые клавиши. Esc отменяет, Backspace очищает это сочетание."
+        }
+        // B5 remote: SFTP delete title with host, symlink label, SSH prompt extras.
+        L10nKey::SftpDeleteTitleOnHost => "Удалить «{name}» на {host}?",
+        L10nKey::SftpSymlinkAria => "{name}, символическая ссылка",
+        L10nKey::SshPromptPassphrasePlaceholder => "Парольная фраза",
+        L10nKey::SshPromptSaveToKeychain => "Сохранить в связке ключей",
     })
 }
 

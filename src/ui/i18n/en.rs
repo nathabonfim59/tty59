@@ -54,10 +54,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SettingsNoThemesMatch => "No themes match",
         L10nKey::SettingsRestoreChanged => "Restore {count} changed",
         L10nKey::SettingsShortcutsHint => {
-            "Click a shortcut and press new keys. Press a second chord right after to make a sequence. Esc cancels, Backspace clears."
+            "Click a shortcut, press the new keys. Chain two chords for a sequence. Esc cancels."
         }
         L10nKey::SettingsShortcutsHintTmux => {
-            "tmux preset: pane and tab actions use a prefix key. Click a shortcut to change it; Esc cancels, Backspace clears."
+            "tmux preset: pane and tab actions use a prefix key. Click a shortcut to change it; Esc cancels."
         }
         L10nKey::SettingsShortcutConflict => {
             "{keys} is already used by “{action}”. Replacing takes it from there."
@@ -2501,6 +2501,22 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorGitPeekLinesAdded => "{count} lines added",
         L10nKey::EditorGitPeekLinesRemoved => "{count} lines removed",
         L10nKey::EditorGitPeekChanges => "{removed}, {added}",
+        // B5 S2: settings save failure and unassigned shortcuts.
+        L10nKey::SettingsSaveFailedTitle => "Settings couldn't be saved",
+        L10nKey::SettingsSaveFailedBody => {
+            "Leave anyway? Changes since the last successful save will be discarded."
+        }
+        L10nKey::SettingsStay => "Stay",
+        L10nKey::SettingsLeave => "Leave",
+        L10nKey::SettingsShortcutAdd => "Add",
+        L10nKey::SettingsShortcutsRecordingHint => {
+            "Press the new keys. Esc cancels, Backspace clears this shortcut."
+        }
+        // B5 remote: SFTP delete title with host, symlink label, SSH prompt extras.
+        L10nKey::SftpDeleteTitleOnHost => "Delete \"{name}\" on {host}?",
+        L10nKey::SftpSymlinkAria => "{name}, symbolic link",
+        L10nKey::SshPromptPassphrasePlaceholder => "Passphrase",
+        L10nKey::SshPromptSaveToKeychain => "Save to keychain",
     }
 }
 

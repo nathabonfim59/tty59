@@ -3466,6 +3466,12 @@ impl Tty59App {
             if error.is_none() {
                 s.saved_config = config;
             }
+            // Resolved here, once per failed write, and cached for render to
+            // read: the banner's tooltip never looks the path up itself.
+            s.save_error_path = error
+                .as_ref()
+                .and_then(|_| crate::core::config::config_path("config.json"))
+                .map(|path| gpui::SharedString::from(path.display().to_string()));
             s.save_error = error;
         }
         cx.notify();
@@ -3480,6 +3486,7 @@ impl Tty59App {
             cx.set_global(snapshot);
             if let Some(s) = self.active_settings_mut() {
                 s.save_error = None;
+                s.save_error_path = None;
             }
             self.reload_from_config(window, cx);
         }
@@ -7844,6 +7851,7 @@ impl Tty59App {
             theme_draft: None,
             theme_draft_error: None,
             save_error: None,
+            save_error_path: None,
             saved_config: cx.global::<Config>().clone(),
             menu: None,
             menu_query,

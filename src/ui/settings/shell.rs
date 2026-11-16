@@ -964,6 +964,7 @@ impl Tty59App {
             });
 
         let notices = self.render_settings_notices(cx);
+        let save_banner = self.render_settings_save_banner(cx);
 
         let head = std::iter::once(header.into_any_element()).chain(notices);
         let pane = v_flex()
@@ -1009,6 +1010,10 @@ impl Tty59App {
                     .px(px(56.))
                     .children(back),
             )
+            // Not part of the scrolling page, and not a child of it: the
+            // header-first child mapping the results page scrolls by is
+            // untouched.
+            .children(save_banner)
             .when_some(self.active_settings(), |pane, s| {
                 pane.child(crate::ui::scrollbar::with_inset_vertical_scrollbar(
                     "settings-content-scrollbar",
@@ -1196,34 +1201,74 @@ impl Tty59App {
                     .into_any_element(),
             );
         }
-        if let Some(error) = self.active_settings().and_then(|s| s.save_error.clone()) {
-            out.push(
-                v_flex()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .text_size(fs(12.5))
-                            .text_color(tk.danger)
-                            .child(t_fmt(L10nKey::SettingsSaveError, &[("error", &error)])),
-                    )
-                    .child(
-                        h_flex().child(
-                            kit::button(
-                                "retry-settings-save",
-                                t(L10nKey::SettingsRetrySave),
-                                BtnKind::Secondary,
-                            )
-                            .on_click(
-                                cx.listener(|this, _, _window, cx| {
-                                    this.persist_settings_config(cx)
-                                }),
-                            ),
-                        ),
-                    )
-                    .into_any_element(),
-            );
-        }
         out
+    }
+
+    /// A failed write, said under the title band and outside the scrolling
+    /// page so scrolling or changing section never hides it. It stays until a
+    /// write lands: Retry runs the same save every toggle does.
+    fn render_settings_save_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let state = self.active_settings()?;
+        let error = state.save_error.as_deref()?;
+        let path = state.save_error_path.clone();
+        let tk = Tk::of(cx);
+        let scale = ui_scale(cx);
+        let message = div()
+            .id("settings-save-error")
+            .flex_1()
+            .min_w_0()
+            .text_size(fs(12.5))
+            .line_height(px(18.))
+            .text_color(tk.fg)
+            .child(t_fmt(L10nKey::SettingsSaveError, &[("error", error)]))
+            .when_some(path, |d, path| {
+                d.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(path.clone()).build(window, cx)
+                })
+            });
+        let retry = kit::button(
+            "retry-settings-save",
+            t(L10nKey::SettingsRetrySave),
+            BtnKind::Link,
+        )
+        .on_click(cx.listener(|this, _, _window, cx| this.persist_settings_config(cx)));
+        #[cfg(test)]
+        let retry = div()
+            .flex_shrink_0()
+            .debug_selector(|| "settings-save-retry".to_string())
+            .child(retry);
+        let bar = h_flex()
+            .id("settings-save-banner")
+            .role(gpui::Role::Alert)
+            .w_full()
+            .max_w(px(READING_COLUMN * scale))
+            .px(px(12.))
+            .py(px(8.))
+            .gap(px(10.))
+            .items_start()
+            .rounded(px(8.))
+            .shadow(vec![kit::ring(tk.k15, kit::hairline(), true)])
+            .child(
+                div()
+                    .mt(px(6.))
+                    .size(px(6.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(tk.danger),
+            )
+            .child(message)
+            .child(retry);
+        #[cfg(test)]
+        let bar = bar.debug_selector(|| "settings-save-banner".to_string());
+        Some(
+            div()
+                .w_full()
+                .flex_shrink_0()
+                .px(px(56.))
+                .pb(px(12.))
+                .child(bar)
+                .into_any_element(),
+        )
     }
 
     fn render_settings_nav(
@@ -1490,14 +1535,21 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+        let open = move |this: &mut Self, window: &mut Window, cx: &mut Context<Self>| {
             this.navigate_settings(SettingsSection::Keybindings, None, window, cx);
             if let Some(s) = this.active_settings() {
                 s.shortcut_search
                     .clone()
                     .update(cx, |s, cx| s.set_value(action, window, cx));
             }
-        });
+        };
+        // Moving within Settings: only edits that live in the page ask first,
+        // a failed write stays on the banner.
+        if self.ssh_form_dirty(cx) || self.theme_draft_dirty() {
+            self.with_settings_edits_resolved(window, cx, open);
+        } else {
+            open(self, window, cx);
+        }
     }
 
     /// Search results and the "modified" filter: the matching rows, live,
@@ -2521,5 +2573,68 @@ mod tests {
             "on a wide page the import link {import:?} is beside the filter {filter:?}"
         );
         assert!(import.right() <= add.left(), "import precedes Add host");
+    }
+
+    /// F17: after a failed write the banner is drawn under the title band and
+    /// stays exactly where it is while the page under it scrolls. Real render,
+    /// real failed write (a quarantined config refuses to save), real scroll.
+    #[gpui::test]
+    fn the_save_banner_stays_put_while_the_page_scrolls(cx: &mut TestAppContext) {
+        let (app, mut vcx) = harness(cx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(SettingsSection::General, window, cx);
+        });
+        vcx.simulate_resize(size(px(960.), px(420.)));
+        settle(&mut vcx);
+        assert!(
+            vcx.debug_bounds("settings-save-banner").is_none(),
+            "no banner before anything failed"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            cx.global_mut::<Config>().quarantined = true;
+            app.set_notify_threshold(93, cx);
+        });
+        settle(&mut vcx);
+        let banner = vcx
+            .debug_bounds("settings-save-banner")
+            .expect("the failed write is said in a banner");
+        let row_before = vcx
+            .debug_bounds("settings-row-SettingsLanguage")
+            .expect("the page's first rows are drawn");
+
+        let scroll = content_scroll(&app, &vcx);
+        assert!(
+            scroll.max_offset().y > px(200.),
+            "the page must be tall enough to scroll in this window: {:?}",
+            scroll.max_offset()
+        );
+        scroll.set_offset(gpui::point(px(0.), px(-150.)));
+        settle(&mut vcx);
+
+        let banner_after = vcx
+            .debug_bounds("settings-save-banner")
+            .expect("the banner is still drawn after scrolling");
+        let row_after = vcx
+            .debug_bounds("settings-row-SettingsLanguage")
+            .expect("the scrolled row is still laid out");
+        assert!(
+            row_before.origin.y - row_after.origin.y > px(100.),
+            "the page really scrolled: {row_before:?} -> {row_after:?}"
+        );
+        assert_eq!(
+            banner_after, banner,
+            "the banner did not move with the page"
+        );
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        assert!(
+            banner_after.origin.y > px(0.) && banner_after.bottom() < viewport.height,
+            "the banner sits inside the window, below its top edge: {banner_after:?} in {viewport:?}"
+        );
+        assert!(
+            scroll.bounds().top() >= banner_after.bottom(),
+            "the banner is above the scrolling page, not inside it: banner {banner_after:?}, page {:?}",
+            scroll.bounds()
+        );
     }
 }
