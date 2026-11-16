@@ -948,6 +948,9 @@ mod tests {
             .expect("a scratch directory");
         let root = std::fs::canonicalize(dir.path()).expect("it resolves");
         git(&root, &["init", "--quiet"]);
+        // Repository-local, so the code under test inherits it too: a Windows
+        // system `core.autocrlf=true` would turn the one-LF files into CRLF.
+        git(&root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         std::fs::write(root.join("s.txt"), "base\n").unwrap();
         git(&root, &["add", "a.txt", "s.txt"]);

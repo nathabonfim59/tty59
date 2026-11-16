@@ -579,18 +579,14 @@ mod gpui_tests {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
         crate::ui::i18n::set_locale("en");
         vcx.update(|_, cx| LspStore::mark_missing_for_test("rust-analyzer", cx));
-        open_rs(&app, &mut vcx, PATH);
+        // This platform's absolute spelling of PATH: a drive-less `/…` path
+        // has no file URI on Windows, so the test server state would not attach.
+        let path = crate::ui::lsp::test_path(PATH);
+        open_rs(&app, &mut vcx, path.to_str().expect("a UTF-8 test path"));
         let input = app.read_with(&vcx, |app, _| app.active_buffer().unwrap().input.clone());
         let set = |vcx: &mut VisualTestContext, state: TestState| {
             vcx.update(|_, cx| {
-                LspStore::set_state_for_test(
-                    &std::path::PathBuf::from(PATH),
-                    "rust",
-                    "rust-analyzer",
-                    state,
-                    &input,
-                    cx,
-                )
+                LspStore::set_state_for_test(&path, "rust", "rust-analyzer", state, &input, cx)
             });
         };
         set(

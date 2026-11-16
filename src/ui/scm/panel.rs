@@ -4678,8 +4678,13 @@ mod render_idle_gpui_tests {
         frames(&app, &mut vcx);
         let copied = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
         let copied = copied.expect("Copy path wrote the clipboard");
-        assert!(
-            copied.ends_with("b.rs") && copied.contains(&root.display().to_string()),
+        // The whole path, in this platform's local spelling: the fixture root is
+        // canonicalized (a verbatim `\\?\` path on Windows) while the row's path
+        // comes from git, so compare both through the same rule.
+        let expected = root.join("b.rs");
+        assert_eq!(
+            tty59_core::core::path_spelling::local_spelling(std::path::Path::new(&copied)),
+            tty59_core::core::path_spelling::local_spelling(&expected),
             "the path of the row's file, got {copied}"
         );
         assert_eq!(open_menu(&app, &mut vcx), None, "running an item closes it");
