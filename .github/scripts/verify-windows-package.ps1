@@ -76,7 +76,7 @@ function Assert-ConptyPair([string]$directory, [string]$label) {
     # vt-ghostty build on, Ghostty. Both ship in every package until the
     # alacritty backend's deletion drops its pair.
     foreach ($notice in 'LICENSE-Alacritty-APACHE.txt', 'LICENSE-Alacritty-MIT.txt',
-                        'LICENSE-Ghostty.txt') {
+                        'LICENSE-Ghostty.txt', 'completions/licenses/NOTICE-Herdr.txt') {
         if (-not (Test-Path -LiteralPath (Join-Path $directory $notice) -PathType Leaf)) {
             Fail "$label is missing the engine notice $notice"
         }
