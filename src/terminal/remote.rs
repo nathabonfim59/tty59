@@ -4755,6 +4755,21 @@ mod replay_tests {
 
         let (first_epoch, mut first, first_forward) = attach_client(&pane);
         first.resize(TermSize::new(120, 40), 8, 17);
+        // Input below goes straight to the pane, so its echo cannot fence the
+        // resize sent on the socket. A second attach retires this epoch and
+        // may legitimately discard a resize that has not been applied yet.
+        let resize_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while columns(&first) != 120 && std::time::Instant::now() < resize_deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        let resize_acknowledged = columns(&first) == 120;
+        if !resize_acknowledged {
+            pane.kill();
+        }
+        assert!(
+            resize_acknowledged,
+            "the first attach never acknowledged its 120-column resize"
+        );
         assert!(
             type_until_echoed(&pane, b"echo RACED-OUTPUT\r", &first, "RACED-OUTPUT"),
             "the pane never echoed; grid held:\n{}",
