@@ -36,9 +36,9 @@ jobs:
       matrix:
         include:
           # macos-14 is in its retirement brownouts (jobs are cancelled at
-          # dispatch — twice during the 26.10.3 release); macos-15 is the
+          # dispatch — twice during the 26.10.3 release); macos-latest is the
           # hosted arm64 image, and the one server-macos already builds on.
-          - runner: macos-15
+          - runner: macos-latest
             os: macos
             arch: arm64
             target: aarch64-apple-darwin
@@ -452,7 +452,7 @@ jobs:
           - target: x86_64-apple-darwin
             arch: x86_64
             asset: tty59-server-macos-x86_64
-    runs-on: macos-15
+    runs-on: macos-latest
     env:
       RUSTFLAGS: -C strip=symbols
     steps:
