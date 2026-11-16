@@ -1032,7 +1032,8 @@ fn a_joined_link_does_not_outlive_the_text_it_was_read_from(cx: &mut TestAppCont
 // Remote panes: the host answers later, and this machine's files say nothing.
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
+// These cases replay relative paths under the native temp dir and inject the
+// remote probe replies; neither their stream pair nor their cwd requires Unix.
 mod remote {
     use super::*;
     use crate::terminal::link_probe::Existence;
