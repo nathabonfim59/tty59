@@ -238,6 +238,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TreeDirLoading => "读取中…",
         L10nKey::TreeDirEmpty => "空",
         L10nKey::TreeDirHiddenOnly => "只有隐藏文件",
+        L10nKey::TreeDirShowHidden => "显示",
         L10nKey::TreeDirUnreadable => "无法读取",
         L10nKey::TreeSearchCapped => "只显示前 {n} 个匹配",
         L10nKey::TreeSearchFailed => "搜索失败",
@@ -1131,6 +1132,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpEditPermissions => "权限 · {mode}",
         L10nKey::SftpLoading => "加载中…",
         L10nKey::SftpEmptyDirectory => "空文件夹。",
+        L10nKey::SftpListRetry => "重试",
+        L10nKey::SftpListGoUp => "返回上级",
         L10nKey::SftpContextOpen => "打开",
         L10nKey::SftpContextEdit => "编辑",
         L10nKey::SftpContextFollowSymlink => "跟随符号链接",
@@ -1198,8 +1201,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::FileTreeContextNewFolder => "新建文件夹",
         L10nKey::FileTreeContextRename => "重命名",
         L10nKey::FileTreeContextCopyPath => "复制路径",
+        L10nKey::FileTreeContextCopyHostPath => "复制为 host:path",
         L10nKey::FileTreeContextHideDotfiles => "隐藏点文件",
         L10nKey::FileTreeContextShowDotfiles => "显示点文件",
+        L10nKey::FileTreeTooltipRefresh => "刷新",
+        L10nKey::FileTreeNotAutoRefreshing => "未自动刷新",
+        L10nKey::FileTreeWatchRetry => "重试",
         L10nKey::FileDropIntoItself => "文件夹不能复制到它自己里面。",
         L10nKey::FileDropNotHere => "不在这台机器上。",
         L10nKey::FileDropNameTaken => "同一次拖放里已经有另一项用了这个名字。",
@@ -1313,6 +1320,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsSearchEditorZoomKeywords => {
             "缩放 文字大小 字体大小 放大 缩小 编辑器 markdown 预览 zoom"
         }
+        L10nKey::SettingsFilesShowHidden => "显示隐藏文件",
+        L10nKey::SettingsFilesShowHiddenDesc => {
+            "在文件树及其名称搜索中列出以点开头的文件和文件夹，例如 .git 和 .env。"
+        }
+        L10nKey::SettingsSearchFilesShowHiddenKeywords => {
+            "隐藏 隐藏文件 点文件 文件树 显示 hidden dotfiles"
+        }
         L10nKey::EditorGoToLinePlaceholder => "行号，或 行:列（1–{total}）",
         L10nKey::EditorGoToSymbolAction => "跳转到编辑器中的符号…",
         L10nKey::EditorNavigateBack => "后退",
@@ -1392,6 +1406,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PanelPortsRestricted => "这里有以其他用户身份运行的进程，看不到它们的端口。",
         L10nKey::PortAutoForwarded => "远程 :{port} 现在是 http://localhost:{local}",
         L10nKey::PanelCwd => "工作目录",
+        L10nKey::PanelPane => "面板",
         L10nKey::PanelShell => "shell",
         L10nKey::PanelSsh => "ssh",
         L10nKey::PanelBranch => "分支",
@@ -1534,6 +1549,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::DiffTruncatedBudget => {
             "内容未加载——已超出 tty59 的 diff 预算。在终端运行 git diff 查看此文件。"
         }
+        L10nKey::DiffNoContentChanges => "内容无变化",
         L10nKey::DiffUntrackedHeader => "未跟踪文件 ({count})",
         L10nKey::DiffMoreUntracked => "…还有 {count} 个——在终端中运行 git status 查看。",
         L10nKey::DiffLines => "{count} 行 diff",
@@ -1773,6 +1789,8 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::CmdRecentTabSwitcher => "最近标签页切换器",
         L10nKey::CmdRecentTabSwitcherReverse => "最近标签页切换器（反向）",
         L10nKey::CmdCopyWorkingDirectory => "复制工作目录",
+        L10nKey::CmdCopyPaneAddress => "复制面板地址",
+        L10nKey::CmdCopyPaneAddressSubtitle => "当前面板的 %id，可直接用于 tty59 send/capture",
         L10nKey::CmdCopySessionId => "复制会话 ID",
         L10nKey::CmdCopySessionIdSubtitle => "编码 agent 自身的会话 ID",
         L10nKey::CmdNewAgentTab => "新建 Agent 标签页",
@@ -2150,6 +2168,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuSplitUp => "向上分屏",
         L10nKey::AppMenuRenameTab => "重命名标签页…",
         L10nKey::AppMenuCopyWorkingDirectory => "复制工作目录",
+        L10nKey::AppMenuCopyPaneAddress => "复制面板地址",
         L10nKey::AppMenuCopySessionId => "复制会话 ID",
         L10nKey::AppMenuForkSession => "Fork 会话",
         L10nKey::AppMenuSaveAgentLaunchArgs => "将当前启动参数设为默认",
@@ -2180,6 +2199,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::AppMenuFocusNextPane => "聚焦下一个窗格",
         L10nKey::AppMenuFocusPreviousPane => "聚焦上一个窗格",
         L10nKey::AppMenuZoomPane => "缩放窗格",
+        L10nKey::AppMenuUnzoomPane => "取消缩放窗格",
         L10nKey::AppMenuClearScrollback => "清除回滚内容",
         L10nKey::AppMenuOpenLink => "打开",
         L10nKey::AppMenuOpenLinkWithDefaultApp => "用默认程序打开",
@@ -2210,6 +2230,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::TabTooltipHideDetailPanel => "隐藏详情面板",
         L10nKey::TabTooltipShowDetailPanel => "显示详情面板",
         L10nKey::TabTooltipZoomed => "窗格已缩放，其他窗格已隐藏",
+        L10nKey::PaneZoomedBadge => "已缩放 · 第 1 个，共 {count} 个窗格",
         L10nKey::TabMenuLocalShells => "本地",
         L10nKey::TabMenuAddHost => "添加 SSH 主机…",
         L10nKey::TabMenuAllHosts => "所有 SSH 主机…",

@@ -2071,6 +2071,14 @@ mod tests {
                 readout: Default::default(),
                 since_ms: Some(1_760_000_000_000),
                 detection: None,
+                prompt: Some(crate::core::cli_agent::AgentPrompt {
+                    id: "toolu_1".into(),
+                    kind: crate::core::cli_agent::AgentPromptKind::Permission {
+                        tool: "Bash".into(),
+                        summary: "cargo test".into(),
+                        detail: Some("Run the tests".into()),
+                    },
+                }),
             })),
             DaemonMsg::AgentStatus(None),
             DaemonMsg::LoopbackForward(LoopbackForward { local_port: 49152 }),

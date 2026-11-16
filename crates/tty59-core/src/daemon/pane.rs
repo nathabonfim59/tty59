@@ -1256,6 +1256,7 @@ impl DeathReporter {
             return;
         }
         let subscribed = st.subscriber.is_some();
+        drop_agent_prompt(&mut st);
         mark_agent_exited(&mut st);
         notify(&mut st, DaemonMsg::Exited { code });
         drop(st);
@@ -4014,6 +4015,14 @@ fn settle_interrupt(st: &mut PaneState, armed_at: u64) -> bool {
     true
 }
 
+/// Forget what the agent of a pane that has exited was asking: with its
+/// process gone, nothing is left to take an answer.
+fn drop_agent_prompt(st: &mut PaneState) {
+    if st.agent_session.as_mut().is_some_and(|s| s.drop_prompt()) {
+        notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
+    }
+}
+
 /// Give up on a turn that has said nothing for [`AGENT_STALE_AFTER`]. Run by
 /// the daemon's periodic sweep, since a silent pane produces nothing that
 /// would otherwise wake anything up to notice.
@@ -4367,6 +4376,34 @@ fn apply_foreground_agent(
         notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
     }
     stamp_launch_argv(st, Some(detected.argv));
+    seed_resumed_session(st);
+}
+
+/// Take the session id off a command line that resumes one by name, for an
+/// agent that would otherwise not say which until its first turn
+/// (l0ng-ai/tty7#1260). Only fills a gap: an id the agent reported itself
+/// always stands.
+fn seed_resumed_session(st: &mut PaneState) {
+    let (Some(agent), Some(argv)) = (st.agent, st.agent_argv.as_ref()) else {
+        return;
+    };
+    if st
+        .agent_session
+        .as_ref()
+        .is_some_and(|s| s.session_id.is_some())
+    {
+        return;
+    }
+    let Some(id) = agent.resumed_session_id(argv) else {
+        return;
+    };
+    let argv = argv.clone();
+    let sess = st
+        .agent_session
+        .get_or_insert_with(AgentSessionState::default);
+    sess.session_id = Some(id);
+    sess.launch_argv.get_or_insert(argv);
+    notify(st, DaemonMsg::AgentStatus(st.agent_session.clone()));
 }
 
 fn begin_detection(st: &mut PaneState, kind: &str, now: Instant) {
@@ -6966,6 +7003,37 @@ mod tests {
         assert!(sess.inferred);
     }
 
+    /// A pane that exits while its agent asks something leaves nothing to
+    /// answer it: the prompt goes, and subscribers hear so.
+    #[test]
+    fn an_exited_pane_drops_its_agents_prompt() {
+        use crate::core::cli_agent::{
+            AgentPrompt, AgentPromptKind, AgentSessionState, AgentStatus,
+        };
+
+        let mut st = test_state(true);
+        drop_agent_prompt(&mut st);
+        assert!(st.agent_session.is_none());
+
+        st.agent_session = Some(AgentSessionState {
+            status: AgentStatus::Waiting,
+            rich: true,
+            prompt: Some(AgentPrompt {
+                id: "toolu_1".into(),
+                kind: AgentPromptKind::Permission {
+                    tool: "Bash".into(),
+                    summary: "ls".into(),
+                    detail: None,
+                },
+            }),
+            ..Default::default()
+        });
+        drop_agent_prompt(&mut st);
+        let sess = st.agent_session.as_ref().unwrap();
+        assert_eq!(sess.prompt, None);
+        assert_eq!(sess.status, AgentStatus::Waiting);
+    }
+
     #[test]
     fn hook_events_restart_the_agent_clock() {
         use crate::core::cli_agent::{AgentEvent, AgentEventKind};
@@ -6982,6 +7050,7 @@ mod tests {
                 cwd: None,
                 source: None,
                 readout: Default::default(),
+                prompt: None,
             }],
             None,
         );
@@ -7001,6 +7070,7 @@ mod tests {
             cwd: None,
             source: None,
             readout: Default::default(),
+            prompt: None,
         };
         let mut st = test_state(true);
         st.agent_session = Some(AgentSessionState {
@@ -7370,6 +7440,61 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_codex_session_keeps_its_id_before_the_first_turn() {
+        let argv = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        let session_id =
+            |st: &PaneState| st.agent_session.as_ref().and_then(|s| s.session_id.clone());
+
+        let mut st = test_state(true);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(argv("codex resume 0199a1b2-c3d4 --yolo")),
+            Some(20),
+        );
+        let sess = st
+            .agent_session
+            .clone()
+            .expect("a foreground agent has a session");
+        assert_eq!(sess.session_id.as_deref(), Some("0199a1b2-c3d4"));
+        assert_eq!(
+            sess.launch_argv.as_deref(),
+            Some(&argv("codex resume 0199a1b2-c3d4 --yolo")[..])
+        );
+
+        // The agent's own report still wins once it arrives.
+        let mut sniffer = OscSniffer::new();
+        let start = concat!(
+            "\x1b]777;notify;tty59://cli-agent;",
+            r#"{"v":1,"agent":"codex","event":"session-start","session_id":"0199-reported"}"#,
+            "\x07",
+        );
+        apply_signals(&mut st, sniffer.feed(start.as_bytes()));
+        assert_eq!(session_id(&st).as_deref(), Some("0199-reported"));
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(argv("codex resume 0199a1b2-c3d4 --yolo")),
+            Some(20),
+        );
+        assert_eq!(
+            session_id(&st).as_deref(),
+            Some("0199-reported"),
+            "a seeded id never overwrites a reported one"
+        );
+
+        let mut st = test_state(true);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(argv("codex resume --last")),
+            Some(20),
+        );
+        assert_eq!(session_id(&st), None, "--last names no session");
+
+        let mut st = test_state(true);
+        apply_foreground_agent(&mut st, detect_foreground_agent(argv("codex")), Some(20));
+        assert_eq!(session_id(&st), None, "a fresh launch has no id yet");
+    }
+
+    #[test]
     fn agent_screen_blocker_corrects_working_and_live_idle_releases_waiting() {
         let mut st = test_state(true);
         let mut sniffer = OscSniffer::new();
@@ -7514,6 +7639,91 @@ mod tests {
         assert_eq!(st.agent_session.as_ref().unwrap().status, AgentStatus::Done);
     }
 
+    fn held_prompt() -> crate::core::cli_agent::AgentPrompt {
+        crate::core::cli_agent::AgentPrompt {
+            id: "toolu_1".into(),
+            kind: crate::core::cli_agent::AgentPromptKind::Permission {
+                tool: "Bash".into(),
+                summary: "cargo test".into(),
+                detail: None,
+            },
+        }
+    }
+
+    /// The screen detector, not a hook, takes the pane off waiting: the
+    /// prompt held for the wait goes with it. Hook events clear it in
+    /// `apply_event`, but the detector moves the status without them.
+    #[test]
+    fn a_screen_detected_end_of_waiting_drops_the_prompt() {
+        let mut st = test_state(true);
+        let mut sniffer = OscSniffer::new();
+        apply_signals(
+            &mut st,
+            sniffer.feed(
+                concat!(
+                    "\x1b]777;notify;tty59://cli-agent;",
+                    r#"{"v":1,"agent":"claude","event":"prompt-submit"}"#,
+                    "\x07",
+                )
+                .as_bytes(),
+            ),
+        );
+        let epoch = active_detection(&st).unwrap().epoch;
+        let writer = ScreenWriter::Controller(1);
+        let now = Instant::now();
+        let blocker = AgentScreenHint {
+            epoch,
+            revision: 7,
+            rule: Some("live_blocked_form".into()),
+        };
+        apply_screen_hint(&mut st, writer, blocker.clone(), now);
+        let settled = now + Duration::from_secs(3);
+        apply_screen_hint(&mut st, writer, blocker.clone(), settled);
+        let state = st.agent_session.as_mut().unwrap();
+        assert_eq!(state.status, AgentStatus::Waiting);
+        state.prompt = Some(held_prompt());
+
+        apply_screen_hint(
+            &mut st,
+            writer,
+            AgentScreenHint {
+                epoch,
+                revision: 8,
+                rule: Some("live_prompt_box".into()),
+            },
+            settled,
+        );
+        apply_screen_hint(&mut st, writer, blocker, settled);
+        let state = st.agent_session.as_ref().unwrap();
+        assert_eq!(state.status, AgentStatus::Done);
+        assert_eq!(state.prompt, None, "the screen ended the wait");
+    }
+
+    /// The same for an end of waiting the agent's OSC progress reports.
+    #[test]
+    fn an_osc_detected_end_of_waiting_drops_the_prompt() {
+        let mut st = test_state(true);
+        apply_foreground_agent(
+            &mut st,
+            detect_foreground_agent(vec!["grok".into()]),
+            Some(21),
+        );
+        let mut sniffer = OscSniffer::new();
+        apply_signals(&mut st, sniffer.feed(b"\x1b]9;4;1;-1\x07"));
+        apply_signals(
+            &mut st,
+            sniffer.feed(b"\x1b]777;notify;Test agent;Please review\x07"),
+        );
+        let state = st.agent_session.as_mut().unwrap();
+        assert_eq!(state.status, AgentStatus::Waiting);
+        state.prompt = Some(held_prompt());
+
+        apply_signals(&mut st, sniffer.feed(b"\x1b]9;4;0;0\x07"));
+        let state = st.agent_session.as_ref().unwrap();
+        assert_eq!(state.status, AgentStatus::Done);
+        assert_eq!(state.prompt, None, "the OSC progress ended the wait");
+    }
+
     #[test]
     fn a_kitty_notification_marks_a_hookless_agent_waiting() {
         use crate::core::cli_agent::{AgentStatus, CLIAgent};
@@ -7566,6 +7776,7 @@ mod tests {
             readout: Default::default(),
             since_ms: None,
             detection: None,
+            prompt: None,
         });
         apply_signals(&mut st, sniffer.feed(b"\x1b]9;noise\x07"));
         assert_eq!(
