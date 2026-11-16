@@ -7059,7 +7059,12 @@ mod status_lifecycle_witness_gpui_tests {
             .prefix(prefix)
             .tempdir()
             .expect("a scratch directory");
-        let root = std::fs::canonicalize(dir.path()).expect("it resolves");
+        let canonical = std::fs::canonicalize(dir.path()).expect("it resolves");
+        // The panel keys its watcher and status cache by the root git reports,
+        // which production re-spells with `local_spelling`. On Windows
+        // `canonicalize` returns the `\\?\C:\` form, a different `Path` key from
+        // `C:\`, so the fixture must hand out the spelling the panel stores.
+        let root = tty59_core::core::path_spelling::local_spelling_buf(canonical);
         (dir, root)
     }
 
@@ -7682,7 +7687,9 @@ mod status_lifecycle_witness_gpui_tests {
             .expect("and says where the repository is");
         assert!(dir.join(".git").is_dir());
         assert_eq!(
-            std::fs::canonicalize(&root).expect("the root exists"),
+            tty59_core::core::path_spelling::local_spelling_buf(
+                std::fs::canonicalize(&root).expect("the root exists")
+            ),
             dir,
             "the repository is the folder itself, not one above it"
         );
@@ -7700,7 +7707,12 @@ mod status_lifecycle_witness_gpui_tests {
         let root = init_repo(&*host, &inner)
             .expect("an existing repository is not an error")
             .expect("it names the repository that holds the folder");
-        assert_eq!(std::fs::canonicalize(&root).expect("it exists"), outer);
+        assert_eq!(
+            tty59_core::core::path_spelling::local_spelling_buf(
+                std::fs::canonicalize(&root).expect("it exists")
+            ),
+            outer
+        );
         assert!(
             !inner.join(".git").exists(),
             "a repository was nested inside another"

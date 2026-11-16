@@ -50,7 +50,9 @@ fn scratch(name: &str) -> PathBuf {
     std::fs::canonicalize(&dir).unwrap()
 }
 
-fn git_ok(root: &Path, args: &[&str]) -> bool {
+/// One `git` child, run once; its whole `Output` is kept so a failing setup
+/// step can say what git said.
+fn git_output(root: &Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new("git")
         .args([
             "-c",
@@ -66,12 +68,18 @@ fn git_ok(root: &Path, args: &[&str]) -> bool {
         .current_dir(root)
         .output()
         .expect("git runs")
-        .status
-        .success()
 }
 
 fn git(root: &Path, args: &[&str]) {
-    assert!(git_ok(root, args), "git {args:?} failed");
+    let out = git_output(root, args);
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {}: {}\nstdout: {}\nstderr: {}",
+        root.display(),
+        out.status,
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
 }
 
 fn file(i: usize) -> String {
@@ -96,11 +104,15 @@ fn big_repo(name: &str) -> PathBuf {
     std::fs::create_dir_all(&sub).unwrap();
 
     git(&sub, &["init", "-q", "-b", "main"]);
+    git(&sub, &["config", "core.longpaths", "true"]);
+    git(&sub, &["config", "core.autocrlf", "false"]);
     write(&sub, "readme.txt", "sub\n");
     git(&sub, &["add", "-A"]);
     git(&sub, &["commit", "-qm", "sub"]);
 
     git(&root, &["init", "-q", "-b", "main"]);
+    git(&root, &["config", "core.longpaths", "true"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
     for i in 0..BASE {
         write(&root, &file(i), &format!("line {i}\n"));
     }
@@ -120,9 +132,13 @@ fn big_repo(name: &str) -> PathBuf {
     git(&root, &["checkout", "-q", "main"]);
     write(&root, "conflict.txt", "main\n");
     git(&root, &["commit", "-qam", "main"]);
+    let merge = git_output(&root, &["merge", "-q", "side"]);
     assert!(
-        !git_ok(&root, &["merge", "-q", "side"]),
-        "the merge stops on the conflict"
+        !merge.status.success(),
+        "the merge stops on the conflict: {}\nstdout: {}\nstderr: {}",
+        merge.status,
+        String::from_utf8_lossy(&merge.stdout),
+        String::from_utf8_lossy(&merge.stderr),
     );
 
     for i in 0..STAGED + EDITED {
