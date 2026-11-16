@@ -800,6 +800,11 @@ fn settings_search_entries() -> &'static [SearchEntry] {
         },
         SearchEntry {
             section: General,
+            title: SettingsFilesShowHidden,
+            keywords: SettingsSearchFilesShowHiddenKeywords,
+        },
+        SearchEntry {
+            section: General,
             title: SettingsNotifyOnCommandFinish,
             keywords: SettingsSearchNotifyOnCommandFinishKeywords,
         },
@@ -905,6 +910,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorMarkdownPreview => "editor_markdown_preview",
             L10nKey::SettingsEditorMermaidColors => "editor_mermaid_colors",
             L10nKey::SettingsEditorZoom => "editor_zoom",
+            L10nKey::SettingsFilesShowHidden => "files_show_hidden",
             L10nKey::SettingsNotifyOnCommandFinish => "notify_on_command_finish",
             L10nKey::SettingsNotifyThreshold => "notify_threshold_secs",
             L10nKey::SettingsTerminalBell => "bell",
@@ -1033,6 +1039,7 @@ impl SearchEntry {
             L10nKey::SettingsEditorMarkdownPreview => t(L10nKey::SettingsEditorMarkdownPreviewDesc),
             L10nKey::SettingsEditorMermaidColors => t(L10nKey::SettingsEditorMermaidColorsDesc),
             L10nKey::SettingsEditorZoom => t(L10nKey::SettingsEditorZoomDesc),
+            L10nKey::SettingsFilesShowHidden => t(L10nKey::SettingsFilesShowHiddenDesc),
             L10nKey::SettingsNotifyOnCommandFinish => t(L10nKey::SettingsNotifyOnCommandFinishDesc),
             L10nKey::SettingsNotifyThreshold => t(L10nKey::SettingsNotifyThresholdDesc),
             L10nKey::SettingsAppHttpProxy => t(L10nKey::SettingsAppHttpProxyDesc),
@@ -1110,6 +1117,7 @@ impl SearchEntry {
                 cfg.editor_mermaid_colors != defaults.editor_mermaid_colors
             }
             L10nKey::SettingsEditorZoom => cfg.editor_zoom != defaults.editor_zoom,
+            L10nKey::SettingsFilesShowHidden => cfg.files_show_hidden != defaults.files_show_hidden,
             L10nKey::SettingsNotifyOnCommandFinish => {
                 cfg.notify_on_command_finish != defaults.notify_on_command_finish
             }

@@ -1804,6 +1804,7 @@ mod tests {
                     readout: Default::default(),
                     since_ms: None,
                     detection: None,
+                    prompt: None,
                 },
             }])),
             ControlReply::Ok(ReplyOk::AgentStates(Vec::new())),

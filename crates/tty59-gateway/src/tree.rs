@@ -10,13 +10,16 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use tty59_core::core::cli_agent::{AgentSessionState, AgentStatus as CoreStatus, CLIAgent};
+use tty59_core::core::cli_agent::{
+    AgentPrompt, AgentPromptKind, AgentSessionState, AgentStatus as CoreStatus, CLIAgent,
+};
 use tty59_core::core::group_key::{AutoKey, GroupKey, auto_names, pinned_names, place};
 use tty59_core::core::machine::{Machine, PaneRecord, Workspace};
 use tty59_core::core::tab_view::{TabLabel, strip_host_prefix, strip_status_mark, tab_views_of};
 use tty59_core::daemon::control::PaneAgentState;
 use tty59_mobile_proto::{
-    AgentStatus, AgentView, GroupView, PaneView, TabView, Tree, WorkspaceView,
+    AgentStatus, AgentView, GroupView, OptionView, PaneView, PromptKind, PromptView, QuestionView,
+    TabView, Tree, WorkspaceView,
 };
 
 pub fn build(host: &str, machine: &Machine, agents: &[PaneAgentState]) -> Tree {
@@ -198,6 +201,7 @@ fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneVi
                     status: status(overview.status),
                     message: None,
                     exited: overview.exited,
+                    prompt: None,
                 })
                 .or_else(|| {
                     pane.agent.as_ref().map(|facts| AgentView {
@@ -205,6 +209,7 @@ fn pane_view(id: u64, panes: &[PaneRecord], agents: &[PaneAgentState]) -> PaneVi
                         status: status(facts.status.unwrap_or_default()),
                         message: None,
                         exited: false,
+                        prompt: None,
                     })
                 })
         }),
@@ -229,7 +234,47 @@ pub fn agent_view(agent: Option<CLIAgent>, state: &AgentSessionState) -> Option<
         status: status(state.status),
         message: state.message.clone(),
         exited: state.agent_exited(),
+        prompt: state.prompt.as_ref().map(prompt_view),
     })
+}
+
+/// The phone's copy of a waiting agent's prompt: the same fields, in the
+/// mobile protocol's own types so the app never links `tty59-core`.
+fn prompt_view(prompt: &AgentPrompt) -> PromptView {
+    let kind = match &prompt.kind {
+        AgentPromptKind::Question { questions } => PromptKind::Question {
+            questions: questions
+                .iter()
+                .map(|q| QuestionView {
+                    header: q.header.clone(),
+                    text: q.text.clone(),
+                    options: q
+                        .options
+                        .iter()
+                        .map(|o| OptionView {
+                            label: o.label.clone(),
+                            description: o.description.clone(),
+                        })
+                        .collect(),
+                    multi_select: q.multi_select,
+                    allow_other: q.allow_other,
+                })
+                .collect(),
+        },
+        AgentPromptKind::Permission {
+            tool,
+            summary,
+            detail,
+        } => PromptKind::Permission {
+            tool: tool.clone(),
+            summary: summary.clone(),
+            detail: detail.clone(),
+        },
+    };
+    PromptView {
+        id: prompt.id.clone(),
+        kind,
+    }
 }
 
 pub fn status(s: CoreStatus) -> AgentStatus {
@@ -339,6 +384,78 @@ mod tests {
         assert_eq!(agent.status, AgentStatus::Waiting);
         assert_eq!(agent.message.as_deref(), Some("needs permission"));
         assert!(tree.workspaces[0].tabs[1].panes[0].agent.is_none());
+    }
+
+    #[test]
+    fn a_waiting_agents_prompt_reaches_the_phone() {
+        use tty59_core::core::cli_agent::{AgentQuestion, AgentQuestionOption};
+
+        let state = AgentSessionState {
+            status: CoreStatus::Waiting,
+            prompt: Some(AgentPrompt {
+                id: "toolu_1".into(),
+                kind: AgentPromptKind::Question {
+                    questions: vec![AgentQuestion {
+                        header: Some("Cache".into()),
+                        text: "Which store?".into(),
+                        options: vec![AgentQuestionOption {
+                            label: "Redis".into(),
+                            description: Some("Shared".into()),
+                        }],
+                        multi_select: true,
+                        allow_other: true,
+                    }],
+                },
+            }),
+            ..AgentSessionState::default()
+        };
+        let view = agent_view(Some(CLIAgent::Claude), &state).expect("a known agent has a view");
+        assert_eq!(
+            view.prompt,
+            Some(PromptView {
+                id: "toolu_1".into(),
+                kind: PromptKind::Question {
+                    questions: vec![QuestionView {
+                        header: Some("Cache".into()),
+                        text: "Which store?".into(),
+                        options: vec![OptionView {
+                            label: "Redis".into(),
+                            description: Some("Shared".into()),
+                        }],
+                        multi_select: true,
+                        allow_other: true,
+                    }],
+                },
+            })
+        );
+
+        let state = AgentSessionState {
+            status: CoreStatus::Waiting,
+            prompt: Some(AgentPrompt {
+                id: "p".into(),
+                kind: AgentPromptKind::Permission {
+                    tool: "Bash".into(),
+                    summary: "cargo test".into(),
+                    detail: Some("Run the tests".into()),
+                },
+            }),
+            ..AgentSessionState::default()
+        };
+        assert_eq!(
+            agent_view(Some(CLIAgent::Codex), &state).and_then(|v| v.prompt),
+            Some(PromptView {
+                id: "p".into(),
+                kind: PromptKind::Permission {
+                    tool: "Bash".into(),
+                    summary: "cargo test".into(),
+                    detail: Some("Run the tests".into()),
+                },
+            })
+        );
+        assert_eq!(
+            agent_view(Some(CLIAgent::Codex), &AgentSessionState::default()).and_then(|v| v.prompt),
+            None
+        );
     }
 
     #[test]
