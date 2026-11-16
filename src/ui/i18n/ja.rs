@@ -1667,6 +1667,23 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ScmDiscardAllConfirm => {
             "未ステージの変更と未追跡ファイルをすべて破棄しますか？ステージ済みの変更は残ります。元に戻せません。"
         }
+        L10nKey::ScmDiscardManyConfirm => {
+            "{count} 個のファイルの変更を破棄しますか？元に戻せません。"
+        }
+        L10nKey::ScmDeleteUntrackedConfirm => {
+            "{path} を削除しますか？未追跡のため、Git では復元できません。"
+        }
+        L10nKey::ScmDeleteUntrackedFolderConfirm => {
+            "{path} とその中身をすべて削除しますか？未追跡のため、Git では復元できません。"
+        }
+        L10nKey::ScmDeleteUntrackedManyConfirm => {
+            "未追跡の項目 {count} 個を削除しますか？Git では復元できません。"
+        }
+        L10nKey::ScmDeleteUntracked => "未追跡を削除",
+        L10nKey::ScmDiscardEverythingConfirm => "未ステージの変更をすべて破棄しますか？",
+        L10nKey::ScmDiscardEverythingDetail => {
+            "追跡済みファイルの未ステージの編集は元に戻り、未追跡のファイルとフォルダーは削除されます。ステージ済みの変更は残ります。ここでは元に戻せません。"
+        }
         L10nKey::ScmAmendConfirm => {
             "直前のコミットを修正しますか？新しいコミットに置き換わるため、すでに取得した人は対応が必要になります。"
         }
