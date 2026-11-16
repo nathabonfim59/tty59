@@ -30,8 +30,15 @@ pub(crate) fn pill(accent: Hsla, cx: &App) -> Div {
     let theme = cx.theme();
     h_flex()
         .occlude()
+        // The pill never draws wider than the terminal it floats over, and what
+        // does not fit on its row wraps onto the next one, so a long reason
+        // and the actions beside it are all painted instead of running past
+        // the terminal's edge. A pill whose content fits keeps its one row.
+        .max_w_full()
+        .flex_wrap()
         .items_center()
-        .gap(px(8.))
+        .gap_x(px(8.))
+        .gap_y(px(4.))
         .min_h(px(PILL_H))
         .pl(px(12.))
         .pr(px(14.))
@@ -65,6 +72,9 @@ pub(crate) fn anchor(items: Vec<AnyElement>) -> Option<AnyElement> {
             .left_0()
             .right_0()
             .bottom_4()
+            // The same margin at the sides as below, so a pill that fills the
+            // terminal does not touch its edges.
+            .px_4()
             .child(v_flex().w_full().items_center().gap_2().children(items))
             .into_any_element(),
     )

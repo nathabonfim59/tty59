@@ -29,9 +29,10 @@ use gpui_component::{ActiveTheme as _, IconName, Sizable as _, h_flex, v_flex};
 
 use super::{BufferId, TabCode};
 use crate::ui::app::Tty59App;
+use crate::ui::dialog::{self, Tone};
 use crate::ui::editor_text::TextFormat;
 use crate::ui::host_ops::HostOps;
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 
 /// How long typing has to pause before the buffer is diffed again.
 const DIFF_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -308,6 +309,28 @@ fn fetch_base(h: &dyn tty59_core::host::Host, path: &Path) -> Fetched {
         root: Some(root),
         bytes,
     }
+}
+
+/// What the peek's header says: the lines the change took out and put in, each
+/// in its own plural form, against the staged version. That is the base the
+/// markers are drawn from — the index, which is not always the last commit.
+fn peek_summary(removed: usize, added: usize) -> String {
+    let lines = |key, n| t_plural(key, n, &[]);
+    let changes = match (removed, added) {
+        (0, added) => lines(L10nKey::EditorGitPeekLinesAdded, added),
+        (removed, 0) => lines(L10nKey::EditorGitPeekLinesRemoved, removed),
+        (removed, added) => t_fmt(
+            L10nKey::EditorGitPeekChanges,
+            &[
+                (
+                    "removed",
+                    &lines(L10nKey::EditorGitPeekLinesRemoved, removed),
+                ),
+                ("added", &lines(L10nKey::EditorGitPeekLinesAdded, added)),
+            ],
+        ),
+    };
+    t_fmt(L10nKey::EditorGitPeekSummary, &[("changes", &changes)])
 }
 
 /// The inline peek a click on a marker, or the peek command, opens.
@@ -832,6 +855,7 @@ impl Tty59App {
     pub(crate) fn render_editor_gutter_peek(
         &self,
         id: BufferId,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let f = self.buffer(id)?;
@@ -848,13 +872,7 @@ impl Tty59App {
         let theme = cx.theme();
         let removed = peek.hunk.old.len();
         let added = peek.hunk.new.len();
-        let summary = t_fmt(
-            L10nKey::EditorGitPeekSummary,
-            &[
-                ("removed", &removed.to_string()),
-                ("added", &added.to_string()),
-            ],
-        );
+        let summary = peek_summary(removed, added);
         let body: AnyElement = if peek.original.is_empty() {
             div()
                 .px_3()
@@ -889,8 +907,8 @@ impl Tty59App {
             .gap_2()
             .px_3()
             .py_1p5()
-            .border_b_1()
-            .border_color(theme.border)
+            .border_b(crate::ui::theme::hairline(window))
+            .border_color(theme.sidebar_border)
             .child(
                 div()
                     .flex_1()
@@ -900,23 +918,29 @@ impl Tty59App {
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(gpui::rems(crate::ui::right_panel::HEADING))
                     .text_color(theme.muted_foreground)
                     .child(t(L10nKey::EditorGitPeekKeys)),
             )
-            .child(
-                Button::new("editor-gutter-peek-revert")
-                    .small()
-                    .label(t(L10nKey::EditorGitPeekRevert))
-                    .on_click({
+            .child(super::status::probe(
+                dialog::button(
+                    "editor-gutter-peek-revert",
+                    t(L10nKey::EditorGitPeekRevert),
+                    Tone::DangerOutline,
+                    true,
+                    dialog::popover_rungs(cx),
+                    cx,
+                    {
                         let app = app.clone();
                         move |_, window, cx| {
                             let _ = app.update(cx, |app, cx| {
                                 app.editor_gutter_revert(id, &hunk, window, cx);
                             });
                         }
-                    }),
-            )
+                    },
+                ),
+                "editor-gutter-peek-revert",
+            ))
             .child(
                 Button::new("editor-gutter-peek-close")
                     .ghost()
@@ -931,7 +955,6 @@ impl Tty59App {
                         }
                     }),
             );
-        let keys_hunk = peek.hunk.clone();
         let card = v_flex()
             .id("editor-gutter-peek")
             .track_focus(&peek.focus)
@@ -942,19 +965,13 @@ impl Tty59App {
                     if ks.modifiers.modified() {
                         return;
                     }
-                    match ks.key.as_str() {
-                        "escape" => {
-                            let _ = app.update(cx, |app, cx| {
-                                app.editor_gutter_dismiss_peek(id, window, cx)
-                            });
-                        }
-                        "enter" => {
-                            let _ = app.update(cx, |app, cx| {
-                                app.editor_gutter_revert(id, &keys_hunk, window, cx)
-                            });
-                        }
-                        _ => return,
+                    // Escape only: reverting discards the user's lines, so it is
+                    // the Revert button's to do and no bare key's.
+                    if ks.key != "escape" {
+                        return;
                     }
+                    let _ =
+                        app.update(cx, |app, cx| app.editor_gutter_dismiss_peek(id, window, cx));
                     cx.stop_propagation();
                 }
             })
@@ -1163,6 +1180,22 @@ mod tests {
         assert_eq!(decode_base(&bytes, &utf16), "é\n");
     }
 
+    /// Each count in its own plural form, and the base named as it is.
+    #[test]
+    fn the_peek_header_counts_each_side_in_its_own_plural_form() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(peek_summary(0, 1), "1 line added since the staged version");
+        assert_eq!(peek_summary(0, 8), "8 lines added since the staged version");
+        assert_eq!(
+            peek_summary(1, 0),
+            "1 line removed since the staged version"
+        );
+        assert_eq!(
+            peek_summary(2, 1),
+            "2 lines removed, 1 line added since the staged version"
+        );
+    }
+
     #[test]
     fn step_wraps_forward_past_the_last_hunk() {
         let hunks = vec![h(1..2, 1..2)];
@@ -1265,20 +1298,177 @@ mod tests {
             assert!(input.read(cx).focus_handle(cx).is_focused(window));
         });
 
-        // Enter in the peek reverts the change it shows.
+        // Enter in the peek is not a revert: the text is as it was and the
+        // peek is still up. (The real-file witness is
+        // `enter_in_the_peek_changes_nothing_and_only_revert_reverts`.)
         app.update_in(&mut vcx, |app, window, cx| {
             assert!(app.editor_gutter_peek_at_cursor(window, cx));
         });
         vcx.run_until_parked();
         vcx.simulate_keystrokes("enter");
         vcx.run_until_parked();
-        assert!(!peek_open(&app, &mut vcx));
+        assert!(peek_open(&app, &mut vcx));
         vcx.update(|_, cx| {
             assert_eq!(
                 input.read(cx).text().to_string(),
-                "one\ntwo\nthree\nfour\nfive\n"
+                "one\nTWO\nthree\nfour\nfive\n"
             );
         });
+    }
+
+    /// The data-loss guard on a real file: Enter with the peek focused leaves
+    /// the buffer's bytes, its modified state and the file on disk exactly as
+    /// they were and the peek open; only activating the Revert button puts the
+    /// base lines back, and one undo takes that back.
+    #[gpui::test]
+    fn enter_in_the_peek_changes_nothing_and_only_revert_reverts(cx: &mut gpui::TestAppContext) {
+        use crate::ui::app::test_window;
+        use crate::ui::code_editor::nav::gpui_tests::open_rs;
+
+        // A directory of this test's own, removed with it and nothing else.
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::ui::code_editor::tests::test_real_dir(dir.path());
+        let file = root.join("peek.rs");
+
+        let (app, mut vcx, _pane) = test_window::harness_with_tabs(cx, 1);
+        let settle = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            let _ = vcx.update(|window, cx| window.draw(cx));
+            vcx.run_until_parked();
+        };
+        let id = open_rs(&app, &mut vcx, file.to_str().expect("utf-8 path"));
+        let input = app.read_with(&vcx, |app, _| app.buffer(id).unwrap().input.clone());
+        let edited = vcx.update(|_, cx| input.read(cx).text().to_string());
+        // A staged first line that differs from the buffer's: one change, at
+        // the caret's own line.
+        let base = format!(
+            "// the staged first line\n{}",
+            edited.split_once('\n').map_or("", |(_, rest)| rest)
+        );
+        // The host reads land on a background thread: wait for them, with a
+        // deadline, rather than guessing at a pause.
+        let wait_for = |app: &gpui::Entity<Tty59App>,
+                        vcx: &mut gpui::VisualTestContext,
+                        what: &str,
+                        ready: &dyn Fn(&BufferGutter) -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                settle(vcx);
+                if app.update_in(vcx, |app, _, _| ready(&app.buffer(id).unwrap().gutter)) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "timed out waiting for {what}"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        // The buffer's own first read of its base finds no repository yet.
+        wait_for(&app, &mut vcx, "the first base read", &|g| {
+            !g.fetching && g.fetched.is_some()
+        });
+
+        // Then the file goes into a repository with `base` staged and the
+        // edited text in the working copy, and the production refetch (the
+        // one a save asks for) reads the index.
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("git runs");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        std::fs::write(&file, &base).unwrap();
+        git(&["add", "peek.rs"]);
+        std::fs::write(&file, &edited).unwrap();
+        app.update_in(&mut vcx, |app, _, _| app.editor_gutter_refetch(id));
+        wait_for(&app, &mut vcx, "the staged base", &|g| {
+            g.base.as_deref() == Some(base.as_str())
+        });
+        // The base and its one change are the production ones, here and again
+        // before the click: a missing base would make Enter look harmless.
+        let real_base_and_hunk =
+            |app: &gpui::Entity<Tty59App>, vcx: &mut gpui::VisualTestContext| {
+                app.update_in(vcx, |app, _, cx| {
+                    assert_eq!(
+                        app.buffer(id).unwrap().gutter.base.as_deref(),
+                        Some(base.as_str()),
+                        "the buffer has its staged base"
+                    );
+                    assert_eq!(app.editor_gutter_hunks_now(id, cx).len(), 1, "one change");
+                })
+            };
+        real_base_and_hunk(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            input.update(cx, |state, cx| {
+                state.set_cursor_position(Position::new(0, 0), window, cx);
+                state.focus(window, cx);
+            });
+            assert!(app.editor_gutter_peek_at_cursor(window, cx));
+        });
+        let _probe = crate::ui::paint_probe::scope();
+        settle(&mut vcx);
+        // The real peek, drawn in the real window, builds its Revert with the
+        // destructive-outline recipe: an outline and no fill at rest.
+        let revert_paints = crate::ui::paint_probe::all("dialog.button.danger_outline");
+        assert!(
+            !revert_paints.is_empty(),
+            "the peek's Revert is a DangerOutline button"
+        );
+        for p in &revert_paints {
+            assert!(p.border.is_some() && p.fill.is_none(), "{p:?}");
+        }
+        let state = |app: &gpui::Entity<Tty59App>, vcx: &mut gpui::VisualTestContext| {
+            app.update_in(vcx, |app, _, cx| {
+                let f = app.buffer(id).unwrap();
+                (
+                    f.input.read(cx).text().to_string(),
+                    f.dirty,
+                    f.gutter.peek.is_some(),
+                )
+            })
+        };
+        let before = state(&app, &mut vcx);
+        assert!(before.2, "the peek is open");
+        assert_eq!(before.0, edited);
+
+        real_base_and_hunk(&app, &mut vcx);
+        vcx.simulate_keystrokes("enter");
+        settle(&mut vcx);
+        assert_eq!(
+            state(&app, &mut vcx),
+            before,
+            "Enter changed the buffer or closed the peek"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), edited, "disk");
+
+        real_base_and_hunk(&app, &mut vcx);
+        let revert = vcx
+            .debug_bounds("editor-gutter-peek-revert")
+            .expect("the Revert button is drawn");
+        vcx.simulate_click(revert.center(), gpui::Modifiers::none());
+        settle(&mut vcx);
+        let after = state(&app, &mut vcx);
+        assert_eq!(after.0, base, "Revert restores the base lines");
+        assert!(!after.2, "the peek closes on Revert");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            edited,
+            "disk is only written by save"
+        );
+
+        vcx.update(|window, cx| {
+            window.dispatch_action(Box::new(gpui_component::input::Undo), cx);
+        });
+        settle(&mut vcx);
+        assert_eq!(
+            state(&app, &mut vcx).0,
+            edited,
+            "one undo restores the lines"
+        );
     }
 
     /// The base is the index — staged edits are not changes — read through
@@ -1323,6 +1513,16 @@ mod tests {
         let fetched = fetch_base(&*host, &file);
         assert_eq!(fetched.root.as_deref(), Some(root.as_path()));
         assert_eq!(fetched.bytes.as_deref(), Some(&b"two\n"[..]));
+
+        // The header words the change against what the markers are drawn from:
+        // the staged `two`, not the committed `one`.
+        crate::ui::i18n::set_locale("en");
+        let staged = decode_base(fetched.bytes.as_deref().unwrap(), &TextFormat::default());
+        let hunks = diff_hunks(&staged, "three\n");
+        assert_eq!(hunks.len(), 1);
+        let summary = peek_summary(hunks[0].old.len(), hunks[0].new.len());
+        assert!(summary.contains("staged version"), "{summary}");
+        assert!(!summary.contains("commit"), "{summary}");
 
         let untracked = fetch_base(&*host, &root.join("new.txt"));
         assert!(untracked.root.is_some());

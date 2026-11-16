@@ -1,7 +1,7 @@
 use gpui::{
     Animation, AnimationExt as _, AnyElement, App, Axis, Bounds, Context, Edges, FontWeight,
     MouseButton, Pixels, SharedString, Window, canvas, deferred, div, ease_out_quint,
-    linear_color_stop, linear_gradient, prelude::*, px,
+    linear_color_stop, linear_gradient, prelude::*, px, rems,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -25,9 +25,12 @@ use crate::core::shells::DetectedShell;
 use crate::daemon::protocol::ShellSpec;
 use crate::ui::app::{SpawnWhere, TILE_GLYPH, TILE_SIZE, Tab, Tty59App, tile_trailing_inset};
 use crate::ui::hints::tab_badge_label;
-use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::reorder::{self, Reorder, Surface};
 use crate::ui::search::SearchTab;
+use crate::ui::text_elision::{ElidedLabel, Mode, join_segments, path_separator};
+
+pub(crate) use crate::ui::text_elision::measure_text;
 
 /// One duration and one curve for every transition the app runs, so a fade and
 /// a slide read as the same hand. Long enough to be seen as movement, short
@@ -35,6 +38,15 @@ use crate::ui::search::SearchTab;
 pub(crate) const TRANSITION_MS: u64 = 140;
 pub(crate) const REORDER_SLIDE_MS: u64 = TRANSITION_MS;
 const CHIP_GAP: f32 = 6.;
+
+/// The gap between the strip row's own children, as a share of the rem: what
+/// `gap_1p5` has always been, 6px at the default size, and it grows with the
+/// interface font. The row is drawn with it and budgeted with it.
+const STRIP_GAP_REM: f32 = 0.375;
+
+/// Air between two groups of title-bar chrome: the document header and the
+/// Agents pill, the search box and the tiles beside it.
+pub(crate) const CHROME_GROUP_GAP: f32 = 8.;
 
 pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
@@ -70,18 +82,6 @@ pub(crate) fn abbreviate_home<'a>(
     // pane whose cwd spells itself `C:/Users/…` shortens under a
     // `C:\Users\…` home too (#544).
     crate::ui::path_display::abbreviate_home(path, home)
-}
-
-/// The separator a path spells itself with. A path carrying a single `\` is
-/// a Windows path and has to be put back together with `\`: rejoining it with
-/// `/` would make one tab spell its location two ways, `C:\Users\dev\app`
-/// while it fits and `C:/…/app` once it has to be elided.
-fn path_separator(path: &str) -> char {
-    if path.contains('\\') { '\\' } else { '/' }
-}
-
-fn join_segments(segments: &[&str], sep: char) -> String {
-    segments.join(sep.encode_utf8(&mut [0u8; 4]) as &str)
 }
 
 pub(crate) fn short_title(raw: &str, home: Option<&std::path::Path>) -> String {
@@ -202,151 +202,30 @@ pub(crate) fn label_of(
     }
 }
 
-/// What a row can add on hover: the name behind the one [`label_of`] cut down,
-/// or `None` when it cut nothing and the tooltip would only repeat the row.
+/// A tab's whole label, and the words an ended pane wrote after its name.
 ///
-/// The comparison has to happen on the *same* spelling, which is the whole
-/// trick here. `label_of` abbreviates a path under the home before it elides
-/// it, and this returns the abbreviated form too, so a raw `/Users/x/repo`
-/// measured against a label of `~/repo` looks like a difference that isn't
-/// one — and every tab named after a directory inside the home would hang a
-/// tooltip saying exactly what it already says. Abbreviate first, compare
-/// after.
-fn tooltip_of(
-    view: &crate::ui::machine_mirror::TabView,
-    index: usize,
-    home: Option<&std::path::Path>,
-) -> Option<SharedString> {
-    use crate::ui::machine_mirror::TabLabel;
-
-    // The other rungs are never shortened: a given name and a process name are
-    // printed whole, and an agent's is a word.
-    let raw = match view.label() {
-        TabLabel::Osc(title) => title,
-        TabLabel::Cwd(cwd) => cwd,
-        _ => return None,
-    };
-    let full = abbreviate_home(raw.trim(), home);
-    if full.trim().is_empty() || full.as_ref() == label_of(view, index, home).as_str() {
-        return None;
-    }
-    Some(SharedString::from(full.into_owned()))
+/// `ended_tail` is a CANDIDATE, `Some` only for the pane's own title as its exit
+/// wrote it (never a custom name, an agent, a directory or a process name): the
+/// producer already checked it against the pane's actual title. The label may
+/// have been transformed in front of those words (home shortening, a host
+/// prefix), which cannot touch the end; whether the display text really ends
+/// with the tail is validated once by the [`ElidedLabel`] (`tail_included`),
+/// which falls back to ordinary elision on a mismatch. A surface hands the WHOLE text
+/// to the label together with the candidate, builds no head string, and keeps
+/// the whole text for the hover.
+pub(crate) struct FullLabel {
+    pub(crate) text: SharedString,
+    pub(crate) ended_tail: Option<&'static str>,
 }
 
-/// Width of `text` shaped in `font` at `size`, in pixels.
-///
-/// The window's text system caches shaped runs, so measuring the same labels
-/// across frames is cheap. The sidebar elides against real glyph widths
-/// instead of guessing at character counts — that is the only way a mixed
-/// CJK/Latin label can be squeezed without tearing mid-token.
-pub(crate) fn measure_text(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-) -> f32 {
-    text_system
-        .shape_line(
-            SharedString::from(text),
-            px(size),
-            &[gpui::TextRun {
-                len: text.len(),
-                font: font.clone(),
-                color: gpui::Hsla::default(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }],
-            None,
-        )
-        .width
-        .as_f32()
-}
-
-/// Elides a path from the front when it cannot fit `max_width`, keeping the
-/// root marker (drive letter, `~`, or the leading slash) and every trailing
-/// segment that fits.
-///
-/// The tail is what a user identifies a tab by — the file or directory they
-/// are actually working on — so it is never torn: whole segments drop off the
-/// front first (a half-eaten directory name reads as noise), and when even
-/// the last segment is too wide, only that segment is elided character by
-/// character, still tail-first.
-pub(crate) fn elide_path_keep_tail(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    path: &str,
-    max_width: f32,
-) -> SharedString {
-    let path = path.trim();
-    if path.is_empty() || measure_text(text_system, font, size, path) <= max_width {
-        return SharedString::from(path);
-    }
-    let sep = path_separator(path);
-    let segments: Vec<&str> = path.split(['/', '\\']).collect();
-    // A leading slash splits into an empty first segment; `~` and drive
-    // letters (`E:`) carry the same "where this tree lives" weight, and a
-    // leading `…` means `short_title` already elided once — that marker is
-    // replaced by the new elision instead of stacking two ellipses. Keep
-    // whichever marker there is so the result never reads as a bare
-    // relative path.
-    let root: &str = match segments.first() {
-        Some(&"") => "/",
-        Some(&"~") => "~",
-        Some(&"…") => "",
-        Some(head) if head.ends_with(':') => head,
-        _ => "",
-    };
-    let root_kept = segments
-        .first()
-        .is_some_and(|s| s.is_empty() || *s == "~" || *s == "…" || s.ends_with(':'));
-    let prefix = if root.is_empty() {
-        format!("…{sep}")
-    } else if root == "/" {
-        // The absolute-path root is already the slash itself.
-        format!("/…{sep}")
-    } else {
-        format!("{root}{sep}…{sep}")
-    };
-    // Drop whole segments from the front until the remaining tail fits. The
-    // width only shrinks as segments leave, so the first fit is the widest
-    // one — greedy is optimal here.
-    //
-    // With a root marker, `head = 1` would spell the root, the ellipsis, and
-    // then every remaining segment — strictly wider than the original that
-    // already failed to fit — so that candidate is skipped rather than
-    // measured.
-    let mut head = if root_kept { 2 } else { 0 };
-    while head < segments.len() {
-        let candidate = if head == 0 {
-            join_segments(&segments, sep)
-        } else {
-            format!("{prefix}{}", join_segments(&segments[head..], sep))
-        };
-        if measure_text(text_system, font, size, &candidate) <= max_width {
-            return SharedString::from(candidate);
+impl FullLabel {
+    fn whole(text: String) -> Self {
+        Self {
+            text: SharedString::from(text),
+            ended_tail: None,
         }
-        if head + 1 >= segments.len() {
-            break;
-        }
-        head += 1;
     }
-    // Even the last segment alone is too wide: keep its tail after the
-    // ellipsis, with no slash so the reader sees the segment was torn.
-    elide_tail_clusters(
-        text_system,
-        font,
-        size,
-        segments[segments.len() - 1],
-        max_width,
-    )
 }
-
-/// Characters a token is allowed to break on. Space is in the set because
-/// this also elides labels a human typed — `Backend server logs` — not just
-/// branch names, and a word boundary is the cut a reader forgives.
-const TOKEN_BREAKS: [char; 5] = ['-', '_', '/', '.', ' '];
 
 /// Splits `text` into grapheme clusters — what a reader counts as one
 /// character, and the only place a label may be cut.
@@ -358,190 +237,6 @@ const TOKEN_BREAKS: [char; 5] = ['-', '_', '/', '.', ' '];
 /// as a bare letter.
 fn clusters(text: &str) -> Vec<&str> {
     text.graphemes(true).collect()
-}
-
-/// The head this token would rather keep: six clusters, extended to just past
-/// the next break so the cut lands on a boundary (`window-…` rather than
-/// `window…`). When no break is within reach the plain six is kept — running
-/// on to the cap would spend the whole budget on a prefix and leave the tail,
-/// which is what identifies the token, with nothing.
-fn preferred_head(clusters: &[&str]) -> usize {
-    let base = clusters.len().min(6);
-    let cap = clusters.len().min(12);
-    if base >= cap {
-        return base;
-    }
-    match clusters[base..cap]
-        .iter()
-        .position(|c| c.chars().next().is_some_and(|c| TOKEN_BREAKS.contains(&c)))
-    {
-        Some(offset) => base + offset + 1,
-        None => base,
-    }
-}
-
-/// Elides the middle of a single token (a branch name, a shell name, a label
-/// the user typed) so both its head and its identifying tail survive:
-/// `window-transparency-backdrop` reads `window-…backdrop` in a narrow
-/// sidebar instead of losing its tail to a trailing ellipsis.
-///
-/// A head that fits but leaves no room for a tail is worse than no head at
-/// all, so the preferred head is given up for a shorter one when that is what
-/// it takes to keep a few trailing clusters; only when even a three-cluster
-/// head cannot buy a tail does this fall back to a tail-only elision.
-pub(crate) fn elide_keep_edges(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-    max_width: f32,
-) -> SharedString {
-    let text = text.trim();
-    if text.is_empty() || measure_text(text_system, font, size, text) <= max_width {
-        return SharedString::from(text);
-    }
-    let cells = clusters(text);
-    let shaped = |head_n: usize, tail_n: usize| -> f32 {
-        let mut s = cells[..head_n].concat();
-        s.push('…');
-        s.push_str(&cells[cells.len() - tail_n..].concat());
-        measure_text(text_system, font, size, &s)
-    };
-    // Width is monotone in the tail length, so a binary search finds the
-    // longest tail that still fits behind a given head.
-    let longest_tail = |head_n: usize| -> usize {
-        let (mut lo, mut hi) = (0usize, cells.len() - head_n);
-        while lo < hi {
-            let mid = (lo + hi + 1) / 2;
-            if shaped(head_n, mid) <= max_width {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        lo
-    };
-    /// Enough trailing clusters to tell two sibling branches apart.
-    const MIN_TAIL: usize = 3;
-    let preferred = preferred_head(&cells);
-    let mut candidates = vec![preferred, 6, 3];
-    candidates.retain(|&h| h > 0 && h <= cells.len());
-    candidates.dedup();
-    let mut best: Option<(usize, usize)> = None;
-    for head_n in candidates {
-        if shaped(head_n, 0) > max_width {
-            continue;
-        }
-        let tail = longest_tail(head_n);
-        if tail >= MIN_TAIL.min(cells.len() - head_n) {
-            best = Some((head_n, tail));
-            break;
-        }
-        if best.is_none_or(|(_, best_tail)| tail > best_tail) {
-            best = Some((head_n, tail));
-        }
-    }
-    let Some((head, tail)) = best.filter(|&(_, tail)| tail > 0) else {
-        // No head buys a tail worth showing; a bare tail says more.
-        return elide_tail_clusters(text_system, font, size, text, max_width);
-    };
-    let mut out = cells[..head].concat();
-    out.push('…');
-    out.push_str(&cells[cells.len() - tail..].concat());
-    SharedString::from(out)
-}
-
-/// Elides a row label. A path keeps its tail — the file or directory being
-/// worked on — while anything else keeps both edges.
-///
-/// A shell title is not always a path: `npm run dev`, `man git-log`, or a name
-/// the user typed into the rename box. Running those through the path rule
-/// drops their head, which is the part that names them, and `… server logs`
-/// says less than the CSS truncation this replaced.
-pub(crate) fn elide_label(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-    max_width: f32,
-) -> SharedString {
-    if text.contains('/') || text.contains('\\') {
-        elide_path_keep_tail(text_system, font, size, text, max_width)
-    } else {
-        elide_keep_edges(text_system, font, size, text, max_width)
-    }
-}
-
-/// Keeps the longest head of `text` that fits before a trailing ellipsis —
-/// the plain cut a reader expects, for a string read left to right like a
-/// branch name.
-pub(crate) fn elide_end_clusters(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-    max_width: f32,
-) -> SharedString {
-    if measure_text(text_system, font, size, text) <= max_width {
-        return SharedString::from(text.to_string());
-    }
-    let budget = max_width - measure_text(text_system, font, size, "…");
-    if budget <= 0. {
-        return SharedString::from("…");
-    }
-    let cells = clusters(text);
-    let (mut lo, mut hi) = (0usize, cells.len());
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        if measure_text(text_system, font, size, &cells[..mid].concat()) <= budget {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    let mut out = cells[..lo].concat();
-    out.push('…');
-    SharedString::from(out)
-}
-
-/// Keeps the longest tail of `text` that fits after a bare ellipsis. Shared
-/// by the path and token elisions as their last resort.
-pub(crate) fn elide_tail_clusters(
-    text_system: &gpui::WindowTextSystem,
-    font: &gpui::Font,
-    size: f32,
-    text: &str,
-    max_width: f32,
-) -> SharedString {
-    // Nothing to cut. The search below is bounded by the budget *after* the
-    // ellipsis, so without this a branch that fit came back as "…" plus the
-    // whole of itself — the rail's group header printed `…feat/v4-redesign`
-    // with room to spare.
-    if measure_text(text_system, font, size, text) <= max_width {
-        return SharedString::from(text.to_string());
-    }
-    let budget = max_width - measure_text(text_system, font, size, "…");
-    if budget <= 0. {
-        return SharedString::from("…");
-    }
-    let cells = clusters(text);
-    let (mut lo, mut hi) = (0usize, cells.len());
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2;
-        let s = cells[cells.len() - mid..].concat();
-        if measure_text(text_system, font, size, &s) <= budget {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    if lo == 0 {
-        return SharedString::from("…");
-    }
-    let mut out = String::with_capacity(1 + text.len());
-    out.push('…');
-    out.push_str(&cells[cells.len() - lo..].concat());
-    SharedString::from(out)
 }
 
 #[derive(Clone)]
@@ -647,6 +342,221 @@ fn strip_width(viewport_w: Pixels, pad: Edges<Pixels>, reserved: f32, floor: f32
     (viewport_w - pad.left - pad.right - px(reserved)).max(px(floor))
 }
 
+/// How many chips `avail` points hold at their narrowest. At least one, so the
+/// active tab always has a place.
+fn chips_fit(avail: f32) -> usize {
+    ((avail / (CHIP_MIN_W + CHIP_GAP)).floor() as usize).max(1)
+}
+
+/// The hidden-tab count, `+14`: a 28px tile, its type size (a share of the
+/// rem), the slot every drawn glyph sits in, and the inset kept on each side
+/// of the slots.
+///
+/// Each glyph, the `+` and every digit, is centred in a slot of exactly
+/// [`count_slot`], and the tile is as wide as its slots plus the inset, never
+/// narrower than [`COUNT_MIN_W`]. The budget that reserves the tile and the
+/// boxes that are drawn therefore come from the same number, and nothing is
+/// shaped or measured while the strip is laid out.
+const COUNT_H: f32 = 28.;
+const COUNT_MIN_W: f32 = 28.;
+const COUNT_TEXT: f32 = 12. / 16.;
+const COUNT_SLOT_EM: f32 = 0.75;
+const COUNT_INSET: f32 = 2.;
+
+pub(crate) fn count_digits(n: usize) -> usize {
+    n.checked_ilog10().map_or(1, |d| d as usize + 1)
+}
+
+/// The room one glyph of the count takes at `rem` pixels.
+fn count_slot(rem: f32) -> f32 {
+    COUNT_SLOT_EM * COUNT_TEXT * rem
+}
+
+/// Width of the count tile for a count of `digits` digits at `rem` pixels:
+/// one slot for the `+` and one for each digit, widening the tile only once
+/// they outgrow [`COUNT_MIN_W`].
+fn count_w(digits: usize, rem: f32) -> f32 {
+    (2. * COUNT_INSET + (1 + digits) as f32 * count_slot(rem)).max(COUNT_MIN_W)
+}
+
+const COUNT_DIGIT_GLYPHS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+
+/// The Agents pill at the end of the strip: its text size (a share of the rem,
+/// what the pill has always been drawn at) and the padding either side of its
+/// label. The label is drawn as our own child at exactly this size and with
+/// [`StripMetrics`]' features, so what is measured is what is on screen.
+pub(crate) const PILL_TEXT: f32 = 0.875;
+pub(crate) const PILL_PAD_X: f32 = 10.;
+/// The gap between the pill's word and its count, drawn and budgeted as this.
+pub(crate) const PILL_COUNT_GAP: f32 = 6.;
+
+#[cfg(test)]
+std::thread_local! {
+    static PILL_COUNT_INK: std::cell::Cell<Option<gpui::Hsla>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// What the Agents pill's count glyphs inherit as their ink as they are
+/// painted: the test platform has no renderer to read pixels back from.
+#[cfg(test)]
+pub(crate) fn record_pill_count_ink(ink: gpui::Hsla) {
+    PILL_COUNT_INK.with(|cell| cell.set(Some(ink)));
+}
+
+#[cfg(test)]
+fn take_pill_count_ink() -> Option<gpui::Hsla> {
+    PILL_COUNT_INK.with(|cell| cell.take())
+}
+
+/// What the Agents pill's label measures at the current font, size and
+/// language: its words, and the width of one digit. The strip budgets the
+/// pill from these without shaping any text while it is laid out; drawing only
+/// reads them, and they are measured again when the font, the size or the
+/// language they are for has changed.
+#[derive(Clone)]
+pub(crate) struct StripMetrics {
+    rem: f32,
+    family: SharedString,
+    agents: &'static str,
+    workbench: &'static str,
+    /// The tabular figures the label is drawn with, built once: the measured
+    /// font, the pill and the count tile all take their features from here.
+    features: gpui::FontFeatures,
+    /// "Agents", the word alone: the count is drawn beside it, not in it.
+    agents_w: f32,
+    /// One tabular digit, which is every digit's width.
+    digit: f32,
+    workbench_w: f32,
+}
+
+impl StripMetrics {
+    /// Measures now and keeps itself current: the configured size and the
+    /// theme's font are what a change can come through, and a language change
+    /// reaches the app as a notify. Each of them only compares what was
+    /// measured against what is now, and measures again when they differ.
+    pub(crate) fn new(window: &mut Window, cx: &mut Context<Tty59App>) -> Self {
+        cx.observe_in(&cx.entity(), window, |this, _, window, cx| {
+            this.strip_metrics_refresh(window, cx)
+        })
+        .detach();
+        cx.observe_global_in::<Config>(window, |this, window, cx| {
+            this.strip_metrics_refresh(window, cx)
+        })
+        .detach();
+        cx.observe_global_in::<gpui_component::Theme>(window, |this, window, cx| {
+            this.strip_metrics_refresh(window, cx)
+        })
+        .detach();
+        Self::measure(window, cx)
+    }
+
+    fn measure(window: &Window, cx: &App) -> Self {
+        let rem = cx.global::<Config>().ui_font_size;
+        let features = crate::ui::theme::tabular_figures();
+        let font = gpui::Font {
+            family: cx.theme().font_family.clone(),
+            features: features.clone(),
+            fallbacks: None,
+            weight: FontWeight::NORMAL,
+            style: gpui::FontStyle::Normal,
+        };
+        let size = rem * PILL_TEXT;
+        let width = |text: &str| measure_text(window.text_system(), &font, size, text).ceil();
+        let (agents, workbench) = (t(L10nKey::VisionAgents), t(L10nKey::VisionWorkbench));
+        Self {
+            rem,
+            family: font.family.clone(),
+            agents,
+            workbench,
+            features,
+            agents_w: width(agents),
+            digit: width("0"),
+            workbench_w: width(workbench),
+        }
+    }
+
+    fn is_for(&self, cx: &App) -> bool {
+        self.rem == cx.global::<Config>().ui_font_size
+            && self.family == cx.theme().font_family
+            && self.agents == t(L10nKey::VisionAgents)
+            && self.workbench == t(L10nKey::VisionWorkbench)
+    }
+
+    pub(crate) fn features(&self) -> gpui::FontFeatures {
+        self.features.clone()
+    }
+
+    /// The pill's width with `count` agents needing attention (`Agents 3`, the
+    /// count only above zero), or with the Workbench label while the agent
+    /// view is up.
+    pub(crate) fn pill_w(&self, workbench: bool, count: usize) -> f32 {
+        2. * PILL_PAD_X
+            + match (workbench, count) {
+                (true, _) => self.workbench_w,
+                (false, 0) => self.agents_w,
+                (false, _) => {
+                    self.agents_w + PILL_COUNT_GAP + count_digits(count) as f32 * self.digit
+                }
+            }
+    }
+
+    /// What the Agents pill holds at the end of the strip row, from its left
+    /// edge to the row's next control: the pill with `count` agents needing
+    /// attention (the Agents form, the only one a docked document has beside
+    /// it) and the gap the row puts after it.
+    pub(crate) fn pill_span(&self, count: usize) -> f32 {
+        self.pill_w(false, count) + STRIP_GAP_REM * self.rem
+    }
+}
+
+impl Tty59App {
+    /// How many agents need attention: the number the Agents pill says. The
+    /// one scan a frame takes; whoever budgets the pill is handed this number
+    /// rather than counting again.
+    pub(crate) fn attention_total(&self) -> usize {
+        self.agent_vision
+            .state
+            .attention_count(&self.agent_vision.panes, &self.agent_vision.reads)
+            .total()
+    }
+
+    fn strip_metrics_refresh(&mut self, window: &Window, cx: &App) {
+        if !self.strip_metrics.is_for(cx) {
+            self.strip_metrics = StripMetrics::measure(window, cx);
+        }
+        // The right panel's tab row is kept current by the same observers: a
+        // size, font, theme or language change reaches both through them.
+        if !self.right_tab_metrics.is_for(cx) {
+            self.right_tab_metrics = RightTabMetrics::measure(window, cx);
+        }
+    }
+}
+
+/// What the count tile takes out of the chips' `avail` when `total` chips do
+/// not all fit: the tile and the strip row's gap before it, or nothing when
+/// they fit.
+///
+/// The count's width depends on its digits and the digits on how many chips
+/// the rest of the room holds, so settle on the fewest digits it can have:
+/// start from one and widen while the count it leaves needs more. Widening
+/// only ever takes chips away, so the digits it stops at are exactly the ones
+/// the count that is drawn has, and more room never hides more tabs.
+fn count_reserve(avail: f32, total: usize, rem: f32) -> f32 {
+    if total <= chips_fit(avail) {
+        return 0.;
+    }
+    let reserve = |digits| STRIP_GAP_REM * rem + count_w(digits, rem);
+    let mut digits = 1;
+    loop {
+        let kept = chips_fit(avail - reserve(digits)).min(total - 1);
+        let needed = count_digits(total - kept);
+        if needed <= digits {
+            return reserve(digits);
+        }
+        digits = needed;
+    }
+}
+
 /// The run of chips to draw when they cannot all fit.
 ///
 /// The row clips what overflows, so past a certain tab count the chips at the
@@ -655,7 +565,7 @@ fn strip_width(viewport_w: Pixels, pad: Edges<Pixels>, reserved: f32, floor: f32
 /// first tab until the active one would fall off the right edge, then move it
 /// by as little as it takes to hold the active chip.
 fn visible_chips(order: &[usize], active: usize, avail: f32) -> Vec<usize> {
-    let fits = ((avail / (CHIP_MIN_W + CHIP_GAP)).floor() as usize).max(1);
+    let fits = chips_fit(avail);
     if order.len() <= fits {
         return order.to_vec();
     }
@@ -680,10 +590,6 @@ const RIGHT_PANEL_TABS: [(RightPanelTab, L10nKey); 4] = [
     (RightPanelTab::GitHub, L10nKey::PanelGitHubTitle),
 ];
 
-fn right_panel_tab_size(window: &Window) -> f32 {
-    window.rem_size().as_f32() * crate::ui::right_panel::TAB_TEXT
-}
-
 fn right_panel_tab_font(cx: &gpui::App) -> gpui::Font {
     gpui::Font {
         family: cx.theme().font_family.clone(),
@@ -695,18 +601,131 @@ fn right_panel_tab_font(cx: &gpui::App) -> gpui::Font {
     }
 }
 
-/// What the bare tab labels take, padding included. The panel's floor is
-/// built on it, so the chrome tiles beside them always fit.
-pub(crate) fn right_panel_tab_labels_w(window: &Window, cx: &gpui::App) -> f32 {
-    let size = right_panel_tab_size(window);
-    let font = right_panel_tab_font(cx);
-    RIGHT_PANEL_TABS
-        .iter()
-        .map(|(_, key)| {
-            measure_text(window.text_system(), &font, size, t(*key))
-                + 2. * (TAB_OUTER_PAD + TAB_INNER_PAD)
-        })
-        .sum()
+/// The Changes count's font: regular weight, because a count is data hanging
+/// off the label rather than part of it, and tabular figures so the digits keep
+/// one width. The tab draws the count with exactly this, and
+/// [`RightTabMetrics`] measures it with exactly this: the figures are built
+/// once, in the metrics, and both take them from there.
+fn right_panel_count_font(cx: &gpui::App, features: gpui::FontFeatures) -> gpui::Font {
+    gpui::Font {
+        family: cx.theme().font_family.clone(),
+        features,
+        fallbacks: None,
+        weight: FontWeight::NORMAL,
+        style: Default::default(),
+    }
+}
+
+/// The gap between the Changes label and its count.
+pub(crate) const TAB_COUNT_GAP: f32 = 4.;
+
+/// What the right panel's tab row measures at the current font, size and
+/// language: the four labels, and the widest count the Changes tab can draw.
+///
+/// Measured once and kept, the way [`StripMetrics`] keeps the Agents pill's
+/// words: the panel's floor is asked for many times a frame, and shaping text
+/// each time it was asked is what this replaces. [`Self::is_for`] is the whole
+/// key — the size the tab text is drawn at, both fonts in full, and the label
+/// words — and a hit measures nothing.
+#[derive(Clone)]
+pub(crate) struct RightTabMetrics {
+    size: f32,
+    label_font: gpui::Font,
+    count_font: gpui::Font,
+    /// The tabular figures the count is drawn with, built once: what is
+    /// measured is what is on screen.
+    features: gpui::FontFeatures,
+    labels: [&'static str; 4],
+    /// What the bare tab labels take, padding included. The panel's floor is
+    /// built on it, so the chrome tiles beside them always fit.
+    labels_w: f32,
+    /// The widest count the tab draws (`ChangesCount::OVERFLOW`, which is
+    /// wider than any number under it) in the count's font.
+    count_slot: f32,
+}
+
+// How many times `RightTabMetrics::measure` has run on this thread: what a
+// test reads to tell a frame that measured from one that did not.
+#[cfg(test)]
+thread_local! {
+    static RIGHT_TAB_MEASURES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+impl RightTabMetrics {
+    fn key_size(cx: &App) -> f32 {
+        cx.global::<Config>().ui_font_size * crate::ui::right_panel::TAB_TEXT
+    }
+
+    fn key_labels() -> [&'static str; 4] {
+        std::array::from_fn(|i| t(RIGHT_PANEL_TABS[i].1))
+    }
+
+    pub(crate) fn measure(window: &Window, cx: &App) -> Self {
+        #[cfg(test)]
+        RIGHT_TAB_MEASURES.with(|n| n.set(n.get() + 1));
+        let size = Self::key_size(cx);
+        let features = crate::ui::theme::tabular_figures();
+        let label_font = right_panel_tab_font(cx);
+        let count_font = right_panel_count_font(cx, features.clone());
+        let labels = Self::key_labels();
+        let text_system = window.text_system();
+        // Each text node is laid out at its width rounded up (gpui's text
+        // element does `width.ceil()` per node), so each is measured that way:
+        // summing the fractions would leave the floor short of what is drawn.
+        let labels_w: f32 = labels
+            .iter()
+            .map(|label| {
+                measure_text(text_system, &label_font, size, label).ceil()
+                    + 2. * (TAB_OUTER_PAD + TAB_INNER_PAD)
+            })
+            .sum();
+        let count_slot = measure_text(
+            text_system,
+            &count_font,
+            size,
+            crate::ui::scm::panel::ChangesCount::OVERFLOW,
+        )
+        .ceil();
+        Self {
+            size,
+            label_font,
+            count_font,
+            features,
+            labels,
+            labels_w,
+            count_slot,
+        }
+    }
+
+    /// Whether this was measured for what is on screen now.
+    pub(crate) fn is_for(&self, cx: &App) -> bool {
+        self.size == Self::key_size(cx)
+            && self.label_font == right_panel_tab_font(cx)
+            && self.count_font == right_panel_count_font(cx, self.features.clone())
+            && self.labels == Self::key_labels()
+    }
+
+    /// The pixel size the tab text is measured at, and so drawn at.
+    pub(crate) fn size(&self) -> f32 {
+        self.size
+    }
+
+    /// The face a tab label is measured in (its widest weight), and so drawn in.
+    pub(crate) fn label_font(&self) -> &gpui::Font {
+        &self.label_font
+    }
+
+    /// The face the Changes count is measured in, and so drawn in.
+    pub(crate) fn count_font(&self) -> &gpui::Font {
+        &self.count_font
+    }
+
+    /// What the tab labels need, with room for the widest Changes count held
+    /// all the time — also while there is none, so the panel's minimum width
+    /// does not move as the number does.
+    pub(crate) fn tabs_w(&self) -> f32 {
+        self.labels_w + TAB_COUNT_GAP + self.count_slot
+    }
 }
 
 /// Right panel tab geometry: each tab's click target reaches this far past
@@ -786,13 +805,39 @@ pub(in crate::ui) fn titlebar_search_fill(cx: &App) -> gpui::Hsla {
     gpui::rgb(cx.global::<crate::ui::presets::Surfaces>().rail.base).into()
 }
 
+/// The label is always a single glyph: counts past nine read "9", so the
+/// pills only ever carry one digit and their fixed geometry holds.
 fn unread_count_label(unread: usize) -> Option<String> {
     (unread > 1).then(|| unread.min(9).to_string())
 }
 
+/// The paints a status mark is drawn with: `mark` for the dot or ring and,
+/// when the badge can carry an unread count, the `(fill, ink)` pair its
+/// label sits on.
+struct StatusPaints {
+    mark: gpui::Hsla,
+    count: Option<(gpui::Hsla, gpui::Hsla)>,
+}
+
+/// Turns the status's semantic role into paint. `base` is what the dim beat
+/// of a blink blends against — the row's surface, or the badge's halo — and
+/// it reaches only the mark: the count's label must keep the contrast its
+/// `on_fill` was floored for, so a faded count fill under a fixed label is
+/// not allowed.
+fn status_paints(sem: crate::ui::presets::Semantic, base: gpui::Hsla, faded: bool) -> StatusPaints {
+    let ink: gpui::Hsla = gpui::rgb(sem.ink).into();
+    StatusPaints {
+        mark: match faded {
+            true => base.blend(ink.opacity(0.4)),
+            false => ink,
+        },
+        count: Some((gpui::rgb(sem.fill).into(), gpui::rgb(sem.on_fill).into())),
+    }
+}
+
 /// Air between the search box and the nearest chrome tile when the bar is too
 /// narrow for the box to sit at its full width.
-const TITLEBAR_SEARCH_CLEAR_GAP: f32 = 8.;
+const TITLEBAR_SEARCH_CLEAR_GAP: f32 = CHROME_GROUP_GAP;
 
 /// Where the title-bar search box is centred, as offsets from the tab strip it
 /// is drawn inside.
@@ -848,6 +893,26 @@ pub(crate) fn search_band(
         right,
         clear: leading.max(trailing),
     }
+}
+
+/// The share of the band the search box may take, so a document docked beside
+/// the terminal leaves the label and chord room to read in.
+const TITLEBAR_SEARCH_SHARE: f32 = 0.6;
+
+/// The narrowest the search box carries its chord at. Narrower, the label has
+/// the room: the shortcut is one keypress the rail's tooltip and the palette
+/// already teach.
+pub(crate) const TITLEBAR_SEARCH_CHORD_MIN_W: f32 = 240.;
+
+/// How wide the search box is drawn in a band `band_w` wide whose springs keep
+/// `clear` free at each end: its width, a share of the band, and what the two
+/// clears leave. Drawn at exactly this width, and the chord is judged against
+/// it, so what is decided is what is on screen.
+pub(crate) fn search_box_w(band_w: f32, clear: f32) -> f32 {
+    TITLEBAR_SEARCH_W
+        .min(TITLEBAR_SEARCH_SHARE * band_w)
+        .min(band_w - 2. * clear)
+        .max(0.)
 }
 
 /// How far the title bar's lead reaches before the tab strip starts: the room
@@ -944,12 +1009,11 @@ struct NewTabMenu {
     /// Saved host, its display name, and the `user@host:port` beside it —
     /// empty when the name already says it.
     hosts: Vec<(uuid::Uuid, SharedString, SharedString)>,
-    /// Agents the menu names — at most [`MENU_AGENTS`], and only ones that
-    /// have actually been run.
+    /// Agents the menu names — at most [`MENU_AGENTS`]: the ones actually
+    /// run, or the first offered while nothing has run yet.
     agents: Vec<CLIAgent>,
     /// The window can offer agents the menu does not name, so the section
-    /// closes with a row into the palette. Also the reason the section exists
-    /// when nothing has been run yet: the installed agents are all in there.
+    /// closes with a row into the palette.
     more_agents: bool,
 }
 
@@ -1076,8 +1140,9 @@ impl NewTabMenu {
 
         // A peer of Local and SSH, and absent when this machine has no agent
         // to offer — an empty heading would be a section about nothing. The
-        // rows are the ones actually run; the seam holds the rest, already
-        // filtered, the way Other Shells does.
+        // rows are the ones actually run — or the first few offered, while
+        // nothing has run yet; the seam holds the rest, already filtered,
+        // the way Other Shells does.
         if !self.agents.is_empty() || self.more_agents {
             menu = menu
                 .item(PopupMenuItem::separator())
@@ -1173,24 +1238,30 @@ fn menu_shells<'a>(
 }
 
 /// The agents the menu names, off the front of the frecency-ordered list
-/// quick launch already built: only those that have actually been run, at
-/// most [`MENU_AGENTS`].
+/// quick launch already built: those that have actually been run, at most
+/// [`MENU_AGENTS`].
 ///
-/// An agent nobody has run is not named just because it is installed and
-/// there is room. A zero count is not a use either — launching stamps
-/// recency before the pane reports the agent, and the count is what says it
-/// really ran. `offered` is already most-used-first; this does not reorder.
+/// A zero count is not a use — launching stamps recency before the pane
+/// reports the agent, and the count is what says it really ran. But when
+/// nothing offered has run yet the first [`MENU_AGENTS`] are named anyway:
+/// a fresh profile's menu that is only a heading and the seam makes the
+/// first launch take a menu, a search scope and a pick. `offered` is
+/// already most-used-first; this does not reorder.
 fn menu_agents(
     offered: &[CLIAgent],
     usage: &std::collections::HashMap<String, crate::core::config::ProfileUsage>,
     now: u64,
 ) -> Vec<CLIAgent> {
-    offered
+    let named: Vec<CLIAgent> = offered
         .iter()
         .copied()
         .filter(|agent| usage.get(agent.slug()).is_some_and(|u| u.score(now) > 0.0))
         .take(MENU_AGENTS)
-        .collect()
+        .collect();
+    match named.is_empty() {
+        true => offered.iter().copied().take(MENU_AGENTS).collect(),
+        false => named,
+    }
 }
 
 /// The hosts the menu names, in the order they were handed over — frecency,
@@ -1245,35 +1316,44 @@ fn menu_hosts(
 /// An empty note drops the right half entirely rather than leaving a zero-width
 /// child to hold the `gap_3` open — the name is then free to use the full row,
 /// still eliding at the panel edge.
-fn menu_row(label: SharedString, note: SharedString, cx: &gpui::App) -> impl IntoElement + use<> {
-    let muted = cx.theme().muted_foreground;
+pub(crate) fn menu_row(
+    label: SharedString,
+    note: SharedString,
+    cx: &gpui::App,
+) -> impl IntoElement + use<> {
+    let muted: gpui::Hsla = gpui::rgb(crate::ui::theme::chrome_ink(cx).unpicked_meta).into();
+    // What a test finds the row's two halves by: their text, in the selector.
+    #[cfg(test)]
+    let test_name = label.clone();
+    let name_el = div()
+        .flex_shrink_0()
+        .max_w(match note.is_empty() {
+            true => MENU_W - MENU_ROW_INSET,
+            false => MENU_NAME_W,
+        })
+        .truncate()
+        .child(label);
+    #[cfg(test)]
+    let name_el = name_el.debug_selector(move || format!("menu-row-name:{test_name}"));
     h_flex()
         .w_full()
         .items_center()
         .justify_between()
         .gap_3()
-        .child(
-            div()
-                .flex_shrink_0()
-                .max_w(match note.is_empty() {
-                    true => MENU_W - MENU_ROW_INSET,
-                    false => MENU_NAME_W,
-                })
-                .truncate()
-                .child(label),
-        )
+        .child(name_el)
         .when(!note.is_empty(), |this| {
+            #[cfg(test)]
+            let test_note = note.clone();
+            let note_el = div()
+                .max_w(MENU_NOTE_W)
+                .truncate()
+                .text_color(muted)
+                .child(note);
+            #[cfg(test)]
+            let note_el = note_el.debug_selector(move || format!("menu-row-note:{test_note}"));
             // Pushed right by the cell, not by `text_right`: a line set
             // with `truncate` ignores its alignment and hugs the name.
-            this.child(
-                h_flex().flex_1().justify_end().child(
-                    div()
-                        .max_w(MENU_NOTE_W)
-                        .truncate()
-                        .text_color(muted)
-                        .child(note),
-                ),
-            )
+            this.child(h_flex().flex_1().justify_end().child(note_el))
         })
 }
 
@@ -1497,6 +1577,17 @@ impl Tty59App {
         let active_tab = self.right_panel_tab;
         let body_ink = cx.theme().foreground;
         let muted = cx.theme().muted_foreground;
+        // The count's own ink, floored on the panel fill and on the selected pill alike.
+        let count_ink: gpui::Hsla = gpui::rgb(crate::ui::theme::chrome_ink(cx).tab_count).into();
+        // Read once for the row, from the status the watcher keeps current: no
+        // repository lookup and no scan of the entries.
+        let changes = self.scm_changes_count(cx);
+        // The faces the floor was measured in. The row draws with exactly
+        // these — family, features and size set on the elements themselves —
+        // so nothing an ancestor sets can change a face that was measured.
+        let size = px(self.right_tab_metrics.size());
+        let label_font = self.right_tab_metrics.label_font().clone();
+        let count_font = self.right_tab_metrics.count_font().clone();
         RIGHT_PANEL_TABS
             .into_iter()
             .map(|(tab, label_key)| {
@@ -1505,11 +1596,24 @@ impl Tty59App {
                     true => body_ink,
                     false => muted,
                 };
-                div()
+                // Only the Changes tab carries one, and none at zero. The
+                // tooltip and the accessible name say the exact figure, which
+                // the tab's own `99+` may not.
+                let count = changes.filter(|_| tab == RightPanelTab::Scm);
+                let description = count.map(|c| SharedString::from(c.description()));
+                let name = match &description {
+                    Some(text) => text.clone(),
+                    None => SharedString::from(t(label_key)),
+                };
+                let tab_el = div()
                     .id(("right-panel-tab", tab as usize))
                     .role(gpui::Role::Tab)
-                    .aria_label(t(label_key))
+                    .aria_label(name)
                     .aria_selected(current)
+                    .when_some(description, |tab_el, text| {
+                        tab_el
+                            .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                    })
                     // The press must not start a window drag from the title bar
                     // the tabs sit in.
                     .occlude()
@@ -1526,14 +1630,43 @@ impl Tty59App {
                             .py_0p5()
                             .rounded_md()
                             .when(current, |s| s.bg(cx.theme().secondary))
-                            .text_size(gpui::rems(crate::ui::right_panel::TAB_TEXT))
+                            .text_size(size)
+                            .font_family(label_font.family.clone())
+                            .font_features(label_font.features.clone())
                             .font_weight(match current {
-                                true => FontWeight::MEDIUM,
+                                true => label_font.weight,
                                 false => FontWeight::NORMAL,
                             })
                             .text_color(ink)
                             .hover(move |s| s.text_color(body_ink))
-                            .child(t(label_key)),
+                            .child(match count {
+                                None => t(label_key).into_any_element(),
+                                // A separate element, not more text in the
+                                // label: muted, regular, tabular, and set
+                                // apart by its own gap.
+                                Some(count) => {
+                                    let label_el = div().child(t(label_key));
+                                    #[cfg(test)]
+                                    let label_el =
+                                        label_el.debug_selector(|| "right-panel-tab-label".into());
+                                    let count_el = div()
+                                        .ml(px(TAB_COUNT_GAP))
+                                        .text_size(size)
+                                        .font_family(count_font.family.clone())
+                                        .font_features(count_font.features.clone())
+                                        .font_weight(count_font.weight)
+                                        .text_color(count_ink)
+                                        .child(count.label());
+                                    #[cfg(test)]
+                                    let count_el =
+                                        count_el.debug_selector(|| "right-panel-tab-count".into());
+                                    h_flex()
+                                        .items_baseline()
+                                        .child(label_el)
+                                        .child(count_el)
+                                        .into_any_element()
+                                }
+                            }),
                     )
                     // The current one does nothing: only ⌘J and the title-bar
                     // panel tile put the panel away.
@@ -1541,10 +1674,23 @@ impl Tty59App {
                         if this.right_panel_tab != tab {
                             this.set_right_panel_tab(tab, cx);
                         }
-                    }))
-                    .into_any_element()
+                    }));
+                #[cfg(test)]
+                let tab_el =
+                    tab_el.debug_selector(move || format!("right-panel-tab-{}", tab as usize));
+                tab_el.into_any_element()
             })
             .collect()
+    }
+
+    /// The halo a status badge rings itself with: the surface on light
+    /// surfaces, white on dark — a dark halo read as a notch bitten out of
+    /// the avatar rather than a badge sitting on it.
+    fn status_badge_halo(ring: gpui::Hsla) -> gpui::Hsla {
+        match crate::ui::presets::surface_is_dark(ring) {
+            true => gpui::white(),
+            false => ring,
+        }
     }
 
     /// Working and Done differ only in hue (blue vs green), and Waiting vs Done
@@ -1552,30 +1698,15 @@ impl Tty59App {
     /// green, the pair red-green colour vision separates worst. Give Waiting a
     /// hole so it is a different *shape*, not just a different colour.
     fn status_dot(
-        rgb: u32,
+        paints: StatusPaints,
         unread: usize,
         size: f32,
         ring: gpui::Hsla,
         hollow: bool,
-        faded: bool,
     ) -> gpui::AnyElement {
         let d = (size * 0.42).max(7.);
-        // The halo was the surface itself, which is only a ring while the
-        // surface is light — on a dark theme it went near-black and read as a
-        // notch bitten out of the avatar rather than a badge sitting on it.
-        // Light themes already ring the dot in white; give the dark ones the
-        // same white edge, and the hollow Waiting dot the same white hole.
-        let bg = match crate::ui::presets::surface_is_dark(ring) {
-            true => gpui::white(),
-            false => ring,
-        };
-        // The dim beat of a blink is a paler fill, still opaque: fading the
-        // whole badge let the avatar show through the dot and its ring.
-        let fill: gpui::Hsla = match faded {
-            true => bg.blend(gpui::Hsla::from(gpui::rgb(rgb)).opacity(0.4)),
-            false => gpui::rgb(rgb).into(),
-        };
-        if let Some(label) = unread_count_label(unread) {
+        let bg = Self::status_badge_halo(ring);
+        if let (Some((fill, on_fill)), Some(label)) = (paints.count, unread_count_label(unread)) {
             let nd = (size * 0.72).max(13.0);
             let pill = div()
                 .absolute()
@@ -1591,14 +1722,18 @@ impl Tty59App {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px((nd * 0.62).round()))
+                .text_size(px((nd * 0.62).round().max(10.)))
                 .line_height(px(nd))
                 .font_features(crate::ui::theme::tabular_figures())
                 .font_weight(FontWeight::BOLD)
-                .text_color(gpui::white())
+                .text_color(on_fill)
                 .child(label);
             #[cfg(test)]
-            let pill = pill.debug_selector(move || format!("avatar-status-count-{unread}"));
+            let pill = {
+                let mut pill = pill;
+                crate::ui::paint_probe::note("avatar-status-pill", &mut pill);
+                pill.debug_selector(move || format!("avatar-status-count-{unread}"))
+            };
             pill.into_any_element()
         } else {
             let dot = div()
@@ -1609,7 +1744,7 @@ impl Tty59App {
                 .rounded_full()
                 .border_2()
                 .border_color(bg)
-                .bg(fill)
+                .bg(paints.mark)
                 .when(hollow, |dot| {
                     dot.flex()
                         .items_center()
@@ -1617,7 +1752,11 @@ impl Tty59App {
                         .child(div().size(px((d * 0.36).max(2.5))).rounded_full().bg(bg))
                 });
             #[cfg(test)]
-            let dot = dot.debug_selector(move || format!("avatar-status-circle-{unread}"));
+            let dot = {
+                let mut dot = dot;
+                crate::ui::paint_probe::note("avatar-status-dot", &mut dot);
+                dot.debug_selector(move || format!("avatar-status-circle-{unread}"))
+            };
             dot.into_any_element()
         }
     }
@@ -1657,29 +1796,31 @@ impl Tty59App {
     /// while the agent waits on the user, blinking while it works — or the
     /// count in a wider pill only when more than one result is unread. `None`
     /// for a row with nothing to report.
+    ///
+    /// The colour is the active theme's semantic role for the status
+    /// ([`agent_status_semantic`](crate::ui::theme::agent_status_semantic)),
+    /// not a fixed hex — light themes get the darker steps they need for the
+    /// marks to clear contrast floors.
     pub(crate) fn row_status_dot(
         &self,
         status: Option<crate::core::cli_agent::AgentStatus>,
         unread: usize,
         surface: gpui::Hsla,
+        cx: &App,
     ) -> Option<gpui::AnyElement> {
-        let rgb = status.and_then(|s| s.dot_rgb())?;
+        let sem = status.and_then(|s| crate::ui::theme::agent_status_semantic(s, cx))?;
         let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
         let faded =
             status == Some(crate::core::cli_agent::AgentStatus::Working) && !self.working_dot_on;
-        let ink: gpui::Hsla = gpui::rgb(rgb).into();
-        let fill = match faded {
-            true => surface.blend(ink.opacity(0.4)),
-            false => ink,
-        };
+        let paints = status_paints(sem, surface, faded);
         let slot = div()
             .flex_shrink_0()
             .flex()
             .items_center()
             .justify_center()
             .min_w(px(ROW_STATUS_SLOT));
-        let mark = match unread_count_label(unread) {
-            Some(label) => {
+        let mark = match (paints.count, unread_count_label(unread)) {
+            (Some((fill, on_fill)), Some(label)) => {
                 let pill = div()
                     .h(px(14.))
                     .min_w(px(18.))
@@ -1689,24 +1830,32 @@ impl Tty59App {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_size(px(9.))
+                    .text_size(px(10.))
                     .line_height(px(14.))
                     .font_features(crate::ui::theme::tabular_figures())
                     .font_weight(FontWeight::BOLD)
-                    .text_color(gpui::white())
+                    .text_color(on_fill)
                     .child(label);
                 #[cfg(test)]
-                let pill = pill.debug_selector(move || format!("row-status-count-{unread}"));
+                let pill = {
+                    let mut pill = pill;
+                    crate::ui::paint_probe::note("row-status-pill", &mut pill);
+                    pill.debug_selector(move || format!("row-status-count-{unread}"))
+                };
                 pill.into_any_element()
             }
-            None => {
+            _ => {
                 let dot = div()
                     .size(px(ROW_STATUS_DOT))
                     .rounded_full()
-                    .when(!hollow, |d| d.bg(fill))
-                    .when(hollow, |d| d.border_1().border_color(fill));
+                    .when(!hollow, |d| d.bg(paints.mark))
+                    .when(hollow, |d| d.border_1().border_color(paints.mark));
                 #[cfg(test)]
-                let dot = dot.debug_selector(move || format!("row-status-circle-{unread}"));
+                let dot = {
+                    let mut dot = dot;
+                    crate::ui::paint_probe::note("row-status-dot", &mut dot);
+                    dot.debug_selector(move || format!("row-status-circle-{unread}"))
+                };
                 dot.into_any_element()
             }
         };
@@ -1783,29 +1932,6 @@ impl Tty59App {
             .into_any_element()
     }
 
-    /// The full title behind a shortened one, for the row to name on hover.
-    ///
-    /// `tab_label` hands back a path elided to its last three segments and then
-    /// capped, and the chip truncates whatever is left over — so a tab could
-    /// read `…/a/b/c` with no way to find out which `a` that was. `None` when
-    /// nothing was dropped, so tabs that already show their whole name stay
-    /// quiet under the pointer.
-    ///
-    /// It has to unshorten whatever the label was *made of*, which is why it
-    /// reads the same [`TabView`](crate::ui::machine_mirror::TabView) the label
-    /// did: a tab named after its directory wants that directory spelled out,
-    /// not the title it never had. See [`tooltip_of`].
-    pub(crate) fn tab_title_tooltip(
-        &self,
-        tab: &Tab,
-        index: usize,
-        window: Option<&Window>,
-        cx: &App,
-    ) -> Option<SharedString> {
-        let (view, home) = tab.label_view(window, cx);
-        tooltip_of(&view, index, home.as_deref())
-    }
-
     /// What this window puts on a tab of its own — the same ladder, through the
     /// same renderer, as the switcher uses for a tab of somebody else's window.
     /// See [`label_of`].
@@ -1832,23 +1958,43 @@ impl Tty59App {
         tab: &Tab,
         window: Option<&Window>,
         cx: &App,
-    ) -> Option<String> {
+    ) -> Option<FullLabel> {
         use crate::ui::machine_mirror::TabLabel;
 
         if let Some(name) = tab.name.as_ref().filter(|n| !n.trim().is_empty()) {
-            return Some(name.trim().to_string());
+            return Some(FullLabel::whole(name.trim().to_string()));
         }
         let (view, home) = tab.label_view(window, cx);
-        let raw = match view.label() {
-            TabLabel::Osc(title) | TabLabel::Cwd(title) => {
-                abbreviate_home(strip_host_prefix(title.trim()), home.as_deref()).into_owned()
+        let label = match view.label() {
+            TabLabel::Osc(title) => {
+                let text =
+                    abbreviate_home(strip_host_prefix(title.trim()), home.as_deref()).into_owned();
+                // Only the pane's own title can be the label its exit wrote, only
+                // for a pane that has ended, and never for a sleeping tab (its
+                // title is the one it went to sleep with). `view.live` is that
+                // pane's own `!exited`, read once by `label_view` from the very
+                // leaf the label comes from, so a live tab never looks again.
+                let ended_tail = match tab.is_asleep() || view.live {
+                    true => None,
+                    // The leaf the label ladder itself reads, not a second choice.
+                    false => tab
+                        .title_leaf(window, cx)
+                        .and_then(|leaf| leaf.read(cx).ended_tail()),
+                };
+                FullLabel {
+                    text: SharedString::from(text),
+                    ended_tail,
+                }
             }
-            TabLabel::Agent(agent) => agent.display_name().to_string(),
-            TabLabel::Named(name) => name.to_string(),
-            TabLabel::Process(title) => title.to_string(),
-            TabLabel::Unknown => String::new(),
+            TabLabel::Cwd(title) => FullLabel::whole(
+                abbreviate_home(strip_host_prefix(title.trim()), home.as_deref()).into_owned(),
+            ),
+            TabLabel::Agent(agent) => FullLabel::whole(agent.display_name().to_string()),
+            TabLabel::Named(name) => FullLabel::whole(name.to_string()),
+            TabLabel::Process(title) => FullLabel::whole(title.to_string()),
+            TabLabel::Unknown => FullLabel::whole(String::new()),
         };
-        (!raw.trim().is_empty()).then_some(raw)
+        (!label.text.trim().is_empty()).then_some(label)
     }
 
     /// The New Tab control: one `+` that drops the list of everything it could
@@ -2286,6 +2432,7 @@ impl Tty59App {
     pub(crate) fn tab_strip(
         &self,
         show_chips: bool,
+        attention: usize,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
@@ -2355,8 +2502,24 @@ impl Tty59App {
         } else {
             document_w
         };
-        let fixed_w = 3. * CHIP_GAP + crate::ui::app::TILE_SIZE + corner_w;
+        // The pill's width, which the strip budgets, and the number the pill
+        // says come from the one count the caller scanned for the frame.
+        let pill_w = self.strip_metrics.pill_w(agent_mode, attention);
+        let rem = window.rem_size().as_f32();
+        // The row's gaps: chips to New Tab, New Tab to the spacer, the spacer
+        // to the pill, and the pill to the trailing chrome.
+        let fixed_w = 4. * STRIP_GAP_REM * rem + crate::ui::app::TILE_SIZE + pill_w + corner_w;
         let chips_avail = (strip_w - px(fixed_w + GRAB_HANDLE_W)).max(px(80.));
+        // The hidden-tab count sits beside the chips, so what it takes comes
+        // off their room before anything is drawn. Never below one chip.
+        let count_room = match show_chips {
+            true => count_reserve(f32::from(chips_avail), self.tabs.len(), rem),
+            false => 0.,
+        };
+        let chips_avail = match count_room > 0. {
+            true => (chips_avail - px(count_room)).max(px(CHIP_MIN_W)),
+            false => chips_avail,
+        };
         let mut chips = h_flex()
             .items_center()
             .gap(px(CHIP_GAP))
@@ -2384,7 +2547,9 @@ impl Tty59App {
             }
             None => (0..self.tabs.len()).collect(),
         };
-        let display = visible_chips(&display, active, f32::from(chips_avail));
+        let shown = visible_chips(&display, active, f32::from(chips_avail));
+        let hidden = display.len() - shown.len();
+        let display = shown;
 
         for i in display {
             if !show_chips {
@@ -2394,8 +2559,14 @@ impl Tty59App {
             let badge_pos = badge_positions.as_ref().and_then(|positions| positions[i]);
             let tab = &self.tabs[i];
             let is_active = i == active;
-            let label = self.tab_label(tab, i, Some(window), cx);
-            let full_title = self.tab_title_tooltip(tab, i, Some(window), cx);
+            // The whole title, not the three-segment short form the switcher
+            // uses: a cut made before the chip's width is known would throw
+            // away text the measured label could have kept. Nothing to say
+            // falls back to the ladder's own placeholder.
+            let label = match self.full_tab_label(tab, Some(window), cx) {
+                Some(full) => full,
+                None => FullLabel::whole(self.tab_label(tab, i, Some(window), cx)),
+            };
             let ssh_dot = self.tab_ssh_dot(tab, cx);
             let asleep = tab.is_asleep();
             let agent = tab.agent(cx).or_else(|| tab.asleep_agent());
@@ -2428,15 +2599,25 @@ impl Tty59App {
                     .id(("tab-label", i))
                     .flex_1()
                     .min_w_0()
-                    .truncate()
                     .text_sm()
                     .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                    .when_some(full_title, |d, title| {
-                        d.tooltip(move |window, cx| {
-                            gpui_component::tooltip::Tooltip::new(title.clone()).build(window, cx)
-                        })
+                    .tooltip({
+                        let whole = label.text.clone();
+                        move |window, cx| {
+                            gpui_component::tooltip::Tooltip::new(whole.clone()).build(window, cx)
+                        }
                     })
-                    .child(label)
+                    .child({
+                        let elided = ElidedLabel::new(
+                            ("tab-chip-label", i),
+                            label.text.clone(),
+                            Mode::Label,
+                        );
+                        match label.ended_tail {
+                            Some(tail) => elided.tail_included(tail),
+                            None => elided,
+                        }
+                    })
                     .into_any_element(),
             };
 
@@ -2642,6 +2823,64 @@ impl Tty59App {
             .occlude()
             .flex_shrink_0()
             .child(self.new_tab_button("tab-add", cx));
+        #[cfg(test)]
+        let add_button = add_button.debug_selector(|| "tab-strip-new".into());
+
+        // What the chips leave out, said on screen. It opens the same recent
+        // tabs list Ctrl+Tab raises, so the hidden tabs are one click away.
+        let count_tile = (show_chips && hidden > 0).then(|| {
+            let theme = cx.theme();
+            let label = SharedString::from(t_plural(L10nKey::TabStripHiddenTabs, hidden, &[]));
+            let slot = px(count_slot(rem));
+            let glyph = move |index: usize, text: &'static str| {
+                let cell = div()
+                    .flex_none()
+                    .w(slot)
+                    .flex()
+                    .justify_center()
+                    .child(text);
+                #[cfg(test)]
+                let cell = cell.debug_selector(move || format!("tab-strip-overflow-glyph-{index}"));
+                #[cfg(not(test))]
+                let _ = index;
+                cell
+            };
+            let tile = div()
+                .id("tab-strip-overflow")
+                .role(gpui::Role::Button)
+                .aria_label(label.clone())
+                .occlude()
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(count_w(count_digits(hidden), rem)))
+                .h(px(COUNT_H))
+                .rounded_lg()
+                .text_size(rems(COUNT_TEXT))
+                .font_features(self.strip_metrics.features())
+                .text_color(theme.muted_foreground)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme.muted).text_color(theme.foreground))
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                // The press is kept from the title bar under it, like the
+                // chips', so a click here is never the start of a window drag.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.tab_switch(true, window, cx);
+                    // A click may land while a modifier is down; that
+                    // modifier coming up must not commit the list.
+                    this.switcher_release_hold(cx);
+                }))
+                .child(glyph(0, "+"))
+                .children(hidden.to_string().bytes().enumerate().map(|(at, digit)| {
+                    glyph(at + 1, COUNT_DIGIT_GLYPHS[usize::from(digit - b'0')])
+                }));
+            #[cfg(test)]
+            let tile = tile.debug_selector(move || format!("tab-strip-overflow-{hidden}"));
+            tile
+        });
 
         // Same bargain the rail's own tiles keep when the Appearance switch is
         // on: present in the layout, painted only while the pointer is on the
@@ -2738,10 +2977,6 @@ impl Tty59App {
             (strip_chrome && docked_right <= 0.).then(trailing_chrome_tiles_w),
         );
         let centre_search = (!show_chips).then(|| {
-            // The chord as text, not caps: a cap's fill is this box's own
-            // grey, so on it a cap is only a gap between two letters.
-            let chord = crate::ui::keymap::effective_key("TogglePalette", cx)
-                .map(|spec| crate::ui::keymap::key_tokens(&spec).join(""));
             // Two equal springs either side keep the box centred; each stops
             // at the band's `clear`, and past that it is the box that gives.
             // Reserve the agent-mode controls on both sides while keeping the
@@ -2749,6 +2984,34 @@ impl Tty59App {
             let clear = band
                 .clear
                 .max(if self.agent_mode_active() { 140. } else { 110. });
+            // The band is the bar's column less what stands beside it: the
+            // rail at the width it is drawn, the window buttons the strip
+            // stops short of, and what `band.right` already gives to a docked
+            // document and panel. On macOS the bar is the terminal column, so
+            // those two come off it instead.
+            let rail_w = match (self.agent_mode_active(), self.sidebar_open(cx)) {
+                (true, _) => self.sidebar_width.get(),
+                (false, true) => self.sidebar_px(window, cx),
+                (false, false) => 0.,
+            };
+            let beside_bar = match cfg!(target_os = "macos") {
+                true => panel_w + document_w,
+                false => controls_w,
+            };
+            let band_w = (window.viewport_size().width.as_f32()
+                - pad.left.as_f32()
+                - pad.right.as_f32()
+                - rail_w
+                - beside_bar
+                - band.right)
+                .max(0.);
+            let box_w = search_box_w(band_w, clear);
+            // Caps, one per key, only where the box is wide enough to carry
+            // them; they come from the binding the user has.
+            let chord = (box_w >= TITLEBAR_SEARCH_CHORD_MIN_W)
+                .then(|| crate::ui::keymap::effective_key("TogglePalette", cx))
+                .flatten()
+                .map(|spec| crate::ui::dialog::chord(crate::ui::keymap::key_tokens(&spec), cx));
             let spring = || div().flex_1().min_w(px(clear));
             div()
                 .absolute()
@@ -2762,14 +3025,12 @@ impl Tty59App {
                 .child(
                     h_flex()
                         .id("titlebar-search")
+                        .when(cfg!(test), |d| {
+                            d.debug_selector(|| "titlebar-search".into())
+                        })
                         .occlude()
-                        .w(px(TITLEBAR_SEARCH_W))
+                        .w(px(box_w))
                         .min_w_0()
-                        // Enough of the bar that the label and its chord still
-                        // fit with a document docked beside the terminal; at a
-                        // half it read `Search Everywhe…` in exactly the
-                        // layout people search from most.
-                        .max_w(gpui::relative(0.6))
                         .h(px(TITLEBAR_SEARCH_H))
                         .items_center()
                         .gap(px(7.))
@@ -2792,9 +3053,7 @@ impl Tty59App {
                                 .truncate()
                                 .child(t(L10nKey::AppMenuSearchEverywhere)),
                         )
-                        .when_some(chord, |row, chord| {
-                            row.child(div().flex_shrink_0().child(chord))
-                        })
+                        .when_some(chord, |row, chord| row.child(chord))
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(
                             cx.listener(|this, _, window, cx| match this.search.is_some() {
@@ -2810,7 +3069,7 @@ impl Tty59App {
             .id("tab-strip")
             .relative()
             .items_center()
-            .gap_1p5()
+            .gap(rems(STRIP_GAP_REM))
             .when(show_chips, |this| this.w(strip_w))
             .when(!show_chips, |this| this.w_full())
             .pl_0()
@@ -2821,9 +3080,10 @@ impl Tty59App {
                 this.child(self.agent_view_switch(cx))
             })
             .child(chips)
+            .when_some(count_tile, |this, tile| this.child(tile))
             .when(show_chips, move |this| this.child(add_button))
             .child(div().flex_1().min_w(px(GRAB_HANDLE_W)))
-            .child(self.agent_mode_button(cx))
+            .child(self.agent_mode_button(attention, cx))
             .when_some(right_chrome, |this, chrome| match chrome_band_w {
                 Some(w) => this.child(
                     h_flex()
@@ -2898,13 +3158,15 @@ fn avatar_disc(
             let hollow = status == Some(crate::core::cli_agent::AgentStatus::Waiting);
             let dot = status
                 .filter(|_| badge)
-                .and_then(|s| s.dot_rgb())
-                .map(|rgb| {
+                .and_then(|s| crate::ui::theme::agent_status_semantic(s, cx))
+                .map(|sem| {
                     // A working agent's dot blinks, so a column of tabs
                     // says at a glance which ones are still going.
                     let faded =
                         status == Some(crate::core::cli_agent::AgentStatus::Working) && !blink_on;
-                    Tty59App::status_dot(rgb, unread, size, cx.theme().background, hollow, faded)
+                    let surface = cx.theme().background;
+                    let paints = status_paints(sem, Tty59App::status_badge_halo(surface), faded);
+                    Tty59App::status_dot(paints, unread, size, surface, hollow)
                 });
             // Which agent this is, and what it wants, were carried entirely
             // by a brand hue and a nine-pixel dot. Say it in words too.
@@ -2955,12 +3217,16 @@ fn avatar_disc(
                 ),
             )
             .when_some(ssh, |b, rgb| {
+                // A connection state, not an agent status: same badge shape,
+                // raw mark, and no count to pair a label ink with.
                 b.child(Tty59App::status_dot(
-                    rgb,
+                    StatusPaints {
+                        mark: gpui::rgb(rgb).into(),
+                        count: None,
+                    },
                     0,
                     size,
                     cx.theme().background,
-                    false,
                     false,
                 ))
             })
@@ -3153,27 +3419,34 @@ mod tests {
                 let app = self.0.read(cx);
                 let status = crate::core::cli_agent::AgentStatus::Done;
                 let surface = cx.theme().background;
-                div().flex().children((0..=2).flat_map(|unread| {
-                    [
-                        div()
-                            .relative()
-                            .size(px(32.))
-                            .children(app.row_status_dot(Some(status), unread, surface))
-                            .into_any_element(),
-                        div()
-                            .relative()
-                            .size(px(32.))
-                            .child(Tty59App::status_dot(
-                                status.dot_rgb().unwrap(),
-                                unread,
-                                18.,
-                                surface,
-                                false,
-                                false,
-                            ))
-                            .into_any_element(),
-                    ]
-                }))
+                div()
+                    .flex()
+                    .children([0usize, 1, 2, 12].into_iter().flat_map(|unread| {
+                        [
+                            div()
+                                .relative()
+                                .size(px(32.))
+                                .children(app.row_status_dot(Some(status), unread, surface, cx))
+                                .into_any_element(),
+                            div()
+                                .relative()
+                                .size(px(32.))
+                                .child(
+                                    crate::ui::theme::agent_status_semantic(status, cx)
+                                        .map(|sem| {
+                                            Tty59App::status_dot(
+                                                status_paints(sem, surface, false),
+                                                unread,
+                                                18.,
+                                                surface,
+                                                false,
+                                            )
+                                        })
+                                        .expect("a status with a mark resolves a semantic role"),
+                                )
+                                .into_any_element(),
+                        ]
+                    }))
             }
         }
         let (app, _app_window) = crate::ui::app::test_window::harness(cx);
@@ -3183,18 +3456,20 @@ mod tests {
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        for (circles, counts, two_circle, two_count) in [
+        for (circles, counts, two_circle, two_count, capped_count) in [
             (
                 ["row-status-circle-0", "row-status-circle-1"],
                 ["row-status-count-0", "row-status-count-1"],
                 "row-status-circle-2",
                 "row-status-count-2",
+                "row-status-count-12",
             ),
             (
                 ["avatar-status-circle-0", "avatar-status-circle-1"],
                 ["avatar-status-count-0", "avatar-status-count-1"],
                 "avatar-status-circle-2",
                 "avatar-status-count-2",
+                "avatar-status-count-12",
             ),
         ] {
             for circle in circles {
@@ -3212,6 +3487,170 @@ mod tests {
                 "the count has room on both sides"
             );
             assert!(pill.size.height >= px(13.));
+            let capped = vcx
+                .debug_bounds(capped_count)
+                .expect("a count past nine still paints its pill");
+            // Tabular figures give every digit the same advance, so the
+            // capped label keeps the identical pill box.
+            assert_eq!(
+                (capped.size.width, capped.size.height),
+                (pill.size.width, pill.size.height),
+                "the capped single-glyph label keeps the pill geometry"
+            );
+        }
+    }
+
+    /// Every status mark a row or avatar paints comes out of the active
+    /// theme's semantic roles — Working to `info`, Waiting to `warning`, Done
+    /// to `success` — read off the rendered elements themselves, so a
+    /// consumer wired back to a fixed hex fails here rather than compiling
+    /// away. The count pill is the role's `fill`/`on_fill` pair, and a
+    /// Working blink dims only the mark, never the count's fill out from
+    /// under its fixed label. The SSH badge is not an agent status: it keeps
+    /// its raw mark.
+    #[gpui::test]
+    fn status_marks_paint_the_active_themes_semantics(cx: &mut TestAppContext) {
+        use crate::core::cli_agent::AgentStatus;
+        use crate::ui::paint_probe;
+        use crate::ui::search::Avatar;
+        const SSH_DOT: u32 = 0x2477db;
+
+        struct StatusMarks(gpui::Entity<Tty59App>);
+        impl gpui::Render for StatusMarks {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let app = self.0.read(cx);
+                let surface = cx.theme().background;
+                let row = |status, unread| {
+                    app.row_status_dot(Some(status), unread, surface, cx)
+                        .expect("a status with a mark resolves one")
+                };
+                div().flex().children([
+                    row(AgentStatus::Working, 0),
+                    row(AgentStatus::Working, 2),
+                    row(AgentStatus::Waiting, 0),
+                    row(AgentStatus::Done, 0),
+                    row(AgentStatus::Done, 2),
+                    avatar_disc(
+                        "agent-badge",
+                        Avatar {
+                            agent: Some(crate::core::cli_agent::CLIAgent::Codex),
+                            status: Some(AgentStatus::Done),
+                            unread: 3,
+                            ssh: None,
+                        },
+                        22.,
+                        true,
+                        true,
+                        cx,
+                    ),
+                    avatar_disc(
+                        "ssh-badge",
+                        Avatar {
+                            agent: None,
+                            status: None,
+                            unread: 0,
+                            ssh: Some(SSH_DOT),
+                        },
+                        22.,
+                        true,
+                        true,
+                        cx,
+                    ),
+                ])
+            }
+        }
+
+        let (app, _app_window) = crate::ui::app::test_window::harness(cx);
+        let window = cx.add_window(|_, _| StatusMarks(app.clone()));
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let _probe = paint_probe::scope();
+        for id in ["light", "dark"] {
+            cx.update(|cx| {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: id.into(),
+                    ..Default::default()
+                }));
+                crate::ui::theme::apply_theme(None, cx);
+            });
+            let expected = cx.update(|cx| crate::ui::presets::by_id(cx, id).semantics());
+            app.update(cx, |app, _| app.working_dot_on = true);
+            vcx.run_until_parked();
+            paint_probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+
+            let dots = paint_probe::all("row-status-dot");
+            assert_eq!(dots.len(), 3, "{id}: Working/Waiting/Done row dots");
+            assert_eq!(dots[0].fill, Some(expected.info.ink), "{id}: working mark");
+            assert_eq!(
+                dots[1].border,
+                Some(expected.warning.ink),
+                "{id}: waiting ring"
+            );
+            assert_eq!(dots[2].fill, Some(expected.success.ink), "{id}: done mark");
+            for dot in &dots {
+                let alpha = match dot.fill {
+                    Some(_) => dot.fill_alpha,
+                    None => dot.border_alpha,
+                };
+                assert_eq!(alpha, Some(1.0), "{id}: a mark must stay opaque");
+            }
+            let pills = paint_probe::all("row-status-pill");
+            assert_eq!(pills.len(), 2, "{id}: unread >1 draws a pill");
+            for (pill, role) in [(pills[0], expected.info), (pills[1], expected.success)] {
+                assert_eq!(
+                    (pill.fill, pill.text),
+                    (Some(role.fill), Some(role.on_fill)),
+                    "{id}: the count paints the role's fill/on_fill pair"
+                );
+                assert_eq!(
+                    (pill.fill_alpha, pill.text_alpha),
+                    (Some(1.0), Some(1.0)),
+                    "{id}: the count's pair must stay opaque"
+                );
+            }
+            let badge_pills = paint_probe::all("avatar-status-pill");
+            assert_eq!(badge_pills.len(), 1, "{id}: the avatar's count pill");
+            assert_eq!(
+                (badge_pills[0].fill, badge_pills[0].text),
+                (Some(expected.success.fill), Some(expected.success.on_fill)),
+                "{id}: the badge pairs the role's fill and ink"
+            );
+            assert_eq!(
+                (badge_pills[0].fill_alpha, badge_pills[0].text_alpha),
+                (Some(1.0), Some(1.0)),
+                "{id}: the badge count must stay opaque"
+            );
+            let badge_dots = paint_probe::all("avatar-status-dot");
+            assert_eq!(badge_dots.len(), 1, "{id}: only the ssh badge is a dot");
+            assert_eq!(
+                badge_dots[0].fill,
+                Some(SSH_DOT),
+                "{id}: the ssh badge keeps its raw mark, not a semantic role"
+            );
+
+            // The dim beat of a blink reaches the mark alone: the Working
+            // count's label keeps the contrast `on_fill` was floored for.
+            app.update(cx, |app, _| app.working_dot_on = false);
+            vcx.run_until_parked();
+            paint_probe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let dots = paint_probe::all("row-status-dot");
+            assert_ne!(
+                dots[0].fill,
+                Some(expected.info.ink),
+                "{id}: a blink dims the mark"
+            );
+            let pills = paint_probe::all("row-status-pill");
+            assert_eq!(
+                (pills[0].fill, pills[0].text),
+                (Some(expected.info.fill), Some(expected.info.on_fill)),
+                "{id}: the count's pair does not blink"
+            );
         }
     }
 
@@ -3420,13 +3859,25 @@ mod tests {
         // Idle draws no dot, so it has nothing to name.
         assert_eq!(agent_status_label(None), None);
         assert_eq!(agent_status_label(Some(AgentStatus::Idle)), None);
-        // Every state that does draw a dot can be read out loud.
+        // Every state that draws a mark can be read out loud.
+        let role = crate::ui::presets::Semantic {
+            ink: 0,
+            fill: 0,
+            on_fill: 0,
+        };
+        let marks = crate::ui::presets::Semantics {
+            danger: role,
+            warning: role,
+            success: role,
+            info: role,
+            link: role,
+        };
         for status in [
             AgentStatus::Working,
             AgentStatus::Waiting,
             AgentStatus::Done,
         ] {
-            assert!(status.dot_rgb().is_some());
+            assert!(marks.for_agent_status(status).is_some());
             assert!(
                 agent_status_label(Some(status)).is_some_and(|s| !s.is_empty()),
                 "{status:?} paints a dot with no words behind it"
@@ -3526,242 +3977,6 @@ mod tests {
         assert!(out.ends_with('…'));
     }
 
-    /// `TestAppContext` shapes through gpui's `NoopTextSystem`, where every
-    /// glyph is exactly one em — weight-agnostic and, more to the point,
-    /// CJK-agnostic. That keeps these tests identical on all three CI targets,
-    /// but it also means they cannot speak to the proportional and mixed-script
-    /// widths the elision exists for: what they pin is the contract — which
-    /// parts of a label must survive, and that the result fits its budget.
-    fn elide_setup(cx: &mut TestAppContext) -> (gpui::WindowTextSystem, gpui::Font, f32) {
-        let size = 14.;
-        (
-            gpui::WindowTextSystem::new(cx.text_system().clone()),
-            gpui::Font::default(),
-            size,
-        )
-    }
-
-    #[gpui::test]
-    fn elide_path_fits_shallow_paths_untouched(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = "~/tty59";
-        let max = measure_text(&ts, &font, size, path) + 1.;
-        assert_eq!(elide_path_keep_tail(&ts, &font, size, path, max), "~/tty59");
-    }
-
-    #[gpui::test]
-    fn elide_path_shows_the_whole_deep_path_when_the_budget_allows(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        // A wide sidebar must not elide a deep path: only the width may
-        // decide, never a fixed segment cap.
-        let path = "E:/work/toolbox/crates/tty59-core/src/client";
-        let max = measure_text(&ts, &font, size, path) + 1.;
-        assert_eq!(elide_path_keep_tail(&ts, &font, size, path, max), path);
-    }
-
-    #[gpui::test]
-    fn elide_path_keeps_drive_tail_and_budget(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = "E:/work/toolbox/src/ui/tab_sidebar.rs";
-        let max = 200.;
-        assert!(
-            measure_text(&ts, &font, size, path) > max,
-            "the fixture has to be wider than the budget to exercise elision"
-        );
-        let out = elide_path_keep_tail(&ts, &font, size, path, max);
-        assert!(out.starts_with("E:/…/"), "drive letter survives: {out}");
-        assert!(
-            out.ends_with("tab_sidebar.rs"),
-            "the file name always survives: {out}"
-        );
-        assert!(
-            measure_text(&ts, &font, size, &out) <= max,
-            "the elided label fits the budget"
-        );
-    }
-
-    #[gpui::test]
-    fn elide_path_keeps_tilde_and_leading_slash(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let home = "~/projects/toolbox/src/ui/tab_sidebar.rs";
-        assert!(
-            measure_text(&ts, &font, size, home) > 200.,
-            "the fixture has to be wider than the budget to exercise elision"
-        );
-        let out = elide_path_keep_tail(&ts, &font, size, home, 200.);
-        assert!(out.starts_with("~/…/"), "tilde root survives: {out}");
-        assert!(out.ends_with("tab_sidebar.rs"));
-
-        let abs = "/usr/local/share/man/man1/git.1";
-        assert!(
-            measure_text(&ts, &font, size, abs) > 120.,
-            "the fixture has to be wider than the budget to exercise elision"
-        );
-        let out = elide_path_keep_tail(&ts, &font, size, abs, 120.);
-        assert!(out.starts_with("/…/"), "absolute root survives: {out}");
-        assert!(out.ends_with("git.1"));
-    }
-
-    #[gpui::test]
-    fn elide_path_tears_only_the_last_segment_as_a_last_resort(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = "E:/supercalifragilisticexpialidocious";
-        let max = 60.;
-        assert!(measure_text(&ts, &font, size, path) > max);
-        let out = elide_path_keep_tail(&ts, &font, size, path, max);
-        assert!(out.starts_with('…'), "a torn segment reads as torn: {out}");
-        assert!(
-            out.chars().nth(1) != Some('/'),
-            "no slash after a torn segment: {out}"
-        );
-        assert!(out.ends_with('s'), "the word's tail survives: {out}");
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-    }
-
-    #[gpui::test]
-    fn elide_edges_keeps_both_ends_of_a_branch(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "window-transparency-backdrop";
-        let max = 140.;
-        assert!(measure_text(&ts, &font, size, branch) > max);
-        let out = elide_keep_edges(&ts, &font, size, branch, max);
-        assert!(out.starts_with("window-"), "head survives: {out}");
-        assert!(out.ends_with("backdrop"), "tail survives: {out}");
-        assert!(out.contains('…'));
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-        assert!(out.chars().count() < branch.chars().count());
-    }
-
-    #[gpui::test]
-    fn elide_end_keeps_the_head_of_a_branch(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "fix/rpc-proxy-and-error-classification";
-        let max = 140.;
-        let out = elide_end_clusters(&ts, &font, size, branch, max);
-        assert!(out.starts_with("fix/rpc-"), "head survives: {out}");
-        assert!(out.ends_with('…') && out.matches('…').count() == 1, "{out}");
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-        let fits = measure_text(&ts, &font, size, branch);
-        assert_eq!(elide_end_clusters(&ts, &font, size, branch, fits), branch);
-    }
-
-    #[gpui::test]
-    fn elide_edges_leaves_short_branches_alone(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "main";
-        let max = measure_text(&ts, &font, size, branch) + 1.;
-        assert_eq!(elide_keep_edges(&ts, &font, size, branch, max), "main");
-    }
-
-    #[gpui::test]
-    fn elide_edges_falls_back_to_a_tail_sliver_when_the_head_cannot_fit(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "window-transparency-backdrop";
-        let out = elide_keep_edges(&ts, &font, size, branch, 30.);
-        assert!(out.starts_with('…'));
-        assert!(measure_text(&ts, &font, size, &out) <= 30.);
-    }
-
-    #[gpui::test]
-    fn elide_path_cuts_windows_backslash_paths_on_segments(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = r"C:\Users\dev\AppData\Local\Temp\verify-build";
-        let max = 200.;
-        assert!(measure_text(&ts, &font, size, path) > max);
-        let out = elide_path_keep_tail(&ts, &font, size, path, max);
-        assert!(out.starts_with(r"C:\…\"), "drive letter survives: {out}");
-        assert!(
-            out.ends_with("verify-build"),
-            "the leaf segment survives: {out}"
-        );
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-    }
-
-    /// One tab must not spell its location two ways depending on how wide the
-    /// sidebar happens to be.
-    #[gpui::test]
-    fn elide_path_keeps_the_separator_the_path_arrived_with(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let windows = r"C:\Users\dev\projects\toolbox\src\ui\app.rs";
-        let wide = measure_text(&ts, &font, size, windows) + 1.;
-        assert_eq!(
-            elide_path_keep_tail(&ts, &font, size, windows, wide),
-            windows,
-            "a path that fits is left exactly as it arrived"
-        );
-        let out = elide_path_keep_tail(&ts, &font, size, windows, 120.);
-        assert!(!out.contains('/'), "no forward slash creeps in: {out}");
-
-        let unix = "/home/dev/projects/toolbox/src/ui/app.rs";
-        let out = elide_path_keep_tail(&ts, &font, size, unix, 120.);
-        assert!(!out.contains('\\'), "no backslash creeps in: {out}");
-    }
-
-    /// A branch with no `-`, `_`, `/` or `.` in reach used to lose its head
-    /// entirely, which is the one thing this function promises not to do.
-    #[gpui::test]
-    fn elide_edges_keeps_a_head_on_a_separatorless_token(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "verylongbranchnamewithoutseps";
-        for max in [60., 80., 100., 120.] {
-            let out = elide_keep_edges(&ts, &font, size, branch, max);
-            assert!(
-                out.starts_with('v'),
-                "head survives at {max}px: {out}",
-                max = max
-            );
-            assert!(out.ends_with('s'), "tail survives at {max}px: {out}");
-            assert!(measure_text(&ts, &font, size, &out) <= max);
-        }
-    }
-
-    /// A head that fits but leaves nothing behind the ellipsis says less than
-    /// a shorter head that keeps the identifying tail.
-    #[gpui::test]
-    fn elide_edges_gives_up_head_room_to_keep_a_tail(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let branch = "feature/some-really-long-thing";
-        let max = 80.;
-        assert!(measure_text(&ts, &font, size, branch) > max);
-        let out = elide_keep_edges(&ts, &font, size, branch, max);
-        assert!(
-            !out.ends_with('…'),
-            "the tail is never traded away for a longer head: {out}"
-        );
-        assert!(out.ends_with('g'), "the identifying tail survives: {out}");
-        assert!(measure_text(&ts, &font, size, &out) <= max);
-    }
-
-    /// The sidebar title is not always a path. `elide_label` has to notice,
-    /// because the path rule drops the head — and for a command line or a name
-    /// the user typed, the head is the part that names it.
-    #[gpui::test]
-    fn elide_label_keeps_the_head_of_a_non_path(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        for text in ["Backend server logs", "npm run dev -- --watch"] {
-            let max = 90.;
-            assert!(measure_text(&ts, &font, size, text) > max);
-            let out = elide_label(&ts, &font, size, text, max);
-            let first = text.chars().next().unwrap();
-            assert!(
-                out.starts_with(first),
-                "a non-path keeps its head: {out} (from {text})"
-            );
-            assert!(measure_text(&ts, &font, size, &out) <= max);
-        }
-    }
-
-    /// …while a path still gets the tail-first treatment through the same
-    /// entry point.
-    #[gpui::test]
-    fn elide_label_still_keeps_the_tail_of_a_path(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        let path = "~/projects/toolbox/src/ui/tab_sidebar.rs";
-        let out = elide_label(&ts, &font, size, path, 200.);
-        assert!(out.starts_with("~/…/"), "root survives: {out}");
-        assert!(out.ends_with("tab_sidebar.rs"), "leaf survives: {out}");
-    }
-
     #[test]
     fn short_title_cuts_windows_paths_on_backslashes() {
         assert_eq!(
@@ -3782,88 +3997,6 @@ mod tests {
         (0..=clusters.len())
             .map(|n| clusters[..n].concat())
             .collect()
-    }
-
-    fn cluster_suffixes(text: &str) -> Vec<String> {
-        let clusters: Vec<&str> = text.graphemes(true).collect();
-        (0..=clusters.len())
-            .map(|n| clusters[clusters.len() - n..].concat())
-            .collect()
-    }
-
-    /// An elision may only drop whole grapheme clusters, so whatever survives
-    /// on either side of the ellipsis has to be a cluster-aligned prefix and
-    /// suffix of what went in. Slicing by `char` instead passes every width
-    /// check and still tears `👨‍👩‍👧` into a dangling joiner, strips the
-    /// variation selector off `❤️`, or leaves half of `🇨🇳` to render as a
-    /// bare letter.
-    #[track_caller]
-    fn assert_cut_on_cluster_boundaries(input: &str, out: &str, max: f32) {
-        let Some((head, tail)) = out.split_once('…') else {
-            assert_eq!(out, input, "an unelided label comes back verbatim");
-            return;
-        };
-        assert!(
-            cluster_prefixes(input).iter().any(|p| p == head),
-            "head {head:?} is not a cluster-aligned prefix of {input:?} (@{max}px)"
-        );
-        assert!(
-            cluster_suffixes(input).iter().any(|s| s == tail),
-            "tail {tail:?} is not a cluster-aligned suffix of {input:?} (@{max}px)"
-        );
-    }
-
-    /// Fixtures whose clusters are wider than one `char`, placed so that a
-    /// `char`-indexed cut lands inside one at some width.
-    const CLUSTER_FIXTURES: [&str; 7] = [
-        "ab\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467}cdefghijklmnop",
-        "release-notes-final-ab\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467}",
-        "abcdef\u{2764}\u{fe0f}ghijklmnopqr",
-        "long-branch-name-x\u{2764}\u{fe0f}",
-        "abcdef\u{1F1E8}\u{1F1F3}ghijklmnopqr",
-        "abcde\u{301}fghijklmnopqrst",
-        "review-\u{1F44D}\u{1F3FD}-approved-changes",
-    ];
-
-    #[gpui::test]
-    fn elide_edges_cuts_only_on_cluster_boundaries(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        for text in CLUSTER_FIXTURES {
-            let mut max = 30.;
-            while max <= 200. {
-                let out = elide_keep_edges(&ts, &font, size, text, max);
-                assert_cut_on_cluster_boundaries(text, &out, max);
-                assert!(
-                    measure_text(&ts, &font, size, &out) <= max,
-                    "{out:?} still has to fit its budget (@{max}px)"
-                );
-                max += 2.;
-            }
-        }
-    }
-
-    /// The path elision tears its last segment character by character as a
-    /// last resort; that resort has to respect clusters too.
-    #[gpui::test]
-    fn elide_path_tears_its_last_segment_on_cluster_boundaries(cx: &mut TestAppContext) {
-        let (ts, font, size) = elide_setup(cx);
-        for leaf in CLUSTER_FIXTURES {
-            let path = format!("~/projects/toolbox/{leaf}");
-            let mut max = 30.;
-            while max <= 120. {
-                let out = elide_path_keep_tail(&ts, &font, size, &path, max);
-                // Whatever it settled on, the tail after the ellipsis has to
-                // be cluster-aligned against the path it came from.
-                if let Some((_, tail)) = out.split_once('…') {
-                    let tail = tail.trim_start_matches('/');
-                    assert!(
-                        cluster_suffixes(&path).iter().any(|s| s == tail),
-                        "tail {tail:?} is not a cluster-aligned suffix of {path:?} (@{max}px)"
-                    );
-                }
-                max += 2.;
-            }
-        }
     }
 
     /// `short_title`'s 40-glyph clamp is the other `char`-indexed cut.
@@ -4015,45 +4148,18 @@ mod tests {
         );
     }
 
-    /// A tooltip exists to say what the row had to leave out. One that repeats
-    /// the row is worse than none, and the label and the raw string it came
-    /// from are not comparable until both have been abbreviated: `~/repo` and
-    /// `/Users/x/repo` are the same name spelled two ways, and reading them as
-    /// a difference hung a tooltip on every tab named after a directory under
-    /// the home — which, after this change, is most of them.
+    /// The label and the raw string it came from are not comparable until both
+    /// have been abbreviated: `~/repo` and `/Users/x/repo` are the same name
+    /// spelled two ways. A directory under the home is labelled with its `~`
+    /// and whole; one that was cut keeps its last three segments.
     #[test]
-    fn a_tab_named_after_a_directory_says_nothing_more_on_hover_unless_it_was_cut() {
+    fn a_tab_named_after_a_directory_is_labelled_whole_unless_it_was_cut() {
         let mut tab = strip_tab();
         tab.cwd = Some("/Users/x/repo".into());
-
         assert_eq!(label_of(&tab, 0, Some(home())), "~/repo");
-        assert_eq!(
-            tooltip_of(&tab, 0, Some(home())),
-            None,
-            "the row is already showing the whole directory"
-        );
 
-        // Cut down to its last three segments, so the head is worth having.
         tab.cwd = Some("/Users/x/repo/crates/tty59-core/src".into());
         assert_eq!(label_of(&tab, 0, Some(home())), "…/crates/tty59-core/src");
-        assert_eq!(
-            tooltip_of(&tab, 0, Some(home())).as_deref(),
-            Some("~/repo/crates/tty59-core/src")
-        );
-
-        // The same holds for a title that happens to be a path — the rung this
-        // guard was already getting wrong before a directory could reach it.
-        let mut titled = strip_tab();
-        titled.osc_title = Some("/Users/x/repo".into());
-        assert_eq!(tooltip_of(&titled, 0, Some(home())), None);
-
-        // A shell integration's `user@host:` head is not in the label, so it
-        // is still worth spelling out.
-        titled.osc_title = Some("me@box:/Users/x/repo".into());
-        assert_eq!(
-            tooltip_of(&titled, 0, Some(home())).as_deref(),
-            Some("me@box:/Users/x/repo")
-        );
     }
 
     /// The one test that fails if any of the wiring is put back: a real tab,
@@ -4114,12 +4220,6 @@ mod tests {
                 strip,
                 label_of(&from_tree, index, home.as_deref()),
                 "the two columns name the same tab the same way"
-            );
-
-            assert_eq!(
-                app.tab_title_tooltip(tab, index, Some(window), cx),
-                None,
-                "and the row is showing the whole path, so it stays quiet"
             );
         });
     }
@@ -4196,11 +4296,10 @@ mod tests {
         );
 
         // The root of a filesystem is a directory like any other: a tab
-        // sitting in it says so, and says nothing more on hover.
+        // sitting in it says so.
         let mut root = strip_tab();
         root.cwd = Some("/".into());
         assert_eq!(label_of(&root, 0, Some(home())), "/");
-        assert_eq!(tooltip_of(&root, 0, Some(home())), None);
     }
 
     fn inventory(labels: &[&str]) -> Vec<DetectedShell> {
@@ -4359,20 +4458,1083 @@ mod tests {
         );
         assert!(named.len() < offered.len(), "the rest are the seam row's");
 
+        // Nothing has run yet: the menu still leads with the first agents
+        // the machine offers, and the seam covers the rest — a heading above
+        // a single "Other Agents…" makes launching the first agent take a
+        // menu, a search scope and a pick.
         let none = used(&[]);
         let named = menu_agents(&offered, &none, now);
-        assert!(named.is_empty(), "installed but never run is not named");
+        assert_eq!(
+            named,
+            vec![CLIAgent::Claude, CLIAgent::Amp, CLIAgent::Codex],
+            "a fresh profile names the first offered agents, in offered order"
+        );
         assert!(
             named.len() < offered.len(),
-            "so the section is only the seam"
+            "the rest remain the seam row's"
         );
+        // A record for an agent this machine does not offer is no use either.
+        let stale = used(&[("goose", 9, now)]);
+        assert_eq!(menu_agents(&offered, &stale, now), named);
+
+        // Offered fewer than the cap, every one is named — no seam row.
+        let few = [CLIAgent::Claude, CLIAgent::Codex];
+        let named = menu_agents(&few, &none, now);
+        assert_eq!(named, few);
+        assert_eq!(named.len(), few.len());
+
+        assert!(menu_agents(&[], &none, now).is_empty());
         assert!(menu_agents(&[], &usage, now).is_empty());
 
         // Every offered agent has been run and they fit: no seam row.
-        let few = [CLIAgent::Claude, CLIAgent::Codex];
         let two = used(&[("claude", 4, now), ("codex", 1, now)]);
         let named = menu_agents(&few, &two, now);
         assert_eq!(named, vec![CLIAgent::Claude, CLIAgent::Codex]);
         assert_eq!(named.len(), few.len());
+    }
+}
+
+/// The top strip through the real window: a harness app with the tab bar on
+/// top, resized, drawn, and read back from what was painted (`strip_slots` is
+/// written from paint, so a chip that is not drawn leaves nothing in it).
+#[cfg(test)]
+pub(crate) mod overflow_gpui_tests {
+    use crate::core::config::{Config, TabBarPosition, UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX};
+    use crate::ui::app::{Tty59App, test_window::harness_with_tabs};
+    use gpui::{Bounds, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext, px, size};
+    use gpui_component::ActiveTheme as _;
+
+    /// `windows::MIN_SIZE.0`: the narrowest window the app lets anyone drag to.
+    const NARROWEST_WINDOW: f32 = 720.;
+
+    /// The control carries the count it draws in its selector, so a test can
+    /// compare what is on screen against the chips that were actually left out.
+    /// `debug_bounds` wants a `&'static str`, so the supported counts are listed
+    /// once instead of leaking a string per lookup.
+    const COUNT_SELECTORS: [&str; 24] = [
+        "tab-strip-overflow-1",
+        "tab-strip-overflow-2",
+        "tab-strip-overflow-3",
+        "tab-strip-overflow-4",
+        "tab-strip-overflow-5",
+        "tab-strip-overflow-6",
+        "tab-strip-overflow-7",
+        "tab-strip-overflow-8",
+        "tab-strip-overflow-9",
+        "tab-strip-overflow-10",
+        "tab-strip-overflow-11",
+        "tab-strip-overflow-12",
+        "tab-strip-overflow-13",
+        "tab-strip-overflow-14",
+        "tab-strip-overflow-15",
+        "tab-strip-overflow-16",
+        "tab-strip-overflow-17",
+        "tab-strip-overflow-18",
+        "tab-strip-overflow-19",
+        "tab-strip-overflow-20",
+        "tab-strip-overflow-21",
+        "tab-strip-overflow-22",
+        "tab-strip-overflow-23",
+        "tab-strip-overflow-24",
+    ];
+
+    fn count_selector(hidden: usize) -> &'static str {
+        COUNT_SELECTORS[hidden - 1]
+    }
+
+    /// The painted slot of each glyph of the count (`+`, then each digit), by
+    /// position. `debug_bounds` wants `&'static str`, so they are listed once.
+    const GLYPH_SELECTORS: [&str; 3] = [
+        "tab-strip-overflow-glyph-0",
+        "tab-strip-overflow-glyph-1",
+        "tab-strip-overflow-glyph-2",
+    ];
+
+    /// The count's type is 12px at the default 16px rem.
+    const COUNT_TEXT_OF_REM: f32 = 12. / 16.;
+
+    /// Every glyph of the count sits inside its own painted slot, in the tile,
+    /// and the widest glyph the font can put there, shaped by the real text
+    /// system, fits that slot: no digit clips or runs into its neighbour at
+    /// this interface font size.
+    fn assert_glyphs_fit_their_slots(
+        vcx: &mut VisualTestContext,
+        tile: Bounds<Pixels>,
+        counted: usize,
+        ui_font_size: f32,
+        what: &str,
+    ) {
+        let glyphs = 1 + counted.to_string().len();
+        let slots: Vec<Bounds<Pixels>> = (0..glyphs)
+            .map(|at| {
+                vcx.debug_bounds(GLYPH_SELECTORS[at])
+                    .unwrap_or_else(|| panic!("{what}: glyph {at} of +{counted} was not painted"))
+            })
+            .collect();
+        let same = |a: Pixels, b: Pixels| f32::from(a - b).abs() < 0.01;
+        for (at, slot) in slots.iter().enumerate() {
+            assert!(
+                same(slot.size.width, slots[0].size.width),
+                "{what}: +{counted} glyph {at} has its own width: {:?} vs {:?}",
+                slot.size.width,
+                slots[0].size.width
+            );
+            assert!(
+                slot.left() >= tile.left() && slot.right() <= tile.right(),
+                "{what}: +{counted} glyph {at} sticks out of its tile"
+            );
+            if at > 0 {
+                assert!(
+                    slots[at - 1].right() <= slot.left() + px(0.01),
+                    "{what}: +{counted} glyphs {} and {at} overlap",
+                    at - 1
+                );
+            }
+        }
+        let widest = vcx.update(|window, cx| {
+            let font = gpui::Font {
+                family: cx.theme().font_family.clone(),
+                features: crate::ui::theme::tabular_figures(),
+                fallbacks: None,
+                weight: gpui::FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+            };
+            let size = ui_font_size * COUNT_TEXT_OF_REM;
+            ["+", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+                .into_iter()
+                .map(|glyph| {
+                    crate::ui::tab_strip::measure_text(window.text_system(), &font, size, glyph)
+                })
+                .fold(0., f32::max)
+        });
+        assert!(
+            widest <= f32::from(slots[0].size.width),
+            "{what}: +{counted} has glyphs {widest}px wide in {:?} slots at {ui_font_size}px",
+            slots[0].size.width
+        );
+    }
+
+    /// The two languages the strip is drawn in here, by registry code, with
+    /// what each calls the Agents pill: its label, and so its width, is the one
+    /// thing in the row that changes with them.
+    pub(crate) const LOCALES: [(&str, &str); 2] = [("en", "Agents"), ("ru-RU", "Агенты")];
+
+    /// `set_locale` falls back to English for a code it does not know, so the
+    /// language is checked by what it says, not by what was asked for.
+    pub(crate) fn use_locale(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        locale: &str,
+        agents: &str,
+    ) {
+        assert!(
+            crate::ui::i18n::find_language(locale).is_some(),
+            "{locale} is not a supported language code"
+        );
+        crate::ui::i18n::set_locale(locale);
+        assert_eq!(
+            crate::ui::i18n::t(crate::ui::i18n::L10nKey::VisionAgents),
+            agents,
+            "the strip is not drawn in {locale}"
+        );
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        redraw(vcx);
+    }
+
+    fn redraw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn resize(vcx: &mut VisualTestContext, width: f32) {
+        vcx.simulate_resize(size(px(width), px(700.)));
+        redraw(vcx);
+    }
+
+    pub(crate) fn set_ui_font_size(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        ui_font_size: f32,
+    ) {
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.ui_font_size = ui_font_size;
+            cx.set_global(cfg);
+        });
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        redraw(vcx);
+    }
+
+    fn strip_window(
+        cx: &mut TestAppContext,
+        tabs: usize,
+        width: f32,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, tabs);
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.tab_bar_position = TabBarPosition::Top;
+            cx.set_global(cfg);
+        });
+        app.update_in(&mut vcx, |_, _, cx| cx.notify());
+        resize(&mut vcx, width);
+        (app, vcx, streams)
+    }
+
+    /// Indices of the chips the strip actually painted.
+    fn drawn(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<usize> {
+        app.update(vcx, |app, _| {
+            app.strip_slots
+                .borrow()
+                .iter()
+                .enumerate()
+                .filter(|(_, bounds)| bounds.size.width > px(0.))
+                .map(|(i, _)| i)
+                .collect()
+        })
+    }
+
+    /// The overflow control, whatever count it carries.
+    fn find_tile(vcx: &mut VisualTestContext, tabs: usize) -> Option<(usize, Bounds<Pixels>)> {
+        (1..=tabs).find_map(|n| vcx.debug_bounds(count_selector(n)).map(|b| (n, b)))
+    }
+
+    /// Right edge of the last painted chip.
+    fn last_chip_right(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        shown: &[usize],
+    ) -> Pixels {
+        app.update(vcx, |app, _| {
+            let slots = app.strip_slots.borrow();
+            let right = shown
+                .iter()
+                .map(|&i| slots[i].right())
+                .fold(px(0.), |a, b| if b > a { b } else { a });
+            right
+        })
+    }
+
+    /// Where the strip's own controls sit beside the chips: the whole row is
+    /// the chips, the count when there is one, New Tab, then the Agents pill,
+    /// and none of them may stand on another or on the window's edge. The
+    /// pill is not budgeted by the chips' own arithmetic, so a strip that
+    /// forgets it shrinks the chips' row until the last chip overlaps what
+    /// follows it.
+    fn assert_row_does_not_overlap(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        shown: &[usize],
+        width: f32,
+        what: &str,
+    ) {
+        let new_tab = vcx
+            .debug_bounds("tab-strip-new")
+            .expect("the New Tab button is drawn");
+        let pill = vcx
+            .debug_bounds("agent-mode-pill")
+            .expect("the Agents pill is drawn");
+        let last_chip = last_chip_right(app, vcx, shown);
+        assert!(
+            last_chip <= new_tab.left(),
+            "{what}: the last chip overlaps New Tab at {width}px: chip ends {last_chip:?}, \
+             New Tab starts {:?}",
+            new_tab.left()
+        );
+        assert!(
+            new_tab.right() <= pill.left(),
+            "{what}: New Tab overlaps the Agents pill at {width}px"
+        );
+        assert!(
+            pill.right() <= px(width),
+            "{what}: the Agents pill is pushed out of the window at {width}px"
+        );
+    }
+
+    /// Whatever the strip drew, the count is exact and sits between the last
+    /// chip and the New Tab button, which stays inside the window.
+    fn assert_count_is_exact_and_paid_for(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        tabs: usize,
+        width: f32,
+        what: &str,
+    ) -> Option<(usize, Bounds<Pixels>)> {
+        let shown = drawn(app, vcx);
+        let hidden = tabs - shown.len();
+        let tile = find_tile(vcx, tabs);
+        assert_row_does_not_overlap(app, vcx, &shown, width, what);
+        if hidden == 0 {
+            assert_eq!(tile, None, "{what}: everything fits at {width}px, no count");
+            return None;
+        }
+        let (counted, bounds) =
+            tile.unwrap_or_else(|| panic!("{what}: {hidden} tabs hidden at {width}px, no count"));
+        assert_eq!(counted, hidden, "{what}: the count is off at {width}px");
+        let last_chip = last_chip_right(app, vcx, &shown);
+        assert!(
+            last_chip <= bounds.left(),
+            "{what}: the count overlaps the last chip at {width}px: chip ends {last_chip:?}, \
+             count starts {:?}",
+            bounds.left()
+        );
+        let new_tab = vcx
+            .debug_bounds("tab-strip-new")
+            .expect("the New Tab button is drawn");
+        assert!(
+            bounds.right() <= new_tab.left(),
+            "{what}: the count overlaps the New Tab button at {width}px"
+        );
+        assert!(
+            new_tab.right() <= px(width),
+            "{what}: the New Tab button was pushed out of the window at {width}px"
+        );
+        Some((counted, bounds))
+    }
+
+    /// The reported bug: 24 tabs in a 1000px window, a run of them drawn and
+    /// nothing on screen saying how many were left out. The same strip with
+    /// three tabs is the control: everything fits, so there is no count.
+    #[gpui::test]
+    fn tabs_that_do_not_fit_are_counted_on_screen(cx: &mut TestAppContext) {
+        let (few, mut few_vcx, _few_streams) = strip_window(cx, 3, 1000.);
+        assert_eq!(drawn(&few, &mut few_vcx), vec![0, 1, 2]);
+        assert_eq!(find_tile(&mut few_vcx, 3), None, "three tabs need no count");
+        assert!(few_vcx.debug_bounds("tab-strip-new").is_some());
+
+        let (app, mut vcx, _streams) = strip_window(cx, 24, 1000.);
+        let shown = drawn(&app, &mut vcx);
+        assert!(
+            !shown.is_empty() && shown.len() < 24,
+            "the window has to be narrow enough to clip some tabs: drew {shown:?}"
+        );
+        let hidden = 24 - shown.len();
+        assert!(
+            vcx.debug_bounds(count_selector(hidden)).is_some(),
+            "{hidden} tabs are not drawn and nothing carries that count \
+             (found {:?})",
+            find_tile(&mut vcx, 24).map(|(n, _)| n)
+        );
+    }
+
+    /// Thresholds, from the narrowest supported window to one that holds every
+    /// chip, at the default and at the largest interface font. The count is
+    /// exact, never grows with more room, and the control is paid for out of
+    /// the chips' width instead of pushing `+` out; the control itself grows
+    /// with the interface font and with a second digit.
+    #[gpui::test]
+    fn the_count_is_exact_and_paid_for_at_every_width(cx: &mut TestAppContext) {
+        const TABS: usize = 20;
+        let (app, mut vcx, _streams) = strip_window(cx, TABS, NARROWEST_WINDOW);
+
+        // tile width by [font size, digits - 1]
+        let mut tile_w = [[None::<f32>; 2]; 2];
+        // each locale x font x digit count is proved once, not at every width
+        let mut glyphs_checked = [[[false; 2]; 2]; 2];
+        for (locale_at, (locale, agents)) in LOCALES.into_iter().enumerate() {
+            use_locale(&app, &mut vcx, locale, agents);
+            for (font, ui_font_size) in [UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX]
+                .into_iter()
+                .enumerate()
+            {
+                set_ui_font_size(&app, &mut vcx, ui_font_size);
+                let (mut saw_all_fit, mut saw_hidden) = (false, false);
+                let mut previous_hidden = usize::MAX;
+                let mut width = NARROWEST_WINDOW;
+                while width <= 2700. {
+                    resize(&mut vcx, width);
+                    let hidden = TABS - drawn(&app, &mut vcx).len();
+                    assert!(
+                        hidden <= previous_hidden,
+                        "{locale} {ui_font_size}px font: more room hid more tabs at {width}px: \
+                         {hidden} after {previous_hidden}"
+                    );
+                    previous_hidden = hidden;
+                    let what = format!("{locale} {ui_font_size}px font");
+                    match assert_count_is_exact_and_paid_for(&app, &mut vcx, TABS, width, &what) {
+                        None => saw_all_fit = true,
+                        Some((counted, bounds)) => {
+                            saw_hidden = true;
+                            let digits = counted.to_string().len() - 1;
+                            tile_w[font][digits] = Some(f32::from(bounds.size.width));
+                            if !std::mem::replace(
+                                &mut glyphs_checked[locale_at][font][digits],
+                                true,
+                            ) {
+                                assert_glyphs_fit_their_slots(
+                                    &mut vcx,
+                                    bounds,
+                                    counted,
+                                    ui_font_size,
+                                    &what,
+                                );
+                            }
+                        }
+                    }
+                    width += 13.;
+                }
+                assert!(
+                    saw_all_fit && saw_hidden,
+                    "{locale} {ui_font_size}px font: the sweep has to cross the point where \
+                     everything fits"
+                );
+            }
+        }
+        use_locale(&app, &mut vcx, "en", "Agents");
+
+        let w = |font: usize, digits: usize| {
+            tile_w[font][digits].unwrap_or_else(|| panic!("no tile with {} digits", digits + 1))
+        };
+        for digits in 0..2 {
+            assert!(
+                w(1, digits) > w(0, digits),
+                "the tile ignores the interface font: {} vs {} px with {} digit(s)",
+                w(1, digits),
+                w(0, digits),
+                digits + 1
+            );
+        }
+        assert!(
+            w(0, 1) >= w(0, 0) && w(1, 1) > w(1, 0),
+            "a second digit has no room: {:?}",
+            tile_w
+        );
+    }
+
+    /// The active tab is one of the drawn chips beside the count, wherever it
+    /// sits, including after the strip is reordered under it and at the
+    /// narrowest supported window.
+    #[gpui::test]
+    fn the_active_tab_stays_drawn_beside_the_count(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = strip_window(cx, 24, 1000.);
+
+        for (locale, agents) in LOCALES {
+            use_locale(&app, &mut vcx, locale, agents);
+            for (width, target) in [
+                (1440., 23usize),
+                (1000., 23),
+                (1000., 11),
+                (1000., 0),
+                (NARROWEST_WINDOW, 17),
+            ] {
+                resize(&mut vcx, width);
+                app.update_in(&mut vcx, |app, window, cx| app.activate(target, window, cx));
+                redraw(&mut vcx);
+                let shown = drawn(&app, &mut vcx);
+                assert!(
+                    shown.contains(&target),
+                    "{locale}: tab {target} is not drawn at {width}px: {shown:?}"
+                );
+                assert_count_is_exact_and_paid_for(&app, &mut vcx, 24, width, locale)
+                    .expect("24 tabs overflow");
+            }
+
+            app.update_in(&mut vcx, |app, _, cx| {
+                let order: Vec<usize> = (0..app.tabs.len()).rev().collect();
+                app.apply_tab_order(&order, cx);
+            });
+            redraw(&mut vcx);
+            let shown = drawn(&app, &mut vcx);
+            let active = app.update(&mut vcx, |app, _| app.active);
+            assert!(
+                shown.contains(&active),
+                "{locale} reordered: {active} not in {shown:?}"
+            );
+            assert_count_is_exact_and_paid_for(&app, &mut vcx, 24, NARROWEST_WINDOW, locale)
+                .expect("24 tabs overflow");
+        }
+        use_locale(&app, &mut vcx, "en", "Agents");
+    }
+
+    /// A real click on the count raises the existing recent-tabs list, the
+    /// way the keyboard does but with no modifier held, so the list stays up
+    /// for the pointer. Escape backs out with the active tab untouched, Enter
+    /// lands on the tab used before this one, and Ctrl+Tab keeps walking the
+    /// same list afterwards.
+    #[gpui::test]
+    fn clicking_the_count_opens_the_recent_tabs_list(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = strip_window(cx, 24, 1000.);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.activate(20, window, cx);
+            app.activate(5, window, cx);
+        });
+        redraw(&mut vcx);
+
+        let (_, tile) = find_tile(&mut vcx, 24).expect("24 tabs overflow a 1000px strip");
+        vcx.simulate_click(tile.center(), Modifiers::none());
+        redraw(&mut vcx);
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_some(), "the click opens the list");
+        });
+
+        vcx.simulate_modifiers_change(Modifiers::control());
+        vcx.simulate_modifiers_change(Modifiers::none());
+        app.update(&mut vcx, |app, _| {
+            assert!(
+                app.switcher.is_some(),
+                "a modifier going up must not commit a list the mouse opened"
+            );
+        });
+
+        vcx.simulate_keystrokes("escape");
+        redraw(&mut vcx);
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_none(), "Escape closes the list");
+            assert_eq!(app.active, 5, "backing out leaves the active tab alone");
+        });
+
+        let (_, tile) = find_tile(&mut vcx, 24).expect("the count is still there");
+        vcx.simulate_click(tile.center(), Modifiers::none());
+        redraw(&mut vcx);
+        vcx.simulate_keystrokes("enter");
+        redraw(&mut vcx);
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_none(), "Enter picks a tab and closes it");
+            assert_eq!(
+                app.active, 20,
+                "the recent-tabs list leads with the last tab used"
+            );
+        });
+
+        vcx.simulate_modifiers_change(Modifiers::control());
+        app.update_in(&mut vcx, |app, window, cx| app.tab_switch(true, window, cx));
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_some(), "Ctrl+Tab raises the list");
+        });
+        vcx.simulate_modifiers_change(Modifiers::none());
+        app.update(&mut vcx, |app, _| {
+            assert!(app.switcher.is_none());
+            assert_eq!(app.active, 5, "releasing commits the previously used tab");
+        });
+    }
+
+    /// A pane name far longer than any chip, so the chip has to elide it.
+    const LONG_NAME: &str = "a-pane-with-a-very-long-name-that-no-chip-can-hold-whole-and-then-some-more-words-after-it-to-be-sure";
+
+    /// Ends the pane of tab `i` named `name`, the way the daemon's exit does.
+    fn end_pane(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, i: usize, name: &str) {
+        app.update(vcx, |app, cx| {
+            let leaf = app.tabs[i].pane.first_leaf().expect("a tab has a pane");
+            leaf.terminal()
+                .expect("a terminal pane")
+                .update(cx, |view, cx| view.end_for_test(name, cx));
+            cx.notify();
+        });
+    }
+
+    /// An ended pane's chip keeps the words its exit wrote, whole, in every
+    /// shipped language, and elides only the name in front of them. The
+    /// observer reads what the label actually prepared and painted.
+    #[gpui::test]
+    fn an_ended_chip_keeps_its_localized_tail_whole(cx: &mut TestAppContext) {
+        use crate::ui::text_elision::observe;
+
+        let (app, mut vcx, _streams) = strip_window(cx, 2, 1000.);
+        let chip = gpui::ElementId::from(("tab-chip-label", 0usize));
+        // The strip width per language is MEASURED, not computed: at each one the chip is
+        // too narrow for the name AND for an ordinary label to keep the status whole
+        // (the same label with its whole text and no included tail cuts the status),
+        // yet wide enough for the included tail plus a cut name.
+        for (language, width, tail) in [
+            ("en", 700., " — process exited"),
+            ("ru-RU", 700., ": процесс завершён"),
+            // The smaller zero-count pill admits a second chip at 600px. At
+            // 640px this fixture again has room for the full tail and cut name.
+            ("ja-JP", 640., " — プロセスが終了しました"),
+            ("zh-CN", 550., " — 进程已退出"),
+        ] {
+            crate::ui::i18n::set_locale(language);
+            end_pane(&app, &mut vcx, 0, LONG_NAME);
+            resize(&mut vcx, width);
+            observe::clear();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let label = observe::label(&chip)
+                .unwrap_or_else(|| panic!("{language}: the chip label was not drawn"));
+            assert!(label.painted, "{language}: {label:?}");
+            assert!(
+                label.text.ends_with(tail),
+                "{language}: the tail was cut: {:?}",
+                label.text
+            );
+            assert!(
+                label.text.contains('…') && label.text.len() < LONG_NAME.len() + tail.len(),
+                "{language}: the name did not elide: {:?}",
+                label.text
+            );
+        }
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// A name the user gave the tab is theirs: the pane ending behind it adds
+    /// no tail to it, and a live pane has none to offer either.
+    #[gpui::test]
+    fn only_the_panes_own_ended_title_carries_a_tail(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = strip_window(cx, 3, 1000.);
+        app.update(&mut vcx, |app, cx| {
+            app.tabs[0].name = Some("my deploy — process exited".into());
+            cx.notify();
+        });
+        end_pane(&app, &mut vcx, 0, "tty59");
+        end_pane(&app, &mut vcx, 1, "tty59");
+        app.update_in(&mut vcx, |app, window, cx| {
+            let named = app
+                .full_tab_label(&app.tabs[0], Some(window), cx)
+                .expect("a named tab has a label");
+            assert_eq!(named.text.as_str(), "my deploy — process exited");
+            assert!(
+                named.ended_tail.is_none(),
+                "a custom name is untouched, even one that ends in the ended words"
+            );
+
+            let ended = app
+                .full_tab_label(&app.tabs[1], Some(window), cx)
+                .expect("an ended pane has a title");
+            assert_eq!(ended.text.as_str(), "tty59 — process exited");
+            assert_eq!(ended.ended_tail, Some(" — process exited"));
+
+            // Whatever a live pane's label is (it may have nothing to say),
+            // it carries no tail.
+            let live = app.full_tab_label(&app.tabs[2], Some(window), cx);
+            assert!(
+                live.is_none_or(|label| label.ended_tail.is_none()),
+                "a pane that has not ended has no tail"
+            );
+        });
+    }
+
+    /// `text` shaped as the pill draws it (the theme's font, tabular figures,
+    /// the pill's share of the interface font size), by the real text system.
+    fn shaped_in_pill(vcx: &mut VisualTestContext, ui_font_size: f32, text: &'static str) -> f32 {
+        vcx.update(|window, cx| {
+            let font = gpui::Font {
+                family: cx.theme().font_family.clone(),
+                features: crate::ui::theme::tabular_figures(),
+                fallbacks: None,
+                weight: gpui::FontWeight::NORMAL,
+                style: gpui::FontStyle::Normal,
+            };
+            crate::ui::tab_strip::measure_text(
+                window.text_system(),
+                &font,
+                ui_font_size * crate::ui::tab_strip::PILL_TEXT,
+                text,
+            )
+        })
+    }
+
+    /// Puts a waiting agent on each of `streams`, through the daemon's own
+    /// message, and waits until the app's inbox counts all `expected` of them.
+    pub(crate) fn agents_wait(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        streams: &mut [crate::daemon::transport::Stream],
+        expected: usize,
+    ) {
+        use crate::core::cli_agent::{AgentDetectionSession, AgentSessionState, AgentStatus};
+        for (index, stream) in streams.iter_mut().take(expected).enumerate() {
+            crate::daemon::protocol::DaemonMsg::AgentStatus(Some(AgentSessionState {
+                status: AgentStatus::Waiting,
+                since_ms: Some(index as u64 + 1),
+                message: Some(format!("Approve task {index}")),
+                detection: Some(AgentDetectionSession {
+                    kind: "codex".into(),
+                    epoch: 1,
+                    exited: false,
+                    source: None,
+                    rule: None,
+                }),
+                ..Default::default()
+            }))
+            .encode(stream)
+            .unwrap();
+        }
+        let mut counted = 0;
+        for _ in 0..400 {
+            vcx.run_until_parked();
+            counted = app.update_in(vcx, |app, window, cx| {
+                app.refresh_agent_vision(window, cx);
+                app.agent_vision
+                    .state
+                    .attention_count(&app.agent_vision.panes, &app.agent_vision.reads)
+                    .total()
+            });
+            if counted == expected {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            counted, expected,
+            "the daemon's {expected} waiting agents did not all reach the inbox in 2s"
+        );
+        redraw(vcx);
+    }
+
+    /// What the pill says, read from where its parts were painted: the label,
+    /// and the count when there is one, each in its own box; both inside the
+    /// pill's padding, the budgeted width exactly spent on them, and the
+    /// strip's other controls clear of it.
+    ///
+    /// `workbench` is the mode the pill is drawn in, `agents` and
+    /// `workbench_label` what the language calls its two labels, and `count`
+    /// how many agents need attention.
+    fn assert_pill_says(
+        vcx: &mut VisualTestContext,
+        (ui_font_size, width): (f32, f32),
+        (workbench, count): (bool, usize),
+        (agents, workbench_label): (&'static str, &'static str),
+        what: &str,
+    ) {
+        let pill = vcx
+            .debug_bounds("agent-mode-pill")
+            .unwrap_or_else(|| panic!("{what}: the Agents pill is not drawn"));
+        let label = vcx
+            .debug_bounds("agent-mode-label")
+            .unwrap_or_else(|| panic!("{what}: the pill's label is not drawn in its own box"));
+        let count_box = vcx.debug_bounds("agent-mode-count");
+        let pad = crate::ui::tab_strip::PILL_PAD_X;
+        // A text element's intrinsic width is its shaped line width rounded up
+        // to a whole pixel (`ceil` in gpui's `TextLayout::layout`), which is
+        // also how the metric measures; so the painted box is exactly the
+        // shaped width's ceiling, give or take float noise, never the raw advance.
+        let same = |a: Pixels, shaped: f32| (f32::from(a) - shaped.ceil()).abs() <= 0.01;
+
+        let word = if workbench { workbench_label } else { agents };
+        let word_w = shaped_in_pill(vcx, ui_font_size, word);
+        assert!(
+            same(label.size.width, word_w),
+            "{what}: the label is {:?} wide, `{word}` shapes to {word_w}px: it carries more \
+             than its word",
+            label.size.width
+        );
+
+        let shows_count = !workbench && count > 0;
+        let digits = if shows_count {
+            count.to_string().len()
+        } else {
+            0
+        };
+        // The pill is budgeted from the word and ONE digit, each rounded up to a
+        // whole pixel, and a count of `digits` digits is painted as one run
+        // rounded up once. The word's box is the budgeted width exactly, so
+        // all that can be left over is what `digits` rounded-up digits exceed
+        // their one rounded-up run by: under a pixel for every digit, split
+        // between the two sides however the button aligns them. It can never be
+        // longer: nothing may stand inside the padding.
+        let rounding = digits as f32 + 0.01;
+        let inside_padding = |edge: Pixels| edge >= px(-0.01);
+        let left_pad = label.left() - pill.left() - px(pad);
+        assert!(
+            inside_padding(left_pad) && left_pad <= px(rounding),
+            "{what}: the label starts {:?} into the pill; its padding is {pad}px, at most \
+             {rounding}px more for rounding",
+            label.left() - pill.left()
+        );
+
+        let last = match (shows_count, count_box) {
+            (false, None) => label,
+            (false, Some(found)) => panic!(
+                "{what}: the pill shows a count box {found:?} for {count} agents in a mode \
+                 that carries none"
+            ),
+            (true, None) => panic!("{what}: {count} agents need attention and no count is drawn"),
+            (true, Some(count_box)) => {
+                let digit_run = ["0", "00", "000"][digits - 1];
+                let digits_w = shaped_in_pill(vcx, ui_font_size, digit_run);
+                assert!(
+                    same(count_box.size.width, digits_w),
+                    "{what}: the count for {count} is {:?} wide, its {digits} tabular digits \
+                     shape to {digits_w}px",
+                    count_box.size.width
+                );
+                assert!(
+                    count_box.left() - label.right() >= px(2.),
+                    "{what}: the count is {:?} from the label, no visible gap",
+                    count_box.left() - label.right()
+                );
+                count_box
+            }
+        };
+        let right_pad = pill.right() - last.right() - px(pad);
+        assert!(
+            inside_padding(right_pad) && right_pad <= px(rounding),
+            "{what}: {:?} is left between the pill's content and its edge; its padding is \
+             {pad}px, at most {rounding}px more for rounding: the budget and the drawing \
+             disagree",
+            pill.right() - last.right()
+        );
+
+        assert!(
+            pill.right() <= px(width),
+            "{what}: the pill {pill:?} leaves the {width}px window"
+        );
+        // Workbench takes the strip's New Tab button away; everywhere else it
+        // is drawn and the pill must stand clear of it.
+        let new_tab = vcx.debug_bounds("tab-strip-new");
+        match (workbench, new_tab) {
+            (true, Some(found)) => {
+                panic!("{what}: Workbench draws New Tab at {found:?}, it has none")
+            }
+            (true, None) => {}
+            (false, None) => panic!("{what}: the New Tab button is not drawn"),
+            (false, Some(new_tab)) => assert!(
+                new_tab.right() <= pill.left(),
+                "{what}: the pill {pill:?} overlaps New Tab {new_tab:?}"
+            ),
+        }
+    }
+
+    /// The reported bug: "Agents (0)" with no agents anywhere, and the count
+    /// baked into the label so it cannot be told apart from the word. Through
+    /// a real window: nothing but the word at zero, then one and two digits in
+    /// their own muted span as agents arrive through the daemon's messages,
+    /// and the Workbench label, with no count, once a real click on the pill
+    /// has switched the mode.
+    #[gpui::test]
+    fn the_agents_pill_keeps_its_count_apart_and_hides_zero(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = strip_window(cx, 12, 1440.);
+        let says = |vcx: &mut VisualTestContext, workbench: bool, count: usize, what: &str| {
+            assert_pill_says(
+                vcx,
+                (UI_FONT_SIZE_DEFAULT, 1440.),
+                (workbench, count),
+                ("Agents", "Workbench"),
+                what,
+            )
+        };
+
+        says(&mut vcx, false, 0, "no agents");
+
+        agents_wait(&app, &mut vcx, &mut streams[..1], 1);
+        says(&mut vcx, false, 1, "one agent");
+
+        agents_wait(&app, &mut vcx, &mut streams, 12);
+        says(&mut vcx, false, 12, "twelve agents");
+
+        let pill = vcx.debug_bounds("agent-mode-pill").expect("pill");
+        vcx.simulate_click(pill.center(), Modifiers::none());
+        redraw(&mut vcx);
+        assert!(
+            app.update(&mut vcx, |app, _| app.agent_mode_active()),
+            "clicking the pill enters the agent view"
+        );
+        says(&mut vcx, true, 12, "workbench, twelve waiting");
+
+        let pill = vcx.debug_bounds("agent-mode-pill").expect("pill");
+        vcx.simulate_click(pill.center(), Modifiers::none());
+        redraw(&mut vcx);
+        assert!(
+            !app.update(&mut vcx, |app, _| app.agent_mode_active()),
+            "clicking Workbench leaves the agent view"
+        );
+        says(&mut vcx, false, 12, "back out of the agent view");
+    }
+
+    /// The pill's budget is what the strip lays out around, so the label, the
+    /// count and their gap must be spent exactly in every language and at the
+    /// largest interface font, at the narrow window where the chips already
+    /// give way to it.
+    #[gpui::test]
+    fn the_agents_pill_is_budgeted_in_every_language_and_font(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = strip_window(cx, 12, 1000.);
+        for count in [0, 12] {
+            if count > 0 {
+                agents_wait(&app, &mut vcx, &mut streams, count);
+            }
+            for (locale, agents) in LOCALES {
+                use_locale(&app, &mut vcx, locale, agents);
+                let workbench = crate::ui::i18n::t(crate::ui::i18n::L10nKey::VisionWorkbench);
+                for ui_font_size in [UI_FONT_SIZE_DEFAULT, UI_FONT_SIZE_MAX] {
+                    set_ui_font_size(&app, &mut vcx, ui_font_size);
+                    let what = format!("{locale} {ui_font_size}px, {count} agents");
+                    assert_pill_says(
+                        &mut vcx,
+                        (ui_font_size, 1000.),
+                        (false, count),
+                        (agents, workbench),
+                        &what,
+                    );
+                    let shown = drawn(&app, &mut vcx);
+                    assert_row_does_not_overlap(&app, &mut vcx, &shown, 1000., &what);
+                }
+            }
+        }
+        use_locale(&app, &mut vcx, "en", "Agents");
+        set_ui_font_size(&app, &mut vcx, UI_FONT_SIZE_DEFAULT);
+    }
+
+    /// The count is muted text on the pill's fill, and at rest and hovered its
+    /// contrast clears 4.5:1. While the pill is pressed its fill reduces the
+    /// muted ink's contrast to 3.3:1, so the count takes the full
+    /// foreground then, as the word beside it already does. Real mouse events
+    /// on the real pill, and the ink the count's glyphs inherit read where
+    /// they are painted.
+    #[gpui::test]
+    fn the_agents_pill_count_takes_the_foreground_while_pressed(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = strip_window(cx, 3, 1440.);
+        agents_wait(&app, &mut vcx, &mut streams, 2);
+        let (muted, foreground) =
+            vcx.update(|_, cx| (cx.theme().muted_foreground, cx.theme().foreground));
+        assert_ne!(
+            muted, foreground,
+            "the two inks must differ to tell them apart"
+        );
+        let ink = |vcx: &mut VisualTestContext| {
+            redraw(vcx);
+            super::take_pill_count_ink().expect("the count's ink was painted")
+        };
+
+        assert_eq!(ink(&mut vcx), muted, "at rest the count is muted");
+
+        let pill = vcx
+            .debug_bounds("agent-mode-pill")
+            .expect("the pill is drawn");
+        vcx.simulate_mouse_move(pill.center(), None::<gpui::MouseButton>, Modifiers::none());
+        assert_eq!(
+            ink(&mut vcx),
+            muted,
+            "hovering the pill leaves the count muted"
+        );
+
+        vcx.simulate_mouse_down(pill.center(), gpui::MouseButton::Left, Modifiers::none());
+        assert_eq!(
+            ink(&mut vcx),
+            foreground,
+            "while the pill is pressed the count takes the foreground"
+        );
+
+        let away = gpui::point(px(5.), px(400.));
+        vcx.simulate_mouse_move(away, None::<gpui::MouseButton>, Modifiers::none());
+        vcx.simulate_mouse_up(away, gpui::MouseButton::Left, Modifiers::none());
+        assert_eq!(ink(&mut vcx), muted, "released, the count is muted again");
+        assert!(
+            !app.update(&mut vcx, |app, _| app.agent_mode_active()),
+            "a press released elsewhere is not a click"
+        );
+    }
+}
+
+/// When the right panel's tab row is measured: once per key, never per frame.
+#[cfg(test)]
+mod right_tab_metrics_gpui_tests {
+    use super::*;
+    use crate::ui::app::test_window::harness;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    fn measures() -> usize {
+        RIGHT_TAB_MEASURES.with(|n| n.get())
+    }
+
+    fn refresh(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| app.strip_metrics_refresh(window, cx));
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        vcx.run_until_parked();
+    }
+
+    fn tabs_w(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> f32 {
+        app.update_in(vcx, |app, _, _| app.right_tab_metrics.tabs_w())
+    }
+
+    /// Frames that change nothing the key names measure nothing, however many
+    /// of them there are — and the floor is read from the cache every time it
+    /// is asked, which is many times a frame.
+    #[gpui::test]
+    fn an_unchanged_key_measures_nothing(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        refresh(&app, &mut vcx);
+        let before = measures();
+        for _ in 0..8 {
+            refresh(&app, &mut vcx);
+            app.update_in(&mut vcx, |app, window, cx| {
+                for _ in 0..10 {
+                    let _ = app.right_panel_min_px(window, cx);
+                }
+            });
+        }
+        assert_eq!(measures(), before, "nothing the key names changed");
+    }
+
+    /// Each input the key names measures again, once: the size the tab text is
+    /// drawn at, the font family both faces are built from, and the labels'
+    /// language.
+    #[gpui::test]
+    fn each_input_of_the_key_measures_again_once(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx) = harness(cx);
+        refresh(&app, &mut vcx);
+
+        // The interface font size.
+        let (before, wide) = (measures(), tabs_w(&app, &mut vcx));
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.ui_font_size += 2.;
+            cx.set_global(cfg);
+        });
+        refresh(&app, &mut vcx);
+        refresh(&app, &mut vcx);
+        assert_eq!(measures(), before + 1, "a size change measures once");
+        assert_ne!(tabs_w(&app, &mut vcx), wide, "and the floor follows it");
+
+        // The font family.
+        let before = measures();
+        vcx.update(|_, cx| {
+            gpui_component::Theme::global_mut(cx).font_family = "Another Sans".into();
+        });
+        refresh(&app, &mut vcx);
+        refresh(&app, &mut vcx);
+        assert_eq!(measures(), before + 1, "a family change measures once");
+
+        // The language: the labels are different words. `set_locale` falls back
+        // to English for a code it does not know (`ru` is not one; `ru-RU` is),
+        // so the language is checked by what the labels say.
+        let before = measures();
+        let english = t(L10nKey::PanelFilesTitle);
+        assert!(crate::ui::i18n::find_language("ru-RU").is_some());
+        crate::ui::i18n::set_locale("ru-RU");
+        assert_ne!(
+            t(L10nKey::PanelFilesTitle),
+            english,
+            "the labels are Russian"
+        );
+        refresh(&app, &mut vcx);
+        refresh(&app, &mut vcx);
+        assert_eq!(measures(), before + 1, "a language change measures once");
+        crate::ui::i18n::set_locale("en");
+    }
+
+    /// The faces the row is drawn with come out of the metrics, so these are
+    /// the faces it is measured in: medium labels, regular tabular counts, the
+    /// theme's family, at the size the tab text is drawn at. (The painter reads
+    /// them from here and sets them on the elements; that it does is by
+    /// construction in `right_panel_tabs`, and checked in native captures.)
+    #[gpui::test]
+    fn the_metrics_hold_the_faces_the_row_is_given(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        let (app, mut vcx) = harness(cx);
+        refresh(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            let metrics = &app.right_tab_metrics;
+            let ui = cx.global::<Config>().ui_font_size;
+            assert_eq!(metrics.size(), ui * crate::ui::right_panel::TAB_TEXT);
+            assert_eq!(metrics.label_font().weight, FontWeight::MEDIUM);
+            assert_eq!(metrics.count_font().weight, FontWeight::NORMAL);
+            assert_eq!(
+                metrics.count_font().features,
+                crate::ui::theme::tabular_figures()
+            );
+            assert_eq!(metrics.label_font().family, cx.theme().font_family);
+            assert_eq!(metrics.count_font().family, cx.theme().font_family);
+        });
     }
 }

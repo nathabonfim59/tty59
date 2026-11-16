@@ -77,6 +77,7 @@ macro_rules! l10n_keys {
 
 l10n_keys! {
     VisionToggle,
+    VisionTogglePalette,
     VisionAgents,
     VisionWorkbench,
     VisionInbox,
@@ -101,6 +102,7 @@ l10n_keys! {
     VisionDone,
     VisionIdle,
     VisionExited,
+    VisionExitedAge,
     VisionPane,
     VisionDefault,
     VisionDefaultDesc,
@@ -131,6 +133,7 @@ l10n_keys! {
     SettingsSearchShortcuts,
     SettingsHostsDesc,
     SettingsAddHost,
+    SettingsSaveHost,
     SettingsNoHostsMatch,
     SettingsHostsFromFiles,
     SettingsMoreHosts,
@@ -298,6 +301,7 @@ l10n_keys! {
     TreeDirUnreadable,
     TreeSearchCapped,
     TreeSearchFailed,
+    TreeRetry,
     FileChangedOnDisk,
     Reload,
     KeepMine,
@@ -418,6 +422,8 @@ l10n_keys! {
     SettingsInheritedByEveryHost,
     SettingsNoSavedHosts,
     SettingsNothingMatches,
+    SettingsNoSettingsMatch,
+    SettingsClearSearch,
     SettingsInTty59,
     SettingsImportFromSshConfig,
     SettingsExpandAllGroups,
@@ -903,6 +909,7 @@ l10n_keys! {
     SettingsSearchTabCompletionKeywords,
     SettingsSearchTerminalBellKeywords,
     SettingsSearchThemeKeywords,
+    SettingsSearchMachineKeywords,
     SettingsSearchTrimTrailingSpacesKeywords,
     SettingsSearchVerifyHostKeysKeywords,
     SettingsSearchWarnBeforeClosingKeywords,
@@ -938,6 +945,11 @@ l10n_keys! {
     SftpTransferSummaryRunning,
     SftpTransferSummaryFailed,
     SftpTransferSummaryIdle,
+    // B3-R: finished-transfer summaries.
+    SftpTransferSummaryDownloads,
+    SftpTransferSummaryUploads,
+    SftpTransferSummaryBoth,
+    SearchHostsHelper,
     SftpTransferProgress,
     SftpTransferDone,
     SftpTransferCancelled,
@@ -1134,6 +1146,9 @@ l10n_keys! {
     PanelInfoTitle,
     PanelChangesTitle,
     PanelScmTitle,
+    // B3-P: the Changes tab's accessible name and tooltip.
+    PanelChangesTabCount,
+    PanelChangesTabCapped,
     PanelFilesTitle,
     PanelSearchTitle,
     PanelGitHubTitle,
@@ -1144,6 +1159,15 @@ l10n_keys! {
     PanelLoading,
     PanelNotAGitRepo,
     PanelNotAGitRepoHint,
+    PanelInitRepo,
+    PanelScmStatusFailed,
+    PanelScmStatusRetry,
+    PanelCopyError,
+    PanelScmGitExitStatus,
+    PanelScmGitSignal,
+    PanelScmGitUnusableRoot,
+    PanelScmGitPanicked,
+    PanelScmGitPanickedWithReason,
     PanelNoChanges,
     PanelNoChangesHint,
     PanelMoreChangedFiles,
@@ -1185,6 +1209,7 @@ l10n_keys! {
     ScmNothingToCommit,
     ScmNetworkBusy,
     ScmCommitNeedsMessage,
+    ScmCommitHasConflicts,
     ScmDetailFilesFailed,
     ScmTimeNow,
     ScmTimeMinutes,
@@ -1247,6 +1272,13 @@ l10n_keys! {
     ScmNoMatchingChanges,
     ScmOpenChanges,
     ScmDiscardAllConfirm,
+    ScmDiscardManyConfirm,
+    ScmDeleteUntrackedConfirm,
+    ScmDeleteUntrackedFolderConfirm,
+    ScmDeleteUntrackedManyConfirm,
+    ScmDeleteUntracked,
+    ScmDiscardEverythingConfirm,
+    ScmDiscardEverythingDetail,
     ScmAmendConfirm,
     ScmOpMerge,
     ScmOpRebase,
@@ -1257,6 +1289,7 @@ l10n_keys! {
     ScmSwitchRepository,
     ScmFilesChanged,
     ScmStagedFileCount,
+    ScmConflictCount,
     WindowStop,
     WindowDelete,
     WindowThisWorkspace,
@@ -1389,6 +1422,7 @@ l10n_keys! {
     NotifyTurnFinished,
     TabTooltipMore,
     TabTooltipShowSidebar,
+    TabStripHiddenTabs,
     TabTooltipHideSidebar,
     TabTooltipHideDetailPanel,
     TabTooltipShowDetailPanel,
@@ -1524,6 +1558,7 @@ l10n_keys! {
     PanelSearchInContents,
     PanelFilesNameMatches,
     SwitcherHintNewWindow,
+    SwitcherHintMachine,
     SwitcherLocalHost,
     SwitcherConnectingTo,
     SwitcherFormName,
@@ -1858,6 +1893,7 @@ l10n_keys! {
     IntegrationNoticeBlocked,
     IntegrationNoticeNotEngaged,
     PaneTitleDisconnected,
+    PaneTitleNotConnected,
     PaneTitleProcessExited,
     LoopbackForwardFailed,
     TrayTooltipAgents,
@@ -1943,11 +1979,45 @@ l10n_keys! {
     SettingsCopyJoinWrapped,
     SettingsCopyJoinWrappedDesc,
     SettingsSearchCopyJoinWrappedKeywords,
+    // B3-L: settings terminology and host/source counts.
+    SettingsCopyJoinWrappedWithKey,
+    SettingsCopyJoinWrappedUnbound,
+    SettingsPort,
+    SettingsKeyFile,
+    SettingsSearchVisionDefaultKeywords,
+    SettingsHostCount,
+    SettingsSourceCount,
+    // B3-A: the agents rail's empty and no-match states.
+    SidebarAgentsEmptyHint,
+    SidebarNewAgent,
+    SidebarNothingMatches,
     MermaidRendering,
     MermaidViewerFullScreen,
     MermaidViewerFit,
     MermaidViewerExit,
     MermaidRenderError,
+    // B3-E: editor status, empty hint and gutter peek.
+    LspMissingBody,
+    LspErrorCount,
+    LspWarningCount,
+    EditorEmptyOpenHint,
+    EditorEmptyTreeAlt,
+    EditorEmptyOpenUnbound,
+    EditorGitPeekLinesAdded,
+    EditorGitPeekLinesRemoved,
+    EditorGitPeekChanges,
+    // B5 S2: settings save failure and unassigned shortcuts.
+    SettingsSaveFailedTitle,
+    SettingsSaveFailedBody,
+    SettingsStay,
+    SettingsLeave,
+    SettingsShortcutAdd,
+    SettingsShortcutsRecordingHint,
+    // B5 remote: SFTP delete title with host, symlink label, SSH prompt extras.
+    SftpDeleteTitleOnHost,
+    SftpSymlinkAria,
+    SshPromptPassphrasePlaceholder,
+    SshPromptSaveToKeychain,
 }
 
 /// The source control strings that are translated but not yet displayed.
@@ -1986,6 +2056,21 @@ pub fn t(key: L10nKey) -> &'static str {
 
 pub fn t_fmt(key: L10nKey, args: &[(&str, &str)]) -> String {
     apply_template(t(key), args, None)
+}
+
+/// `key` as the current locale words it, then as every other shipped locale
+/// does, in catalog order. For a surface that has to recognise text some
+/// other language's rendering of `key` produced, and must not allocate to do
+/// it: every item is the catalog's own `&'static str`.
+pub fn texts_current_first(key: L10nKey) -> impl Iterator<Item = &'static str> {
+    let current = current_locale_index();
+    std::iter::once(translate(current, key)).chain(
+        SUPPORTED_LANGUAGES
+            .iter()
+            .enumerate()
+            .filter(move |(idx, _)| *idx != current)
+            .filter_map(move |(_, lang)| (lang.translate_fn)(key)),
+    )
 }
 
 /// The same key as every *other* locale words it.
@@ -2055,6 +2140,22 @@ pub fn t_plural(key: L10nKey, count: usize, args: &[(&str, &str)]) -> String {
         args,
         Some(count),
     )
+}
+
+/// The templates a plural-aware key reads in the current language, one for
+/// each category in the order Zero, One, Few, Many, Other, chosen by the same
+/// selection [`t_plural`] makes: for a measurement of every word the key can
+/// ever show. Nothing is formatted and nothing is allocated.
+pub(crate) fn plural_templates(key: L10nKey) -> [&'static str; 5] {
+    let locale = current_locale_index();
+    [
+        PluralCategory::Zero,
+        PluralCategory::One,
+        PluralCategory::Few,
+        PluralCategory::Many,
+        PluralCategory::Other,
+    ]
+    .map(|category| translate_variant(locale, key, category.as_str()))
 }
 
 fn apply_template(template: &'static str, args: &[(&str, &str)], count: Option<usize>) -> String {
@@ -2130,6 +2231,8 @@ mod tests {
             // Pure templates: every word in them is a placeholder.
             L10nKey::AppCmdShellTitle,
             L10nKey::SftpTransferProgress,
+            L10nKey::LspProblemsTooltip,
+            L10nKey::EditorGitPeekChanges,
             // Product names.
             L10nKey::SettingsServer,
             L10nKey::SettingsAgentClaudeCode,
@@ -2184,6 +2287,7 @@ mod tests {
             // Russian keeps this punctuation separator and product-name template.
             L10nKey::TrayAgentSep,
             L10nKey::TrayTooltipAgents,
+            L10nKey::SftpTransferSummaryBoth,
         ];
 
         for &key in KEPT_IN_ENGLISH {
@@ -2245,6 +2349,44 @@ mod tests {
                 assert!(!copy.contains('⌘'), "{code} copy-on-select: {copy:?}");
                 assert!(!x11.contains("XQuartz"), "{code} x11: {x11:?}");
             }
+        }
+        set_locale(default_language_code());
+    }
+
+    /// The shortcut helper sentences name keys in words ("Backspace", the word
+    /// the keycaps and the other shortcut copy use), never with the ⌫ glyph.
+    /// Backspace help belongs to the recording state only: the resting helper
+    /// lines say nothing about it, while the recording helper and the
+    /// "press keys" prompt do. And the button that opens the shortcuts page is
+    /// a navigation, so it carries no "…" that would promise a dialog.
+    #[test]
+    fn shortcut_copy_names_keys_in_words_and_the_page_link_has_no_ellipsis() {
+        for lang in SUPPORTED_LANGUAGES {
+            set_locale(lang.code);
+            let code = lang.code;
+            // Resting state: no Backspace help, in words or as the glyph.
+            for key in [
+                L10nKey::SettingsShortcutsHint,
+                L10nKey::SettingsShortcutsHintTmux,
+            ] {
+                let text = t(key);
+                assert!(!text.contains('⌫'), "{code} {key:?}: {text:?}");
+                assert!(!text.contains("Backspace"), "{code} {key:?}: {text:?}");
+            }
+            // Recording state: Backspace in words, never the glyph.
+            for key in [
+                L10nKey::SettingsShortcutsRecordingHint,
+                L10nKey::SettingsPressKeys,
+            ] {
+                let text = t(key);
+                assert!(!text.contains('⌫'), "{code} {key:?}: {text:?}");
+                assert!(text.contains("Backspace"), "{code} {key:?}: {text:?}");
+            }
+            let edit = t(L10nKey::SettingsEditShortcuts);
+            assert!(
+                !edit.ends_with('…') && !edit.ends_with("..."),
+                "{code} edit shortcuts: {edit:?}"
+            );
         }
         set_locale(default_language_code());
     }
@@ -2317,6 +2459,12 @@ mod tests {
             L10nKey::SettingsAliasesLinked,
             L10nKey::SettingsMoreAgents,
             L10nKey::SettingsMoreHosts,
+            L10nKey::SettingsHostCount,
+            L10nKey::SettingsSourceCount,
+            L10nKey::LspErrorCount,
+            L10nKey::LspWarningCount,
+            L10nKey::EditorGitPeekLinesAdded,
+            L10nKey::EditorGitPeekLinesRemoved,
             L10nKey::SettingsRestoreChanged,
             L10nKey::SettingsMatchCount,
             L10nKey::SettingsImportSummary,
@@ -2327,6 +2475,8 @@ mod tests {
             L10nKey::PanelMoreChangedFiles,
             L10nKey::ScmFilesChanged,
             L10nKey::ScmStagedFileCount,
+            L10nKey::ScmCommitHasConflicts,
+            L10nKey::ScmConflictCount,
             L10nKey::WindowStopShells,
             L10nKey::WindowDeleteShells,
             L10nKey::DiffChangedFiles,
@@ -2347,8 +2497,12 @@ mod tests {
             L10nKey::GitHubShowAllFiles,
             L10nKey::GitHubPassedCount,
             L10nKey::GitHubSkippedCount,
+            L10nKey::PanelChangesTabCount,
             L10nKey::GitHubShowHiddenComments,
             L10nKey::GitHubShowAllReviewers,
+            L10nKey::SftpTransferSummaryDownloads,
+            L10nKey::SftpTransferSummaryUploads,
+            L10nKey::TabStripHiddenTabs,
         ];
         for key in plural_keys {
             for branch in ["zero", "one", "few", "many", "other"] {

@@ -49,8 +49,9 @@ const TREE_PAD_BOTTOM: f32 = 16.;
 const TREE_ROW_H: f32 = 26.;
 
 /// The disclosure chevron's column, drawn on folders and left empty on files
-/// so every name at one depth starts at the same x.
-const CHEVRON_W: f32 = 10.;
+/// so every name at one depth starts at the same x. The panel's one
+/// disclosure size, so the mark fills its column exactly.
+const CHEVRON_W: f32 = crate::ui::right_panel::DISCLOSURE_CHEVRON;
 
 /// The gap between a row's chevron, icon and name.
 const TREE_GAP: f32 = 6.;
@@ -65,6 +66,12 @@ const SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20
 const SEARCH_LIMIT: usize = 200;
 
 const SEARCH_MAX_DIRS: usize = 2000;
+
+/// The Retry under an unreadable folder's note, suffixed with the folder so two
+/// refused folders on screen are two buttons.
+const TREE_RETRY_ID: &str = "file-tree-retry";
+/// The Retry under a failed search; there is only ever one.
+const TREE_SEARCH_RETRY_ID: &str = "file-tree-search-retry";
 
 #[derive(Clone, PartialEq)]
 pub(crate) struct TreeEntry {
@@ -194,6 +201,22 @@ impl SearchState {
         self.generation += 1;
         self.pending.clear();
         self.failed = false;
+    }
+
+    /// Ask the same question again. A new generation first, so an answer still
+    /// in flight from the earlier try is refused from this moment; then only
+    /// the remembered query is forgotten, so the next `retarget` sees a change
+    /// and sends it. `failed` stays up until an answer of the current
+    /// generation replaces it, rather than the column claiming "nothing
+    /// matches" while the second try is still out. Does nothing for a search
+    /// that has not failed: a click on a frame drawn before the answer landed
+    /// must not resend a query that worked.
+    fn retry(&mut self) {
+        if !self.failed {
+            return;
+        }
+        self.generation += 1;
+        self.pending.clear();
     }
 }
 
@@ -913,6 +936,52 @@ pub(crate) fn shell_quote_for(path: &Path, shell_program: Option<&str>) -> Strin
 impl Tty59App {
     pub(crate) fn active_host(&self, cx: &App) -> Option<SharedHost> {
         HostRegistry::lookup(cx, self.spawn_host(cx))
+    }
+
+    /// The Retry under a failed note, or `None` for a note no second try would
+    /// change. `host` is the host the note was drawn for, so the click retries
+    /// that listing and not whichever host the workspace has moved to.
+    fn tree_note_retry(
+        &self,
+        note: TreeNote,
+        dir: &Path,
+        host: HostId,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::ui::right_panel::PanelAction> {
+        use crate::ui::right_panel::PanelAction;
+        let label = t(L10nKey::TreeRetry);
+        match note {
+            TreeNote::Unreadable => {
+                let dir = dir.to_path_buf();
+                Some(PanelAction::secondary(
+                    format!("{TREE_RETRY_ID}-{}", dir.display()),
+                    label,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.file_tree_retry_dir(host, &dir, cx)
+                    }),
+                ))
+            }
+            TreeNote::SearchFailed => Some(PanelAction::secondary(
+                TREE_SEARCH_RETRY_ID,
+                label,
+                cx.listener(|this, _, _window, cx| {
+                    this.file_tree.search.retry();
+                    cx.notify();
+                }),
+            )),
+            TreeNote::Loading | TreeNote::Empty | TreeNote::HiddenOnly | TreeNote::SearchCapped => {
+                None
+            }
+        }
+    }
+
+    /// List `dir` on `host` again. Marked stale rather than dropped, so it
+    /// keeps its note until the new answer lands, and the next frame's
+    /// `request_loads` is what sends the request. Only that one listing is
+    /// invalidated.
+    pub(crate) fn file_tree_retry_dir(&mut self, host: HostId, dir: &Path, cx: &mut Context<Self>) {
+        self.file_tree.invalidate_dir(host, dir);
+        cx.notify();
     }
 
     pub(crate) fn file_tree_refresh_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2178,7 +2247,8 @@ impl Tty59App {
         let is_dir = row.entry.is_dir;
         let selected = self.tab_code().and_then(|c| c.selected.as_deref()) == Some(&*path);
         let muted = cx.theme().muted_foreground;
-        let paths_are_local = self.spawn_host(cx).is_local();
+        let tree_host = self.spawn_host(cx);
+        let paths_are_local = tree_host.is_local();
 
         // A placeholder standing in for children that are not there. Not a
         // file, so it takes none of the row machinery below — no hover, no
@@ -2195,7 +2265,21 @@ impl Tty59App {
                 TreeNote::SearchCapped => (L10nKey::TreeSearchCapped, muted),
                 TreeNote::SearchFailed => (L10nKey::TreeSearchFailed, cx.theme().danger),
             };
-            return vec![
+            // The two failures are the only notes another try can change: a
+            // refused listing may have been a moment's permission or a link
+            // that has since come back, and a search the host refused can
+            // simply be asked again. Under the note, on its text column, so
+            // the button reads as that note's and not the next row's.
+            let retry = self
+                .tree_note_retry(note, &path, tree_host, cx)
+                .map(|action| {
+                    h_flex()
+                        .pl(px(ROW_INSET + row.depth as f32 * INDENT + LABEL_LEAD))
+                        .pb(px(4.))
+                        .child(action.render(cx))
+                        .into_any_element()
+                });
+            let mut out = vec![
                 h_flex()
                     // Aligned with the label column of a real row at this
                     // depth: ROW_INSET for the row's own inset, INDENT for the
@@ -2251,10 +2335,11 @@ impl Tty59App {
                     })
                     .into_any_element(),
             ];
+            out.extend(retry);
+            return out;
         }
 
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
-        let tree_host = self.spawn_host(cx);
         let dirty = self.editor_is_dirty(tree_host, &path);
 
         let renaming = matches!(
@@ -2315,6 +2400,10 @@ impl Tty59App {
             .size(px(CHEVRON_W))
             .text_color(muted)
         });
+        // The basename, not the path: `debug_bounds` takes a literal, and a
+        // test's scratch root is not one.
+        #[cfg(test)]
+        let chevron_selector = format!("tree-chevron-{}", row.entry.name);
         let row_el = h_flex()
             .id(SharedString::from(format!("tree-{}", path.display())))
             .role(gpui::Role::TreeItem)
@@ -2334,14 +2423,17 @@ impl Tty59App {
             .cursor_pointer()
             .when(selected, |d| d.bg(gpui::rgb(sf.selected)))
             .when(!selected, |d| d.hover(|s| s.bg(gpui::rgb(sf.hover))))
-            .child(
-                div()
+            .child({
+                let cell = div()
                     .flex_none()
                     .w(px(CHEVRON_W))
                     .flex()
                     .justify_center()
-                    .children(chevron),
-            )
+                    .children(chevron);
+                #[cfg(test)]
+                let cell = cell.debug_selector(move || chevron_selector);
+                cell
+            })
             .child(
                 div()
                     .flex_none()
@@ -3750,6 +3842,75 @@ mod tests {
     }
 }
 
+/// Retry under a failed search: what `SearchState` does with the generation.
+#[cfg(test)]
+mod search_retry_tests {
+    use super::*;
+
+    fn hit(name: &str) -> TreeEntry {
+        TreeEntry {
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            is_dir: false,
+            ignored: false,
+        }
+    }
+
+    /// Retry sends the same query again, the failure stays on screen until an
+    /// answer replaces it, an answer to the earlier try is refused from the
+    /// moment the retry is asked, and the newer one is taken.
+    #[test]
+    fn retrying_a_failed_search_asks_the_same_query_again() {
+        let mut search = SearchState::default();
+        let first = search.retarget("foo", false).expect("a new query walks");
+        assert!(search.accept(first, false, Vec::new()));
+        assert!(search.failed, "the host refused it");
+        assert!(search.retarget("foo", false).is_none(), "nothing changed");
+
+        search.retry();
+        assert!(search.failed, "still failed until something says otherwise");
+        assert_eq!(
+            search_rows(&search).last().and_then(|r| r.note),
+            Some(TreeNote::SearchFailed)
+        );
+        assert!(
+            !search.accept(first, true, vec![hit("late.rs")]),
+            "an answer to the first try is refused as soon as the retry is asked"
+        );
+        assert!(search.failed && search.hits.is_empty());
+
+        let again = search
+            .retarget("foo", false)
+            .expect("a retried query walks again");
+        assert!(again > first, "and under a newer generation");
+        assert!(search.failed, "the failure is still what is shown");
+        assert!(search.accept(again, true, vec![hit("foo.rs")]));
+        assert!(!search.failed, "the second answer replaced it");
+        assert_eq!(search.hits.len(), 1);
+    }
+
+    /// A click on a frame drawn before the answer landed must not resend a
+    /// query that worked, or move the generation under one in flight.
+    #[test]
+    fn retrying_a_search_that_has_not_failed_does_nothing() {
+        let mut search = SearchState::default();
+        let first = search.retarget("foo", false).expect("a new query walks");
+        assert!(search.accept(first, true, vec![hit("foo.rs")]));
+        let generation = search.generation;
+
+        search.retry();
+        assert_eq!(search.generation, generation);
+        assert!(
+            search.retarget("foo", false).is_none(),
+            "the query is still remembered"
+        );
+        assert!(
+            search.accept(first, true, vec![hit("foo.rs")]),
+            "and the answer in flight is still taken"
+        );
+    }
+}
+
 #[cfg(test)]
 mod render_idle_gpui_tests {
     use super::*;
@@ -3941,6 +4102,93 @@ mod render_idle_gpui_tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Panels F20 guard: the Files tree already drew a 10px chevron, and now
+    /// takes it from the panel's shared disclosure size. `src` folded, then
+    /// opened through the row's own activate path with `ui` folded inside
+    /// it; a file keeps the 10px column and draws no mark in it. Selectors
+    /// are the rows' basenames, unique in this fixture, as literals.
+    #[gpui::test]
+    fn tree_chevrons_are_10px_open_and_folded(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("chevrons");
+        std::fs::create_dir_all(root.join("src/ui")).unwrap();
+        std::fs::write(root.join("a.rs"), "").unwrap();
+        let src = root.join("src");
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        let drawn = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, _, cx| {
+                let code = app.tab_code().expect("panel state");
+                let rows = app
+                    .file_tree
+                    .visible_rows(HostId::LOCAL, &code.roots, &code.expanded);
+                cx.notify();
+                rows.iter()
+                    .filter(|r| r.note.is_none())
+                    .map(|r| (r.entry.name.clone(), r.expanded))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let count =
+            |rows: &[(String, bool)], name: &str| rows.iter().filter(|r| r.0 == name).count();
+        let cell = |vcx: &mut VisualTestContext, what: &'static str| {
+            vcx.run_until_parked();
+            vcx.debug_bounds(what)
+                .unwrap_or_else(|| panic!("{what} was not drawn"))
+        };
+        let ten = gpui::size(px(10.), px(10.));
+
+        let rows = drawn(&app, &mut vcx);
+        assert_eq!(count(&rows, "src"), 1, "one `src` row: {rows:?}");
+        assert_eq!(count(&rows, "a.rs"), 1, "one `a.rs` row: {rows:?}");
+        assert_eq!(count(&rows, "ui"), 0, "`src` starts folded: {rows:?}");
+        assert_eq!(
+            cell(&mut vcx, "tree-chevron-src").size,
+            ten,
+            "folded chevron"
+        );
+        let file = cell(&mut vcx, "tree-chevron-a.rs");
+        assert_eq!(file.size.width, px(10.), "a file keeps the column");
+        assert!(
+            file.size.height < px(1.),
+            "and draws no mark in it: {file:?}"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_tree_activate(&src, true, window, cx);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.update_in(&mut vcx, |app, _, _| {
+            app.file_tree.children.get(HostId::LOCAL, &src).is_none()
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "`src` was never listed"
+            );
+            vcx.background_executor.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        settle(&app, &mut vcx, &root);
+        let rows = drawn(&app, &mut vcx);
+        assert_eq!(
+            rows.iter().find(|r| r.0 == "src").map(|r| r.1),
+            Some(true),
+            "`src` open: {rows:?}"
+        );
+        assert_eq!(count(&rows, "ui"), 1, "one `ui` row: {rows:?}");
+        assert_eq!(
+            rows.iter().find(|r| r.0 == "ui").map(|r| r.1),
+            Some(false),
+            "`ui` folded"
+        );
+        assert_eq!(cell(&mut vcx, "tree-chevron-src").size, ten, "open chevron");
+        assert_eq!(
+            cell(&mut vcx, "tree-chevron-ui").size,
+            ten,
+            "folded chevron inside it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[gpui::test]
     fn a_decorated_tree_settles_and_then_reaches_render_idle(cx: &mut TestAppContext) {
         let _serial = serial();
@@ -3996,6 +4244,172 @@ mod render_idle_gpui_tests {
         let (app, mut vcx, _pane) = files_panel_on(cx, &root);
         assert_eq!(rows(&app, &mut vcx), 1, "the root row and nothing else");
         assert_eq!(draws_while_idle(&mut vcx), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- B3b recovery witnesses -------------------------------------------
+    //
+    // Baseline-compatible: no new API is named. Each looks for the Retry
+    // button by its debug selector in a real app window, so on c700 it fails
+    // on its own `expect` ("... offers a retry").
+
+    /// A folder whose listing was refused carries a Retry, and the click lists
+    /// it again: a readable answer takes the "Could not be read" note away.
+    ///
+    /// The refusal is what a refused listing leaves behind — the folder marked
+    /// unreadable — without having to make the OS refuse one (a permission
+    /// trick would not hold for a test run as root).
+    #[gpui::test]
+    fn retry_under_an_unreadable_folder_lists_it_again(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("retry");
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.file_tree
+                .unreadable
+                .insert((HostId::LOCAL, root.clone()));
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let id: &'static str =
+            Box::leak(format!("file-tree-retry-{}", root.display()).into_boxed_str());
+        let button = vcx
+            .debug_bounds(id)
+            .expect("an unreadable folder offers a retry");
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        settle(&app, &mut vcx, &root);
+        let unreadable = app.update_in(&mut vcx, |app, _, _| {
+            app.file_tree
+                .unreadable
+                .contains(&(HostId::LOCAL, root.clone()))
+        });
+        assert!(!unreadable, "the second listing was read, and says so");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(vcx.debug_bounds(id).is_none(), "and the retry is gone");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failed search carries a Retry. The click asks the same query again,
+    /// the failure stays on screen until an answer replaces it, and the answer
+    /// that does is a newer generation's.
+    #[gpui::test]
+    fn retry_under_a_failed_search_asks_the_same_query_again(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("search-retry");
+        std::fs::write(root.join("foo.rs"), "").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        vcx.simulate_resize(gpui::size(px(1200.), px(800.)));
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.file_search
+                .update(cx, |state, cx| state.set_value("foo", window, cx));
+            cx.notify();
+        });
+        // Wait out the debounce on the test clock, then for the real search.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let answered = |vcx: &mut VisualTestContext, until: &dyn Fn(&SearchState) -> bool| {
+            loop {
+                vcx.executor()
+                    .advance_clock(SEARCH_DEBOUNCE + std::time::Duration::from_millis(100));
+                app.update_in(vcx, |_, _, cx| cx.notify());
+                vcx.background_executor.run_until_parked();
+                if app.update_in(vcx, |app, _, _| until(&app.file_tree.search)) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the search never answered"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        answered(&mut vcx, &|s| s.generation > 0 && !s.hits.is_empty());
+
+        // The host refuses the next answer: the failure is what is on screen.
+        let failed_gen = app.update_in(&mut vcx, |app, _, cx| {
+            let generation = app.file_tree.search.generation;
+            assert!(app.file_tree.search.accept(generation, false, Vec::new()));
+            cx.notify();
+            generation
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let button = vcx
+            .debug_bounds("file-tree-search-retry")
+            .expect("a failed search offers a retry");
+
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        let still_failed = app.update_in(&mut vcx, |app, _, _| app.file_tree.search.failed);
+        assert!(
+            still_failed,
+            "the failure stays up until an answer replaces it"
+        );
+
+        answered(&mut vcx, &|s| !s.failed);
+        let (generation, hits) = app.update_in(&mut vcx, |app, _, _| {
+            (
+                app.file_tree.search.generation,
+                app.file_tree.search.hits.len(),
+            )
+        });
+        assert!(
+            generation > failed_gen,
+            "the answer is a newer generation's"
+        );
+        assert!(hits >= 1, "the same query found its file");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- B3b recovery: lifecycle controls added with the production -------
+
+    /// The click's own effect, before any listing has had a chance to land:
+    /// the folder is marked stale to be relisted and keeps its failure — the
+    /// note and its button — until the new answer replaces it.
+    #[gpui::test]
+    fn retrying_a_folder_keeps_its_failure_until_the_listing_lands(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("retry-keeps");
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        app.update_in(&mut vcx, |app, _, cx| {
+            let key = (HostId::LOCAL, root.clone());
+            app.file_tree.unreadable.insert(key.clone());
+            app.file_tree_retry_dir(HostId::LOCAL, &root, cx);
+            assert!(
+                app.file_tree.unreadable.contains(&key),
+                "the failure is not discarded while the answer is awaited"
+            );
+            assert!(
+                app.file_tree.stale.contains(&key),
+                "the folder is marked to be listed again"
+            );
+        });
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Only the listing asked for is invalidated: a sibling's cached listing
+    /// and the root's own stay current.
+    #[gpui::test]
+    fn retrying_a_folder_invalidates_only_that_listing(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("retry-only");
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+        let (a, b) = (root.join("a"), root.join("b"));
+        app.update_in(&mut vcx, |app, _, cx| {
+            for dir in [&a, &b] {
+                app.file_tree
+                    .children
+                    .insert(HostId::LOCAL, dir.clone(), Vec::new());
+            }
+            app.file_tree_retry_dir(HostId::LOCAL, &a, cx);
+            assert!(app.file_tree.stale.contains(&(HostId::LOCAL, a.clone())));
+            assert!(!app.file_tree.stale.contains(&(HostId::LOCAL, b.clone())));
+            assert!(!app.file_tree.stale.contains(&(HostId::LOCAL, root.clone())));
+        });
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4547,8 +4961,11 @@ mod drop_gpui_tests {
         app.update_in(&mut vcx, |app, window, cx| {
             app.file_tree_drop_paths(vec![from.join("note.txt")], root.clone(), window, cx);
         });
+        // The copy creates the destination before it has written the bytes, so
+        // the file existing is not the copy being done: wait for what the file
+        // holds, which is what is asserted next.
         wait_until(&mut vcx, "the copy never landed", |_| {
-            root.join("note.txt").exists()
+            std::fs::read_to_string(root.join("note.txt")).is_ok_and(|text| text == "hello")
         });
         settle(&app, &mut vcx, &root);
 

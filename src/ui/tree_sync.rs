@@ -1684,6 +1684,17 @@ pub(crate) fn queued_for_test(cx: &mut App, client_ws: WorkspaceId) -> Vec<Contr
         .unwrap_or_default()
 }
 
+/// Whether `client_ws` still speaks for its workspace in full. A `Replace`
+/// resync takes that licence back until its pull lands, which is how a test
+/// tells one from the plain re-pull a relink does.
+#[cfg(test)]
+pub(crate) fn informed_for_test(cx: &mut App, client_ws: WorkspaceId) -> bool {
+    cx.default_global::<TreeSync>()
+        .windows
+        .get(&client_ws)
+        .is_some_and(|state| state.informed)
+}
+
 /// The name parked for a create that has not run yet, for tests that need to
 /// see it got that far.
 #[cfg(test)]

@@ -7,8 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.15.0] - 2026-11-16
+
+### Changed
+
+- **A UI polish pass across the whole app**: readable secondary text and
+  theme-aware status colours, long names cut at word boundaries or in the
+  middle so the identifying part stays visible, honest empty states and
+  counts, one size and meaning for status dots, chevrons and popover shapes,
+  and Primary buttons whose label and hover stay readable in every theme.
+- **The title bar and document headers fit narrow windows**: the Agents
+  pill shows its count as a plain number, document controls no longer sit
+  under the title-bar actions, and a narrow diff header wraps onto more rows
+  instead of clipping, keeping the commit id whole.
+- **Settings**: search keeps its context, controls stay beside their labels,
+  a failed save shows a banner with Retry until a save really lands, and the
+  Shortcuts page no longer jumps while recording.
+- **Remote work**: the remote file browser names the machine in paths and
+  delete prompts, marks symlinks and formats sizes consistently; passphrase
+  sheets show the key's file name with its full path below; remote notices
+  stay inside the terminal.
+- **Editor and panels**: the Revert peek says what it compares against and
+  needs an explicit click, a missing language server explains itself,
+  source-control row menus no longer sit under tooltips, and search
+  highlights stay readable in every theme.
+
 ### Added
 
+- The side panel's error states now offer a way out: **Initialize repository**
+  on the Changes tab outside a repository, **Refresh** under a failed GitHub
+  list or detail, and **Retry** under an unreadable folder or a failed search
+  in the Files tab.
 - **A zoomed pane says so**: it wears a "Zoomed · 1 of N panes" badge in
   its top-right corner with the zoom shortcut beside it, and clicking the
   badge brings the other panes back. The pane's right-click menu reads
@@ -51,6 +80,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- When git status cannot be read for a known repository and nothing has been
+  read yet, the Changes tab now shows "Couldn't read git status" with git's own
+  reason, **Retry** and **Copy error**, instead of "Loading…" indefinitely.
 - **bash marks the first command of a new pane again** on distributions
   whose `/etc/profile.d` extends `PROMPT_COMMAND`, as systemd 258's
   `80-systemd-osc-context.sh` does (Ubuntu 26.04). That first line had no

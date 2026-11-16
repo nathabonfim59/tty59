@@ -2,12 +2,6 @@
 //! 260px column. All pure, all cheap, all unit-tested — the panel calls these
 //! once per visible row per frame.
 
-use std::borrow::Cow;
-
-/// The ellipsis every eliding function here uses. One `char`, so a budget in
-/// characters is a budget the caller can reason about.
-const ELLIPSIS: char = '…';
-
 /// Split `src/ui/app.rs` into `("app.rs", "src/ui")`.
 ///
 /// The panel renders these as two runs with different sizes and colours, so
@@ -21,35 +15,6 @@ pub(crate) fn split_display_path(rel: &str) -> (&str, &str) {
         Some((dir, name)) => (name, dir),
         None => (trimmed, ""),
     }
-}
-
-/// Keep the head and the tail, drop the middle. Paths and branch names both
-/// carry their meaning at the ends — `feature/…/auth-retry` still says which
-/// area and which change, where a plain truncate says neither.
-///
-/// `max_chars` counts characters including the ellipsis, so the result never
-/// renders wider than the caller budgeted. Cuts land on character boundaries by
-/// construction: everything here walks `chars()`, never bytes.
-pub(crate) fn elide_middle(s: &str, max_chars: usize) -> Cow<'_, str> {
-    let total = s.chars().count();
-    if total <= max_chars {
-        return Cow::Borrowed(s);
-    }
-    // Below three there is no room for head + ellipsis + tail; fall back to a
-    // plain head cut rather than returning something wider than asked for.
-    if max_chars <= 2 {
-        return Cow::Owned(s.chars().take(max_chars).collect());
-    }
-    let keep = max_chars - 1;
-    // Bias the extra character to the head: the tail is usually a file name,
-    // and its last few characters (the extension) repeat across rows anyway.
-    let head = keep.div_ceil(2);
-    let tail = keep - head;
-    let mut out = String::with_capacity(s.len());
-    out.extend(s.chars().take(head));
-    out.push(ELLIPSIS);
-    out.extend(s.chars().skip(total - tail));
-    Cow::Owned(out)
 }
 
 const MINUTE: i64 = 60;
@@ -103,60 +68,6 @@ mod tests {
         // A leading slash leaves an empty directory half rather than dropping
         // the root — the caller decides how to render that.
         assert_eq!(split_display_path("/etc"), ("etc", ""));
-    }
-
-    #[test]
-    fn elide_middle_leaves_short_strings_borrowed() {
-        assert!(matches!(elide_middle("short", 10), Cow::Borrowed("short")));
-        assert!(matches!(elide_middle("exact", 5), Cow::Borrowed("exact")));
-    }
-
-    #[test]
-    fn elide_middle_keeps_both_ends_and_respects_the_budget() {
-        let out = elide_middle("crates/tty59-core/src/core/git/status.rs", 20);
-        assert_eq!(out.chars().count(), 20);
-        assert_eq!(out.matches(ELLIPSIS).count(), 1);
-        assert!(out.starts_with("crates/"), "{out}");
-        assert!(out.ends_with("status.rs"), "{out}");
-    }
-
-    #[test]
-    fn elide_middle_spends_exactly_one_char_on_the_ellipsis() {
-        // U+2026, not three ASCII dots: three dots would eat three columns of
-        // a budget measured in characters.
-        let out = elide_middle("abcdefghij", 5);
-        assert_eq!(out, "ab…ij");
-        assert_eq!(out.chars().count(), 5);
-        // An odd budget gives the head the spare character.
-        assert_eq!(elide_middle("abcdefghij", 6), "abc…ij");
-    }
-
-    #[test]
-    fn elide_middle_handles_degenerate_budgets() {
-        assert_eq!(elide_middle("abcdef", 3), "a…f");
-        assert_eq!(elide_middle("abcdef", 2), "ab");
-        assert_eq!(elide_middle("abcdef", 1), "a");
-        assert_eq!(elide_middle("abcdef", 0), "");
-    }
-
-    #[test]
-    fn elide_middle_never_cuts_a_multibyte_char_in_half() {
-        // Every one of these is 3 bytes; a byte-indexed implementation panics
-        // here rather than returning something wrong, which is why this test
-        // asserts on the value and not just on not panicking.
-        let path = "文档/设计/源代码管理方案.md";
-        for budget in 0..=path.chars().count() + 2 {
-            let out = elide_middle(path, budget);
-            assert!(
-                out.chars().count() <= budget,
-                "budget {budget} produced {out:?}"
-            );
-        }
-        let out = elide_middle(path, 8);
-        assert_eq!(out.chars().count(), 8);
-        assert!(out.contains(ELLIPSIS));
-        assert!(out.starts_with("文档/设"), "{out}");
-        assert!(out.ends_with(".md"), "{out}");
     }
 
     #[test]

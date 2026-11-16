@@ -245,11 +245,22 @@ pub(crate) const DOCUMENT_MIN_W: f32 = 280.;
 /// that silently became a half on every window wider than about 720 points of
 /// body would be a lie. The terminal's floor still binds.
 pub(crate) fn document_column_px(body: f32, ratio: f32) -> Option<f32> {
-    if !body.is_finite() || body < TERMINAL_MIN_W + DOCUMENT_MIN_W {
+    document_column_px_min(body, ratio, DOCUMENT_MIN_W)
+}
+
+/// [`document_column_px`] for a column that needs `min` points rather than
+/// [`DOCUMENT_MIN_W`]: a diff, whose header must keep its controls.
+pub(crate) fn document_column_px_min(body: f32, ratio: f32, min: f32) -> Option<f32> {
+    // The most the column may take, worked out once: comparing `body` against
+    // `TERMINAL_MIN_W + min` and clamping to `body - TERMINAL_MIN_W` round
+    // differently, and a body that passes the first can leave the second under
+    // `min`, which is a clamp with its bounds the wrong way round.
+    let max = body - TERMINAL_MIN_W;
+    if !body.is_finite() || max < min {
         return None;
     }
     let ratio = if ratio.is_finite() { ratio } else { 0.5 };
-    Some((body * ratio).clamp(DOCUMENT_MIN_W, body - TERMINAL_MIN_W))
+    Some((body * ratio).clamp(min, max))
 }
 
 pub(crate) const TITLE_BAR_HEIGHT: f32 = 48.;
@@ -739,7 +750,11 @@ impl Tab {
 
     /// The leaf a tab names itself after — its title and, with it, the home
     /// that title's path is measured against.
-    fn title_leaf(&self, window: Option<&Window>, cx: &App) -> Option<Entity<TerminalView>> {
+    pub(crate) fn title_leaf(
+        &self,
+        window: Option<&Window>,
+        cx: &App,
+    ) -> Option<Entity<TerminalView>> {
         let leaf = match window {
             Some(window) => self
                 .pane
@@ -1128,6 +1143,12 @@ pub struct Tty59App {
     /// rectangle was not drawn — scrolled out of a full strip, filtered out of
     /// the sidebar — and takes no part in the reading.
     pub(crate) strip_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+    /// What the strip's Agents pill measures at the current font and language.
+    /// Drawing only reads it; it is measured again when one of those changes.
+    pub(crate) strip_metrics: crate::ui::tab_strip::StripMetrics,
+    /// What the right panel's tab row measures: its labels and the widest
+    /// Changes count. Kept current by `strip_metrics_refresh`.
+    pub(crate) right_tab_metrics: crate::ui::tab_strip::RightTabMetrics,
     pub(crate) sidebar_slots: Rc<RefCell<Vec<Bounds<Pixels>>>>,
     /// Where each pinned group's block was drawn last frame, so a tab held
     /// over one can be told which group it is over. Only pinned groups are
@@ -1599,9 +1620,12 @@ impl Tty59App {
                 cfg.scrollback_limit,
             )
         };
+        crate::ui::diff_overlay::refresh_diff_features(font_features.as_ref(), cx);
         let sftp_panel = crate::ui::sftp::SftpPanelState::new(window, cx);
         let file_tree = crate::ui::file_tree::FileTreeState::new(window, cx);
         let editor = crate::ui::code_editor::EditorPanelState::new(window, cx);
+        let strip_metrics = crate::ui::tab_strip::StripMetrics::new(window, cx);
+        let right_tab_metrics = crate::ui::tab_strip::RightTabMetrics::measure(window, cx);
         let mf_bind_host = cx.new(|cx| InputState::new(window, cx).default_value("127.0.0.1"));
         let mf_bind_port = cx.new(|cx| InputState::new(window, cx).placeholder("8080"));
         let mf_target_host = cx.new(|cx| InputState::new(window, cx).placeholder("127.0.0.1"));
@@ -1775,10 +1799,7 @@ impl Tty59App {
             sftp_panel,
             right_panel: Default::default(),
             scm: crate::ui::scm::ScmPanelState {
-                graph: crate::ui::scm::GraphState {
-                    expanded: scm_graph_expanded,
-                    ..Default::default()
-                },
+                graph: crate::ui::scm::GraphState::new(scm_graph_expanded),
                 ..Default::default()
             },
             github: Default::default(),
@@ -1812,6 +1833,8 @@ impl Tty59App {
             tab_merge: Cell::new(None),
             pane_detach: Cell::new(None),
             strip_slots: Rc::new(RefCell::new(Vec::new())),
+            strip_metrics,
+            right_tab_metrics,
             sidebar_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_group_slots: Rc::new(RefCell::new(Vec::new())),
             sidebar_divider: Rc::new(Cell::new(None)),
@@ -3037,6 +3060,40 @@ impl Tty59App {
         self.set_preset(id, window, cx);
     }
 
+    /// Reset on a theme slot's row. The dirty-draft question comes first, so
+    /// nothing is written until it is answered. In System mode only that
+    /// slot's saved key goes back to its default; the mode, the manual preset
+    /// and the other slot stay as they are, but if it is the slot the OS is
+    /// using right now the visible theme changes with it. For the slot a
+    /// pinned mode hides the same write promises more: the visible theme,
+    /// the mode and the other slot are untouched. For the slot a pinned mode
+    /// shows, the row displays `theme_preset`, so the reset is a pick of the
+    /// default for that slot, as the dropdown's.
+    pub(crate) fn reset_theme_slot(
+        &mut self,
+        dark_slot: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.theme_draft_dirty() {
+            self.with_settings_edits_resolved(window, cx, move |this, window, cx| {
+                this.reset_theme_slot(dark_slot, window, cx)
+            });
+            return;
+        }
+        let defaults = Config::default();
+        let default_id = match dark_slot {
+            true => defaults.theme_preset_dark.clone(),
+            false => defaults.theme_preset_light.clone(),
+        };
+        let view = crate::ui::settings::ThemeView::of(cx);
+        if view.0 != crate::ui::settings::ThemeMode::System && view.shows(dark_slot) {
+            self.pick_slot_theme(dark_slot, &default_id, window, cx);
+        } else {
+            self.set_slot_preset(dark_slot, &default_id, window, cx);
+        }
+    }
+
     pub(crate) fn set_theme_legible_palette(
         &mut self,
         on: bool,
@@ -3377,6 +3434,7 @@ impl Tty59App {
             .as_ref()
             .map(crate::core::config::gpui_font_features);
         self.font_features = gpui_features.clone();
+        crate::ui::diff_overlay::refresh_diff_features(gpui_features.as_ref(), cx);
         for tab in &self.tabs {
             for leaf in tab.pane.terminals() {
                 let features = gpui_features.clone();
@@ -3442,6 +3500,12 @@ impl Tty59App {
             if error.is_none() {
                 s.saved_config = config;
             }
+            // Resolved here, once per failed write, and cached for render to
+            // read: the banner's tooltip never looks the path up itself.
+            s.save_error_path = error
+                .as_ref()
+                .and_then(|_| crate::core::config::config_path("config.json"))
+                .map(|path| gpui::SharedString::from(path.display().to_string()));
             s.save_error = error;
         }
         cx.notify();
@@ -3456,6 +3520,7 @@ impl Tty59App {
             cx.set_global(snapshot);
             if let Some(s) = self.active_settings_mut() {
                 s.save_error = None;
+                s.save_error_path = None;
             }
             self.reload_from_config(window, cx);
         }
@@ -6923,23 +6988,10 @@ impl Tty59App {
             }
             out.push(item);
         }
-        for agent in self.offered_agents(cx) {
-            out.push(
-                Item::new(
-                    t_fmt(
-                        L10nKey::AppCmdAgentLaunchTitle,
-                        &[("name", agent.display_name())],
-                    ),
-                    CommandKind::LaunchAgent(agent),
-                )
-                .with_subtitle(agent.launch_command(&cx.global::<Config>().agent_launch))
-                .with_avatar(Avatar {
-                    agent: Some(agent),
-                    ..Avatar::default()
-                })
-                .in_section(new_terminal.clone()),
-            );
-        }
+        out.extend(crate::ui::search::agent_launch_items(
+            &self.offered_agents(cx),
+            &cx.global::<Config>().agent_launch,
+        ));
         out
     }
 
@@ -6963,6 +7015,21 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_search_with(tab, query, ssh_config::import_profiles, window, cx)
+            .detach();
+    }
+
+    /// [`Self::open_search`] with the `~/.ssh/config` import given, and the task
+    /// that lands it returned: a test points the import at a fixture of its own
+    /// and awaits the task before it looks at the rows.
+    pub(crate) fn open_search_with(
+        &mut self,
+        tab: SearchTab,
+        query: &str,
+        import: impl FnOnce() -> Vec<ssh_config::ImportedProfile> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<()> {
         let catalog = self.search_catalog(window, cx);
         let view = cx.new(|cx| SearchView::new(catalog, tab, query, window, cx));
         if tab.in_editor_row() {
@@ -6971,9 +7038,55 @@ impl Tty59App {
         }
         self.search_sub = Some(cx.subscribe_in(&view, window, Self::on_search_event));
         self.search = Some(view.clone());
-        self.refresh_search_sessions(view, window, cx);
+        self.refresh_search_sessions(view.clone(), window, cx);
+        let aliases = self.refresh_search_host_aliases(view, import, window, cx);
         self.refresh_file_index(window, cx);
         cx.notify();
+        aliases
+    }
+
+    /// Stops the window acting on what the open search emits, so a test can
+    /// observe a confirm without the command it names running.
+    #[cfg(test)]
+    pub(crate) fn drop_search_event_handler(&mut self) {
+        self.search_sub = None;
+    }
+
+    /// Reads the `~/.ssh/config` aliases off the window's thread and hands the
+    /// Hosts tab its rows when they are ready. Listing connects to nothing: a
+    /// row's alias is resolved when the row is taken.
+    ///
+    /// `import` is a parameter so a test can point it at a config of its own
+    /// instead of the real home.
+    pub(crate) fn refresh_search_host_aliases(
+        &mut self,
+        view: Entity<SearchView>,
+        import: impl FnOnce() -> Vec<ssh_config::ImportedProfile> + Send + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Task<()> {
+        // Weak: a slow read must not keep a closed search alive.
+        let view = view.downgrade();
+        cx.spawn_in(window, async move |this, cx| {
+            let imported = cx
+                .background_executor()
+                .spawn(async move { import() })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // Closed, or closed and opened again, since: nothing to update.
+                let Some(view) = view
+                    .upgrade()
+                    .filter(|view| this.search.as_ref() == Some(view))
+                else {
+                    return;
+                };
+                let items = crate::ui::search::alias_host_items(
+                    &cx.global::<Config>().ssh_profiles,
+                    imported,
+                );
+                view.update(cx, |view, cx| view.set_host_aliases(items, window, cx));
+            });
+        })
     }
 
     /// Asks the machine this window's workspace is on — this one, or a
@@ -7604,6 +7717,8 @@ impl Tty59App {
             L10nKey::SettingsLegiblePalette => {
                 self.set_theme_legible_palette(defaults.theme_legible_palette, window, cx)
             }
+            L10nKey::SettingsLightThemeLabel => self.reset_theme_slot(false, window, cx),
+            L10nKey::SettingsDarkThemeLabel => self.reset_theme_slot(true, window, cx),
             L10nKey::SettingsOpacity => {
                 self.update_config(cx, |cfg| cfg.window_opacity = None);
                 apply_theme(Some(window), cx);
@@ -7829,9 +7944,6 @@ impl Tty59App {
             cx.subscribe_in(&settings_search, window, |this, _i, ev, _w, cx| {
                 if matches!(ev, InputEvent::Change) {
                     this.autoselect_settings_search(cx);
-                    if let Some(s) = this.active_settings_mut() {
-                        s.reveal_first_hit.set(true);
-                    }
                     cx.notify();
                 }
             }),
@@ -7886,6 +7998,7 @@ impl Tty59App {
             theme_draft: None,
             theme_draft_error: None,
             save_error: None,
+            save_error_path: None,
             saved_config: cx.global::<Config>().clone(),
             menu: None,
             menu_query,
@@ -7963,9 +8076,7 @@ impl Tty59App {
         self.agent_vision.input.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::VisionSearch), window, cx)
         });
-        self.sidebar_search.update(cx, |state, cx| {
-            state.set_placeholder(t(L10nKey::SearchTabs), window, cx)
-        });
+        self.sync_sidebar_search_placeholder(window, cx);
         self.file_search.update(cx, |state, cx| {
             state.set_placeholder(t(L10nKey::SearchFiles), window, cx)
         });
@@ -8400,6 +8511,9 @@ impl Tty59App {
 
     fn reload_from_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         apply_theme(Some(window), cx);
+        // The Agents list can be switched off from the file or the settings
+        // page; the rail's search field has to stop calling itself agents' search.
+        self.sync_sidebar_search_placeholder(window, cx);
         let config = cx.global::<Config>().clone();
         if config.cursor_style != self.terminal_cursor_style
             || config.scrollback_limit != self.terminal_scrollback_limit
@@ -8474,6 +8588,7 @@ impl Tty59App {
         }
         if font_features != self.font_features {
             self.font_features = font_features.clone();
+            crate::ui::diff_overlay::refresh_diff_features(font_features.as_ref(), cx);
             for tab in &self.tabs {
                 for leaf in tab.pane.terminals() {
                     let features = font_features.clone();
@@ -9452,6 +9567,7 @@ impl Tty59App {
             .is_none()
             .then(|| self.remote_strip_action(&status, cx))
             .flatten();
+        let popover = crate::ui::dialog::popover_rungs(cx);
         let theme = cx.theme();
         let message = match installing {
             Some(phase) => format!(
@@ -9472,17 +9588,20 @@ impl Tty59App {
                             .text_color(theme.foreground),
                     )
                     .when_some(action, |this, (label, action)| {
-                        use gpui_component::Sizable as _;
-                        use gpui_component::button::ButtonVariants as _;
                         this.child(
-                            gpui_component::button::Button::new("remote-status-action")
-                                .flex_shrink_0()
-                                .label(label)
-                                .primary()
-                                .small()
-                                .on_click(cx.listener(move |this, _, window, cx| {
+                            crate::ui::dialog::primary_button(
+                                "remote-status-action",
+                                label,
+                                true,
+                                popover,
+                                cx,
+                            )
+                            .flex_shrink_0()
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
                                     this.run_strip_action(action.clone(), window, cx);
-                                })),
+                                },
+                            )),
                         )
                     }),
             )
@@ -9506,13 +9625,12 @@ impl Tty59App {
     /// size. The window keeps its grid meanwhile and shows the pane's output
     /// laid out for the phone, so it says why, and offers the pane back.
     fn render_lease_notices(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        use gpui_component::Sizable as _;
-        use gpui_component::button::ButtonVariants as _;
         let Some(tab) = self.tabs.get(self.active) else {
             return Vec::new();
         };
         let theme = cx.theme();
-        let (info, foreground, popover) = (theme.info, theme.foreground, theme.popover);
+        let (info, foreground) = (theme.info, theme.foreground);
+        let rungs = crate::ui::dialog::popover_rungs(cx);
         tab.pane
             .terminals()
             .into_iter()
@@ -9531,14 +9649,13 @@ impl Tty59App {
                                 )),
                         )
                         .child(
-                            gpui_component::button::Button::new(gpui::SharedString::from(format!(
-                                "lease-take-back-{id}"
-                            )))
-                            .label(crate::ui::i18n::t(
-                                crate::ui::i18n::L10nKey::RemoteActionTakeBack,
-                            ))
-                            .custom(crate::ui::theme::inverted_button(popover, cx))
-                            .small()
+                            crate::ui::dialog::primary_button(
+                                gpui::SharedString::from(format!("lease-take-back-{id}")),
+                                crate::ui::i18n::t(crate::ui::i18n::L10nKey::RemoteActionTakeBack),
+                                true,
+                                rungs,
+                                cx,
+                            )
                             .on_click(move |_, _, cx| leaf.read(cx).terminal.take_back()),
                         )
                         .into_any_element(),
@@ -9838,7 +9955,11 @@ impl Render for Tty59App {
         // blank and write again.
         let tab_landing = self.tab_landing(window, cx);
         let detach_caret = self.detach_caret(window, cx);
-        let strip = self.tab_strip(!vertical, window, cx);
+        // The pill's count, scanned once for everything this frame draws:
+        // the strip budgets and draws the pill from it, and the hoisted
+        // document header stands clear of the same pill.
+        let attention = self.attention_total();
+        let strip = self.tab_strip(!vertical, attention, window, cx);
         let sidebar = rail.then(|| {
             if agent_mode {
                 self.agent_projects_sidebar(window, cx)
@@ -9970,18 +10091,11 @@ impl Render for Tty59App {
         } else {
             self.document_dock_px(window, cx)
         };
-        // Where the docked header sits. Everywhere but macOS the title bar
-        // spans the workspace and leaves the strip above the column empty, so
-        // the header goes up into it; on macOS the column already reaches the
-        // top of the window and its own first row lands there.
-        let document_chrome = if cfg!(target_os = "macos") {
-            crate::ui::document_column::DocumentChrome::Dock
-        } else {
-            crate::ui::document_column::DocumentChrome::DockHoisted
-        };
+        let hoisted_trail = self.hoisted_header_trail(attention, window, cx);
+        let document_chrome = self.docked_document_chrome(hoisted_trail, window, cx);
         let document_header = document_dock_px
             .is_some()
-            .then(|| self.render_document_header(document_chrome, window, cx))
+            .then(|| self.render_document_header(document_chrome, hoisted_trail, window, cx))
             .flatten();
         let (overlays, document_column) = match document_dock_px {
             Some(w) => (
@@ -10125,10 +10239,9 @@ impl Render for Tty59App {
                             // The document's header, in the strip the spanning
                             // title bar leaves empty above its column. Drawn
                             // after the bar so it sits over the tab strip's
-                            // slack — and stopping short of the trailing
-                            // chrome, which is only in the way when the detail
-                            // panel is closed and this column is the one at the
-                            // window's right edge.
+                            // slack — and stopping short of what the bar draws
+                            // at this end: the Agents pill, and with the
+                            // detail panel closed the trailing chrome too.
                             .when_some(document_header, |this, header| {
                                 this.child(
                                     div()
@@ -10137,11 +10250,7 @@ impl Render for Tty59App {
                                         .h(px(TITLE_BAR_HEIGHT))
                                         .right(px(panel_px))
                                         .w(px(document_px))
-                                        .when(panel_px <= 0., |d| {
-                                            d.pr(px(crate::ui::tab_strip::trailing_chrome_w(
-                                                window.is_fullscreen(),
-                                            )))
-                                        })
+                                        .pr(px(hoisted_trail))
                                         .child(header),
                                 )
                             }),
@@ -12927,12 +13036,23 @@ pub(crate) mod test_window {
     use gpui::{AppContext, Entity, TestAppContext, VisualTestContext};
 
     pub(crate) fn harness(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext) {
+        harness_configured(cx, |_| {})
+    }
+
+    /// `harness` over a config edited before the window is built, for what
+    /// the app reads once at construction.
+    pub(crate) fn harness_configured(
+        cx: &mut TestAppContext,
+        edit: impl FnOnce(&mut Config),
+    ) -> (Entity<Tty59App>, VisualTestContext) {
         crate::core::config::pin_test_config_dir();
 
         cx.executor().allow_parking();
         cx.update(|cx| {
             gpui_component::init(cx);
-            cx.set_global(Config::default());
+            let mut config = Config::default();
+            edit(&mut config);
+            cx.set_global(config);
             crate::ui::keymap::init(cx);
         });
         let window = cx.add_window(|window, cx| {
@@ -12966,10 +13086,22 @@ pub(crate) mod test_window {
         VisualTestContext,
         Vec<crate::daemon::transport::Stream>,
     ) {
+        harness_with_tabs_configured(cx, n, |_| {})
+    }
+
+    pub(crate) fn harness_with_tabs_configured(
+        cx: &mut TestAppContext,
+        n: usize,
+        edit: impl FnOnce(&mut Config),
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+    ) {
         use crate::terminal::view::quiet_test_pane;
         use crate::ui::pane::{Pane, PaneSlot};
 
-        let (app, mut vcx) = harness(cx);
+        let (app, mut vcx) = harness_configured(cx, edit);
         vcx.update(|_, cx| {
             let mut cfg = cx.global::<Config>().clone();
             cfg.cursor_blink = false;

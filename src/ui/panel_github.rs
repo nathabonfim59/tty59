@@ -18,7 +18,9 @@ use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::github::rows::{GLYPH, ROW_H, stack_glyph, stack_trunk};
 use crate::ui::github::{GhTarget, now_unix};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET};
+use crate::ui::right_panel::{
+    META, PanelAction, ROW_FILL_RADIUS, ROW_INSET, TAB_TEXT, TEXT, TEXT_INSET,
+};
 use crate::ui::scm::path::relative_time;
 use crate::ui::scm::state::RepoKey;
 
@@ -38,6 +40,9 @@ const SWITCH_H: f32 = 22.;
 const PINNED_GAP: f32 = 10.;
 const LIST_GAP: f32 = 14.;
 const PINNED_INSET: f32 = 14.;
+/// The Refresh button under a failed call — list or detail, only ever one on
+/// screen.
+const GITHUB_ERROR_REFRESH: &str = "panel-github-error-refresh";
 
 impl Tty59App {
     pub(crate) fn render_panel_github(
@@ -121,7 +126,7 @@ impl Tty59App {
         // The Git tab's gap under its pinned block, so the header reads as
         // one unit and the list starts clear of it.
         pinned.push(div().flex_none().h(px(LIST_GAP)).into_any_element());
-        let body = self.github_list_body(&chosen.slug, cx);
+        let body = self.github_list_body(&repo, &chosen.slug, cx);
         self.github_shell(title, pinned, body, false)
     }
 
@@ -484,9 +489,46 @@ impl Tty59App {
             .into_any_element()
     }
 
-    fn github_list_body(&mut self, slug: &RepoSlug, cx: &mut Context<Self>) -> AnyElement {
+    /// A failed call, said in words, with Refresh under it: every one of
+    /// these is answered by trying again — after `gh auth login`, after the
+    /// rate limit resets, once the network is back.
+    ///
+    /// `over_content` is a refresh that failed over something still on
+    /// screen. That one keeps the list or detail as the subject, so its button
+    /// steps down to the secondary paint. The click is `github_refresh` for
+    /// `repo`, the repository this body was drawn for — not whichever one the
+    /// pane has moved to by the time it lands.
+    pub(crate) fn github_error_body(
+        &self,
+        err: &ApiError,
+        repo: &RepoKey,
+        over_content: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (text, hint) = describe_error(err, self.github_authenticated());
+        let hint = hint.map(|hint| hint_element(&hint, cx));
+        let repo = repo.clone();
+        let on_click = cx.listener(move |this, _, _window, cx| {
+            this.github_refresh(Some(repo.clone()), cx);
+        });
+        let action = match over_content {
+            false => {
+                PanelAction::primary(GITHUB_ERROR_REFRESH, t(L10nKey::GitHubRefresh), on_click)
+            }
+            true => {
+                PanelAction::secondary(GITHUB_ERROR_REFRESH, t(L10nKey::GitHubRefresh), on_click)
+            }
+        };
+        self.panel_empty_with(&text, hint, Some(action), cx)
+    }
+
+    fn github_list_body(
+        &mut self,
+        repo: &RepoKey,
+        slug: &RepoSlug,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let query = self.github_query(slug);
-        let authenticated = self.github_authenticated();
         let Some(cache) = self.github.lists.get(&query) else {
             return self.panel_empty(t(L10nKey::PanelLoading), None, cx);
         };
@@ -495,17 +537,21 @@ impl Tty59App {
         let next_page = cache.next_page;
         let loading = cache.loading;
         let loaded = cache.loaded;
+        let fetched = cache.fetched.is_some();
 
         let mut body = v_flex().pb(px(12.));
         if let Some(err) = &error {
-            let (text, hint) = describe_error(err, authenticated);
-            body = body.child(self.panel_empty(&text, hint.as_deref(), cx));
+            body = body.child(self.github_error_body(err, repo, !items.is_empty(), cx));
         }
         // An empty page with more behind it is not "no issues": `/issues`
         // pages filtered to one kind can come back empty (see `api::list`).
         if items.is_empty() && next_page.is_none() {
             if error.is_none() {
-                let text = if loaded && !loading {
+                // "No issues" is an answer, and `fetched` is what marks one
+                // having landed: a Refresh clears the error and the stamp but
+                // leaves `loaded`, so without it the wait for the new answer
+                // read as an empty repository.
+                let text = if loaded && !loading && fetched {
                     match query.kind {
                         Kind::Issues => t(L10nKey::GitHubNoIssues),
                         Kind::Pulls => t(L10nKey::GitHubNoPulls),
@@ -863,35 +909,185 @@ pub(crate) fn label_chip(label: &Label, cx: &gpui::App) -> AnyElement {
         .into_any_element()
 }
 
+/// The command the sign-in hints send the user to type. It is what is typed,
+/// so it is not translated; the catalog's sentence carries only where it goes.
+const GH_LOGIN: &str = "gh auth login";
+
+/// Where a catalog hint puts the command. A named placeholder rather than
+/// punctuation around it, so each language can word the sentence its own way.
+const COMMAND_PLACEHOLDER: &str = "{command}";
+
+/// One run of a hint: words, or the command.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HintPiece {
+    Text(String),
+    Command,
+}
+
+/// A line of advice under an error, in the order it is read.
+///
+/// Built from the catalog's templates by cutting at [`COMMAND_PLACEHOLDER`], so
+/// the command is a piece of its own that can be drawn as a chip. Text that
+/// did not come from a template — a server's message — is one `Text` piece
+/// and is never searched for the placeholder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hint {
+    pieces: Vec<HintPiece>,
+}
+
+impl Hint {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
+        Hint {
+            pieces: vec![HintPiece::Text(text.into())],
+        }
+    }
+
+    /// A catalog template, cut where it names the command.
+    pub(crate) fn template(template: &str) -> Self {
+        let mut pieces = Vec::new();
+        let mut rest = template;
+        while let Some(at) = rest.find(COMMAND_PLACEHOLDER) {
+            if at > 0 {
+                pieces.push(HintPiece::Text(rest[..at].to_string()));
+            }
+            pieces.push(HintPiece::Command);
+            rest = &rest[at + COMMAND_PLACEHOLDER.len()..];
+        }
+        if !rest.is_empty() {
+            pieces.push(HintPiece::Text(rest.to_string()));
+        }
+        Hint { pieces }
+    }
+
+    /// `self`, a space, then `next` — two sentences of one hint.
+    fn then(mut self, next: Hint) -> Hint {
+        if self.pieces.is_empty() {
+            return next;
+        }
+        if next.pieces.is_empty() {
+            return self;
+        }
+        self.pieces.push(HintPiece::Text(" ".to_string()));
+        self.pieces.extend(next.pieces);
+        self
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    fn has_command(&self) -> bool {
+        self.pieces.contains(&HintPiece::Command)
+    }
+
+    /// The hint as plain words, the command spelled out, for what cannot draw
+    /// a chip.
+    pub(crate) fn plain(&self) -> String {
+        self.pieces
+            .iter()
+            .map(|piece| match piece {
+                HintPiece::Text(text) => text.as_str(),
+                HintPiece::Command => GH_LOGIN,
+            })
+            .collect()
+    }
+}
+
+/// The hint as it is drawn: plain text when it names no command, and
+/// otherwise its runs in a wrapping row with the command as an inline chip —
+/// mono, the muted wash and ink the label chips in this panel wear, radius 4,
+/// and a size relative to the line it sits in.
+///
+/// Whitespace the catalog put next to a run is kept as a gap after the run
+/// before it rather than as leading space, so a run that wraps to a new line
+/// does not start with an indent, and a language that sets no space beside
+/// the command (Chinese, Japanese) gets none.
+pub(crate) fn hint_element(hint: &Hint, cx: &gpui::App) -> AnyElement {
+    if !hint.has_command() {
+        return hint.plain().into_any_element();
+    }
+    let theme = cx.theme();
+    let (wash, ink) = (theme.foreground.opacity(0.08), theme.muted_foreground);
+    let mono = theme.mono_font_family.clone();
+    let space = rems(META * 0.25);
+
+    // Each run, with whether a space follows it.
+    let mut runs: Vec<(Option<&str>, bool)> = Vec::new();
+    for piece in &hint.pieces {
+        match piece {
+            HintPiece::Command => runs.push((None, false)),
+            HintPiece::Text(text) => {
+                if text.starts_with(char::is_whitespace)
+                    && let Some(last) = runs.last_mut()
+                {
+                    last.1 = true;
+                }
+                let words = text.trim();
+                if !words.is_empty() {
+                    runs.push((Some(words), text.ends_with(char::is_whitespace)));
+                }
+            }
+        }
+    }
+
+    let mut row = h_flex().flex_wrap().items_baseline();
+    for (words, spaced) in runs {
+        let run = match words {
+            Some(words) => div().child(words.to_string()),
+            None => {
+                let chip = div()
+                    .flex_none()
+                    .px(px(4.))
+                    .py(px(0.5))
+                    .rounded(px(4.))
+                    .bg(wash)
+                    .font_family(mono.clone())
+                    .text_size(rems(META * 0.85))
+                    .text_color(ink)
+                    .whitespace_nowrap()
+                    .child(GH_LOGIN);
+                #[cfg(test)]
+                let chip = chip.debug_selector(|| "github-hint-command".into());
+                chip
+            }
+        };
+        row = row.child(run.when(spaced, |run| run.mr(space)));
+    }
+    row.into_any_element()
+}
+
 /// What to tell the user about a failed call, and what they can do about it.
-pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Option<String>) {
-    let sign_in = || Some(t(L10nKey::GitHubSignInHint).to_string());
+pub(crate) fn describe_error(err: &ApiError, authenticated: bool) -> (String, Option<Hint>) {
+    let sign_in = || Some(Hint::template(t(L10nKey::GitHubSignInHint)));
     match err {
         ApiError::NotFound if authenticated => (t(L10nKey::GitHubNotFoundSignedIn).into(), None),
         ApiError::NotFound => (t(L10nKey::GitHubNotFoundSignedOut).into(), sign_in()),
         ApiError::Unauthorized => (t(L10nKey::GitHubUnauthorized).into(), sign_in()),
         ApiError::RateLimited { reset } => {
-            let mut hint: Vec<String> = Vec::new();
+            let mut hint = Hint::default();
             if let Some(at) = reset {
                 let minutes = ((at - now_unix()).max(0) + 59) / 60;
-                hint.push(t_fmt(
+                hint = hint.then(Hint::text(t_fmt(
                     L10nKey::GitHubRateLimitResetIn,
                     &[("n", &minutes.max(1).to_string())],
-                ));
+                )));
             }
             if !authenticated {
-                hint.push(t(L10nKey::GitHubRateLimitSignedOut).to_string());
+                hint = hint.then(Hint::template(t(L10nKey::GitHubRateLimitSignedOut)));
             }
             (
                 t(L10nKey::GitHubRateLimited).into(),
-                (!hint.is_empty()).then(|| hint.join(" ")),
+                (!hint.is_empty()).then_some(hint),
             )
         }
         ApiError::Forbidden(msg) => (
             t(L10nKey::GitHubForbidden).into(),
-            (!msg.is_empty()).then(|| msg.clone()),
+            (!msg.is_empty()).then(|| Hint::text(msg.clone())),
         ),
-        ApiError::Network(msg) => (t(L10nKey::GitHubNetworkError).into(), Some(msg.clone())),
+        ApiError::Network(msg) => (
+            t(L10nKey::GitHubNetworkError).into(),
+            Some(Hint::text(msg.clone())),
+        ),
         ApiError::Http(code) => (
             t_fmt(L10nKey::GitHubHttpError, &[("code", &code.to_string())]),
             None,
@@ -1005,8 +1201,14 @@ mod tests {
         let (text, hint) = describe_error(&ApiError::RateLimited { reset: Some(reset) }, false);
         assert_eq!(text, t(L10nKey::GitHubRateLimited));
         let hint = hint.expect("a rate limit explains itself");
-        assert!(hint.contains("10 min"), "{hint}");
-        assert!(hint.contains("gh auth login"), "{hint}");
+        let words = hint.plain();
+        assert!(words.contains("10 min"), "{words}");
+        assert!(hint.has_command(), "{words}");
+        assert!(words.contains("gh auth login"), "{words}");
+        assert!(
+            !words.contains('`') && !words.contains(COMMAND_PLACEHOLDER),
+            "no literal backticks or placeholder: {words}"
+        );
 
         let (_, hint) = describe_error(&ApiError::RateLimited { reset: None }, true);
         assert!(
@@ -1020,12 +1222,45 @@ mod tests {
         crate::ui::i18n::set_locale("en");
         let (out, hint) = describe_error(&ApiError::NotFound, false);
         assert_eq!(out, t(L10nKey::GitHubNotFoundSignedOut));
-        assert!(hint.unwrap().contains("gh auth login"));
+        assert!(hint.unwrap().has_command());
         let (inn, hint) = describe_error(&ApiError::NotFound, true);
         assert_eq!(inn, t(L10nKey::GitHubNotFoundSignedIn));
         assert!(hint.is_none());
         let (_, hint) = describe_error(&ApiError::Unauthorized, true);
-        assert!(hint.unwrap().contains("gh auth login"));
+        assert!(hint.unwrap().has_command());
+    }
+
+    /// The command is cut out of the catalog's sentence wherever the language
+    /// puts it, and the sentence around it survives whole.
+    #[test]
+    fn a_template_is_cut_at_the_command_wherever_it_sits() {
+        let text = |s: &str| HintPiece::Text(s.to_string());
+        assert_eq!(
+            Hint::template("Run {command} in a terminal.").pieces,
+            vec![text("Run "), HintPiece::Command, text(" in a terminal.")]
+        );
+        assert_eq!(
+            Hint::template("{command} 登录").pieces,
+            vec![HintPiece::Command, text(" 登录")]
+        );
+        assert_eq!(
+            Hint::template("在终端中运行{command}").pieces,
+            vec![text("在终端中运行"), HintPiece::Command]
+        );
+        // No placeholder: words only, nothing invented.
+        assert_eq!(
+            Hint::template("Just words.").pieces,
+            vec![text("Just words.")]
+        );
+    }
+
+    /// A server's message is data. If it happens to spell the placeholder it
+    /// must not turn into a command chip.
+    #[test]
+    fn a_servers_message_is_never_searched_for_the_placeholder() {
+        let hint = Hint::text("denied: {command}");
+        assert!(!hint.has_command());
+        assert_eq!(hint.plain(), "denied: {command}");
     }
 
     #[test]
@@ -1062,6 +1297,9 @@ mod gpui_tests {
     use crate::daemon::protocol::DaemonMsg;
     use crate::ui::app::{Tty59App, test_window};
     use crate::ui::github::Connection;
+    use crate::ui::i18n::{L10nKey, t};
+
+    use super::Hint;
 
     struct Fake {
         asked: Mutex<Vec<String>>,
@@ -1138,6 +1376,66 @@ mod gpui_tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// Every request is refused as not found, which signed out is the answer
+    /// that tells the user to sign in.
+    struct Refusing;
+
+    impl Transport for Refusing {
+        fn get(&self, _path: &str) -> Result<Reply, ApiError> {
+            Err(ApiError::NotFound)
+        }
+
+        fn authenticated(&self) -> bool {
+            false
+        }
+    }
+
+    /// The sign-in hint of a real failed list: the command is one chip, drawn
+    /// inline, and the catalog sentence around it has no backticks to show.
+    #[gpui::test]
+    fn the_sign_in_hint_draws_the_command_as_one_chip(cx: &mut TestAppContext) {
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::Builder::new()
+            .prefix("tty59-gh-hint-")
+            .tempdir()
+            .expect("a scratch directory");
+        let root = std::fs::canonicalize(dir.path()).expect("it resolves");
+        git(&root, &["init", "--quiet"]);
+        git(
+            &root,
+            &["remote", "add", "origin", "https://github.com/acme/widgets"],
+        );
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        let transport: Arc<dyn Transport> = Arc::new(Refusing);
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.github.connector = Some(Arc::new(move || Connection {
+                transport: transport.clone(),
+            }));
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::GitHub;
+            cx.notify();
+        });
+        DaemonMsg::Cwd(root.clone())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        settle(&app, &mut vcx, "the refused list", |app| {
+            app.github.lists.values().any(|l| l.error.is_some())
+        });
+        vcx.run_until_parked();
+
+        assert!(
+            vcx.debug_bounds("github-hint-command").is_some(),
+            "the command is drawn as a chip of its own"
+        );
+        let hint = Hint::template(t(L10nKey::GitHubSignInHint));
+        assert!(hint.has_command());
+        assert!(
+            !hint.plain().contains('`'),
+            "no literal backticks: {}",
+            hint.plain()
+        );
     }
 
     #[gpui::test]
@@ -1373,6 +1671,332 @@ mod gpui_tests {
         settle(&app, &mut vcx, "the detail read again", |_| {
             reads_of_pull() >= 2
         });
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ---- B3b recovery witnesses -------------------------------------------
+    //
+    // Baseline-compatible: none of these names an API that c700 lacks. Each
+    // looks for the Refresh button by its debug selector in a real app window,
+    // so on c700 it fails on its own `expect` ("... offers Refresh").
+
+    /// The selector the recovery button is drawn under.
+    const REFRESH: &str = "panel-github-error-refresh";
+
+    /// Every request is refused as not found, and counted.
+    struct CountingRefusing {
+        asks: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Transport for CountingRefusing {
+        fn get(&self, _path: &str) -> Result<Reply, ApiError> {
+            self.asks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(ApiError::NotFound)
+        }
+
+        fn authenticated(&self) -> bool {
+            false
+        }
+    }
+
+    /// Answers like [`Fake`] until `down` is set, then every request fails as a
+    /// dead link. What a refresh that fails over content already on screen
+    /// needs, without any timer or mock handler in the way.
+    struct Flaky {
+        inner: Fake,
+        down: std::sync::atomic::AtomicBool,
+    }
+
+    impl Transport for Flaky {
+        fn get(&self, path: &str) -> Result<Reply, ApiError> {
+            if self.down.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ApiError::Network("link down".into()));
+            }
+            self.inner.get(path)
+        }
+
+        fn authenticated(&self) -> bool {
+            true
+        }
+    }
+
+    /// The GitHub tab on `root`, a repository with an `acme/widgets` remote,
+    /// reading through `transport`.
+    fn github_on(
+        cx: &mut TestAppContext,
+        root: &Path,
+        transport: Arc<dyn Transport>,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        crate::daemon::transport::Stream,
+    ) {
+        git(root, &["init", "--quiet"]);
+        git(
+            root,
+            &["remote", "add", "origin", "https://github.com/acme/widgets"],
+        );
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        vcx.simulate_resize(gpui::size(gpui::px(1200.), gpui::px(800.)));
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.github.connector = Some(Arc::new(move || Connection {
+                transport: transport.clone(),
+            }));
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::GitHub;
+            cx.notify();
+        });
+        DaemonMsg::Cwd(root.to_path_buf())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        (app, vcx, pane)
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// A failed list with nothing to show says what to do and carries the
+    /// Refresh that does it; the click asks GitHub again. The sign-in hint's
+    /// command chip is still drawn beside it.
+    #[gpui::test]
+    fn a_failed_list_with_no_rows_offers_a_refresh_that_asks_again(cx: &mut TestAppContext) {
+        crate::ui::i18n::set_locale("en");
+        let root = scratch("refresh-list");
+        let refusing = Arc::new(CountingRefusing {
+            asks: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let (app, mut vcx, _pane) = github_on(cx, &root, refusing.clone());
+        settle(&app, &mut vcx, "the refused list", |app| {
+            app.github.lists.values().any(|l| l.error.is_some())
+        });
+        draw(&mut vcx);
+        assert!(
+            vcx.debug_bounds("github-hint-command").is_some(),
+            "the rich hint's command chip survives"
+        );
+        let button = vcx
+            .debug_bounds(REFRESH)
+            .expect("a failed list offers Refresh");
+        let before = refusing.asks.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(before >= 1, "the first try was made");
+
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        settle(&app, &mut vcx, "the list asked for again", |_| {
+            refusing.asks.load(std::sync::atomic::Ordering::SeqCst) > before
+        });
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A failed call — here a signed-out 404 on one issue — says what to do
+    /// and carries the Refresh that does it: the click asks GitHub again.
+    #[gpui::test]
+    fn a_failed_detail_offers_a_refresh_that_asks_again(cx: &mut TestAppContext) {
+        let root = scratch("refresh-detail");
+        let fake = Arc::new(Fake {
+            asked: Mutex::new(Vec::new()),
+        });
+        let (app, mut vcx, _pane) = github_on(cx, &root, fake.clone());
+        settle(&app, &mut vcx, "the issue list", |app| {
+            app.github.lists.values().any(|l| l.loaded)
+        });
+
+        const MISSING: &str = "/repos/acme/widgets/issues/99";
+        let slug = app.update_in(&mut vcx, |app, _, cx| {
+            let slug = app.github.lists.keys().next().unwrap().slug.clone();
+            app.github_open_detail(slug.clone(), 99, cx);
+            slug
+        });
+        settle(&app, &mut vcx, "the failed detail", |app| {
+            app.github
+                .details
+                .get(&(slug.clone(), 99))
+                .is_some_and(|d| d.error.is_some())
+        });
+        let asked = |fake: &Fake| {
+            fake.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|p| p.as_str() == MISSING)
+                .count()
+        };
+        let before = asked(&fake);
+        assert!(before >= 1);
+
+        draw(&mut vcx);
+        let button = vcx
+            .debug_bounds(REFRESH)
+            .expect("a failed detail offers Refresh");
+        vcx.simulate_click(button.center(), gpui::Modifiers::none());
+        settle(&app, &mut vcx, "the detail asked for again", |_| {
+            asked(&fake) > before
+        });
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The link drops after a list and a detail are on screen. Both keep what
+    /// they had — the rows, the detail — and both still offer Refresh beside
+    /// the failure.
+    #[gpui::test]
+    fn a_failed_refresh_over_retained_rows_and_detail_still_offers_refresh(
+        cx: &mut TestAppContext,
+    ) {
+        let root = scratch("refresh-retained");
+        let flaky = Arc::new(Flaky {
+            inner: Fake {
+                asked: Mutex::new(Vec::new()),
+            },
+            down: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (app, mut vcx, _pane) = github_on(cx, &root, flaky.clone());
+        settle(&app, &mut vcx, "the issue list", |app| {
+            app.github
+                .lists
+                .values()
+                .any(|l| l.loaded && l.error.is_none() && !l.items.is_empty())
+        });
+        let slug = app.update_in(&mut vcx, |app, _, cx| {
+            let slug = app.github.lists.keys().next().unwrap().slug.clone();
+            app.github_open_detail(slug.clone(), 7, cx);
+            slug
+        });
+        settle(&app, &mut vcx, "the detail", |app| {
+            app.github
+                .details
+                .get(&(slug.clone(), 7))
+                .is_some_and(|d| d.detail.is_some())
+        });
+
+        // The link drops and everything cached is due again.
+        flaky.down.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.update_in(&mut vcx, |app, _, cx| {
+            for list in app.github.lists.values_mut() {
+                list.fetched = None;
+            }
+            for detail in app.github.details.values_mut() {
+                detail.fetched = None;
+            }
+            cx.notify();
+        });
+
+        // The detail is on screen: it keeps its content and says why it may
+        // be out of date.
+        settle(&app, &mut vcx, "the failed detail refresh", |app| {
+            app.github
+                .details
+                .get(&(slug.clone(), 7))
+                .is_some_and(|d| d.error.is_some())
+        });
+        draw(&mut vcx);
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| {
+                app.github.details[&(slug.clone(), 7)].detail.is_some()
+            }),
+            "the detail is kept"
+        );
+        assert!(
+            vcx.debug_bounds(REFRESH).is_some(),
+            "a failed refresh over a detail offers Refresh"
+        );
+
+        // Back to the list: the same, over the rows.
+        app.update_in(&mut vcx, |app, _, cx| app.github_close_detail(cx));
+        settle(&app, &mut vcx, "the failed list refresh", |app| {
+            app.github.lists.values().any(|l| l.error.is_some())
+        });
+        draw(&mut vcx);
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| {
+                app.github.lists.values().any(|l| !l.items.is_empty())
+            }),
+            "the rows are kept"
+        );
+        assert!(
+            vcx.debug_bounds(REFRESH).is_some(),
+            "a failed refresh over rows offers Refresh"
+        );
+
+        test_window::quiesce(&mut vcx, Some(&root));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Over rows already on screen the failure is not the subject, so the
+    /// button steps down to the secondary paint; when the failure is the whole
+    /// body it is the primary. Read through PanelAction's own probe note, from
+    /// the real window, for the list (over rows) and for a detail that never
+    /// loaded (the whole body).
+    #[gpui::test]
+    fn a_refresh_over_rows_is_secondary_and_one_that_is_the_whole_body_is_primary(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::ui::paint_probe as probe;
+
+        let _probe = probe::scope();
+        let root = scratch("refresh-tone");
+        let flaky = Arc::new(Flaky {
+            inner: Fake {
+                asked: Mutex::new(Vec::new()),
+            },
+            down: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (app, mut vcx, _pane) = github_on(cx, &root, flaky.clone());
+        settle(&app, &mut vcx, "the issue list", |app| {
+            app.github
+                .lists
+                .values()
+                .any(|l| l.loaded && l.error.is_none() && !l.items.is_empty())
+        });
+
+        // The link drops: the list keeps its rows and says why.
+        flaky.down.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.update_in(&mut vcx, |app, _, cx| {
+            for list in app.github.lists.values_mut() {
+                list.fetched = None;
+            }
+            cx.notify();
+        });
+        settle(&app, &mut vcx, "the failed list refresh", |app| {
+            app.github.lists.values().any(|l| l.error.is_some())
+        });
+        probe::clear();
+        draw(&mut vcx);
+        assert!(
+            !probe::all("panel_action.secondary").is_empty(),
+            "a failure over rows is a secondary button"
+        );
+        assert!(
+            probe::all("panel_action.primary").is_empty(),
+            "and not a primary one"
+        );
+
+        // A detail that never loaded: the failure is all there is.
+        app.update_in(&mut vcx, |app, _, cx| {
+            let slug = app.github.lists.keys().next().unwrap().slug.clone();
+            app.github_open_detail(slug, 7, cx);
+        });
+        settle(&app, &mut vcx, "the failed detail", |app| {
+            app.github.details.values().any(|d| d.error.is_some())
+        });
+        probe::clear();
+        draw(&mut vcx);
+        assert!(
+            !probe::all("panel_action.primary").is_empty(),
+            "a failure that is the whole body is a primary button"
+        );
+        assert!(
+            probe::all("panel_action.secondary").is_empty(),
+            "and not a secondary one"
+        );
 
         test_window::quiesce(&mut vcx, Some(&root));
         let _ = std::fs::remove_dir_all(&root);

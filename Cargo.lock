@@ -11894,7 +11894,7 @@ dependencies = [
 
 [[package]]
 name = "tty59"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "anyhow",
  "async_zip 0.0.19",
@@ -11919,6 +11919,7 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "parking_lot",
  "percent-encoding",
  "plist",
  "qrcode",
@@ -11949,7 +11950,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-agent-detect"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "regex",
  "serde",
@@ -11958,7 +11959,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-cli"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11973,7 +11974,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-core"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -12014,7 +12015,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-gateway"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -12040,7 +12041,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-mermaid"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "merman",
  "resvg",
@@ -12050,7 +12051,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-mobile-client"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "anyhow",
  "iroh",
@@ -12063,7 +12064,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-mobile-proto"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -12073,7 +12074,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-server"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -12082,7 +12083,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-vt"
-version = "26.14.1"
+version = "26.15.0"
 dependencies = [
  "bitflags 2.13.1",
  "log",
@@ -12095,7 +12096,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-vt-sys"
-version = "26.14.1"
+version = "26.15.0"
 
 [[package]]
 name = "typeid"
