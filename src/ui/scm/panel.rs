@@ -11,11 +11,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Context, Focusable as _, SharedString, Window, div, prelude::*, px, relative, rems,
+    AnyElement, Context, Focusable as _, MouseButton, SharedString, Window, div, prelude::*, px,
+    relative, rems,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
-use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
 };
@@ -39,6 +40,7 @@ use crate::ui::right_panel::{
 use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
 use crate::ui::scm::ScmIntent;
 use crate::ui::scm::path::split_display_path;
+use crate::ui::scm::row_menu::{RowMenu, RowOwner};
 use crate::ui::scm::rows_window::RowsWindow;
 use crate::ui::scm::state::{RepoKey, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
@@ -1681,25 +1683,10 @@ impl Tty59App {
         ));
     }
 
-    /// Record the row a context menu just opened on, until it is dismissed.
-    fn scm_menu_opened(
-        &mut self,
-        group: ScmGroup,
-        path: String,
-        menu: &gpui::Entity<PopupMenu>,
-        cx: &mut Context<Self>,
-    ) {
-        self.scm.menu_row = Some((group, path));
-        // Replacing the subscription drops the last menu's: only the menu
-        // that is open now can clear the pin.
-        self.scm.menu_sub = Some(
-            cx.subscribe(menu, |this, _menu, _: &gpui::DismissEvent, cx| {
-                this.scm.menu_row = None;
-                cx.notify();
-            }),
-        );
-    }
-
+    /// Whether `entry` is the Changes row a row menu is open on. The record is
+    /// the row's own (`row_menu::RowMenu` writes it when the menu opens and
+    /// clears it when the menu ends or the row's state is released), and it
+    /// is what keeps that row built however far the list scrolls.
     fn scm_menu_row_is(&self, group: ScmGroup, entry: &StatusEntry) -> bool {
         self.scm
             .menu_row
@@ -1732,7 +1719,7 @@ impl Tty59App {
         &mut self,
         repo: &RepoKey,
         status: &Arc<WorkingTreeStatus>,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Groups are told apart by the pause between them, not by a rule:
@@ -1804,8 +1791,11 @@ impl Tty59App {
                                 repo,
                                 group,
                                 entries[index],
-                                Some(depth),
-                                None,
+                                RowPos {
+                                    depth: Some(depth),
+                                    set: None,
+                                },
+                                window,
                                 cx,
                             ),
                         })
@@ -1819,7 +1809,17 @@ impl Tty59App {
                     let built = run
                         .indices()
                         .map(|i| {
-                            self.scm_file_row(repo, group, entries[i], None, Some((i, shown)), cx)
+                            self.scm_file_row(
+                                repo,
+                                group,
+                                entries[i],
+                                RowPos {
+                                    depth: None,
+                                    set: Some((i, shown)),
+                                },
+                                window,
+                                cx,
+                            )
                         })
                         .collect();
                     run.finish(built)
@@ -2105,10 +2105,11 @@ impl Tty59App {
         repo: &RepoKey,
         group: ScmGroup,
         entry: &StatusEntry,
-        depth: Option<usize>,
-        set: Option<(usize, usize)>,
+        pos: RowPos,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let RowPos { depth, set } = pos;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let mono = cx.theme().mono_font_family.clone();
         let path = entry.path.as_str().to_string();
@@ -2134,6 +2135,15 @@ impl Tty59App {
         #[cfg(test)]
         let name_selector = format!("{id}-name");
         let strip_reserve = action_strip_reserve(row_verbs(group).len());
+        // The row's own menu state: alive while this row keeps being built, so
+        // a row that leaves the list takes its open menu and its record with it.
+        let menu = RowMenu::of(
+            id.clone(),
+            || RowOwner::Change(group, path.clone()),
+            cx.entity().downgrade(),
+            window,
+            cx,
+        );
         h_flex()
             .id(id.clone())
             // The whole path and which list it is on: the letter drawn beside
@@ -2177,26 +2187,40 @@ impl Tty59App {
                     );
                 })
             })
-            .tooltip({
-                let full_path = path.clone();
-                move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(full_path.clone()).build(window, cx)
-                }
+            // Not offered while a row menu is open: the menu opens inside this
+            // row, and without a builder the toolkit also drops a tooltip that
+            // is already up or waiting out its delay.
+            .when(!self.scm.row_menu_open(), |row| {
+                row.tooltip({
+                    let full_path = path.clone();
+                    move |window, cx| {
+                        let tip = gpui_component::tooltip::Tooltip::new(full_path.clone())
+                            .build(window, cx);
+                        #[cfg(test)]
+                        row_tooltip_probe::built(&tip);
+                        tip
+                    }
+                })
             })
-            .context_menu({
+            .on_mouse_down(MouseButton::Right, {
+                let menu = menu.clone();
                 let app = cx.entity().downgrade();
                 let repo = repo.clone();
                 let entry = entry.clone();
-                move |menu, _window, cx| {
-                    // Built on open, outside render: the row is kept built
-                    // while its menu is up, however far the list scrolls.
-                    let popup = cx.entity();
-                    let path = entry.path.as_str().to_string();
-                    let _ =
-                        app.update(cx, |this, cx| this.scm_menu_opened(group, path, &popup, cx));
-                    Self::scm_row_context_menu(menu, &app, &repo, group, &entry, cx)
+                move |event, window, cx| {
+                    let (app, repo, entry) = (app.clone(), repo.clone(), entry.clone());
+                    RowMenu::open(
+                        &menu,
+                        event.position,
+                        move |popup, _window, cx| {
+                            Self::scm_row_context_menu(popup, &app, &repo, group, &entry, cx)
+                        },
+                        window,
+                        cx,
+                    );
                 }
             })
+            .children(RowMenu::overlay(&menu, window, cx))
             .child(git_badge(letter, status_color(deco, cx), &mono))
             // Names use the same resting/selected hierarchy as sidebar rows.
             // The name takes its own width first and only then shrinks, down
@@ -2553,6 +2577,16 @@ impl Tty59App {
         self.scm.set_group_collapsed(group, !collapsed);
         cx.notify();
     }
+}
+
+/// Where a changed-file row sits: what `scm_file_row` is told besides the file.
+#[derive(Clone, Copy)]
+struct RowPos {
+    /// The row's level in the tree view, `None` in the flat list.
+    depth: Option<usize>,
+    /// The row's index in the flat list and the list's length, for a screen
+    /// reader; `None` in the tree.
+    set: Option<(usize, usize)>,
 }
 
 /// The Changes tab's number, before it is worded.
@@ -3130,6 +3164,48 @@ fn verb_all_tooltip(verb: RowVerb) -> &'static str {
         RowVerb::OpenConflict => L10nKey::ScmOpenConflict,
         RowVerb::MarkResolved => L10nKey::ScmMarkResolved,
     })
+}
+
+/// Observes the row tooltips the toolkit actually builds, from the builders
+/// the rows already pass it. `Window` keeps its tooltip state private, so the
+/// only public handle on "a tooltip is on screen" is the view itself: the
+/// builder records a weak handle, and a tooltip is up exactly while that handle
+/// still upgrades. Test builds only; the tooltip tree is the one production
+/// builds.
+#[cfg(test)]
+pub(super) mod row_tooltip_probe {
+    use gpui::{AnyView, AnyWeakView};
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static SEEN: RefCell<Vec<AnyWeakView>> = const { RefCell::new(Vec::new()) };
+        static BUILT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(in crate::ui::scm) fn built(view: &AnyView) {
+        BUILT.with(|n| n.set(n.get() + 1));
+        SEEN.with(|seen| seen.borrow_mut().push(view.downgrade()));
+    }
+
+    pub(in crate::ui::scm) fn reset() {
+        BUILT.with(|n| n.set(0));
+        SEEN.with(|seen| seen.borrow_mut().clear());
+    }
+
+    /// How many tooltips the toolkit has asked the rows to build since `reset`.
+    pub(in crate::ui::scm) fn builds() -> usize {
+        BUILT.with(Cell::get)
+    }
+
+    /// How many of them are still alive.
+    pub(in crate::ui::scm) fn live() -> usize {
+        SEEN.with(|seen| {
+            seen.borrow()
+                .iter()
+                .filter(|view| view.upgrade().is_some())
+                .count()
+        })
+    }
 }
 
 #[cfg(test)]
@@ -4045,7 +4121,7 @@ mod tests {
 #[cfg(test)]
 mod render_idle_gpui_tests {
     use super::*;
-    use crate::daemon::protocol::DaemonMsg;
+    use crate::daemon::protocol::{ClientMsg, DaemonMsg};
     use crate::ui::app::{render_probe, test_window};
     use crate::ui::host_ops::HostId;
     use gpui::{
@@ -4109,6 +4185,806 @@ mod render_idle_gpui_tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    // --- a row menu and the tooltip of the row it opens on -----------------
+    //
+    // Real rows, the real context menu and the toolkit's own tooltip timer;
+    // the only seam is `row_tooltip_probe`, which watches the tooltip views
+    // the rows' own builders hand the toolkit.
+
+    /// The toolkit's show delay, which the finding keeps.
+    const TIP_DELAY: Duration = Duration::from_millis(500);
+
+    fn frames(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        for _ in 0..3 {
+            app.update_in(vcx, |_, _, cx| cx.notify());
+            vcx.run_until_parked();
+        }
+    }
+
+    fn wait(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, by: Duration) {
+        vcx.executor().advance_clock(by);
+        frames(app, vcx);
+    }
+
+    fn pointer_to(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, at: Point<Pixels>) {
+        vcx.simulate_mouse_move(at, None::<MouseButton>, Modifiers::none());
+        frames(app, vcx);
+    }
+
+    fn right_click(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, at: Point<Pixels>) {
+        vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        vcx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        frames(app, vcx);
+    }
+
+    /// A click far from any menu: the toolkit dismisses a menu on a press
+    /// outside it, the same path a user's click away takes.
+    fn click_away(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        vcx.simulate_click(gpui::point(px(2.), px(2.)), Modifiers::none());
+        frames(app, vcx);
+    }
+
+    /// Who the panel has on record as having a row menu open: the Changes
+    /// row's path, or the History row's oid.
+    fn open_menu(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<String> {
+        app.update_in(vcx, |app, _, _| {
+            app.scm
+                .menu_row
+                .as_ref()
+                .map(|(_, path)| path.clone())
+                .or_else(|| app.scm.menu_commit.clone())
+        })
+    }
+
+    /// What has the keyboard focus, by handle.
+    fn focused(vcx: &mut VisualTestContext) -> Option<gpui::FocusHandle> {
+        vcx.update(|window, cx| window.focused(cx))
+    }
+
+    type Stream = crate::daemon::transport::Stream;
+
+    /// The Changes panel over two untracked files, `a.rs` above `b.rs`, drawn as a
+    /// real window draws it. The points are inside each row, clear of its badge.
+    fn two_change_rows(
+        cx: &mut TestAppContext,
+        name: &str,
+    ) -> (
+        PathBuf,
+        Entity<Tty59App>,
+        VisualTestContext,
+        Stream,
+        Point<Pixels>,
+        Point<Pixels>,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let root = scratch(name);
+        git(&root, &["init", "--quiet"]);
+        std::fs::write(root.join("a.rs"), "a\n").unwrap();
+        std::fs::write(root.join("b.rs"), "b\n").unwrap();
+        let (app, mut vcx, pane) = scm_panel_on(cx, &root, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
+                    .is_some_and(|s| s.untracked().count() == 2)
+            })
+        });
+        vcx.simulate_resize(gpui::size(px(1800.), px(1000.)));
+        frames(&app, &mut vcx);
+        let inside = |vcx: &mut VisualTestContext, selector: &'static str| {
+            let bounds = vcx.debug_bounds(selector).expect("the row is drawn");
+            gpui::point(bounds.left() + px(24.), bounds.center().y)
+        };
+        let upper = inside(&mut vcx, "scm-row-Untracked-a.rs");
+        let lower = inside(&mut vcx, "scm-row-Untracked-b.rs");
+        assert!(upper.y < lower.y);
+        (root, app, vcx, pane, upper, lower)
+    }
+
+    /// The whole lifecycle over two rows, with the owner each row's menu is
+    /// recorded under. `upper` is above `lower`, and a menu opened on the lower
+    /// one must not cover the upper one's pointer: nothing assumes it, the
+    /// first step proves each point reaches its own row with no menu open, and
+    /// the fixtures leave room below the rows for a menu to open downwards.
+    fn drive_row_menu_lifecycle(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        (upper, upper_owner): (Point<Pixels>, &str),
+        (lower, lower_owner): (Point<Pixels>, &str),
+    ) {
+        // Reachability, with no menu open: a right-click on each point opens
+        // that row's menu and nothing else's.
+        for (point, owner) in [(upper, upper_owner), (lower, lower_owner)] {
+            right_click(app, vcx, point);
+            assert_eq!(
+                open_menu(app, vcx).as_deref(),
+                Some(owner),
+                "the click at {point:?} reaches the row of {owner}"
+            );
+            click_away(app, vcx);
+            assert_eq!(open_menu(app, vcx), None, "and the menu is dismissed");
+        }
+        row_tooltip_probe::reset();
+        let half = Duration::from_millis(250);
+
+        // Control: with no menu the tooltip comes after the delay, not before.
+        pointer_to(app, vcx, lower);
+        wait(app, vcx, half);
+        assert_eq!(row_tooltip_probe::live(), 0, "not before the delay");
+        wait(app, vcx, half + Duration::from_millis(10));
+        assert_eq!(row_tooltip_probe::live(), 1, "the delay brings it");
+
+        // Already visible when the menu opens: it goes, and stays gone.
+        right_click(app, vcx, lower);
+        assert_eq!(
+            open_menu(app, vcx).as_deref(),
+            Some(lower_owner),
+            "the row's menu is recorded as open"
+        );
+        assert_eq!(row_tooltip_probe::live(), 0, "it does not cover the menu");
+        wait(app, vcx, TIP_DELAY * 4);
+        assert_eq!(
+            (row_tooltip_probe::live(), row_tooltip_probe::builds()),
+            (0, 1),
+            "nothing new is built while the menu is open"
+        );
+
+        // A press outside dismisses it: the record goes, and the tooltip is back
+        // after the ordinary delay on the next hover, on either row.
+        click_away(app, vcx);
+        assert_eq!(open_menu(app, vcx), None, "dismissal clears the record");
+        pointer_to(app, vcx, upper);
+        wait(app, vcx, half);
+        assert_eq!(row_tooltip_probe::live(), 0, "the delay applies again");
+        wait(app, vcx, half + Duration::from_millis(10));
+        assert_eq!(row_tooltip_probe::live(), 1, "and then the tooltip returns");
+
+        // Still waiting out the delay when the menu opens: it is never built.
+        pointer_to(app, vcx, lower);
+        let built = row_tooltip_probe::builds();
+        wait(app, vcx, Duration::from_millis(200));
+        right_click(app, vcx, lower);
+        assert!(open_menu(app, vcx).is_some());
+        wait(app, vcx, TIP_DELAY * 2);
+        assert_eq!(
+            (row_tooltip_probe::live(), row_tooltip_probe::builds()),
+            (0, built),
+            "a pending tooltip does not appear over the menu"
+        );
+
+        // Another row's menu while the first is open: the new menu is the
+        // recorded one, and the first one's dismissal does not wipe it.
+        right_click(app, vcx, upper);
+        assert_eq!(
+            open_menu(app, vcx).as_deref(),
+            Some(upper_owner),
+            "the second row's menu is the one on record"
+        );
+        wait(app, vcx, TIP_DELAY * 2);
+        assert_eq!(
+            open_menu(app, vcx).as_deref(),
+            Some(upper_owner),
+            "the first's end is not ours"
+        );
+        assert_eq!(row_tooltip_probe::live(), 0);
+
+        // And the second menu's own dismissal clears it.
+        click_away(app, vcx);
+        assert_eq!(open_menu(app, vcx), None);
+        pointer_to(app, vcx, lower);
+        wait(app, vcx, TIP_DELAY + Duration::from_millis(10));
+        assert_eq!(row_tooltip_probe::live(), 1, "tooltips are not left off");
+
+        // Reopen on a row that has had a menu before.
+        right_click(app, vcx, lower);
+        assert!(open_menu(app, vcx).is_some(), "the same row opens again");
+        assert_eq!(row_tooltip_probe::live(), 0);
+        click_away(app, vcx);
+        assert_eq!(open_menu(app, vcx), None);
+    }
+
+    #[gpui::test]
+    fn a_changes_row_menu_takes_the_row_tooltips_away_until_it_is_dismissed(
+        cx: &mut TestAppContext,
+    ) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, upper, lower) = two_change_rows(cx, "row-menu");
+        drive_row_menu_lifecycle(&app, &mut vcx, (upper, "a.rs"), (lower, "b.rs"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The pin contract a scrolled list reads: which Changes row has a menu
+    /// open, by group and path, and the History record stays out of it.
+    #[gpui::test]
+    fn an_open_changes_menu_is_recorded_by_group_and_path_for_the_row_pin(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, _upper, lower) = two_change_rows(cx, "row-menu-pin");
+        right_click(&app, &mut vcx, lower);
+        let (row, commit) = app.update_in(&mut vcx, |app, _, _| {
+            (app.scm.menu_row.clone(), app.scm.menu_commit.clone())
+        });
+        assert_eq!(row, Some((ScmGroup::Untracked, "b.rs".to_string())));
+        assert_eq!(commit, None, "a Changes menu is not a History menu");
+        click_away(&app, &mut vcx);
+        let row = app.update_in(&mut vcx, |app, _, _| app.scm.menu_row.clone());
+        assert_eq!(row, None, "dismissal releases the pin");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[gpui::test]
+    fn a_history_row_menu_takes_the_row_tooltips_away_until_it_is_dismissed(
+        cx: &mut TestAppContext,
+    ) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, newest, older, newest_oid, older_oid) =
+            history_rows(cx, "row-menu-history");
+        drive_row_menu_lifecycle(&app, &mut vcx, (newest, &newest_oid), (older, &older_oid));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Three commits, the middle one tagged `v1` so its row has a chip to point
+    /// at, the History section open. The points are the chips of the newest and
+    /// the tagged commit's rows, and their oids.
+    fn history_rows(
+        cx: &mut TestAppContext,
+        name: &str,
+    ) -> (
+        PathBuf,
+        Entity<Tty59App>,
+        VisualTestContext,
+        Stream,
+        Point<Pixels>,
+        Point<Pixels>,
+        String,
+        String,
+    ) {
+        crate::core::config::pin_test_config_dir();
+        let root = scratch(name);
+        git(&root, &["init", "--quiet"]);
+        let commit = |n: u32| {
+            std::fs::write(root.join(format!("f{n}.txt")), format!("{n}\n")).unwrap();
+            git(&root, &["add", "-A"]);
+            git(
+                &root,
+                &[
+                    "-c",
+                    "user.name=tty59 test",
+                    "-c",
+                    "user.email=test@tty59.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    &format!("feat: c{n}"),
+                ],
+            );
+        };
+        commit(0);
+        commit(1);
+        // A tag on the middle commit (HEAD is commit 1 here, and commit 2 is
+        // made on top of it) gives the second row a chip to point at; the
+        // newest has its branch.
+        git(&root, &["tag", "v1"]);
+        commit(2);
+        let newest_oid = git_out(&root, &["rev-parse", "HEAD"]);
+        let older_oid = git_out(&root, &["rev-parse", "v1^{commit}"]);
+        let (app, mut vcx, pane) = scm_panel_on(cx, &root, |app, _| app.scm.repo.is_some());
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.scm.graph.expanded = true;
+            // As tall as the section may be (the render clamps it to its
+            // ceiling): the rows then sit well above the window's bottom edge,
+            // so a menu opened on the lower one has room below it and is not
+            // snapped back up over the upper one.
+            app.scm.graph.height.set(10_000.);
+            cx.notify();
+        });
+        wait_until(&app, &mut vcx, |app, _| app.scm.graph.page().is_some());
+        vcx.simulate_resize(gpui::size(px(1800.), px(1000.)));
+        frames(&app, &mut vcx);
+        let newest = vcx
+            .debug_bounds("scm-graph-ref-0")
+            .expect("the newest commit's chip is drawn");
+        let older = vcx
+            .debug_bounds("scm-graph-ref-1")
+            .expect("the tagged commit's chip is drawn");
+        assert!(newest.top() < older.top());
+        (
+            root,
+            app,
+            vcx,
+            pane,
+            newest.center(),
+            older.center(),
+            newest_oid,
+            older_oid,
+        )
+    }
+
+    /// Every commit of a page has its menu key, and no two share one: the key
+    /// is the whole oid, prepared with the page.
+    #[gpui::test]
+    fn every_history_commit_has_its_own_menu_key(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, _newest, _older, _a, _b) =
+            history_rows(cx, "row-menu-keys");
+        let keys = app.update_in(&mut vcx, |app, _, _| {
+            let graph = &app.scm.graph;
+            let count = graph.page().map_or(0, |page| page.commits.len());
+            (0..count)
+                .map(|i| graph.menu_key(i).map(ToString::to_string))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(keys.len(), 3);
+        assert!(keys.iter().all(Option::is_some), "a key per commit");
+        let mut unique = keys.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), keys.len(), "no two commits share a key");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The keyboard focus on the active terminal, which stays in the tree
+    /// whichever panel is shown, and the handle it is.
+    fn park_focus(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> gpui::FocusHandle {
+        app.update_in(vcx, |app, window, cx| app.focus_active(window, cx));
+        frames(app, vcx);
+        focused(vcx).expect("the active terminal has the focus")
+    }
+
+    /// The keyboard focus on the commit message box: a target that is painted
+    /// while the Changes panel is, and that the app's own fallback (a focus
+    /// that has nowhere to land goes to the active terminal) would never pick.
+    /// A restore test that parks the focus here cannot pass by that fallback:
+    /// it passes only if the menu gave the focus back itself. Calibrated with
+    /// no menu: the box keeps the focus over frames and is not the terminal.
+    fn park_commit_focus(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> gpui::FocusHandle {
+        let terminal = park_focus(app, vcx);
+        let handle = app.update_in(vcx, |app, window, cx| {
+            let input = app
+                .scm
+                .commit_input
+                .clone()
+                .expect("the commit box is drawn");
+            let handle = input.read(cx).focus_handle(cx);
+            window.focus(&handle, cx);
+            handle
+        });
+        frames(app, vcx);
+        assert_ne!(handle, terminal, "the commit box is not the default target");
+        assert_eq!(
+            focused(vcx),
+            Some(handle.clone()),
+            "the commit box keeps the focus over frames, with no menu"
+        );
+        handle
+    }
+
+    /// Escape is the menu's own: it closes it, and the focus the menu took
+    /// goes back to what had it before.
+    #[gpui::test]
+    fn escape_closes_a_row_menu_and_gives_the_focus_back(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, _upper, lower) = two_change_rows(cx, "row-menu-escape");
+        let before = Some(park_commit_focus(&app, &mut vcx));
+        right_click(&app, &mut vcx, lower);
+        assert_eq!(open_menu(&app, &mut vcx).as_deref(), Some("b.rs"));
+        assert_ne!(focused(&mut vcx), before, "the menu took the focus");
+        vcx.simulate_keystrokes("escape");
+        frames(&app, &mut vcx);
+        assert_eq!(open_menu(&app, &mut vcx), None, "Escape closes it");
+        assert_eq!(focused(&mut vcx), before, "the focus is given back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A second row's menu replacing the first: Escape on it gives back the
+    /// focus from BEFORE EITHER menu, not the first menu's handle.
+    #[gpui::test]
+    fn escape_after_one_row_menu_replaced_another_restores_the_focus_from_before_both(
+        cx: &mut TestAppContext,
+    ) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, upper, lower) = two_change_rows(cx, "row-menu-escape-ab");
+        let before = Some(park_focus(&app, &mut vcx));
+        right_click(&app, &mut vcx, lower);
+        assert_eq!(open_menu(&app, &mut vcx).as_deref(), Some("b.rs"));
+        right_click(&app, &mut vcx, upper);
+        assert_eq!(
+            open_menu(&app, &mut vcx).as_deref(),
+            Some("a.rs"),
+            "the second row's menu replaced the first"
+        );
+        vcx.simulate_keystrokes("escape");
+        frames(&app, &mut vcx);
+        assert_eq!(open_menu(&app, &mut vcx), None, "Escape closes it");
+        assert_eq!(
+            focused(&mut vcx),
+            before,
+            "the focus from before either menu, not the first menu's"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same replacement, from a focus the app's own fallback would never
+    /// pick (the commit box). The second row's menu opens BEFORE the first
+    /// one's dismissal arrives, so the focus it must remember is the one from
+    /// before either menu, not the first menu's own handle.
+    #[gpui::test]
+    fn escape_after_one_row_menu_replaced_another_restores_the_commit_box_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, upper, lower) =
+            two_change_rows(cx, "row-menu-escape-ab-commit");
+        let before = Some(park_commit_focus(&app, &mut vcx));
+        right_click(&app, &mut vcx, lower);
+        right_click(&app, &mut vcx, upper);
+        assert_eq!(
+            open_menu(&app, &mut vcx).as_deref(),
+            Some("a.rs"),
+            "the second row's menu replaced the first"
+        );
+        vcx.simulate_keystrokes("escape");
+        frames(&app, &mut vcx);
+        assert_eq!(open_menu(&app, &mut vcx), None, "Escape closes it");
+        assert_eq!(
+            focused(&mut vcx),
+            before,
+            "the focus from before either menu, not the first menu's"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same row asked again while its menu is open (a right-click on its
+    /// own row is outside the menu, so the first one is dismissed as the second
+    /// opens): one menu, on record once, and Escape restores the original focus.
+    #[gpui::test]
+    fn escape_after_a_row_menu_was_reopened_before_it_was_dismissed_restores_the_original_focus(
+        cx: &mut TestAppContext,
+    ) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, _upper, lower) = two_change_rows(cx, "row-menu-reopen");
+        let before = Some(park_commit_focus(&app, &mut vcx));
+        right_click(&app, &mut vcx, lower);
+        right_click(&app, &mut vcx, lower);
+        assert_eq!(
+            open_menu(&app, &mut vcx).as_deref(),
+            Some("b.rs"),
+            "the reopened menu is on record, the first one's end did not clear it"
+        );
+        vcx.simulate_keystrokes("escape");
+        frames(&app, &mut vcx);
+        assert_eq!(open_menu(&app, &mut vcx), None, "Escape closes it");
+        assert_eq!(
+            focused(&mut vcx),
+            before,
+            "the original focus, not the first menu's"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Arrows move through the items and Enter runs the one they stop on: four
+    /// downs from nothing are Open, Open changes, Stage and Copy path (the
+    /// separators are skipped), and Copy path puts the file's path on the
+    /// clipboard, then closes the menu with the focus back where it was.
+    #[gpui::test]
+    fn arrows_and_enter_work_in_a_row_menu(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, _upper, lower) = two_change_rows(cx, "row-menu-keys-nav");
+        let before = Some(park_commit_focus(&app, &mut vcx));
+        right_click(&app, &mut vcx, lower);
+        assert_eq!(open_menu(&app, &mut vcx).as_deref(), Some("b.rs"));
+        vcx.simulate_keystrokes("down down down down enter");
+        frames(&app, &mut vcx);
+        let copied = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        let copied = copied.expect("Copy path wrote the clipboard");
+        assert!(
+            copied.ends_with("b.rs") && copied.contains(&root.display().to_string()),
+            "the path of the row's file, got {copied}"
+        );
+        assert_eq!(open_menu(&app, &mut vcx), None, "running an item closes it");
+        assert_eq!(focused(&mut vcx), before, "the focus is given back");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Focus that leaves the menu without a dismissal ends it, and is not
+    /// taken back.
+    #[gpui::test]
+    fn a_row_menu_whose_focus_moves_away_is_closed(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, _upper, lower) = two_change_rows(cx, "row-menu-focus");
+        right_click(&app, &mut vcx, lower);
+        assert_eq!(open_menu(&app, &mut vcx).as_deref(), Some("b.rs"));
+        // The focus goes to a real target, the active terminal, while the menu is open.
+        let target = park_focus(&app, &mut vcx);
+        assert_eq!(
+            open_menu(&app, &mut vcx),
+            None,
+            "the menu went with its focus"
+        );
+        assert_eq!(
+            focused(&mut vcx),
+            Some(target),
+            "and the focus stays where it went"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A focus handed to a handle that is not in the tree (a target that has
+    /// not been painted yet): where the window leaves that focus is the window's
+    /// and the app's focus-lost handling's business, not the menu's. It is
+    /// measured first WITHOUT a menu, then with one open: the menu closes with
+    /// its focus and adds nothing to where the focus ends up, in particular it
+    /// does not give back the focus from before it opened.
+    #[gpui::test]
+    fn a_menu_adds_nothing_to_where_a_focus_given_outside_the_tree_ends_up(
+        cx: &mut TestAppContext,
+    ) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, _upper, lower) = two_change_rows(cx, "row-menu-focus-far");
+
+        // Calibration, no menu: park the focus, then give it to a handle outside the tree.
+        let before = park_focus(&app, &mut vcx);
+        let outside = vcx.update(|window, cx| {
+            let handle = cx.focus_handle();
+            window.focus(&handle, cx);
+            handle
+        });
+        frames(&app, &mut vcx);
+        let without_menu = focused(&mut vcx);
+
+        // The same transition with a menu open.
+        let again = park_focus(&app, &mut vcx);
+        assert_eq!(again, before, "the same focus to start from");
+        right_click(&app, &mut vcx, lower);
+        assert_eq!(open_menu(&app, &mut vcx).as_deref(), Some("b.rs"));
+        vcx.update(|window, cx| window.focus(&outside, cx));
+        frames(&app, &mut vcx);
+        assert_eq!(
+            open_menu(&app, &mut vcx),
+            None,
+            "the menu went with its focus"
+        );
+        assert_eq!(
+            focused(&mut vcx),
+            without_menu,
+            "the focus ends up where it ends up with no menu at all"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Everything the active pane has written to its PTY so far, read from the
+    /// daemon side of its link (`quiet_test_pane`'s stream, the one the fixture
+    /// already holds) with the bounded pattern the terminal view's own tests
+    /// use: a short read timeout, `ClientMsg::read`, every frame that is not
+    /// `Input` skipped, the timeout ending the read.
+    fn pane_input(pane: &mut Stream) -> Vec<u8> {
+        pane.set_read_timeout(Some(Duration::from_millis(150)))
+            .expect("the pane link takes a read timeout");
+        let mut out = Vec::new();
+        loop {
+            match ClientMsg::read(pane) {
+                Ok(ClientMsg::Input(bytes)) => out.extend_from_slice(&bytes),
+                Ok(_) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(e) => panic!("pane link failed: {e}"),
+            }
+        }
+        out
+    }
+
+    /// KNOWN LIMIT, by decision: when the OWNER row or panel goes away under an
+    /// open menu, the window's own focus-lost fallback decides the focus (the
+    /// app puts it on the active terminal), not the field that had it before the
+    /// menu opened. Escape, Enter, an outside click and a reopen DO give the
+    /// prior focus back (their tests park the commit box and require it). What
+    /// is required after a removal is that the fallback is VALID: it exists, it
+    /// is the active terminal, it is in the rendered tree, and typing at it
+    /// reaches the pane's PTY as real `ClientMsg::Input` carrying the sentinel,
+    /// while opening and leaving nothing of the menu behind.
+    fn assert_fallback_focus(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        pane: &mut Stream,
+        terminal: &gpui::FocusHandle,
+    ) {
+        let now = focused(vcx).expect("a focus exists after the menu went away");
+        assert_eq!(&now, terminal, "the focus fell back to the active terminal");
+        let in_tree = vcx.update(|window, cx| now.contains_focused(window, cx));
+        assert!(in_tree, "the fallback focus is in the rendered tree");
+        // Typing: what the pane wrote before is drained, the sentinel is typed
+        // the way this platform's terminal takes text, and the daemon side of the
+        // pane's link must receive it as Input within a bounded number of pumps.
+        let _ = pane_input(pane);
+        #[cfg(target_os = "macos")]
+        vcx.simulate_input("z");
+        #[cfg(not(target_os = "macos"))]
+        vcx.simulate_keystrokes("z");
+        let mut typed = Vec::new();
+        for _ in 0..8 {
+            frames(app, vcx);
+            typed.extend(pane_input(pane));
+            if typed.contains(&b'z') {
+                break;
+            }
+        }
+        assert!(
+            typed.contains(&b'z'),
+            "the sentinel typed at the fallback focus reached the pane as Input, got {typed:?}"
+        );
+        assert_eq!(open_menu(app, vcx), None, "typing at it opens nothing");
+        assert_eq!(
+            focused(vcx).as_ref(),
+            Some(terminal),
+            "and the focus stays on the terminal"
+        );
+    }
+
+    /// The panel stops being drawn under an open menu (another tab takes the
+    /// panel): nothing dismisses the menu, so the row's state going is what
+    /// ends it. Its record goes with it, the tooltips are not left off, the
+    /// menu is not found again when the panel comes back, and the focus is
+    /// valid (the platform fallback, see `assert_fallback_focus`).
+    #[gpui::test]
+    fn a_row_menu_is_released_with_its_panel_and_leaves_no_tooltips_off(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, mut pane, _upper, lower) = two_change_rows(cx, "row-menu-release");
+        row_tooltip_probe::reset();
+        let terminal = park_focus(&app, &mut vcx);
+        right_click(&app, &mut vcx, lower);
+        assert_eq!(open_menu(&app, &mut vcx).as_deref(), Some("b.rs"));
+        assert_ne!(
+            focused(&mut vcx),
+            Some(terminal.clone()),
+            "the menu took the focus"
+        );
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_tab = RightPanelTab::Info;
+            cx.notify();
+        });
+        frames(&app, &mut vcx);
+        wait(&app, &mut vcx, TIP_DELAY);
+        assert_eq!(
+            open_menu(&app, &mut vcx),
+            None,
+            "the menu went with its panel and took its record with it"
+        );
+        assert_fallback_focus(&app, &mut vcx, &mut pane, &terminal);
+
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_tab = RightPanelTab::Scm;
+            cx.notify();
+        });
+        frames(&app, &mut vcx);
+        assert_eq!(
+            open_menu(&app, &mut vcx),
+            None,
+            "a released menu does not come back with the panel"
+        );
+        let row = vcx
+            .debug_bounds("scm-row-Untracked-b.rs")
+            .expect("the row is drawn again");
+        pointer_to(
+            &app,
+            &mut vcx,
+            gpui::point(row.left() + px(24.), row.center().y),
+        );
+        wait(&app, &mut vcx, TIP_DELAY + Duration::from_millis(10));
+        assert_eq!(row_tooltip_probe::live(), 1, "tooltips are not left off");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The row the menu is open on goes away (its file is gone and the list
+    /// refreshes): the row's state is released with it, the record with the
+    /// state, and the rows that are left have their tooltips. The focus was
+    /// parked on the commit box, a target the fallback would never pick, and
+    /// it does NOT come back (the known limit, see `assert_fallback_focus`):
+    /// it falls back to the active terminal and that focus is valid.
+    #[gpui::test]
+    fn a_row_menu_is_released_with_its_row_when_the_file_goes_away(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, mut pane, upper, lower) = two_change_rows(cx, "row-menu-gone");
+        row_tooltip_probe::reset();
+        let terminal = park_focus(&app, &mut vcx);
+        let commit_box = park_commit_focus(&app, &mut vcx);
+        assert_ne!(commit_box, terminal);
+        right_click(&app, &mut vcx, lower);
+        assert_eq!(open_menu(&app, &mut vcx).as_deref(), Some("b.rs"));
+
+        std::fs::remove_file(root.join("b.rs")).unwrap();
+        app.update_in(&mut vcx, |app, _, cx| {
+            if let Some(repo) = app.scm.repo.clone() {
+                app.scm_invalidate(repo.host, &repo.root, cx);
+            }
+        });
+        wait_until(&app, &mut vcx, |app, cx| {
+            app.scm.repo.as_ref().is_some_and(|r| {
+                crate::terminal::git_data::status_of(cx, r.host, &r.root)
+                    .is_some_and(|s| s.untracked().count() == 1)
+            })
+        });
+        frames(&app, &mut vcx);
+        assert!(
+            vcx.debug_bounds("scm-row-Untracked-b.rs").is_none(),
+            "the row is gone"
+        );
+        assert_eq!(
+            open_menu(&app, &mut vcx),
+            None,
+            "its menu and its record went with it"
+        );
+        assert_fallback_focus(&app, &mut vcx, &mut pane, &terminal);
+        pointer_to(&app, &mut vcx, upper);
+        wait(&app, &mut vcx, TIP_DELAY + Duration::from_millis(10));
+        assert_eq!(row_tooltip_probe::live(), 1, "tooltips are not left off");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Rows that never opened a menu have nothing to undo when they go: no
+    /// write to the panel's record is queued for them (one per row would be a
+    /// deferred app update per row every time a panel is hidden), and one that
+    /// did open a menu queues its end.
+    #[gpui::test]
+    fn rows_that_never_opened_a_menu_queue_nothing_when_they_go(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, _upper, lower) = two_change_rows(cx, "row-menu-quiet");
+        super::super::row_menu::reset_writes();
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_tab = RightPanelTab::Info;
+            cx.notify();
+        });
+        frames(&app, &mut vcx);
+        wait(&app, &mut vcx, TIP_DELAY);
+        assert_eq!(
+            super::super::row_menu::writes(),
+            0,
+            "two rows that never had a menu went with their panel and queued nothing"
+        );
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_tab = RightPanelTab::Scm;
+            cx.notify();
+        });
+        frames(&app, &mut vcx);
+        right_click(&app, &mut vcx, lower);
+        click_away(&app, &mut vcx);
+        assert!(
+            super::super::row_menu::writes() >= 2,
+            "a menu that was opened and closed queued its record and its end"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The same for History: the section folds under an open menu, so none of
+    /// its rows is built, and the commit's menu and record go with its row.
+    #[gpui::test]
+    fn a_history_row_menu_is_released_when_its_rows_stop_being_built(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let (root, app, mut vcx, _pane, newest, _older, newest_oid, _older_oid) =
+            history_rows(cx, "row-menu-history-fold");
+        right_click(&app, &mut vcx, newest);
+        assert_eq!(
+            open_menu(&app, &mut vcx).as_deref(),
+            Some(newest_oid.as_str())
+        );
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.scm.graph.expanded = false;
+            cx.notify();
+        });
+        frames(&app, &mut vcx);
+        assert_eq!(
+            open_menu(&app, &mut vcx),
+            None,
+            "the commit's menu went with its row"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The pointer ritual of the strip tests, on the elements this window

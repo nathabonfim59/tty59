@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, HighlightStyle, MouseButton, SharedString, StyledText,
-    Subscription, Window, div, px, rems,
+    AnyElement, App, Context, Entity, HighlightStyle, Hsla, MouseButton, SharedString, StyledText,
+    Subscription, UnderlineStyle, Window, div, px, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{InputEvent, InputState};
@@ -28,10 +28,12 @@ use gpui_component::{
 use tty59_core::host::content_search::ELLIPSIS;
 use tty59_core::host::{ContentHit, ContentLimits, ContentQuery, ContentRange, ContentResults};
 
+use crate::core::config::Config;
 use crate::ui::app::Tty59App;
 use crate::ui::host_ops::HostOps;
 use crate::ui::host_registry::HostRegistry;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::presets::SearchMark;
 use crate::ui::right_panel::{META, ROW_FILL_RADIUS, ROW_GLYPH, ROW_INSET, TEXT_MONO};
 
 use model::{FileGroup, Outcome, SearchKey, SearchRun};
@@ -110,6 +112,54 @@ fn window_hit(hit: &mut ContentHit) {
 fn usable(text: &str, range: &ContentRange) -> bool {
     let (start, end) = (range.start as usize, range.end as usize);
     start < end && end <= text.len() && text.is_char_boundary(start) && text.is_char_boundary(end)
+}
+
+/// How a matched term is painted for one size class's cached mark. The fill is
+/// laid with the same `Hsla` arithmetic the derivation composites with, so the
+/// pixels are the ones the ratios were computed for. With no pair for the
+/// palette nothing new is painted: no fill and no ink, the glyphs keep the
+/// row's ink and are underlined in it.
+fn mark_style(mark: SearchMark) -> HighlightStyle {
+    match mark {
+        SearchMark::Fill(pair) => HighlightStyle {
+            background_color: Some(Hsla::from(gpui::rgb(pair.fill)).opacity(pair.alpha)),
+            color: Some(gpui::rgb(pair.ink).into()),
+            ..Default::default()
+        },
+        SearchMark::Unavailable(_) => HighlightStyle {
+            underline: Some(UnderlineStyle {
+                thickness: px(1.),
+                color: None,
+                wavy: false,
+            }),
+            ..Default::default()
+        },
+    }
+}
+
+/// Test observer: what each hit row handed to its `StyledText`, with the text
+/// size the class was chosen for. Records after the fact and changes nothing
+/// about layout or paint.
+#[cfg(test)]
+mod probe {
+    use std::cell::RefCell;
+    use std::ops::Range;
+
+    use gpui::HighlightStyle;
+
+    pub(super) type Painted = (f32, Vec<(Range<usize>, HighlightStyle)>);
+
+    thread_local! {
+        static PAINTED: RefCell<Vec<Painted>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(text_px: f32, highlights: &[(Range<usize>, HighlightStyle)]) {
+        PAINTED.with(|p| p.borrow_mut().push((text_px, highlights.to_vec())));
+    }
+
+    pub(super) fn take() -> Vec<Painted> {
+        PAINTED.with(|p| std::mem::take(&mut *p.borrow_mut()))
+    }
 }
 
 /// A search result as the panel draws it: every hit windowed once, here,
@@ -642,16 +692,20 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().popover;
-        let mark = HighlightStyle {
-            background_color: Some(cx.theme().yellow.opacity(0.35)),
-            ..Default::default()
-        };
+        // The size class is read where the text is painted: the row's text is
+        // `TEXT_MONO` rems and the window's rem is `ui_font_size`, so no font
+        // size is cached beside the marks and a size change cannot leave a
+        // stale class.
+        let text_px = TEXT_MONO * cx.global::<Config>().ui_font_size;
+        let mark = mark_style(crate::ui::theme::search_marks(cx).for_text_px(text_px));
         let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = hit
             .ranges
             .iter()
             .filter(|r| usable(&hit.text, r))
             .map(|r| (r.start as usize..r.end as usize, mark))
             .collect();
+        #[cfg(test)]
+        probe::record(text_px, &highlights);
         let text =
             StyledText::new(SharedString::from(hit.text.clone())).with_highlights(highlights);
         let (path, line, column) = (hit.path.clone(), hit.line, hit.column);
@@ -971,6 +1025,247 @@ mod gpui_tests {
             .advance_clock(std::time::Duration::from_secs(9));
         vcx.background_executor.run_until_parked();
         assert_eq!(render_probe::draws(), 0, "a finished search kept drawing");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn rgb_of(c: Hsla) -> u32 {
+        let c = gpui::Rgba::from(c);
+        let ch = |v: f32| (v.clamp(0., 1.) * 255.).round() as u32;
+        ch(c.r) << 16 | ch(c.g) << 8 | ch(c.b)
+    }
+
+    /// `fill` laid over the opaque `row`, as the painter composites it.
+    fn over(row: u32, fill: Hsla) -> u32 {
+        rgb_of(Hsla::from(gpui::rgb(row)).blend(fill))
+    }
+
+    /// Sets the UI font size and lets every observer of it settle. Writing the
+    /// `Config` global makes the app's config watcher run `reload_from_config`,
+    /// which re-runs `apply_theme` and so REINSTALLS every cached global,
+    /// `SearchMarks` included: anything a test forces into the cache has to be
+    /// installed after this, never before.
+    fn set_font(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, ui_font_size: f32) {
+        app.update_in(vcx, |_, _, cx| {
+            cx.global_mut::<Config>().ui_font_size = ui_font_size;
+            cx.notify();
+        });
+        vcx.background_executor.run_until_parked();
+    }
+
+    /// One more frame, with the probe cleared immediately before it, and what
+    /// every hit row drew with in that frame. Touches no config or theme.
+    fn redraw(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<probe::Painted> {
+        probe::take();
+        app.update_in(vcx, |_, _, cx| cx.notify());
+        vcx.background_executor.run_until_parked();
+        probe::take()
+    }
+
+    /// `set_font`, then a measured frame: what every hit row drew at that
+    /// UI font size (the window's rem follows it in the same render).
+    fn paint_at(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        ui_font_size: f32,
+    ) -> Vec<probe::Painted> {
+        set_font(app, vcx, ui_font_size);
+        redraw(app, vcx)
+    }
+
+    /// Applies `theme` through the production path (the registry, the config's
+    /// preset and `apply_theme`), outside any render, and checks the cache the
+    /// row reads is that theme's own derivation.
+    fn install_theme(vcx: &mut VisualTestContext, theme: &crate::ui::presets::Theme) {
+        vcx.update(|_, cx| {
+            let mut themes = crate::ui::presets::builtins();
+            themes.push(theme.clone());
+            cx.set_global(crate::ui::presets::Themes(themes));
+            let cfg = cx.global_mut::<Config>();
+            cfg.theme_follow_system = false;
+            cfg.theme_preset = theme.id.clone();
+            crate::ui::theme::apply_theme(None, cx);
+            assert_eq!(
+                crate::ui::theme::search_marks(cx),
+                theme.search_marks(),
+                "{}: the installed marks",
+                theme.id
+            );
+        });
+    }
+
+    /// Draws the hit rows at `ui_font_size` and measures what they drew: for
+    /// every match, the fill 3:1 off both rows the row paints on (resting and
+    /// hover) and the ink 4.5:1 (normal class) or 5.0:1 (small class) on the
+    /// highlight, with literal floors, and the drawn style equal to the cached
+    /// pair of the expected class.
+    fn assert_painted(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, size: f32, small: bool) {
+        let painted = paint_at(app, vcx, size);
+        assert!(
+            !painted.is_empty(),
+            "no hit row was drawn at ui_font_size {size}"
+        );
+        let (marks, rows, row_ink) = vcx.update(|_, cx| {
+            let sf = cx.global::<crate::ui::presets::Surfaces>();
+            (
+                crate::ui::theme::search_marks(cx),
+                [sf.sidebar.base, sf.popover.hover],
+                rgb_of(cx.theme().sidebar_foreground),
+            )
+        });
+        let floor = if small { 5.0 } else { 4.5 };
+        for (text_px, highlights) in &painted {
+            assert_eq!(
+                *text_px,
+                TEXT_MONO * size,
+                "the row text size the class is chosen for"
+            );
+            assert_eq!(*text_px <= 12.0, small, "{size}: size class");
+            assert!(!highlights.is_empty(), "a hit row without a match");
+            let want = mark_style(if small { marks.small } else { marks.normal });
+            for (range, style) in highlights {
+                let fill = style.background_color.unwrap_or_else(|| {
+                    panic!("{size}: match {range:?} was drawn with no highlight fill")
+                });
+                let ink = style.color.map(rgb_of).unwrap_or(row_ink);
+                for (state, row) in ["resting", "hover"].into_iter().zip(rows) {
+                    let comp = over(row, fill);
+                    let highlight = crate::ui::presets::contrast(comp, row);
+                    assert!(
+                        highlight >= 3.0,
+                        "{size} {state}: highlight {comp:06x} on row {row:06x} is {highlight:.2}:1 (< 3)"
+                    );
+                    let text = crate::ui::presets::contrast(ink, comp);
+                    assert!(
+                        text >= floor,
+                        "{size} {state}: ink {ink:06x} on highlight {comp:06x} is {text:.2}:1 (< {floor})"
+                    );
+                }
+                assert_eq!(
+                    *style,
+                    want,
+                    "{size}: the drawn match is the cached {} pair",
+                    if small { "small" } else { "normal" }
+                );
+            }
+        }
+    }
+
+    /// The search hit rows really paint the cached pair for the size class
+    /// their text is at, live as the UI font size moves: 16 (13px) is the
+    /// normal class, 14 (11.375px) the small one, and back to 16 again with no
+    /// stale class. For every drawn match, the ink and the fill it actually
+    /// drew are measured against both rows the row paints on (resting and
+    /// hover), with literal floors: the highlight 3:1 off the row, the glyphs
+    /// 4.5:1 (normal) or 5.0:1 (small) on the highlight.
+    #[gpui::test]
+    fn search_matches_are_painted_with_the_cached_pair_per_text_size(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("marks");
+        std::fs::write(root.join("a.rs"), "fn needle() {}\n// Needle needle\n").unwrap();
+        let (app, mut vcx, _pane) = search_panel_on(cx, &root);
+        type_query(&app, &mut vcx, "needle");
+        landed(&app, &mut vcx);
+
+        // Phase 1, the finding's own state: the DEFAULT DARK theme at the
+        // default 16px UI font (13px row text, normal class). The old paint
+        // is #c9c9cb on #696955, 3.38:1, which fails the 4.5 floor.
+        let dark = crate::ui::presets::builtins()
+            .into_iter()
+            .find(|t| t.id == "dark")
+            .expect("the default dark built-in");
+        install_theme(&mut vcx, &dark);
+        assert_painted(&app, &mut vcx, 16.0, false);
+
+        // Phase 2, a real, validated theme whose two classes have DIFFERENT
+        // pairs, applied through `apply_theme` (so the cache the row reads is
+        // the production one, installed outside any render). Without it a
+        // wrongly chosen class could paint an identical pair and go unnoticed.
+        let theme = crate::ui::presets::builtins()
+            .into_iter()
+            .chain(crate::ui::presets::generated_theme_grid())
+            .find(|t| {
+                let m = t.search_marks();
+                matches!((m.normal, m.small),
+                    (SearchMark::Fill(a), SearchMark::Fill(b)) if a != b)
+            })
+            .expect("a built-in or generated theme whose normal and small pairs differ");
+        install_theme(&mut vcx, &theme);
+        let cached = vcx.update(|_, cx| crate::ui::theme::search_marks(cx));
+        assert_ne!(
+            cached.normal, cached.small,
+            "witness: the installed theme has distinct normal and small pairs"
+        );
+        for (size, small) in [(16.0, false), (14.0, true), (16.0, false)] {
+            assert_painted(&app, &mut vcx, size, small);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A class with no pair (forced through the cache the paint reads) is
+    /// drawn as an underline in the row's own ink: no fill, no colour of its
+    /// own, in both classes, live across a size change.
+    #[gpui::test]
+    fn an_unavailable_class_is_drawn_as_a_plain_underline(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("unavailable");
+        std::fs::write(root.join("a.rs"), "fn needle() {}\n").unwrap();
+        let (app, mut vcx, _pane) = search_panel_on(cx, &root);
+        type_query(&app, &mut vcx, "needle");
+        landed(&app, &mut vcx);
+
+        for size in [16.0, 14.0] {
+            // Settle the font (and the theme the config watcher re-applies
+            // with it) FIRST, then force the miss into the cache the paint
+            // reads, LAST, and measure the very next frame.
+            set_font(&app, &mut vcx, size);
+            let forced = vcx.update(|_, cx| {
+                let sf = cx.global::<crate::ui::presets::Surfaces>();
+                let miss = crate::ui::presets::search_mark_pair_for(
+                    [sf.sidebar.base, sf.popover.hover],
+                    sf.sidebar.text_resting,
+                    0xffff00,
+                    25.0,
+                )
+                .expect_err("no pair reaches 25:1");
+                let forced = crate::ui::presets::SearchMarks {
+                    normal: SearchMark::Unavailable(miss),
+                    small: SearchMark::Unavailable(miss),
+                };
+                cx.set_global(forced);
+                forced
+            });
+            let cached = |vcx: &mut VisualTestContext| {
+                vcx.update(|_, cx| crate::ui::theme::search_marks(cx))
+            };
+            assert_eq!(
+                cached(&mut vcx),
+                forced,
+                "{size}: the forced miss is the cache"
+            );
+            let painted = redraw(&app, &mut vcx);
+            assert_eq!(
+                cached(&mut vcx),
+                forced,
+                "{size}: the cache was replaced while the measured frame drew"
+            );
+            assert!(!painted.is_empty(), "no hit row at ui_font_size {size}");
+            for (_, highlights) in &painted {
+                assert!(!highlights.is_empty());
+                for (_, style) in highlights {
+                    assert_eq!(style.background_color, None, "{size}: no fill");
+                    assert_eq!(style.color, None, "{size}: no ink of its own");
+                    assert_eq!(
+                        style.underline,
+                        Some(UnderlineStyle {
+                            thickness: px(1.),
+                            color: None,
+                            wavy: false
+                        }),
+                        "{size}: a 1px underline in the row ink"
+                    );
+                }
+            }
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 }

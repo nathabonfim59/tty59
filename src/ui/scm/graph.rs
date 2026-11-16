@@ -50,7 +50,7 @@ use gpui::{
     prelude::*, px, quad, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
+use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use tty59_core::core::git::log::{
@@ -64,6 +64,7 @@ use crate::ui::presets::{ActiveLanes, LANE_SLOTS, Lanes};
 use crate::ui::right_panel::{META, META_MONO, ROW_INSET, TEXT, TEXT_INSET, pill_shell};
 use crate::ui::scm::panel::GROUP_CHEVRON;
 use crate::ui::scm::path::relative_time;
+use crate::ui::scm::row_menu::{RowMenu, RowOwner};
 use crate::ui::scm::state::{PreparedPage, RefLabel, RepoKey};
 use crate::ui::text_elision::{ElidedLabel, Mode as ElideMode};
 
@@ -226,6 +227,23 @@ const GRAPH_REF_W: f32 = 76.;
 const GRAPH_REF_CHARS_WIDE: usize = 18;
 const GRAPH_REF_W_WIDE: f32 = 124.;
 const GRAPH_REF_WIDE_FROM: f32 = 380.;
+
+/// What `graph_body` is told about the section it fills: how tall it is (the
+/// ceiling on how many rows become elements) and how wide the panel is.
+#[derive(Clone, Copy)]
+struct GraphView {
+    height: f32,
+    panel_w: f32,
+}
+
+/// What every row of one frame shares: the gutter the text starts after, the
+/// moment ages are counted from, and the ref chip cap.
+#[derive(Clone, Copy)]
+struct RowFrame {
+    gutter: f32,
+    now: i64,
+    ref_cap: RefCap,
+}
 
 /// How much of a ref name a chip may show, and how wide its box may be.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -686,7 +704,8 @@ impl Tty59App {
             }
             Some(page) => {
                 let panel_w = self.right_panel_px(window, cx);
-                self.graph_body(repo, &page, query.as_deref(), height, panel_w, cx)
+                let view = GraphView { height, panel_w };
+                self.graph_body(repo, &page, query.as_deref(), view, window, cx)
             }
         };
         let (backing, handle) = self.graph_resize(ceiling, cx);
@@ -884,10 +903,11 @@ impl Tty59App {
         repo: &RepoKey,
         page: &Arc<CommitPage>,
         query: Option<&str>,
-        height: f32,
-        panel_w: f32,
+        view: GraphView,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let GraphView { height, panel_w } = view;
         let cap = max_lanes(panel_w);
         let ref_cap = RefCap::for_panel(panel_w);
         // One string of beads needs one bead's column, not the budget for the
@@ -926,10 +946,15 @@ impl Tty59App {
         // search result starts on the panel's text column rather than in a
         // column of empty space.
         let indent = if filtering { ROW_INSET } else { gutter };
+        let frame = RowFrame {
+            gutter: indent,
+            now,
+            ref_cap,
+        };
         let list = v_flex().pt(px(first as f32 * GRAPH_ROW_H)).children(
             rows[first..last]
                 .iter()
-                .map(|i| self.graph_row(repo, page, *i, indent, now, ref_cap, cx)),
+                .map(|i| self.graph_row(repo, page, *i, frame, window, cx)),
         );
         let mut stack = div()
             .relative()
@@ -1002,18 +1027,33 @@ impl Tty59App {
         repo: &RepoKey,
         page: &Arc<CommitPage>,
         i: usize,
-        gutter: f32,
-        now: i64,
-        ref_cap: RefCap,
+        frame: RowFrame,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let RowFrame {
+            gutter,
+            now,
+            ref_cap,
+        } = frame;
         let commit = &page.commits[i];
         let mono = cx.theme().mono_font_family.clone();
         // The sidebar's surface, because that is the fill this row sits on.
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let selected = self.scm.graph.selected.as_deref() == Some(commit.oid.as_str());
         let (prefix, subject) = split_conventional(&commit.summary);
-        let oid = commit.oid.clone();
+        // The row's own menu state, keyed by the commit's whole oid (prepared with
+        // the page): alive while this commit keeps being built, so a commit that
+        // leaves the page takes its open menu and its record with it.
+        let menu = self.scm.graph.menu_key(i).cloned().map(|key| {
+            RowMenu::of(
+                key,
+                || RowOwner::Commit(commit.oid.clone()),
+                cx.entity().downgrade(),
+                window,
+                cx,
+            )
+        });
 
         h_flex()
             .id(SharedString::from(format!("scm-graph-row-{i}")))
@@ -1080,11 +1120,19 @@ impl Tty59App {
                         commit.author.at.unix,
                     ))),
             )
-            .tooltip({
-                let text = commit_tooltip(commit, now);
-                move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx)
-                }
+            // Withheld while a row menu is open: it opens inside this row, and
+            // a row with no builder also loses a tooltip already showing.
+            .when(!self.scm.row_menu_open(), |row| {
+                row.tooltip({
+                    let text = commit_tooltip(commit, now);
+                    move |window, cx| {
+                        let tip =
+                            gpui_component::tooltip::Tooltip::new(text.clone()).build(window, cx);
+                        #[cfg(test)]
+                        super::panel::row_tooltip_probe::built(&tip);
+                        tip
+                    }
+                })
             })
             .on_click(cx.listener({
                 let repo = repo.clone();
@@ -1099,14 +1147,28 @@ impl Tty59App {
                     this.graph_open_commit(repo.clone(), seed.oid.clone(), Some(seed), cx)
                 }
             }))
-            .context_menu({
-                let app = cx.entity().downgrade();
-                let repo = repo.clone();
-                let oid = oid.clone();
-                move |menu, _window, cx| {
-                    let danger = cx.theme().danger;
-                    Tty59App::graph_row_context_menu(menu, &repo, &oid, danger, &app)
-                }
+            .when_some(menu, |row, menu| {
+                let overlay = RowMenu::overlay(&menu, window, cx);
+                row.on_mouse_down(MouseButton::Right, {
+                    let app = cx.entity().downgrade();
+                    let repo = repo.clone();
+                    let page = page.clone();
+                    move |event, window, cx| {
+                        let (app, repo) = (app.clone(), repo.clone());
+                        let oid = page.commits[i].oid.clone();
+                        RowMenu::open(
+                            &menu,
+                            event.position,
+                            move |popup, _window, cx| {
+                                let danger = cx.theme().danger;
+                                Tty59App::graph_row_context_menu(popup, &repo, &oid, danger, &app)
+                            },
+                            window,
+                            cx,
+                        );
+                    }
+                })
+                .children(overlay)
             })
             .into_any_element()
     }

@@ -728,6 +728,22 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // in `render`, because the graph reads it once per visible row per frame
     // and each entry costs a contrast bisection on three surfaces.
     cx.set_global(presets::ActiveLanes(theme.lanes_with(&m)));
+    // The matched-text marks of the project-search hit row, derived here for
+    // the same reason. A class with no joint solution is installed as
+    // `Unavailable` and reported once, for both classes, per theme change.
+    let search_marks = theme.search_marks_from(&resolved);
+    let misses: Vec<String> = search_marks
+        .misses()
+        .map(presets::SearchMarkMiss::describe)
+        .collect();
+    if !misses.is_empty() {
+        log::warn!(
+            "theme {}: no search-match highlight meets its contrast floors, matches are underlined instead: {}",
+            theme.id,
+            misses.join(" | ")
+        );
+    }
+    cx.set_global(search_marks);
 
     if !cx.has_global::<StockUiFont>() {
         let stock = Theme::global(cx).font_family.clone();
@@ -1066,6 +1082,13 @@ pub(crate) fn fill_pole(cx: &App) -> u32 {
 /// [`semantics`].
 pub(crate) fn chrome_ink(cx: &App) -> presets::ChromeInk {
     *cx.global::<presets::ChromeInk>()
+}
+
+/// Reads the matched-text marks of the project-search hit row, one per text
+/// size class, derived once per theme change in [`apply_theme`]. Same
+/// required-global invariant as [`semantics`].
+pub(crate) fn search_marks(cx: &App) -> presets::SearchMarks {
+    *cx.global::<presets::SearchMarks>()
 }
 
 /// Resolves a theme-free [`crate::core::cli_agent::AgentStatus`] via cached
@@ -1956,6 +1979,40 @@ mod tests {
             }
 
             assert_eq!(semantics(cx).info.ink, light_expected.info.ink);
+        });
+    }
+
+    /// The matched-text marks are installed by `apply_theme` for the theme it
+    /// applies and replaced by the next one: going through every built-in
+    /// forwards and then backwards, the cache always equals that theme's own
+    /// derivation (both classes), never the previous theme's.
+    #[gpui::test]
+    fn apply_theme_installs_and_replaces_the_search_marks(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            let themes = presets::builtins();
+            cx.set_global(presets::Themes(themes.clone()));
+            let order: Vec<_> = themes.iter().chain(themes.iter().rev()).collect();
+            let mut seen = Vec::new();
+            for theme in order {
+                cx.set_global(Config(crate::core::config::CoreConfig {
+                    theme_follow_system: false,
+                    theme_preset: theme.id.clone(),
+                    ..Default::default()
+                }));
+                apply_theme(None, cx);
+                let cached = search_marks(cx);
+                assert_eq!(cached, theme.search_marks(), "{}: search marks", theme.id);
+                assert_eq!(cached.misses().count(), 0, "{}: Unavailable", theme.id);
+                if !seen.contains(&cached) {
+                    seen.push(cached);
+                }
+            }
+            assert!(
+                seen.len() > 1,
+                "every built-in cached the same marks, so a stale cache could not be told apart"
+            );
         });
     }
 

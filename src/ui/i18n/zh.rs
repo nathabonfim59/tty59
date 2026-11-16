@@ -52,10 +52,10 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SettingsNoThemesMatch => "没有匹配的主题",
         L10nKey::SettingsRestoreChanged => "恢复 {count} 项修改",
         L10nKey::SettingsShortcutsHint => {
-            "点击快捷键后按下新组合键；紧接着再按一组即可组成序列。Esc 取消，Backspace 清除。"
+            "点击快捷键，按下新组合键。连按两组可组成序列。Esc 取消。"
         }
         L10nKey::SettingsShortcutsHintTmux => {
-            "tmux 预设：窗格与标签页操作使用前缀键。点击快捷键即可修改；Esc 取消，Backspace 清除。"
+            "tmux 预设：窗格与标签页操作使用前缀键。点击快捷键即可修改；Esc 取消。"
         }
         L10nKey::SettingsShortcutConflict => "{keys} 已被“{action}”使用，替换后将从那里移除。",
         L10nKey::SettingsReplace => "替换",
@@ -2336,6 +2336,20 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorGitPeekLinesAdded => "新增 {count} 行",
         L10nKey::EditorGitPeekLinesRemoved => "删除 {count} 行",
         L10nKey::EditorGitPeekChanges => "{removed}，{added}",
+        // B5 S2: settings save failure and unassigned shortcuts.
+        L10nKey::SettingsSaveFailedTitle => "无法保存设置",
+        L10nKey::SettingsSaveFailedBody => "仍要离开吗？自上次成功保存以来的更改将被放弃。",
+        L10nKey::SettingsStay => "留下",
+        L10nKey::SettingsLeave => "离开",
+        L10nKey::SettingsShortcutAdd => "添加",
+        L10nKey::SettingsShortcutsRecordingHint => {
+            "按下新组合键。Esc 取消，Backspace 清除此快捷键。"
+        }
+        // B5 remote: SFTP delete title with host, symlink label, SSH prompt extras.
+        L10nKey::SftpDeleteTitleOnHost => "删除 {host} 上的“{name}”？",
+        L10nKey::SftpSymlinkAria => "{name}，符号链接",
+        L10nKey::SshPromptPassphrasePlaceholder => "口令",
+        L10nKey::SshPromptSaveToKeychain => "保存到钥匙串",
     })
 }
 

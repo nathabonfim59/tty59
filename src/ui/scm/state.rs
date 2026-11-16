@@ -137,11 +137,26 @@ pub(crate) struct ScmPanelState {
     /// Where each group's rows start in `scroll`'s content, for
     /// `rows_window`.
     pub(crate) run_tops: crate::ui::scm::rows_window::RunTops,
-    /// The file row whose context menu is open, kept built however far the
-    /// list scrolls: the menu lives in that row's element state. Set when
-    /// the menu is built, cleared when it is dismissed.
+    /// The Changes file row whose context menu is open. The menu lives in that
+    /// row's own state (`row_menu::RowMenu`), so this is also the row that has
+    /// to stay built, however far the list scrolls, for as long as it is open.
+    /// Set when the menu opens; cleared when it is dismissed and when the
+    /// row's state is released (the row left the list, its group changed, or
+    /// the panel is no longer shown).
     pub(crate) menu_row: Option<(ScmGroup, String)>,
-    pub(crate) menu_sub: Option<gpui::Subscription>,
+    /// The History commit whose row menu is open, by oid. Set and cleared
+    /// like `menu_row`.
+    pub(crate) menu_commit: Option<String>,
+    /// The one menu entity the two records above belong to. Every write to
+    /// them names the menu it is for, so a late end of an older menu, even one
+    /// of the very same row, cannot clear what a newer menu recorded.
+    pub(crate) menu_instance: Option<gpui::EntityId>,
+    /// Where the focus goes back to when the menu on record ends. Written and
+    /// cleared with `menu_instance`, in the same write, so it always belongs to
+    /// that menu. A row that opens its own menu while this one is still up
+    /// reads it when it is asked (never while painting) to learn the focus from
+    /// before the first menu, not the first menu's own handle.
+    pub(crate) menu_origin: Option<MenuOrigin>,
     /// What the last frame drew for a repository — Ready, Loading or Failed —
     /// with the cache key. The watcher compares against it
     /// (`StatusRead::same_identity`) so a global write that changed nothing
@@ -150,7 +165,23 @@ pub(crate) struct ScmPanelState {
     pub(crate) seen: Option<((HostId, PathBuf), crate::terminal::git_data::StatusRead)>,
 }
 
+/// The focus of an open row menu: its own handle, and what had the focus
+/// before it took it. Only handles, never the menu entity itself.
+#[derive(Clone)]
+pub(crate) struct MenuOrigin {
+    pub(crate) handle: gpui::FocusHandle,
+    /// `None` when nothing had the focus: that is kept as it is.
+    pub(crate) original: Option<gpui::FocusHandle>,
+}
+
 impl ScmPanelState {
+    /// Whether a Changes or History row has a menu open. While one does, no
+    /// row offers its tooltip: the menu opens inside the row it was asked on,
+    /// and a tooltip drawn there lands on top of its items.
+    pub(crate) fn row_menu_open(&self) -> bool {
+        self.menu_row.is_some() || self.menu_commit.is_some()
+    }
+
     /// The repository the panel should act on: an explicit pick wins over
     /// whatever the active pane happens to be sitting in.
     pub(crate) fn active_repo(&self) -> Option<&RepoKey> {
@@ -246,6 +277,11 @@ pub(crate) struct GraphState {
     page: Option<Arc<CommitPage>>,
     /// The ref chip text of every commit in `page`, by commit index.
     ref_labels: Vec<Option<RefLabel>>,
+    /// The element id of every commit's row menu state, by commit index: the
+    /// commit's full oid, built once with the page. Beside `page` and
+    /// `ref_labels` for the same reason, and for the same one: a frame only
+    /// clones what is already built.
+    menu_keys: Vec<gpui::ElementId>,
     pub(crate) page_key: Option<(RepoKey, u64, GraphScope)>,
     /// The key of a load that came back empty-handed. Without it a failing
     /// `git log` — a scope pinned to a since-deleted branch, a vanished
@@ -305,14 +341,22 @@ impl GraphState {
     pub(crate) fn install_page(&mut self, prepared: PreparedPage, key: (RepoKey, u64, GraphScope)) {
         self.page = Some(Arc::new(prepared.page));
         self.ref_labels = prepared.labels;
+        self.menu_keys = prepared.menu_keys;
         self.page_key = Some(key);
     }
 
-    /// Forget the page, its chips and the key it answered.
+    /// Forget the page, its chips, its menu keys and the key it answered.
     pub(crate) fn clear_page(&mut self) {
         self.page = None;
         self.ref_labels = Vec::new();
+        self.menu_keys = Vec::new();
         self.page_key = None;
+    }
+
+    /// The id of commit `index`'s row menu state. A page is only ever
+    /// installed with its keys, so every commit of it has one.
+    pub(crate) fn menu_key(&self, index: usize) -> Option<&gpui::ElementId> {
+        self.menu_keys.get(index)
     }
 
     /// The chip of commit `index` of the page, `None` for a commit that
@@ -342,12 +386,23 @@ pub(crate) struct RefLabel {
 pub(crate) struct PreparedPage {
     page: CommitPage,
     labels: Vec<Option<RefLabel>>,
+    menu_keys: Vec<gpui::ElementId>,
 }
 
 impl PreparedPage {
-    /// Prepare the chips of every commit of `page`. Runs where the page is
-    /// loaded, off the UI thread.
+    /// Prepare the chips and the menu keys of every commit of `page`. Runs
+    /// where the page is loaded, off the UI thread.
     pub(crate) fn new(page: CommitPage) -> Self {
+        // The commit's whole oid, so a menu follows its commit when the page
+        // changes under it (a row's own id is its position) and two commits
+        // can never share one.
+        let menu_keys = page
+            .commits
+            .iter()
+            .map(|commit| {
+                gpui::ElementId::Name(SharedString::from(format!("scm-graph-menu-{}", commit.oid)))
+            })
+            .collect();
         let labels = page
             .commits
             .iter()
@@ -363,7 +418,11 @@ impl PreparedPage {
                 })
             })
             .collect();
-        Self { page, labels }
+        Self {
+            page,
+            labels,
+            menu_keys,
+        }
     }
 }
 
