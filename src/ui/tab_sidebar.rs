@@ -1778,9 +1778,17 @@ impl Tty59App {
                         if has_counts {
                             branch = branch.tail(META_SEP_TRIMMED);
                         }
+                        // The line may give up room, down to its counts: the
+                        // branch inside it is the shrinkable part and the counts
+                        // never shrink. Held rigid, a header that was exactly
+                        // full (the narrowest rail, the heading on its floor,
+                        // the line on its half) pushed the counts past the
+                        // padding as soon as anything in front of it grew by a
+                        // pixel, such as a 12px pin mark.
                         let line = h_flex()
                             .id(("sidebar-group-git", group_ix))
-                            .flex_shrink_0()
+                            .flex_shrink(1.)
+                            .min_w_0()
                             .max_w(relative(0.5))
                             .items_center()
                             .gap_1p5()
@@ -5097,7 +5105,8 @@ mod fold_tests {
             assert!(
                 (counts.right() - git.right()).abs() < px(0.5)
                     && (bar.right() - px(8.) - counts.right()).abs() < px(0.5),
-                "at {width}: the counts are not flush right"
+                "at {width}: the counts are not flush right: bar {bar:?}, name {name:?}, git {git:?}, counts {counts:?}, counts to padding edge {:?}",
+                bar.right() - px(8.) - counts.right()
             );
             counts_widths.push(counts.size.width);
         }
@@ -5258,7 +5267,10 @@ mod fold_tests {
                 .unwrap_or_else(|| panic!("at {width}: the counts were not painted"));
             assert!(
                 (bar.right() - px(8.) - counts.right()).abs() < px(0.5),
-                "at {width}: the counts are not flush right"
+                "at {width}: the counts are not flush right: bar {bar:?}, name {:?}, git {:?}, counts {counts:?}, counts to padding edge {:?}",
+                vcx.debug_bounds("sidebar-group-name-0"),
+                vcx.debug_bounds("sidebar-group-git-0"),
+                bar.right() - px(8.) - counts.right()
             );
             counts_widths.push(counts.size.width);
         }
