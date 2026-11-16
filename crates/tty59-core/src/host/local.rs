@@ -160,25 +160,45 @@ impl Host for LocalHost {
     }
 
     fn read_file(&self, p: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+        use std::io::Read as _;
+
         guard_off_ui();
-        let md = fs::metadata(p)?;
-        if md.is_dir() {
+        // A directory is named as one before anything tries to open it:
+        // Windows refuses the open with a different, less useful error.
+        if fs::metadata(p)?.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::IsADirectory,
                 format!("{} is a directory", p.display()),
             ));
         }
-        if md.len() > max_bytes {
+        // The size is read from the file that is then read, not from a second
+        // lookup of the path, and it is only ever a hint: procfs and a file
+        // that grows between a stat and a read both report less than they
+        // hold. The bound that matters is on the bytes actually returned, so
+        // the read is cut off one byte past the limit rather than run to the
+        // end of whatever the file has become.
+        let mut file = fs::File::open(p)?;
+        let reported = file.metadata()?.len();
+        if reported > max_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::FileTooLarge,
                 format!(
-                    "{} is {} bytes, over the {max_bytes} limit",
-                    p.display(),
-                    md.len()
+                    "{} is {reported} bytes, over the {max_bytes} limit",
+                    p.display()
                 ),
             ));
         }
-        fs::read(p)
+        let mut bytes = Vec::with_capacity(reported.min(max_bytes) as usize);
+        (&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                format!("{} is over the {max_bytes} byte limit", p.display()),
+            ));
+        }
+        Ok(bytes)
     }
 
     /// The real path behind `p`, in the spelling the rest of tty59 keys by.
@@ -738,6 +758,60 @@ mod tests {
     }
 
     crate::host_conformance_suite!(local, sandbox);
+
+    /// The bound `read_file` promises is on the bytes it returns, not on what
+    /// `stat` claimed before the read: a file the OS reports as empty (procfs,
+    /// or any file that grows between the two calls) must still be refused
+    /// once it yields more than `max_bytes`, and never be read to the end.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_file_bounds_the_bytes_read_not_the_size_stat_reported() {
+        let host = LocalHost::new();
+        let path = Path::new("/proc/self/cmdline");
+        let reported = std::fs::metadata(path).unwrap().len();
+        assert_eq!(reported, 0, "procfs reports no size for this file");
+        // Sanity: the unbounded content really is longer than the limit
+        // asked for below, so a read that ignores the bound is visible.
+        assert!(std::fs::read(path).unwrap().len() > 1);
+
+        let err = host
+            .read_file(path, 1)
+            .expect_err("more than max_bytes were readable, so the read is refused");
+        assert_eq!(err.kind(), io::ErrorKind::FileTooLarge, "{err}");
+    }
+
+    #[test]
+    fn read_file_accepts_exactly_the_limit_and_refuses_one_byte_more() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = LocalHost::new();
+
+        let exact = dir.path().join("exact.bin");
+        std::fs::write(&exact, [7u8; 16]).unwrap();
+        assert_eq!(host.read_file(&exact, 16).unwrap(), vec![7u8; 16]);
+
+        let over = dir.path().join("over.bin");
+        std::fs::write(&over, [7u8; 17]).unwrap();
+        let err = host.read_file(&over, 16).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::FileTooLarge, "{err}");
+
+        let empty = dir.path().join("empty.bin");
+        std::fs::write(&empty, []).unwrap();
+        assert_eq!(host.read_file(&empty, 0).unwrap(), Vec::<u8>::new());
+        let err = host.read_file(&exact, 0).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::FileTooLarge, "{err}");
+    }
+
+    #[test]
+    fn read_file_keeps_its_other_refusals() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = LocalHost::new();
+        let err = host.read_file(dir.path(), 1024).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::IsADirectory, "{err}");
+        let err = host
+            .read_file(&dir.path().join("missing"), 1024)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    }
 
     #[test]
     fn wsl_shares_are_polled_and_nothing_else_is() {

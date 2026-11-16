@@ -62,6 +62,38 @@ The settings are `link_file_open` (`internal`, `system`, or `command`) and
 existed keeps working: one that set a command stays on **Command**, and one
 that did not moves to the built-in editor.
 
+## Images
+
+Under **Built-in editor**, a link to a picture opens it in tty59's own tab,
+in the same place a text file opens, on this machine or read from the connected
+host. The Files tree and the SFTP browser open a picture the same way
+when you click it, whichever mode is set: the setting is about terminal links.
+**Default app** and **Command** keep handing pictures to the OS or to your
+command, exactly as they do any other file, and a picture on another machine
+opens here whichever mode is set.
+
+What opens is decided by the file's **content**, not its name: PNG, JPEG, GIF,
+WebP, BMP, ICO, and SVG. A file called `.png` that holds text opens as text,
+and an SVG opens as a picture, not as source. The picture is fitted to the tab
+with its aspect ratio kept; <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + wheel zooms about
+the pointer, the wheel and a middle-button drag pan, a double click switches
+between fit and 100 %, and **Fit** and **100%** are in the corner. The name,
+format, dimensions, and size are shown at the bottom.
+
+Limits keep a picture from using the machine up:
+
+- **20 MiB** of file, **16,777,216** pixels (width × height, so 4096 × 4096 for
+  a square one) in all, and **64 MiB** of decoded pixels. A file over a limit, a damaged one, or one in a format
+  tty59 does not draw (TIFF, AVIF, HEIC, JPEG XL) is reported in its tab; it is
+  never handed to the desktop, and a program with a picture's name is never run.
+- A **GIF** or **WebP** animates while all its frames fit the 64 MiB; a larger
+  one shows its first frame, and says so.
+- A picture wider or taller than **8192** pixels inside the pixel limit — a
+  panorama — keeps its size and zoom but is shown from a reduced copy, and says
+  so, because the graphics card holds a picture as one texture.
+- An **SVG** is drawn without reading any file or address: one that links or
+  embeds another image is reported instead of being drawn with a hole in it.
+
 ## localhost ports
 
 <kbd>⌘</kbd>-clicking `localhost:3000` opens it in your browser, which is only

@@ -22,10 +22,13 @@ use crate::ui::editor_session::{self, TabEditor};
 use crate::ui::editor_text::{self, EditorConfig, Indent, LineEnding, TextFormat};
 use crate::ui::host_ops::{HostId, HostOps, MTime, SharedHost, WatchSub};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::image_preview::ImageData;
+use crate::ui::image_preview::decode as image_decode;
 use crate::ui::lsp::LspStatus;
 use crate::ui::zoom::SCROLL_GESTURE_IDLE;
 
 mod gutter;
+mod images;
 mod nav;
 pub(crate) mod outline;
 mod problems;
@@ -352,6 +355,12 @@ struct EditorBar {
 pub(crate) struct EditorPanelState {
     /// Every open buffer in this window. Tabs refer to these by id.
     buffers: Vec<OpenFile>,
+    /// Every open picture: documents that have ids like buffers do, and no
+    /// text to hold. See `images`.
+    images: images::ImageState,
+    /// How many times the reader has hidden each tab's editor panel, so a
+    /// restore that was asked for before a hide can tell it landed after one.
+    panel_epoch: HashMap<TabId, u64>,
     next_untitled: u32,
     /// Where to put the cursor once a particular file is on screen, for a
     /// `file.rs:120:3` that has to load first. Carried rather than applied at
@@ -454,6 +463,8 @@ impl EditorPanelState {
         .detach();
         Self {
             buffers: Vec::new(),
+            images: images::ImageState::default(),
+            panel_epoch: HashMap::new(),
             next_untitled: 1,
             pending_cursor: None,
             bar: None,
@@ -707,34 +718,15 @@ struct Loaded {
     config: EditorConfig,
 }
 
-/// Reads, sizes, decodes and configures a file, on the host's own thread.
-fn load_file(
+/// The text half of opening: decodes `bytes` as the editor's text, or says
+/// they are not.
+fn load_text(
     h: &dyn tty59_core::host::Host,
-    requested: PathBuf,
+    path: PathBuf,
+    mtime: Option<MTime>,
+    bytes: &[u8],
 ) -> Result<Loaded, EditorOpenError> {
-    let path = h.canonicalize(&requested).unwrap_or(requested);
-    let meta = h.stat(&path).map_err(|e| {
-        EditorOpenError::Message(t_fmt(
-            L10nKey::EditorCantOpen,
-            &[("path", &path.display().to_string()), ("e", &e.to_string())],
-        ))
-    })?;
-    if meta.len > MAX_FILE_BYTES {
-        return Err(EditorOpenError::Message(t_fmt(
-            L10nKey::EditorFileTooLarge,
-            &[
-                ("path", &path.display().to_string()),
-                ("size", &(meta.len / (1024 * 1024)).to_string()),
-            ],
-        )));
-    }
-    let bytes = h.read_file(&path, MAX_FILE_BYTES).map_err(|e| {
-        EditorOpenError::Message(t_fmt(
-            L10nKey::EditorCantRead,
-            &[("path", &path.display().to_string()), ("e", &e.to_string())],
-        ))
-    })?;
-    let Some(decoded) = editor_text::decode(&bytes) else {
+    let Some(decoded) = editor_text::decode(bytes) else {
         return Err(EditorOpenError::NotText(path));
     };
     let config = read_editorconfig(h, &path);
@@ -742,9 +734,156 @@ fn load_file(
         path,
         text: decoded.text,
         format: decoded.format,
-        mtime: meta.mtime,
+        mtime,
         config,
     })
+}
+
+/// A picture, read and decoded, with where it came from.
+struct ImageLoaded {
+    path: PathBuf,
+    decoded: image_decode::Decoded,
+    /// Whether any pixel is transparent, found here on the host's thread
+    /// rather than in the frame that draws it.
+    has_alpha: bool,
+}
+
+/// A file that is, or is called, a picture and cannot be shown. It still gets
+/// a tab: the reason belongs where the file was opened, not in a toast or a
+/// desktop opener.
+struct ImageFailed {
+    path: PathBuf,
+    error: image_decode::ImageError,
+    /// The file's size when it is known, for the words about a limit.
+    bytes: Option<u64>,
+}
+
+/// What a file turned out to be.
+enum Opened {
+    Text(Loaded),
+    Image(ImageLoaded),
+    ImageFailed(ImageFailed),
+}
+
+/// Reads a file off its host once, decides from its *content* what it is, and
+/// decodes it as that, on the host's own thread.
+///
+/// Order matters, and it is the point of this function: the bytes are
+/// sniffed before they are offered to the text decoder, because an SVG is
+/// valid text and would otherwise open editable. A name that says "picture"
+/// over bytes that are neither a picture nor text is an error in its tab,
+/// never a hand-off to the desktop. Everything else keeps its old route,
+/// including the program protection in [`Tty59App::open_outside_the_editor`].
+fn load_document(
+    h: &dyn tty59_core::host::Host,
+    requested: PathBuf,
+) -> Result<Opened, EditorOpenError> {
+    // The name it was asked for under hints as well as the name it resolves
+    // to: `latest.png` linking to `build-123` is a picture by its link.
+    let named_like_a_picture = image_decode::has_image_extension(&requested);
+    let path = h.canonicalize(&requested).unwrap_or(requested);
+    let meta = h.stat(&path).map_err(|e| {
+        EditorOpenError::Message(t_fmt(
+            L10nKey::EditorCantOpen,
+            &[("path", &path.display().to_string()), ("e", &e.to_string())],
+        ))
+    })?;
+    let hinted = named_like_a_picture || image_decode::has_image_extension(&path);
+    let too_large_for_text = |len: u64| {
+        EditorOpenError::Message(t_fmt(
+            L10nKey::EditorFileTooLarge,
+            &[
+                ("path", &path.display().to_string()),
+                ("size", &(len / (1024 * 1024)).to_string()),
+            ],
+        ))
+    };
+    // Past what any picture may be, nothing is read: a name that says picture
+    // gets the picture's words, anything else the text editor's.
+    if meta.len > image_decode::MAX_IMAGE_BYTES {
+        return if hinted {
+            Ok(Opened::ImageFailed(ImageFailed {
+                path,
+                error: image_decode::ImageError::TooLarge { bytes: meta.len },
+                bytes: Some(meta.len),
+            }))
+        } else {
+            Err(too_large_for_text(meta.len))
+        };
+    }
+    // The host enforces the bound on the bytes it returns, not only on the
+    // size it was told: see `Host::read_file`.
+    let bytes = match h.read_file(&path, image_decode::MAX_IMAGE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(e) => return read_refusal(path, hinted, &e),
+    };
+    let len = bytes.len() as u64;
+    match image_decode::sniff(&bytes) {
+        image_decode::Sniffed::NotImage => {}
+        found => {
+            return Ok(match image_decode::decode(&bytes, found) {
+                Ok(decoded) => {
+                    let has_alpha = decoded.frames.iter().any(|frame| {
+                        crate::ui::image_preview::view::has_alpha(frame.buffer().as_raw())
+                    });
+                    Opened::Image(ImageLoaded {
+                        path,
+                        decoded,
+                        has_alpha,
+                    })
+                }
+                Err(error) => Opened::ImageFailed(ImageFailed {
+                    path,
+                    error,
+                    bytes: Some(len),
+                }),
+            });
+        }
+    }
+    // Not a picture. Text keeps its own, smaller, limit.
+    if len > MAX_FILE_BYTES {
+        return Err(too_large_for_text(len));
+    }
+    match load_text(h, path, meta.mtime, &bytes) {
+        Ok(loaded) => Ok(Opened::Text(loaded)),
+        Err(EditorOpenError::NotText(path)) if hinted => Ok(Opened::ImageFailed(ImageFailed {
+            path,
+            error: image_decode::ImageError::NotAnImage,
+            bytes: Some(len),
+        })),
+        Err(other) => Err(other),
+    }
+}
+
+/// What a refused read of `path` becomes.
+///
+/// The size was checked before the read, and a file can still be over the
+/// limit when it is read — it grew, or never reported its size — which the
+/// host answers as `FileTooLarge`. For something named like a picture that is
+/// the picture's words in its tab, naming the limit and no size, since none
+/// was measured. Anything else, and every other kind of file, keeps the
+/// ordinary "can't read" message.
+fn read_refusal(
+    path: PathBuf,
+    hinted: bool,
+    error: &std::io::Error,
+) -> Result<Opened, EditorOpenError> {
+    if hinted && error.kind() == std::io::ErrorKind::FileTooLarge {
+        return Ok(Opened::ImageFailed(ImageFailed {
+            path,
+            error: image_decode::ImageError::TooLarge {
+                bytes: image_decode::MAX_IMAGE_BYTES + 1,
+            },
+            bytes: None,
+        }));
+    }
+    Err(EditorOpenError::Message(t_fmt(
+        L10nKey::EditorCantRead,
+        &[
+            ("path", &path.display().to_string()),
+            ("e", &error.to_string()),
+        ],
+    )))
 }
 
 /// Collects the `.editorconfig` files that apply to `path`, nearest first,
@@ -993,10 +1132,7 @@ impl Tty59App {
     /// Where the file in front of the active tab's editor lives, if it has
     /// been saved anywhere yet.
     pub(crate) fn editor_active_location(&self) -> Option<(HostId, &Path)> {
-        let f = self.active_buffer()?;
-        f.untitled
-            .is_none()
-            .then(|| (f.host.id(), f.path.as_path()))
+        self.doc_location(self.tab_code()?.active_id()?)
     }
 
     fn tab_index_of(&self, tab: TabId) -> Option<usize> {
@@ -1273,16 +1409,26 @@ impl Tty59App {
             self.apply_pending_cursor(id, path, window, cx);
             return;
         }
+        // A picture already open only comes forward, with the viewport it had:
+        // nothing about the file is read again on a click. It has no lines, so
+        // a `:line` the click carried is dropped, not left for the next file.
+        if let Some(id) = self.image_at(host.id(), path) {
+            self.clear_pending_cursor(path);
+            self.editor_show_in_tab(tab, id, true, window, cx);
+            return;
+        }
         let p = path.to_path_buf();
         let requested = p.clone();
         let host_id = host.id();
+        let seq = self.image_request(tab, host_id, path);
         HostOps::run_in(
             host.clone(),
             window,
             cx,
-            move |h| load_file(h, p),
+            move |h| load_document(h, p),
             move |app, opened, window, cx| match opened {
-                Ok(loaded) => {
+                Ok(Opened::Text(loaded)) => {
+                    app.image_request_done(seq);
                     let id = app.editor_install(host, loaded, tab, true, window, cx);
                     // Against `requested`, not the loaded path: the host
                     // canonicalised it on the way through, and a link that
@@ -1290,10 +1436,20 @@ impl Tty59App {
                     // for.
                     app.apply_pending_cursor(id, &requested, window, cx);
                 }
+                Ok(Opened::Image(loaded)) => {
+                    let data = ImageData::ready(loaded.path, loaded.decoded, loaded.has_alpha);
+                    app.editor_land_image(seq, host, data, window, cx);
+                }
+                Ok(Opened::ImageFailed(failed)) => {
+                    let data = ImageData::failed(failed.path, failed.error, failed.bytes);
+                    app.editor_land_image(seq, host, data, window, cx);
+                }
                 Err(EditorOpenError::NotText(path)) => {
+                    app.image_request_done(seq);
                     app.open_outside_the_editor(host_id, &path, window, cx);
                 }
                 Err(EditorOpenError::Message(message)) => {
+                    app.image_request_done(seq);
                     window.push_notification(message, cx);
                 }
             },
@@ -1607,6 +1763,11 @@ impl Tty59App {
         let code = tab.code.get_or_insert_with(|| Box::new(TabCode::new()));
         if code.visible {
             code.visible = false;
+            // A picture still being read was asked for by a panel that is no
+            // longer there.
+            if let Some(tab) = self.tabs.get(self.active).map(|t| t.tree_id.get()) {
+                self.note_user_hide(tab);
+            }
             self.editor.had_focus = None;
             self.editor.bar = None;
             self.file_tree.editing = None;
@@ -1616,7 +1777,7 @@ impl Tty59App {
         }
         code.visible = true;
         self.file_tree_refresh_roots(window, cx);
-        if self.active_buffer().is_some() {
+        if self.active_doc_present() {
             self.focus_editor(window, cx);
         } else {
             // With no file to show, the panel says "Open a file from the file
@@ -1639,6 +1800,14 @@ impl Tty59App {
     }
 
     fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // A picture in front: its own view of this group takes the focus, so
+        // the panel's keys (close, the zoom actions) have a handler on the
+        // path and a close of the last file does not fall through to the
+        // terminal.
+        if let Some(focus) = self.image_focus(cx) {
+            window.focus(&focus, cx);
+            return;
+        }
         if let Some(f) = self.active_buffer() {
             // A file shown rendered focuses the preview, not the source
             // input behind it — the input is not even in the tree, and a
@@ -1839,6 +2008,12 @@ impl Tty59App {
     }
 
     pub(crate) fn editor_has_focus(&self, window: &Window, cx: &Context<Self>) -> bool {
+        self.code_panel_visible()
+            && (self.image_has_focus(window, cx) || self.text_has_focus(window, cx))
+    }
+
+    /// Whether the text in front, source or rendered, holds the focus.
+    fn text_has_focus(&self, window: &Window, cx: &Context<Self>) -> bool {
         self.code_panel_visible()
             && self.active_buffer().is_some_and(|f| {
                 // A file shown rendered holds the focus on its preview, not
@@ -2354,6 +2529,11 @@ impl Tty59App {
         let Some(id) = self.tab_code().and_then(|c| c.files.get(pos).copied()) else {
             return;
         };
+        // A picture has nothing to lose: it closes without asking.
+        if self.image(id).is_some() {
+            self.editor_remove_from_tab(tab_ix, id, cx);
+            return;
+        }
         let Some(f) = self.buffer(id) else {
             return;
         };
@@ -2661,6 +2841,9 @@ impl Tty59App {
         };
         if code.files.is_empty() {
             code.visible = false;
+            if let Some(tab) = self.tabs.get(self.active).map(|t| t.tree_id.get()) {
+                self.note_user_hide(tab);
+            }
             self.editor.had_focus = None;
             self.editor.bar = None;
             self.file_tree.editing = None;
@@ -2691,6 +2874,10 @@ impl Tty59App {
 
     /// Forgets a buffer everywhere, edits and all.
     fn editor_drop_buffer(&mut self, id: BufferId, cx: &mut Context<Self>) {
+        if self.image(id).is_some() {
+            self.editor_drop_image(id, cx);
+            return;
+        }
         // Whatever was waiting on this buffer to be saved is not going to
         // see that happen now.
         self.editor_saves_failed(id);
@@ -2889,6 +3076,9 @@ impl Tty59App {
                 .update(cx, |st, cx| st.set_highlighter(language, cx));
             moved = true;
         }
+        // Open pictures follow too, or the strip keeps the old name and
+        // opening the renamed file reads it again beside the stale copy.
+        moved |= self.image_path_moved(host, from, to, cx);
         if moved {
             self.editor_rebuild_watcher(cx);
             cx.notify();
@@ -3068,6 +3258,8 @@ impl Tty59App {
     }
 
     fn editor_adopt_orphans(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Pictures no tab shows go, and so do views of places that are gone.
+        self.editor_sweep_images(cx);
         // No tabs at all is the gap in the middle of a server restart or a
         // workspace switch, not a verdict on the buffers: wait for the tabs.
         if self.editor.buffers.is_empty() || self.tabs.is_empty() {
@@ -3146,6 +3338,9 @@ impl Tty59App {
             .cloned()
             .collect();
         let requested = files.clone();
+        // Hiding the panel while the files are on their way is the reader's
+        // answer to the restore: it must not put the panel back.
+        let epoch = self.panel_epoch(tab_id);
         HostOps::run_in(
             host.clone(),
             window,
@@ -3153,64 +3348,119 @@ impl Tty59App {
             move |h| {
                 files
                     .into_iter()
-                    .map(|p| load_file(h, p).ok())
+                    .map(|p| load_document(h, p).ok())
                     .collect::<Vec<_>>()
             },
-            move |app, loaded: Vec<Option<Loaded>>, window, cx| {
-                let mut opened: Vec<(PathBuf, BufferId)> = Vec::new();
-                for (path, l) in requested.into_iter().zip(loaded) {
-                    if let Some(l) = l {
-                        let id = app.editor_install(host.clone(), l, tab_id, false, window, cx);
-                        opened.push((path, id));
-                    }
-                }
-                let group = |paths: &[PathBuf], active: usize| -> (Vec<BufferId>, usize) {
-                    let front = paths.get(active);
-                    let mut ids: Vec<BufferId> = Vec::new();
-                    let mut at = 0;
-                    for path in paths {
-                        let Some(&(_, id)) = opened.iter().find(|(p, _)| p == path) else {
-                            continue;
-                        };
-                        if ids.contains(&id) {
-                            continue;
-                        }
-                        if Some(path) == front {
-                            at = ids.len();
-                        }
-                        ids.push(id);
-                    }
-                    (ids, at)
-                };
-                let (left, left_active) = group(&state.files, state.active);
-                let right = state
-                    .split
-                    .as_ref()
-                    .map(|s| (group(&s.files, s.active), s.focused));
-                let Some(tab_ix) = app.tab_index_of(tab_id) else {
-                    return;
-                };
-                let Some(code) = app.tabs[tab_ix].code.as_deref_mut() else {
-                    return;
-                };
-                let restored: Vec<BufferId> = opened.iter().map(|(_, id)| *id).collect();
-                // Merged into what the tab has now, not written over it: a
-                // file opened, or a split made, while these were loading stays.
-                let untouched = code.restore_groups(
-                    &restored,
-                    (left, left_active),
-                    right.map(|((files, active), focused)| (files, active, focused)),
-                );
-                let visible = state.visible && !code.files.is_empty();
-                code.visible |= visible;
-                // Only a restore nobody has touched takes the keyboard; one the
-                // reader has moved on from leaves it where they put it.
-                if untouched && tab_ix == app.active && visible {
-                    app.focus_editor(window, cx);
-                }
-                cx.notify();
+            move |app, loaded: Vec<Option<Opened>>, window, cx| {
+                app.editor_restore_land(tab_id, state, requested, loaded, epoch, host, window, cx);
             },
         );
+    }
+
+    /// The files of a restore arrive. Merged into what the tab has now, not
+    /// written over it: a file opened, or a split made, while these were
+    /// loading stays.
+    ///
+    /// A picture never lands in a tab other than the one it was recorded for:
+    /// one whose tab has gone since is dropped, where a text file takes the
+    /// fallback it always has. And the panel only comes back if the reader has
+    /// not hidden it in the meantime (`epoch`); a session that was *saved*
+    /// hidden stays hidden either way.
+    #[allow(clippy::too_many_arguments)]
+    fn editor_restore_land(
+        &mut self,
+        tab_id: TabId,
+        state: TabEditor,
+        requested: Vec<PathBuf>,
+        loaded: Vec<Option<Opened>>,
+        epoch: u64,
+        host: SharedHost,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_alive = self.tab_index_of(tab_id).is_some();
+        let mut opened: Vec<(PathBuf, BufferId)> = Vec::new();
+        for (path, l) in requested.into_iter().zip(loaded) {
+            // A picture that no longer decodes is not brought back as an
+            // error tab, as a text file that no longer reads is not brought
+            // back at all.
+            let id = match l {
+                Some(Opened::Text(l)) => {
+                    self.editor_install(host.clone(), l, tab_id, false, window, cx)
+                }
+                Some(Opened::Image(_)) if !tab_alive => continue,
+                Some(Opened::Image(l)) => {
+                    let data = ImageData::ready(l.path, l.decoded, l.has_alpha);
+                    match self.image_at(host.id(), &data.path) {
+                        Some(id) => {
+                            if !self.show_in_tab_strict(tab_id, id, false, window, cx) {
+                                continue;
+                            }
+                            id
+                        }
+                        None => {
+                            match self.editor_install_image(
+                                host.clone(),
+                                data,
+                                tab_id,
+                                false,
+                                window,
+                                cx,
+                            ) {
+                                Some(id) => id,
+                                None => continue,
+                            }
+                        }
+                    }
+                }
+                Some(Opened::ImageFailed(_)) | None => continue,
+            };
+            opened.push((path, id));
+        }
+        let group = |paths: &[PathBuf], active: usize| -> (Vec<BufferId>, usize) {
+            let front = paths.get(active);
+            let mut ids: Vec<BufferId> = Vec::new();
+            let mut at = 0;
+            for path in paths {
+                let Some(&(_, id)) = opened.iter().find(|(p, _)| p == path) else {
+                    continue;
+                };
+                if ids.contains(&id) {
+                    continue;
+                }
+                if Some(path) == front {
+                    at = ids.len();
+                }
+                ids.push(id);
+            }
+            (ids, at)
+        };
+        let (left, left_active) = group(&state.files, state.active);
+        let right = state
+            .split
+            .as_ref()
+            .map(|s| (group(&s.files, s.active), s.focused));
+        let Some(tab_ix) = self.tab_index_of(tab_id) else {
+            return;
+        };
+        let hidden_since = self.panel_epoch(tab_id) != epoch;
+        let Some(code) = self.tabs[tab_ix].code.as_deref_mut() else {
+            return;
+        };
+        let restored: Vec<BufferId> = opened.iter().map(|(_, id)| *id).collect();
+        let untouched = code.restore_groups(
+            &restored,
+            (left, left_active),
+            right.map(|((files, active), focused)| (files, active, focused)),
+        );
+        let visible = state.visible && !code.files.is_empty() && !hidden_since;
+        code.visible |= visible;
+        // Only a restore nobody has touched takes the keyboard; one the
+        // reader has moved on from leaves it where they put it.
+        if untouched && tab_ix == self.active && visible {
+            self.focus_editor(window, cx);
+        }
+        cx.notify();
     }
 
     fn editor_record_sessions(&mut self, cx: &mut Context<Self>) {
@@ -3232,14 +3482,17 @@ impl Tty59App {
                 let mut files = Vec::new();
                 let mut active = 0;
                 for (pos, id) in ids.iter().enumerate() {
-                    let Some(f) = self.buffer(*id) else { continue };
-                    if f.untitled.is_some() || f.host.id() != spawn_host {
+                    // A text buffer or a picture alike, by where it lives.
+                    let Some((host, path)) = self.doc_location(*id) else {
+                        continue;
+                    };
+                    if host != spawn_host {
                         continue;
                     }
                     if pos == front {
                         active = files.len();
                     }
-                    files.push(f.path.clone());
+                    files.push(path.to_path_buf());
                 }
                 (files, active)
             };
@@ -3283,7 +3536,12 @@ impl Tty59App {
             return;
         };
         for id in ids {
-            if self.buffer_tabs(id) == 1 && self.buffer(id).is_some_and(|b| !b.dirty) {
+            // A picture is never unsaved; a text buffer is dropped only clean.
+            let clean = match self.buffer(id) {
+                Some(b) => !b.dirty,
+                None => self.image(id).is_some(),
+            };
+            if self.buffer_tabs(id) == 1 && clean {
                 self.editor_drop_buffer(id, cx);
             }
         }
@@ -3291,6 +3549,8 @@ impl Tty59App {
 
     /// A tab was closed for good: forget what it had open.
     pub(crate) fn editor_forget_tab(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        self.note_user_hide(tab);
+        self.editor.panel_epoch.remove(&tab);
         self.editor.recorded.remove(&tab);
         self.editor.nav.forget_tab(tab);
         editor_session::remove(cx, tab);
@@ -3336,7 +3596,7 @@ impl Tty59App {
         // The last file closed with the focus in it: keep the focus in the
         // panel, or gpui reports it lost and it falls back to the terminal.
         let tab = self.tabs.get(self.active).map(|t| t.tree_id.get());
-        if tab.is_some() && self.editor.had_focus == tab && self.active_buffer().is_none() {
+        if tab.is_some() && self.editor.had_focus == tab && !self.active_doc_present() {
             self.editor.empty_focus.focus(window, cx);
         }
         self.editor.had_focus = tab.filter(|_| self.editor_panel_has_focus(window, cx));
@@ -3452,6 +3712,11 @@ impl Tty59App {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        // A picture draws itself, in a view of its own for this tab and group:
+        // there is no text to zoom or scroll, and the wheel is the picture's.
+        if let Some(body) = id.and_then(|id| self.render_image_body(id, slot, cx)) {
+            return body;
+        }
         let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
         // The body and the buffer it belongs to, for the wheel-zoom wrapper
         // below; `None` is the empty panel, which has no text to zoom.
@@ -3878,7 +4143,15 @@ impl Tty59App {
         let files: Vec<(usize, SharedString, Option<String>, bool, bool)> = shown
             .into_iter()
             .filter_map(|(pos, id)| {
-                let f = self.buffer(id)?;
+                let Some(f) = self.buffer(id) else {
+                    // A picture: named by its file, never unsaved. It has no
+                    // breadcrumbs to spell its path out, so its tab always
+                    // carries it.
+                    let image = self.image(id)?;
+                    let active = Some(id) == active_id;
+                    let tip = Some(image.path.display().to_string());
+                    return Some((pos, image.name.clone(), tip, active, false));
+                };
                 let active = Some(id) == active_id;
                 // The breadcrumbs over the text spell out the focused group's
                 // active file (the strip lists that group's files only) and
@@ -5298,5 +5571,244 @@ mod bar_gpui_tests {
             "and leaves the editor open"
         );
         assert!(editor_input_focused(&app, &mut vcx));
+    }
+}
+
+/// Where a file's *content*, not its name, decides what opens it.
+///
+/// Written against the entry point every caller shares (`open_file_in_editor`,
+/// the one a Ctrl+clicked path, the Files tree and quick-open all reach) and
+/// the two things the app already exposes about what is in front:
+/// `editor_active_location` and `buffer_at`, plus the painted selectors the
+/// image preview draws.
+#[cfg(test)]
+mod image_dispatch_tests {
+    use std::time::{Duration, Instant};
+
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    const VALID_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16" viewBox="0 0 32 16"><rect width="32" height="16" fill="#336699"/></svg>"##;
+
+    /// A temp dir spelled the way the editor will see paths under it: the
+    /// local host's own spelling, produced here without calling the host (its
+    /// methods refuse to run on the UI thread, which a GUI test body is).
+    fn real_dir(dir: &tempfile::TempDir) -> PathBuf {
+        tty59_core::core::path_spelling::local_spelling_buf(
+            std::fs::canonicalize(dir.path()).unwrap(),
+        )
+    }
+
+    /// Runs what is pending and paints a frame.
+    fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+    }
+
+    /// Opens `path` through the shared entry point and waits for the
+    /// off-thread read to land a document in the tab. The wait is bounded.
+    fn open_and_wait(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, path: &Path) {
+        app.update_in(vcx, |app, window, cx| {
+            app.open_file_in_editor(path, window, cx);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.read_with(vcx, |app, _| {
+            app.tab_code().is_none_or(|code| code.files.is_empty())
+        }) && Instant::now() < deadline
+        {
+            vcx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        settle(vcx);
+    }
+
+    /// What the app says is in front: its location, and whether that path is
+    /// held by an editable text buffer.
+    fn front(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        path: &Path,
+    ) -> (Option<PathBuf>, bool, usize) {
+        app.read_with(vcx, |app, cx| {
+            let host = app.active_host(cx).expect("a host").id();
+            (
+                app.editor_active_location()
+                    .filter(|(h, _)| *h == host)
+                    .map(|(_, p)| p.to_path_buf()),
+                app.buffer_at(host, path).is_some(),
+                app.tab_code().map_or(0, |code| code.files.len()),
+            )
+        })
+    }
+
+    /// An SVG is valid text, so a decoder that runs first opens it editable.
+    /// The dispatch has to look at what the bytes are before it decides they
+    /// are text: a picture opens as a picture, in the editor's own place.
+    #[gpui::test]
+    fn a_valid_svg_opens_as_an_image_document_not_as_editable_text(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let svg = real_dir(&dir).join("logo.svg");
+        std::fs::write(&svg, VALID_SVG).unwrap();
+
+        open_and_wait(&app, &mut vcx, &svg);
+
+        let (location, text_buffer, files) = front(&app, &mut vcx, &svg);
+        assert_eq!(files, 1, "one document opened in the tab");
+        assert_eq!(
+            location.as_deref(),
+            Some(svg.as_path()),
+            "the document in front is this file, on this host"
+        );
+        assert!(
+            !text_buffer,
+            "no editable text buffer holds the SVG: an image document does"
+        );
+        assert!(
+            vcx.debug_bounds("image-preview-body").is_some(),
+            "the image preview is what is painted in the editor's place"
+        );
+    }
+
+    /// Content beats the name in both directions: words in a file called
+    /// `.png` are words, and stay editable.
+    #[gpui::test]
+    fn plain_text_named_png_stays_an_editable_text_buffer(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let file = real_dir(&dir).join("notes.png");
+        std::fs::write(&file, "just some words\nin a file with a picture's name\n").unwrap();
+
+        open_and_wait(&app, &mut vcx, &file);
+
+        let (location, text_buffer, files) = front(&app, &mut vcx, &file);
+        assert_eq!(files, 1);
+        assert_eq!(location.as_deref(), Some(file.as_path()));
+        assert!(text_buffer, "text is text, whatever it is called");
+        assert!(
+            vcx.debug_bounds("image-preview-body").is_none(),
+            "and no image preview is drawn for it"
+        );
+    }
+
+    /// Something that says it is an SVG and is not one is a broken picture,
+    /// reported in the tab it opened in, not a text file to fix by hand.
+    #[gpui::test]
+    fn an_svg_that_does_not_parse_is_a_corrupt_image_in_its_tab(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let svg = real_dir(&dir).join("broken.svg");
+        std::fs::write(
+            &svg,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"32\" height=\"16\"><rect width=\"3",
+        )
+        .unwrap();
+
+        open_and_wait(&app, &mut vcx, &svg);
+
+        let (location, text_buffer, files) = front(&app, &mut vcx, &svg);
+        assert_eq!(files, 1, "the error has a tab of its own");
+        assert_eq!(location.as_deref(), Some(svg.as_path()));
+        assert!(!text_buffer, "never an editable fallback");
+        assert!(
+            vcx.debug_bounds("image-preview-error").is_some(),
+            "the failure is stated in the tab"
+        );
+        assert!(
+            vcx.debug_bounds("image-preview-body").is_none(),
+            "and nothing pretends to be the picture"
+        );
+    }
+}
+
+/// What a refused or unusual read of something called a picture becomes.
+#[cfg(test)]
+mod image_open_tests {
+    use std::io;
+
+    use super::*;
+
+    #[cfg(unix)]
+    fn host() -> SharedHost {
+        tty59_core::host::local::LocalHost::new()
+    }
+
+    /// A file that grew past the limit between the size check and the read has
+    /// no measured size: the tab names the limit only.
+    #[test]
+    fn a_picture_named_file_that_grew_past_the_limit_is_an_error_in_its_tab() {
+        let refused = io::Error::new(io::ErrorKind::FileTooLarge, "over");
+        let got = read_refusal(PathBuf::from("/x/shot.png"), true, &refused);
+        match got {
+            Ok(Opened::ImageFailed(failed)) => {
+                assert_eq!(failed.path, PathBuf::from("/x/shot.png"));
+                assert!(matches!(
+                    failed.error,
+                    image_decode::ImageError::TooLarge { .. }
+                ));
+                assert_eq!(failed.bytes, None, "no size is claimed for it");
+            }
+            _ => panic!("a limit error in the picture's tab"),
+        }
+    }
+
+    /// Everything else keeps the ordinary message: other kinds of failure,
+    /// and a file that is not named like a picture.
+    #[test]
+    fn other_refused_reads_keep_the_ordinary_message() {
+        let too_large = io::Error::new(io::ErrorKind::FileTooLarge, "over");
+        let missing = io::Error::new(io::ErrorKind::NotFound, "gone");
+        for (hinted, error) in [(true, &missing), (false, &too_large), (false, &missing)] {
+            assert!(
+                matches!(
+                    read_refusal(PathBuf::from("/x/notes.txt"), hinted, error),
+                    Err(EditorOpenError::Message(_))
+                ),
+                "hinted: {hinted}, {error}"
+            );
+        }
+    }
+
+    /// A link called `.png` to something with no picture's name is a picture
+    /// by its link: its bytes that are neither a picture nor text are said so
+    /// in its tab. Text stays text under any name, and the same bytes under
+    /// their own name keep the route they always took.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_named_like_a_picture_is_a_picture_by_its_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let binary = root.join("build-123");
+        std::fs::write(&binary, b"\0\x01\x02\xfe\xff not a picture, not text \0\0").unwrap();
+        let link = root.join("latest.png");
+        std::os::unix::fs::symlink(&binary, &link).unwrap();
+        let h = host();
+
+        match load_document(&*h, link) {
+            Ok(Opened::ImageFailed(failed)) => {
+                assert_eq!(failed.error, image_decode::ImageError::NotAnImage);
+            }
+            _ => panic!("named like a picture by the link"),
+        }
+        assert!(
+            matches!(load_document(&*h, binary), Err(EditorOpenError::NotText(_))),
+            "under its own name it is a binary, as before"
+        );
+
+        let words = root.join("words.png");
+        std::fs::write(&words, "plain words\n").unwrap();
+        assert!(
+            matches!(load_document(&*h, words), Ok(Opened::Text(_))),
+            "text is text whatever it is called"
+        );
     }
 }

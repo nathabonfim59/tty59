@@ -506,7 +506,20 @@ impl Tty59App {
         code.by_recency()
             .into_iter()
             .filter_map(|id| {
-                let f = self.buffer(id)?;
+                let Some(f) = self.buffer(id) else {
+                    // A picture: its file's name and folder, never unsaved.
+                    let image = self.image(id)?;
+                    let local = image.host.id() == local_host;
+                    let dir =
+                        super::nav::path_crumbs(&image.path, if local { roots } else { &[] }).0;
+                    return Some(PickerRow {
+                        id,
+                        name: image.name.clone(),
+                        dir: dir.into(),
+                        dirty: false,
+                        front: Some(id) == front,
+                    });
+                };
                 let dir = if f.untitled.is_some() {
                     String::new()
                 } else {
