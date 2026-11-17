@@ -1004,6 +1004,17 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
 
     t.ring = rgb(m.accent).into();
     t.tokens.ring = Hsla::from(rgb(m.accent)).into();
+    // The keyboard focus ring floats `FOCUS_RING_GAP` off the control, so it
+    // has to contrast with the surface behind it. It is also the 1px focused
+    // edge of a toolkit field, so it has to contrast with the field's own fill
+    // inside that edge too: the wash the toolkit paints, read here AFTER
+    // `background` and `input` are installed above, since it is built from
+    // them. Opaque and derived once per theme change; the gpui `Theme` is the
+    // cache. `ring` above keeps its accent for the input border and the switch.
+    const FOCUS_RING_GAP: Pixels = px(2.);
+    let wash = t.input_background();
+    t.focus_ring = Some(rgb(theme.focus_ring_ink_from(&resolved, wash)).into());
+    t.focus_ring_offset = FOCUS_RING_GAP;
     // Every splitter and panel edge lights up with this while you drag it, and
     // the drop target for a dragged-in file tints with it. Unset it is a fixed
     // blue from gpui-component's stock theme — the same blue under all nine
@@ -1090,6 +1101,254 @@ pub(crate) fn chrome_ink(cx: &App) -> presets::ChromeInk {
 /// required-global invariant as [`semantics`].
 pub(crate) fn search_marks(cx: &App) -> presets::SearchMarks {
     *cx.global::<presets::SearchMarks>()
+}
+
+/// The stroke of the shared keyboard ring: the toolkit's own outer ring is this
+/// wide (its private `RING_BORDER_WIDTH`), and every ring the app draws itself
+/// keeps the same stroke so they read as one. The one definition; nothing else
+/// writes the number down.
+pub(crate) const COMMIT_RING_W: gpui::Pixels = gpui::px(1.5);
+
+/// Where a [`FocusRing`] sits against the element it marks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RingPlacement {
+    /// Out past the element's edge by the theme's gap, as the toolkit's
+    /// controls draw theirs.
+    Outside,
+    /// Inside the element's edge by the same gap: for a container that fills
+    /// its surroundings, where an outer ring would run off the panel.
+    Inside,
+}
+
+/// The keyboard ring for something that is not a toolkit control: an
+/// anonymous, id-less, always-mounted wrapper that holds `child` and, while
+/// `handle` has focus, the ring around it. Never a tab stop, no listeners and
+/// no `occlude`, so hits and element ids do not change when focus moves.
+///
+/// The ring's stroke is [`COMMIT_RING_W`], its gap the installed
+/// `Theme::focus_ring_offset()` and its colour the installed
+/// `Theme::focus_ring_color()`; nothing is derived while rendering.
+#[derive(gpui::IntoElement)]
+pub(crate) struct FocusRing {
+    handle: gpui::FocusHandle,
+    placement: RingPlacement,
+    radius: gpui::Pixels,
+    fill: bool,
+    keyboard_only: bool,
+    child: gpui::AnyElement,
+    #[cfg(test)]
+    tag: Option<gpui::SharedString>,
+}
+
+impl FocusRing {
+    /// `radius` is the marked element's own corner radius, `child` the element.
+    pub(crate) fn new(
+        handle: &gpui::FocusHandle,
+        placement: RingPlacement,
+        radius: gpui::Pixels,
+        child: impl gpui::IntoElement,
+    ) -> Self {
+        Self {
+            handle: handle.clone(),
+            placement,
+            radius,
+            fill: false,
+            keyboard_only: false,
+            child: child.into_any_element(),
+            #[cfg(test)]
+            tag: None,
+        }
+    }
+
+    /// For a body that takes the room left over (a panel's scroll area).
+    pub(crate) fn fill(mut self) -> Self {
+        self.fill = true;
+        self
+    }
+
+    /// Draws the ring only while the last input was the keyboard, the rule
+    /// gpui's own `focus_visible` style applies: a click that focuses the
+    /// element does not light it. Off by default, so every existing ring keeps
+    /// drawing on any focus.
+    pub(crate) fn keyboard_only(mut self, only: bool) -> Self {
+        self.keyboard_only = only;
+        self
+    }
+
+    /// Names the wrapper `{tag}-frame` and the ring `{tag}` for the tests that
+    /// read layout bounds.
+    #[cfg(test)]
+    pub(crate) fn tagged(mut self, tag: impl Into<gpui::SharedString>) -> Self {
+        self.tag = Some(tag.into());
+        self
+    }
+}
+
+/// Paints its child AFTER everything else in the frame, inside the clip it
+/// has now.
+///
+/// A ring floats out past its element's edge, so it reaches into the box of a
+/// neighbour that comes later in the tree; that neighbour's own fill (its hover
+/// fill, say) would be painted after the ring and cover the stretch of the ring
+/// inside its box. So the ring is deferred: its layout stays where it is in the
+/// tree, its paint is postponed to the end of the frame (priority 0, below
+/// tooltips and menus). `gpui::deferred` does the same but passes no content
+/// mask, which would let the ring of a row scrolled half out of a list paint
+/// over what is above or below the list; this keeps the mask of the place it sits
+/// in, so a scroller still clips it.
+///
+/// A layer only: no id, no listener, no hitbox, nothing that takes a hit.
+struct RingLayer {
+    child: Option<gpui::AnyElement>,
+}
+
+impl RingLayer {
+    fn new(child: impl gpui::IntoElement) -> Self {
+        Self {
+            child: Some(child.into_any_element()),
+        }
+    }
+}
+
+impl gpui::IntoElement for RingLayer {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for RingLayer {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> (gpui::LayoutId, ()) {
+        let layout_id = self.child.as_mut().unwrap().request_layout(window, cx);
+        (layout_id, ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut gpui::Window,
+        _cx: &mut gpui::App,
+    ) {
+        let child = self.child.take().unwrap();
+        let mask = window.content_mask();
+        let offset = window.element_offset();
+        window.defer_draw(child, offset, 0, Some(mask));
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        _prepaint: &mut Self::PrepaintState,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::App,
+    ) {
+    }
+}
+
+impl gpui::RenderOnce for FocusRing {
+    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl gpui::IntoElement {
+        #[cfg(test)]
+        use gpui::InteractiveElement as _;
+        use gpui::{ParentElement as _, Styled as _};
+        use gpui_component::ActiveTheme as _;
+        let focused = self.handle.is_focused(window)
+            && (!self.keyboard_only || window.last_input_was_keyboard());
+        let wrap = gpui::div().relative();
+        let wrap = match self.fill {
+            true => wrap.flex().flex_col().flex_1().min_h_0(),
+            false => wrap,
+        };
+        #[cfg(test)]
+        let wrap = match &self.tag {
+            Some(tag) => {
+                let frame = format!("{tag}-frame");
+                wrap.debug_selector(move || frame)
+            }
+            None => wrap,
+        };
+        let wrap = wrap.child(self.child);
+        // The ring: the installed colour and gap, the shared stroke, nothing
+        // derived here. Decorative: no id, no listener, no `occlude`, so the
+        // pointer reaches whatever is under it.
+        let ring = focused.then(|| {
+            let theme = cx.theme();
+            let colour = theme.focus_ring_color();
+            let gap = theme.focus_ring_offset();
+            let band = COMMIT_RING_W;
+            let overlay = gpui::div()
+                .absolute()
+                .flex_none()
+                .border(band)
+                .border_color(colour);
+            let overlay = match self.placement {
+                // Out past the edge by the stroke and the gap; its corners the
+                // element's own grown by both, so the ring is concentric with it
+                // (a square element keeps the stroke as its radius).
+                RingPlacement::Outside => {
+                    let inset = band + gap;
+                    let radius = match self.radius.as_f32() > 0. {
+                        true => self.radius + gap + band,
+                        false => band,
+                    };
+                    overlay
+                        .top(-inset)
+                        .left(-inset)
+                        .right(-inset)
+                        .bottom(-inset)
+                        .rounded(radius)
+                }
+                // In from the edge by the gap, for a body that fills its
+                // surroundings.
+                RingPlacement::Inside => {
+                    let radius = gpui::px((self.radius.as_f32() - gap.as_f32()).max(0.));
+                    overlay
+                        .top(gap)
+                        .left(gap)
+                        .right(gap)
+                        .bottom(gap)
+                        .rounded(radius)
+                }
+            };
+            #[cfg(test)]
+            let overlay = match &self.tag {
+                Some(tag) => {
+                    let tag = tag.to_string();
+                    overlay.debug_selector(move || tag)
+                }
+                None => overlay,
+            };
+            // Painted after every sibling, inside the clip it sits in.
+            RingLayer::new(overlay)
+        });
+        match ring {
+            Some(ring) => wrap.child(ring),
+            None => wrap,
+        }
+    }
 }
 
 /// Resolves a theme-free [`crate::core::cli_agent::AgentStatus`] via cached
@@ -2109,6 +2368,181 @@ mod tests {
                 );
             }
         });
+    }
+
+    // ---- FocusRing and the input that focused it ----------------------------
+    //
+    // Reviewer controls written AFTER `keyboard_only` existed, so none of them
+    // is claimed as a RED-first test. They pin the one rule it adds: with the
+    // flag off (every caller that does not ask) the ring follows focus alone,
+    // whatever moved it there; with it on, it follows keyboard focus only.
+
+    /// A focusable box inside the shared ring, the ring named `ring-probe`.
+    struct RingProbe {
+        handle: gpui::FocusHandle,
+        /// `None` builds the ring with `FocusRing::new` alone and never calls
+        /// the builder, so the default is tested as the default; `Some(only)`
+        /// calls `keyboard_only(only)`.
+        keyboard_only: Option<bool>,
+    }
+
+    impl gpui::Render for RingProbe {
+        fn render(
+            &mut self,
+            _window: &mut gpui::Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            let boxed = gpui::div()
+                .id("ring-probe-box")
+                .track_focus(&self.handle)
+                .size(px(40.));
+            let ring = FocusRing::new(&self.handle, RingPlacement::Outside, px(6.), boxed);
+            let ring = match self.keyboard_only {
+                Some(only) => ring.keyboard_only(only),
+                None => ring,
+            };
+            gpui::div().p(px(20.)).child(ring.tagged("ring-probe"))
+        }
+    }
+
+    /// The probe in a window, drawn, nothing focused, last input the mouse.
+    fn ring_probe(
+        cx: &mut TestAppContext,
+        keyboard_only: Option<bool>,
+    ) -> (gpui::VisualTestContext, gpui::FocusHandle) {
+        cx.update(|cx| gpui_component::init(cx));
+        let window = cx.add_window(|_, cx| RingProbe {
+            handle: cx.focus_handle(),
+            keyboard_only,
+        });
+        let handle = window
+            .update(cx, |probe, _, _| probe.handle.clone())
+            .expect("the probe window is open");
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.simulate_mouse_move(
+            gpui::point(px(2.), px(2.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        ring_settle(&mut vcx);
+        assert!(
+            !vcx.update(|window, _| window.last_input_was_keyboard()),
+            "setup: the last input was the mouse"
+        );
+        assert!(
+            vcx.debug_bounds("ring-probe-frame").is_some(),
+            "setup: the probe is drawn"
+        );
+        assert!(
+            vcx.debug_bounds("ring-probe").is_none(),
+            "setup: nothing focused, no ring"
+        );
+        (vcx, handle)
+    }
+
+    fn ring_settle(vcx: &mut gpui::VisualTestContext) {
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    fn focus_probe(vcx: &mut gpui::VisualTestContext, handle: &gpui::FocusHandle) {
+        vcx.update(|window, cx| handle.focus(window, cx));
+        ring_settle(vcx);
+        assert!(
+            vcx.update(|window, _| handle.is_focused(window)),
+            "setup: the probe holds focus"
+        );
+    }
+
+    /// The default ring, after the mouse moved focus there: drawn. The control
+    /// the opt-in below is read against, and the behaviour every existing
+    /// caller keeps.
+    #[gpui::test]
+    fn by_default_the_ring_follows_focus_whatever_moved_it(cx: &mut TestAppContext) {
+        // `None`: the ring is built by `FocusRing::new` alone, the builder is
+        // never called, so this is the default and not an explicit `false`.
+        let (mut vcx, handle) = ring_probe(cx, None);
+        focus_probe(&mut vcx, &handle);
+        assert!(
+            !vcx.update(|window, _| window.last_input_was_keyboard()),
+            "setup: focus arrived without the keyboard"
+        );
+        assert!(
+            vcx.debug_bounds("ring-probe").is_some(),
+            "the default ring is drawn for mouse-modality focus"
+        );
+    }
+
+    /// Opted in: the same focus, reached the same way, draws nothing.
+    #[gpui::test]
+    fn keyboard_only_draws_no_ring_for_mouse_modality_focus(cx: &mut TestAppContext) {
+        let (mut vcx, handle) = ring_probe(cx, Some(true));
+        focus_probe(&mut vcx, &handle);
+        assert!(
+            !vcx.update(|window, _| window.last_input_was_keyboard()),
+            "setup: focus arrived without the keyboard"
+        );
+        assert!(
+            vcx.debug_bounds("ring-probe-frame").is_some(),
+            "setup: the wrapper is still drawn"
+        );
+        assert!(
+            vcx.debug_bounds("ring-probe").is_none(),
+            "keyboard_only(true) draws no ring for mouse-modality focus"
+        );
+    }
+
+    /// Opted in, then a real key: the ring appears, and goes again when the
+    /// mouse is the last input, focus unchanged throughout.
+    #[gpui::test]
+    fn keyboard_only_follows_the_last_input_while_focus_stays(cx: &mut TestAppContext) {
+        let (mut vcx, handle) = ring_probe(cx, Some(true));
+        focus_probe(&mut vcx, &handle);
+        assert!(
+            vcx.debug_bounds("ring-probe").is_none(),
+            "setup: no ring yet, the mouse was last"
+        );
+
+        vcx.simulate_keystrokes("a");
+        ring_settle(&mut vcx);
+        assert!(
+            vcx.update(|window, _| window.last_input_was_keyboard()),
+            "setup: a real key was the last input"
+        );
+        assert!(
+            vcx.update(|window, _| handle.is_focused(window)),
+            "setup: the probe still holds focus"
+        );
+        assert!(
+            vcx.debug_bounds("ring-probe").is_some(),
+            "a key after the focus shows the ring"
+        );
+
+        // A real movement, to a point other than the one the probe parked the
+        // pointer on, not a repeat of it.
+        vcx.simulate_mouse_move(
+            gpui::point(px(3.), px(3.)),
+            None,
+            gpui::Modifiers::default(),
+        );
+        ring_settle(&mut vcx);
+        assert!(
+            !vcx.update(|window, _| window.last_input_was_keyboard()),
+            "setup: the pointer moving made the mouse the last input"
+        );
+        assert!(
+            vcx.update(|window, _| handle.is_focused(window)),
+            "setup: the probe still holds focus after the pointer moved"
+        );
+        assert!(
+            vcx.debug_bounds("ring-probe").is_none(),
+            "and the ring goes when the mouse is the last input"
+        );
     }
 }
 

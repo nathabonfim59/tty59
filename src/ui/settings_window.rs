@@ -47,6 +47,7 @@ pub(crate) struct SettingsWindow {
     pub(crate) app: WeakEntity<Tty59App>,
     _observe: Subscription,
     _release: Subscription,
+    _focus_lost: Subscription,
 }
 
 impl SettingsWindow {
@@ -67,10 +68,32 @@ impl SettingsWindow {
             }
             None => true,
         });
+        // With focus on nothing — the focused control left the page (Back
+        // unmounted a shortcut cell) — gpui dispatches keys on the window root
+        // alone, and Escape and Tab go dead. Put focus back on the page's own
+        // root, here, in this window. Only the page: with no settings state
+        // there is nothing to focus, and the terminal is not this window's.
+        let weak = app.downgrade();
+        let focus_lost = cx.on_focus_lost(window, move |_, window, cx| {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let page = {
+                let app = app.read(cx);
+                app.settings_window
+                    .is_none_or(|(settings, _)| settings == window.window_handle())
+                    .then(|| app.active_settings().map(|s| s.focus_handle.clone()))
+                    .flatten()
+            };
+            if let Some(page) = page {
+                window.focus(&page, cx);
+            }
+        });
         Self {
             app: app.downgrade(),
             _observe: observe,
             _release: release,
+            _focus_lost: focus_lost,
         }
     }
 

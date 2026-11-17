@@ -70,8 +70,9 @@ impl Tty59App {
             .children(modes.into_iter().map(|(m, label, halves)| {
                 let on = m == mode;
                 let bar = |w: f32, c: gpui::Rgba| div().w(px(w)).h(px(3.)).rounded(px(1.)).bg(c);
-                v_flex()
+                let card = v_flex()
                     .id(SharedString::from(format!("theme-mode-{m:?}")))
+                    .relative()
                     .items_center()
                     .gap(px(7.))
                     .cursor_pointer()
@@ -125,7 +126,17 @@ impl Tty59App {
                     )
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.set_theme_mode(m, window, cx)),
-                    )
+                    );
+                #[cfg(test)]
+                let card = card.debug_selector(move || format!("theme-mode-{m:?}"));
+                // The whole clickable card (preview and label) is one stop; its
+                // ring follows the preview's 6px corners.
+                kit::stop(
+                    SharedString::from(format!("theme-mode-{m:?}")),
+                    px(6.),
+                    card,
+                )
+                .in_scroll(self.settings_scroll())
             }))
             .into_any_element();
         let mode_desc = match mode {
@@ -237,19 +248,26 @@ impl Tty59App {
             .child(div().w(px(6.)).h(px(2.)).rounded(px(1.)).bg(sw.fg))
             .into_any_element();
         let toggle = id.clone();
+        let trigger_key = ElementId::Name(SharedString::from(format!("{id}-trigger")));
         let trigger = kit::select_trigger(
-            ElementId::Name(SharedString::from(format!("{id}-trigger"))),
+            trigger_key.clone(),
             current.name.clone(),
             Some(leading),
             open,
             !enabled,
             &tk,
         )
+        .relative()
         .when(enabled, |trigger| {
             trigger.on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_settings_menu(toggle.clone(), start, true, window, cx)
             }))
         });
+        // A stop for the trigger alone, and only while it can be used: opening
+        // it puts the caret in the popover's query box, whose keys are its own.
+        let trigger = kit::stop(trigger_key, px(6.), trigger)
+            .live(enabled)
+            .in_scroll(self.settings_scroll());
 
         let popover = open.then(|| self.theme_popover(&id, dark_slot, &current_id, themes, cx));
         div()
@@ -608,7 +626,7 @@ impl Tty59App {
                         .child(name),
                 )
                 .child(
-                    kit::button(
+                    self.page_button(
                         "remove-theme-image",
                         t(L10nKey::SettingsRemoveThemeImage),
                         BtnKind::Link,
@@ -619,7 +637,7 @@ impl Tty59App {
                 )
             })
             .child(
-                kit::button(
+                self.page_button(
                     "pick-theme-image",
                     if image.is_some() {
                         t(L10nKey::SettingsChangeThemeImage)
@@ -652,6 +670,7 @@ impl Tty59App {
                     let _ = app.update(cx, |this, cx| this.set_theme_image_opacity(v, window, cx));
                 }),
                 Rc::new(|_, _| {}),
+                self.settings_scroll(),
             );
             rows.push(
                 self.settings_row(

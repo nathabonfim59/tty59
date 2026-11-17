@@ -65,6 +65,22 @@ impl Tty59App {
         )
     }
 
+    /// Whether the agent list is its own bounded, scrolling box this render: a
+    /// query is typed, or Show all is on; the one definition the list and the
+    /// controls inside it ([`Self::agent_list_scroll`]) share.
+    fn agent_list_bounded(&self, cx: &App) -> bool {
+        self.active_settings()
+            .is_some_and(|s| !s.agent_query.read(cx).value().trim().is_empty() || s.agent_show_all)
+    }
+
+    /// The agent list's scroller for a control inside it: `Some` only while the
+    /// list is bounded.
+    pub(crate) fn agent_list_scroll(&self, cx: &App) -> Option<gpui::ScrollHandle> {
+        self.active_settings()
+            .filter(|_| self.agent_list_bounded(cx))
+            .map(|s| s.agent_list_scroll.clone())
+    }
+
     fn render_agent_hooks_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let tk = Tk::of(cx);
         let Some(s) = self.active_settings() else {
@@ -247,7 +263,7 @@ impl Tty59App {
                     )
                 });
                 let none = list.is_empty();
-                let bounded = !query.is_empty() || show_all;
+                let bounded = self.agent_list_bounded(cx);
                 let scroll = s.agent_list_scroll.clone();
                 let mut col = v_flex().id("agent-hook-list-rows").when(bounded, |c| {
                     // Match the viewport's negative margin so controls keep
@@ -309,7 +325,7 @@ impl Tty59App {
                                 r.child(t_plural(L10nKey::SettingsMoreAgents, rest, &[]))
                             })
                             .child(
-                                kit::button(
+                                self.page_button(
                                     "agent-show-all",
                                     if show_all {
                                         t(L10nKey::SettingsShowInstalledOnly)
@@ -410,41 +426,54 @@ impl Tty59App {
                 }),
             });
             let toggle = menu_id.clone();
-            div()
+            // A plain menu: the same keyboard behaviour as a dropdown's trigger.
+            let items = super::shell::menu_items(&entries);
+            let click_items = items.clone();
+            let trigger = div()
+                .id(ElementId::Name(SharedString::from(format!(
+                    "{menu_id}-trigger"
+                ))))
                 .relative()
+                .size(px(26.))
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .when(open, |d| d.bg(tk.k05))
+                .hover(move |s| s.bg(tk.k05))
                 .child(
-                    div()
-                        .id(ElementId::Name(SharedString::from(format!(
-                            "{menu_id}-trigger"
-                        ))))
-                        .size(px(26.))
-                        .rounded(px(6.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .when(open, |d| d.bg(tk.k05))
-                        .hover(move |s| s.bg(tk.k05))
-                        .child(
-                            Icon::empty()
-                                .path("icons/settings/more.svg")
-                                .size(px(12.))
-                                .text_color(tk.sub),
-                        )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.toggle_settings_menu(toggle.clone(), 0, false, window, cx)
-                        })),
+                    Icon::empty()
+                        .path("icons/settings/more.svg")
+                        .size(px(12.))
+                        .text_color(tk.sub),
                 )
-                .when(open, |d| {
-                    // Built only while open: the entries hold callbacks, and
-                    // the panel is where they are wired to the rows.
-                    d.child(kit::popover_below(
-                        true,
-                        4.,
-                        self.settings_menu_panel(&menu_id, entries, cx)
-                            .min_w(px(170.)),
-                    ))
-                })
+                .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
+                    this.activate_settings_menu(&toggle, ev, &click_items, 0, window, cx)
+                }));
+            #[cfg(test)]
+            let trigger = trigger.debug_selector({
+                let selector = format!("{menu_id}-trigger");
+                move || selector
+            });
+            let trigger = kit::stop(
+                ElementId::Name(SharedString::from(format!("{menu_id}-trigger"))),
+                px(6.),
+                trigger,
+            )
+            .in_scroll(self.settings_scroll())
+            .in_inner_scroll(self.agent_list_scroll(cx))
+            .on_key(self.settings_menu_key(menu_id.clone(), items, 0, cx));
+            div().relative().child(trigger).when(open, |d| {
+                // Built only while open: the entries hold callbacks, and
+                // the panel is where they are wired to the rows.
+                d.child(kit::popover_below(
+                    true,
+                    4.,
+                    self.settings_menu_panel(&menu_id, entries, cx)
+                        .min_w(px(170.)),
+                ))
+            })
         });
 
         v_flex()
@@ -515,11 +544,12 @@ impl Tty59App {
                             })
                             .when_some(action, |r, label| {
                                 r.child(
-                                    kit::button(
+                                    self.page_button(
                                         ("agent-hooks-install", i),
                                         label,
                                         BtnKind::Secondary,
                                     )
+                                    .in_inner_scroll(self.agent_list_scroll(cx))
                                     .on_click(cx.listener(
                                         move |this, _, _w, cx| {
                                             this.settings_install_agent_hooks(agent, cx)

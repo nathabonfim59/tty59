@@ -14,6 +14,7 @@ use crate::ui::app::{
     Tty59App, tile_trailing_inset,
 };
 use crate::ui::i18n::{L10nKey, t, t_fmt};
+use crate::ui::roving::{Pending, PendingKind, Roving};
 use crate::ui::scrollbar::with_vertical_scrollbar;
 use crate::ui::text_elision::{ElidedLabel, Mode as ElideMode};
 
@@ -25,6 +26,53 @@ pub(crate) fn shown_tab(tab: RightPanelTab) -> RightPanelTab {
         RightPanelTab::Search => RightPanelTab::Files,
         tab => tab,
     }
+}
+
+/// A panel's body: its `title` row over a vertically scrolling `inner`, with
+/// the scrollbar. `Tty59App::panel_scroll` is this on the panel's own scroll
+/// handle; the ring scene tests mount it on one of theirs.
+pub(crate) fn panel_scroll_body(
+    scroll: &gpui::ScrollHandle,
+    inner: AnyElement,
+    title: AnyElement,
+) -> AnyElement {
+    let body = div()
+        .id("right-panel-body")
+        // Keep main's flex column sizing inside the shared panel/ring helper.
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .track_scroll(scroll)
+        .child(inner);
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .child(title)
+        .child(with_vertical_scrollbar(
+            "right-panel-body-scrollbar",
+            body,
+            scroll,
+        ))
+        .into_any_element()
+}
+
+/// The keyboard ring around the Info panel's whole body while the Info root
+/// (`handle`) has focus, drawn inside the body's edge: the body fills the panel,
+/// so an outer ring would run off it. The one call the Info panel and the ring
+/// scene tests both make.
+pub(crate) fn info_ring(
+    handle: &gpui::FocusHandle,
+    body: impl IntoElement,
+) -> crate::ui::theme::FocusRing {
+    crate::ui::theme::FocusRing::new(
+        handle,
+        crate::ui::theme::RingPlacement::Inside,
+        px(0.),
+        body,
+    )
+    .fill()
 }
 
 /// Which of the two panel button paints an empty state's way out takes.
@@ -382,6 +430,9 @@ pub(crate) const SEARCH_H: f32 = 30.;
 const SEARCH_GLYPH: f32 = 11.;
 const SEARCH_GLYPH_GAP: f32 = 3.;
 
+/// What the Info tab's root calls itself in the dispatch tree.
+const INFO_PANEL_CONTEXT: &str = "InfoPanel";
+
 #[derive(Default)]
 pub(crate) struct RightPanelState {
     pub(crate) procs_pane: Option<u64>,
@@ -572,6 +623,479 @@ impl InfoRow {
     }
 }
 
+impl InfoRow {
+    /// What Enter does on this row: the counts open their diff, a row with a
+    /// copy tile copies exactly what that tile puts on the clipboard.
+    fn enter_act(&self) -> Option<InfoAct> {
+        if let InfoValue::Diff {
+            open: Some((host, cwd)),
+            ..
+        } = &self.value
+        {
+            return Some(InfoAct::OpenDiff(*host, cwd.clone()));
+        }
+        self.copy.clone().map(InfoAct::Copy)
+    }
+
+    /// What Space does on this row: Reveal, where the row has one (a working
+    /// directory on this machine), and nothing anywhere else.
+    fn space_act(&self) -> Option<InfoAct> {
+        self.reveal.clone().map(InfoAct::Reveal)
+    }
+}
+
+/// What a keyboard stop of the Session table is called. Position is never
+/// kept: rows come and go with the pane (a branch row needs a repository).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum InfoKey {
+    Pane,
+    Cwd,
+    Shell,
+    Ssh,
+    Latency,
+    Branch,
+    Changes,
+}
+
+impl InfoKey {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pane => "Pane",
+            Self::Cwd => "Cwd",
+            Self::Shell => "Shell",
+            Self::Ssh => "Ssh",
+            Self::Latency => "Latency",
+            Self::Branch => "Branch",
+            Self::Changes => "Changes",
+        }
+    }
+}
+
+/// A row of a pane: the pane the table describes and the row's name. Two panes
+/// both have a `Cwd` row, and only one of them is the one the keyboard is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct InfoSource {
+    pub(crate) pane: u64,
+    pub(crate) key: InfoKey,
+}
+
+/// The Session table as the render and the keys both read it.
+struct InfoRows {
+    pane: Option<u64>,
+    rows: Vec<(InfoKey, InfoRow)>,
+}
+
+/// The one row of a frame that carries the keyboard's stop, for the render.
+#[derive(Clone, Copy)]
+struct InfoStop {
+    source: InfoSource,
+    /// The keyboard is on the stop or inside it: its action strip is shown.
+    shown: bool,
+    /// The generation this frame was rendered with.
+    ticket: u64,
+}
+
+/// A keyboard entry waiting for the frame that mounts the row it is for.
+pub(crate) struct InfoEntry {
+    ticket: u64,
+    source: InfoSource,
+}
+
+/// What a row's key does. One value for the tile and the key that stand for
+/// the same thing, so they cannot drift apart.
+#[derive(Clone)]
+enum InfoAct {
+    Copy(String),
+    Reveal(PathBuf),
+    OpenDiff(crate::ui::host_ops::HostId, PathBuf),
+}
+
+/// Run an act that needs nothing but the app. `OpenDiff` needs the window and
+/// the entity; `Tty59App::info_run` does it, and this does nothing for it.
+fn run_info_act(act: &InfoAct, cx: &mut gpui::App) {
+    match act {
+        InfoAct::Copy(text) => {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+        }
+        InfoAct::Reveal(path) => cx.reveal_path(&crate::ui::path_display::native_separators(path)),
+        InfoAct::OpenDiff(..) => {}
+    }
+}
+
+/// The Info rows' keyboard: its one stop, where it is, the generation that
+/// guards a request, and the entry that waits for its row.
+pub(crate) struct InfoKeyboard {
+    roving: Roving,
+    /// The row the keyboard is on. `None`: the first interactive row is the
+    /// stop (so Tab reaches something), and a key resolves to that same row.
+    at: Option<InfoSource>,
+    nav_gen: u64,
+    entry: Option<InfoEntry>,
+    /// The observer of Tab that normalises a stale choice (see
+    /// [`Tty59App::info_after_keystroke`]). Kept here so it lives and dies with
+    /// the keyboard it belongs to; `None` until the window registers it.
+    _keystrokes: Option<gpui::Subscription>,
+}
+
+impl InfoKeyboard {
+    pub(crate) fn new(cx: &mut gpui::App) -> Self {
+        Self {
+            roving: Roving::new(cx),
+            at: None,
+            nav_gen: 0,
+            entry: None,
+            _keystrokes: None,
+        }
+    }
+
+    /// Register, once, for the window that owns this keyboard, the passive
+    /// observer of Tab. It only normalises state after a key has been handled:
+    /// it never focuses, consumes, propagates or rebinds anything.
+    pub(crate) fn watch_tab(&mut self, window: &Window, cx: &mut Context<Tty59App>) {
+        let owner = window.window_handle();
+        self._keystrokes = Some(cx.observe_keystrokes(move |app, event, window, cx| {
+            // Keystrokes of every window reach the observer; only this
+            // window's are its business.
+            if window.window_handle() == owner {
+                app.info_after_keystroke(event, window, cx);
+            }
+        }));
+    }
+
+    /// End an entry that was waiting. The panel being put away, or another tab
+    /// chosen, does not leave one behind.
+    fn clear_entry(&mut self) {
+        self.entry = None;
+        self.roving.cancel();
+    }
+
+    /// The user asked for Info by name: nothing from before survives.
+    fn reset(&mut self) {
+        self.at = None;
+        self.entry = None;
+        self.roving.bump(&mut self.nav_gen);
+    }
+}
+
+impl Tty59App {
+    /// Which row tracks the stop in this frame. The row the keyboard is on, if
+    /// it is still drawn for this pane; the first interactive row while none is
+    /// chosen (so Tab reaches it). A choice that no longer names a drawn row
+    /// tracks nothing while the stop holds the keyboard, so its focus is lost
+    /// and the app's own fallback hands it to the pane; once the stop is not
+    /// focused the first row tracks it again. Only reads.
+    fn info_tracked(
+        &self,
+        pane: Option<u64>,
+        keys: &[InfoKey],
+        rows: &[InfoRow],
+        window: &Window,
+    ) -> Option<InfoKey> {
+        let pane = pane?;
+        let mut stops = keys
+            .iter()
+            .zip(rows)
+            .filter(|(_, row)| row.interactive())
+            .map(|(key, _)| *key);
+        let first = stops.next();
+        match self.info_kb.at {
+            None => first,
+            Some(at) if at.pane == pane => {
+                match first.into_iter().chain(stops).find(|k| *k == at.key) {
+                    Some(key) => Some(key),
+                    None => self.info_stale(first, window),
+                }
+            }
+            Some(_) => self.info_stale(first, window),
+        }
+    }
+
+    fn info_stale(&self, first: Option<InfoKey>, window: &Window) -> Option<InfoKey> {
+        match self.info_kb.roving.handle.is_focused(window) {
+            true => None,
+            false => first,
+        }
+    }
+
+    /// The element the tracked row, or the root when none tracks, carries to
+    /// answer a waiting entry. `rendered` is the row of this frame, or nothing.
+    fn info_probe(
+        &self,
+        ticket: u64,
+        rendered: Option<InfoSource>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let this = cx.weak_entity();
+        self.info_kb
+            .roving
+            .probe(ticket, move |pending, _bounds, window, cx| {
+                // Prepaint: only schedules. The answer is given after the draw,
+                // with the app unleased, from live state.
+                let handle = window.window_handle();
+                cx.defer(move |cx| {
+                    let _ = handle.update(cx, |_, window, cx| {
+                        let _ = this.update(cx, |app, cx| {
+                            app.info_entry_complete(pending, rendered, window, cx)
+                        });
+                    });
+                });
+            })
+    }
+
+    /// Make `row` the keyboard's stop: it tracks the handle, names itself in
+    /// the key context, takes the keys and carries the ring and the probe.
+    fn info_stop(
+        &self,
+        row: gpui::Stateful<gpui::Div>,
+        stop: InfoStop,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let handle = self.info_kb.roving.handle.clone();
+        let mut context = gpui::KeyContext::default();
+        context.add("InfoRow");
+        context.set("key", stop.source.key.as_str());
+        let probe = self.info_probe(stop.ticket, Some(stop.source), cx);
+        let row = row
+            .track_focus(&handle)
+            .key_context(context)
+            // A pointer press never moves the keyboard here: GPUI focuses a
+            // tracked element on mouse-down unless the event is prevented. The
+            // keys and Tab are the way in. The tiles and the strip are not
+            // affected; the strip stops its own presses.
+            .on_any_mouse_down(|_, window, _| window.prevent_default())
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                this.info_row_key(event, window, cx)
+            }))
+            .child(probe);
+        // Inside the row's edge, so the scroller that shows the row cannot clip
+        // the ring.
+        let ring = crate::ui::theme::FocusRing::new(
+            &handle,
+            crate::ui::theme::RingPlacement::Inside,
+            ROW_FILL_RADIUS,
+            row,
+        )
+        .keyboard_only(true);
+        // Only the one tracked row is wrapped, so the names cannot collide.
+        #[cfg(test)]
+        let ring = ring.tagged("info-stop-ring");
+        ring.into_any_element()
+    }
+
+    /// Down, Home or End on the Info root: ask for the keyboard to go to the
+    /// first (or last) interactive row. Settled by the frame that mounts it.
+    fn info_request_entry(&mut self, last: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let InfoRows { pane, rows } = self.info_rows(window, cx);
+        let Some(pane) = pane else {
+            return;
+        };
+        let mut stops = rows
+            .iter()
+            .filter(|(_, row)| row.interactive())
+            .map(|(key, _)| *key);
+        let Some(key) = (if last { stops.last() } else { stops.next() }) else {
+            return;
+        };
+        cx.stop_propagation();
+        let source = InfoSource { pane, key };
+        let ticket = self.info_kb.roving.bump(&mut self.info_kb.nav_gen);
+        self.info_kb.at = Some(source);
+        self.info_kb.roving.request(Pending {
+            ticket,
+            window: window.window_handle(),
+            origin: window.focused(cx),
+            kind: PendingKind::Entry,
+        });
+        self.info_kb.entry = Some(InfoEntry { ticket, source });
+        cx.notify();
+    }
+
+    /// Answer a keyboard entry once a frame has taken it: called after that
+    /// frame, with the app unleased, and the request was taken by its prepaint,
+    /// so it is consumed here whatever the answer. `rendered` is the row that
+    /// frame drew as the stop, `None` when it drew none.
+    fn info_entry_complete(
+        &mut self,
+        pending: Pending,
+        rendered: Option<InfoSource>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ticket = pending.ticket;
+        // Only the entry this completion belongs to is consumed: one for an
+        // older request that arrives after a newer one leaves it alone.
+        let Some(entry) = self.info_kb.entry.take_if(|e| e.ticket == ticket) else {
+            return;
+        };
+        if self.info_answer(&entry, &pending, rendered, window, cx) {
+            let handle = self.info_kb.roving.handle.clone();
+            window.focus(&handle, cx);
+        } else {
+            // The keyboard stays where the user has it, and the position the
+            // request chose is not kept.
+            if self.info_kb.at == Some(entry.source) {
+                self.info_kb.at = None;
+            }
+            cx.notify();
+        }
+    }
+
+    /// Whether the entry may still take the keyboard, from live state.
+    fn info_answer(
+        &self,
+        entry: &InfoEntry,
+        pending: &Pending,
+        rendered: Option<InfoSource>,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> bool {
+        if self.info_kb.nav_gen != entry.ticket
+            || rendered != Some(entry.source)
+            || !(self.right_panel_visible && self.right_panel_tab == RightPanelTab::Info)
+        {
+            return false;
+        }
+        // Nothing has taken the keyboard since the request was made, and it
+        // was made from the root.
+        if pending.origin.as_ref() != Some(&self.info_focus)
+            || window.focused(cx).as_ref() != pending.origin.as_ref()
+            || self.info_kb.roving.mounted(entry.ticket).is_none()
+        {
+            return false;
+        }
+        // Still the pane it was asked about, and the row is still there.
+        let InfoRows { pane, rows } = self.info_rows(window, cx);
+        pane == Some(entry.source.pane)
+            && rows
+                .iter()
+                .any(|(key, row)| *key == entry.source.key && row.interactive())
+    }
+
+    /// Move the stop to `to`: the handle stays focused and re-attaches to that
+    /// row's element in the next frame.
+    fn info_move(&mut self, pane: u64, to: InfoKey, cx: &mut Context<Self>) {
+        self.info_kb.at = Some(InfoSource { pane, key: to });
+        self.info_kb.entry = None;
+        self.info_kb.roving.bump(&mut self.info_kb.nav_gen);
+        cx.notify();
+    }
+
+    /// A key at the row that holds the keyboard. Only while the handle itself
+    /// is focused: the event also bubbles up from a tile of the strip, and a
+    /// tile owns its keys.
+    fn info_row_key(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.info_kb.roving.handle.is_focused(window) {
+            return;
+        }
+        let stroke = &event.keystroke;
+        let key = stroke.key.as_str();
+        // Escape and every other key are not ours: Escape reaches the root.
+        if stroke.modifiers.modified()
+            || !matches!(key, "up" | "down" | "home" | "end" | "enter" | "space")
+        {
+            return;
+        }
+        let InfoRows { pane, rows } = self.info_rows(window, cx);
+        let Some(pane) = pane else {
+            return;
+        };
+        let stops: Vec<usize> = (0..rows.len())
+            .filter(|&i| rows[i].1.interactive())
+            .collect();
+        let last = stops.len().saturating_sub(1);
+        let here = match self.info_kb.at {
+            None => 0,
+            Some(at) if at.pane == pane => match stops.iter().position(|&i| rows[i].0 == at.key) {
+                Some(here) => here,
+                None => return,
+            },
+            Some(_) => return,
+        };
+        if stops.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
+        match key {
+            // The first row's Up is the way back to the root, not a stop.
+            "up" if here == 0 => {
+                self.info_kb.at = None;
+                self.info_kb.entry = None;
+                self.info_kb.roving.bump(&mut self.info_kb.nav_gen);
+                let root = self.info_focus.clone();
+                window.focus(&root, cx);
+                cx.notify();
+            }
+            "up" => self.info_move(pane, rows[stops[here - 1]].0, cx),
+            "down" => self.info_move(pane, rows[stops[(here + 1).min(last)]].0, cx),
+            "home" => self.info_move(pane, rows[stops[0]].0, cx),
+            "end" => self.info_move(pane, rows[stops[last]].0, cx),
+            // A press acts once: a repeat does nothing, and the key-up GPUI
+            // would turn into a click finds no click handler on a row.
+            _ if event.is_held => {}
+            _ => {
+                let row = &rows[stops[here]].1;
+                let act = match key {
+                    "enter" => row.enter_act(),
+                    _ => row.space_act(),
+                };
+                if let Some(act) = act {
+                    self.info_run(act, window, cx);
+                }
+            }
+        }
+    }
+
+    /// After Tab (or Shift+Tab) has been handled by the toolkit's Root, which
+    /// has already moved the keyboard (`focus_next`), and before any frame is
+    /// drawn: if it landed on the Info stop while the choice `at` names a row
+    /// that is no longer drawn for this pane, forget the choice. The first
+    /// interactive row is then the stop in the next frame, with the handle
+    /// focused, so the row Tab reached is kept rather than unmounted by the
+    /// stale-choice rule of `info_tracked` (which exists so that a FOCUSED row
+    /// that vanishes hands the keyboard to the pane). Passive: it reads, and
+    /// resets the Info state only; it moves no focus and consumes nothing.
+    fn info_after_keystroke(
+        &mut self,
+        event: &gpui::KeystrokeEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stroke = &event.keystroke;
+        let held = &stroke.modifiers;
+        if stroke.key != "tab" || held.control || held.alt || held.platform || held.function {
+            return;
+        }
+        if !self.info_kb.roving.handle.is_focused(window) {
+            return;
+        }
+        let Some(at) = self.info_kb.at else {
+            return;
+        };
+        let InfoRows { pane, rows } = self.info_rows(window, cx);
+        let live = pane == Some(at.pane)
+            && rows
+                .iter()
+                .any(|(key, row)| *key == at.key && row.interactive());
+        if live {
+            return;
+        }
+        self.info_kb.reset();
+        cx.notify();
+    }
+
+    fn info_run(&mut self, act: InfoAct, window: &mut Window, cx: &mut Context<Self>) {
+        match act {
+            InfoAct::OpenDiff(host, cwd) => self.toggle_diff_overlay(host, cwd, window, cx),
+            act => run_info_act(&act, cx),
+        }
+    }
+}
+
 /// Widest of the labels actually on screen, so the values line up without a
 /// fixed width guessing at them.
 ///
@@ -664,13 +1188,69 @@ impl Tty59App {
     }
 
     pub(crate) fn toggle_right_panel(&mut self, cx: &mut Context<Self>) {
+        // A keyboard entry into the Changes list does not outlive the panel
+        // being put away or brought back, and neither does one into Info.
+        self.scm_entry_clear();
+        self.info_kb.clear_entry();
         let next = !self.right_panel_visible;
         self.right_panel_visible = next;
         self.update_config(cx, |cfg| cfg.right_panel_visible = next);
         cx.notify();
     }
 
+    /// The user asked for a right panel tab by name — through the palette or
+    /// the tab's own action — so it is shown, and for Info the keyboard goes
+    /// into it: the one way into the panel from the terminal, whose Tab and
+    /// Shift+Tab are input. For Changes the keyboard is asked into the list
+    /// (`scm_request_entry`), which may be unbuilt or still loading. The other
+    /// callers of `set_right_panel_tab` still only select.
+    ///
+    /// The focus is set here, at the event. The Info root is drawn by the very
+    /// next frame (`set_right_panel_tab` has just made it part of it), and the
+    /// handle is the app's own, so there is nothing to repair while drawing.
+    pub(crate) fn show_right_panel_tab(
+        &mut self,
+        tab: RightPanelTab,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_right_panel_tab(tab, cx);
+        match self.right_panel_tab {
+            // Asked for by name: nothing the Info rows remembered survives, and
+            // the keyboard is the root's, from where the rows are entered.
+            RightPanelTab::Info => {
+                self.info_kb.reset();
+                window.focus(&self.info_focus, cx)
+            }
+            // Not focused here: the list may not be read or built yet. The
+            // request is settled by the first frame that mounts its row.
+            RightPanelTab::Scm => {
+                // The keyboard may be inside the Info panel (its root, a row,
+                // a tile), which this very tab switch takes out of the tree.
+                // The request below records where the keyboard is as the
+                // place it must still be at completion, so it is first put
+                // where the app's own fallback would put it a frame later,
+                // at the event, on a handle that survives the switch.
+                if self.info_focus.contains_focused(window, cx) {
+                    self.focus_active(window, cx);
+                }
+                self.scm_request_entry(window, cx)
+            }
+            _ => {}
+        }
+    }
+
     pub(crate) fn set_right_panel_tab(&mut self, tab: RightPanelTab, cx: &mut Context<Self>) {
+        // Choosing a tab, by pointer or otherwise, ends any keyboard entry
+        // into the Changes list that was waiting, and forgets a keyboard
+        // position the list no longer has. `show_right_panel_tab` asks again
+        // after this if it was the keyboard that chose. A waiting entry into
+        // the Info rows ends the same way.
+        self.scm_entry_clear();
+        self.info_kb.clear_entry();
+        if tab == RightPanelTab::Scm {
+            self.scm_drop_orphan_stop(cx);
+        }
         // Every way to find in files ends here, and none of them has a
         // `Window` to move focus with; the Files field takes it on its next
         // frame.
@@ -1007,28 +1587,7 @@ impl Tty59App {
     }
 
     pub(crate) fn panel_scroll(&self, inner: AnyElement, title: AnyElement) -> AnyElement {
-        let body = div()
-            .id("right-panel-body")
-            // A flex column, not the default block: as a block this box left its
-            // child at the child's own width, so the content clipped or sat
-            // narrow whatever the panel's width.
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.right_panel.scroll)
-            .child(inner);
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .child(title)
-            .child(with_vertical_scrollbar(
-                "right-panel-body-scrollbar",
-                body,
-                &self.right_panel.scroll,
-            ))
-            .into_any_element()
+        panel_scroll_body(&self.right_panel.scroll, inner, title)
     }
 
     pub(crate) fn panel_empty(
@@ -1074,12 +1633,12 @@ impl Tty59App {
             .into_any_element()
     }
 
-    fn render_panel_info(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let title = self.panel_title(t(L10nKey::PanelInfoTitle), None, None, window, cx);
-        let mut rows: Vec<InfoRow> = Vec::new();
-        // Which pane the sections below describe, and what can be done with
-        // its ports. Worked out once, by the same call the watch uses.
-        let ctx = self.pane_forward_ctx(window, cx);
+    /// The Session table's rows, each with the name its keyboard stop goes by,
+    /// and the pane they describe. The one place they are worked out: the
+    /// render draws them and the keys act on them, so what a key does is what
+    /// the row on screen says it does, read live at the moment of the key.
+    fn info_rows(&self, window: &Window, cx: &gpui::App) -> InfoRows {
+        let mut rows: Vec<(InfoKey, InfoRow)> = Vec::new();
         let mut pane_id: Option<u64> = None;
         // Where the `changes` row's counts lead. Same source as the sidebar's.
         let mut diff_target: Option<(crate::ui::host_ops::HostId, PathBuf)> = None;
@@ -1094,9 +1653,10 @@ impl Tty59App {
                 // has no id on screen anywhere else — the row makes it visible
                 // the moment the pane is focused, and the copy tile hands it
                 // to a driving agent without touching the pane itself.
-                rows.push(
+                rows.push((
+                    InfoKey::Pane,
                     InfoRow::text(t(L10nKey::PanelPane), format!("%{}", view.pane_id)).copyable(),
-                );
+                ));
                 diff_target = view
                     .git_status_cwd()
                     .map(|cwd| (view.host_id(), cwd.to_path_buf()));
@@ -1108,19 +1668,22 @@ impl Tty59App {
                     // re-spelled with this OS's separators — a remote one is
                     // already native where it lives.
                     let local = view.local_cwd().is_some();
-                    rows.push(InfoRow {
-                        label: t(L10nKey::PanelCwd),
-                        value: InfoValue::Path(compact_path(&cwd, home.as_deref())),
-                        // The compacted `~/…` spelling is for reading; what
-                        // goes on the clipboard is the path a shell can use.
-                        copy: Some(match local {
-                            true => crate::ui::path_display::native_separators(&cwd)
-                                .display()
-                                .to_string(),
-                            false => cwd.display().to_string(),
-                        }),
-                        reveal: local.then(|| cwd.clone()),
-                    });
+                    rows.push((
+                        InfoKey::Cwd,
+                        InfoRow {
+                            label: t(L10nKey::PanelCwd),
+                            value: InfoValue::Path(compact_path(&cwd, home.as_deref())),
+                            // The compacted `~/…` spelling is for reading; what
+                            // goes on the clipboard is the path a shell can use.
+                            copy: Some(match local {
+                                true => crate::ui::path_display::native_separators(&cwd)
+                                    .display()
+                                    .to_string(),
+                                false => cwd.display().to_string(),
+                            }),
+                            reveal: local.then(|| cwd.clone()),
+                        },
+                    ));
                 }
                 // A pane on the default shell runs whatever the server picked,
                 // which is not always the login shell the inventory names: a
@@ -1137,25 +1700,31 @@ impl Tty59App {
                     Some(program) => crate::core::shells::default_shell_name(Some(&program)),
                     None => root.unwrap_or_else(|| self.default_shell_label(cx)),
                 };
-                rows.push(InfoRow::text(t(L10nKey::PanelShell), shell));
+                rows.push((InfoKey::Shell, InfoRow::text(t(L10nKey::PanelShell), shell)));
                 if let Some(ssh) = view.ssh_spec() {
-                    rows.push(InfoRow::text(t(L10nKey::PanelSsh), ssh.host.clone()).copyable());
+                    rows.push((
+                        InfoKey::Ssh,
+                        InfoRow::text(t(L10nKey::PanelSsh), ssh.host.clone()).copyable(),
+                    ));
                 }
                 // Only where there is a network between here and the shell. On
                 // a pane of this machine's own the row would be reporting the
                 // round trip to a Unix socket, which is a number with nothing
                 // to compare it against.
                 if self.right_panel.link_host.is_some() {
-                    rows.push(InfoRow::text(
-                        t(L10nKey::PanelLatency),
-                        // A link whose first ping has not come back yet,
-                        // rather than one measured at zero. The dash is the
-                        // table's empty cell, the same one a clean working
-                        // tree gets.
-                        self.right_panel
-                            .link_rtt
-                            .map(format_rtt)
-                            .unwrap_or_else(|| EMPTY.to_string()),
+                    rows.push((
+                        InfoKey::Latency,
+                        InfoRow::text(
+                            t(L10nKey::PanelLatency),
+                            // A link whose first ping has not come back yet,
+                            // rather than one measured at zero. The dash is the
+                            // table's empty cell, the same one a clean working
+                            // tree gets.
+                            self.right_panel
+                                .link_rtt
+                                .map(format_rtt)
+                                .unwrap_or_else(|| EMPTY.to_string()),
+                        ),
                     ));
                 }
                 git = view.git_status(cx);
@@ -1167,26 +1736,56 @@ impl Tty59App {
             // a diff, disagreeing means a click that opens a repository other
             // than the one whose numbers were clicked.
             if let Some(git) = git {
-                rows.push(InfoRow::branch(t(L10nKey::PanelBranch), git.branch.clone()).copyable());
-                rows.push(InfoRow {
-                    label: t(L10nKey::PanelChangesRow),
-                    value: InfoValue::Diff {
-                        added: git.added,
-                        removed: git.removed,
-                        // A clean tree has no diff to open, so the row keeps
-                        // its place in the table but stops being a button.
-                        open: (git.added > 0 || git.removed > 0)
-                            .then_some(diff_target.clone())
-                            .flatten(),
+                rows.push((
+                    InfoKey::Branch,
+                    InfoRow::branch(t(L10nKey::PanelBranch), git.branch.clone()).copyable(),
+                ));
+                rows.push((
+                    InfoKey::Changes,
+                    InfoRow {
+                        label: t(L10nKey::PanelChangesRow),
+                        value: InfoValue::Diff {
+                            added: git.added,
+                            removed: git.removed,
+                            // A clean tree has no diff to open, so the row keeps
+                            // its place in the table but stops being a button.
+                            open: (git.added > 0 || git.removed > 0)
+                                .then_some(diff_target.clone())
+                                .flatten(),
+                        },
+                        copy: None,
+                        reveal: None,
                     },
-                    copy: None,
-                    reveal: None,
-                });
+                ));
             }
         }
+        InfoRows {
+            pane: pane_id,
+            rows,
+        }
+    }
+
+    fn render_panel_info(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let title = self.panel_title(t(L10nKey::PanelInfoTitle), None, None, window, cx);
+        // Which pane the sections below describe, and what can be done with
+        // its ports. Worked out once, by the same call the watch uses.
+        let ctx = self.pane_forward_ctx(window, cx);
+        let InfoRows {
+            pane: pane_id,
+            rows,
+        } = self.info_rows(window, cx);
+        let (keys, rows): (Vec<InfoKey>, Vec<InfoRow>) = rows.into_iter().unzip();
+        // The row that tracks the keyboard's one stop in this frame, if any.
+        let tracked = self.info_tracked(pane_id, &keys, &rows, window);
+        // A pending entry no row will answer in this frame still has to be
+        // consumed by it, so the root carries the probe then, and only then.
+        // It names no row, and what it settles can only be dropped.
+        let ticket = self.info_kb.nav_gen;
+        let root_probe = (self.info_kb.entry.is_some() && tracked.is_none())
+            .then(|| self.info_probe(ticket, None, cx));
 
         if rows.is_empty() {
-            return self.panel_scroll(
+            let empty = self.panel_scroll(
                 self.panel_empty(
                     t(L10nKey::PanelNoSession),
                     Some(t(L10nKey::PanelNoSessionHint)),
@@ -1194,18 +1793,70 @@ impl Tty59App {
                 ),
                 title,
             );
+            return match root_probe {
+                Some(probe) => v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .child(empty)
+                    .child(probe)
+                    .into_any_element(),
+                None => empty,
+            };
         }
 
         let label_w = info_label_column(&rows, window, cx);
+        // Whether the keyboard is on the tracked row or on something inside it
+        // (a tile of its strip): the strip is then shown, for the tiles are
+        // what the keys stand for.
+        let shown = self.info_kb.roving.handle.contains_focused(window, cx);
         // Rows pad themselves in to `TEXT_INSET`, so their hover fill bleeds
         // past the text on both sides — the geometry the Source Control tab's
         // rows are on, one tab over.
         let mut list = v_flex().px(px(CONTENT_INSET));
-        for (i, row) in rows.into_iter().enumerate() {
-            list = list.child(self.info_row(i, row, label_w, cx));
+        for (i, (key, row)) in keys.iter().zip(rows).enumerate() {
+            let stop = (tracked == Some(*key))
+                .then(|| {
+                    pane_id.map(|pane| InfoStop {
+                        source: InfoSource { pane, key: *key },
+                        shown,
+                        ticket,
+                    })
+                })
+                .flatten();
+            list = list.child(self.info_row(i, row, label_w, stop, cx));
         }
 
         let inner = v_flex()
+            .id("right-panel-info")
+            // The Info root takes the keyboard when the Info tab is asked for
+            // (`show_right_panel_tab`). Not a tab stop itself: the stops inside
+            // it follow it in the tab order.
+            .track_focus(&self.info_focus)
+            .key_context(INFO_PANEL_CONTEXT)
+            // Escape from anywhere in the panel gives the keyboard back to the
+            // pane. It gets here only when nothing nearer took it: a field or
+            // a menu that has something to close handles its own Escape action
+            // first, and the toolkit's Escape bindings are all scoped to those.
+            // Down, Home and End on the root itself (not bubbling from a row,
+            // which takes its own) enter the rows.
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                let stroke = &event.keystroke;
+                if stroke.modifiers.modified() {
+                    return;
+                }
+                if stroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.focus_active(window, cx);
+                } else if this.info_focus.is_focused(window) {
+                    match stroke.key.as_str() {
+                        "down" | "home" => this.info_request_entry(false, window, cx),
+                        "end" => this.info_request_entry(true, window, cx),
+                        _ => {}
+                    }
+                }
+            }))
+            .when_some(root_probe, |this, probe| this.relative().child(probe))
             .pb(px(SECTION_GAP))
             .gap(px(SECTION_GAP))
             .child(
@@ -1214,9 +1865,12 @@ impl Tty59App {
                     .child(list),
             )
             .children(self.procs_section(pane_id, cx))
-            .children(self.ports_section(ctx.as_ref(), cx))
+            .children(self.ports_section(ctx.as_ref(), window, cx))
             .into_any_element();
-        self.panel_scroll(inner, title)
+        let ringed = info_ring(&self.info_focus, self.panel_scroll(inner, title));
+        #[cfg(test)]
+        let ringed = ringed.tagged("info-ring");
+        ringed.into_any_element()
     }
 
     /// One label/value line, with whatever it can do revealed on hover.
@@ -1231,6 +1885,7 @@ impl Tty59App {
         i: usize,
         row: InfoRow,
         label_w: gpui::Pixels,
+        stop: Option<InfoStop>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
@@ -1380,9 +2035,17 @@ impl Tty59App {
             .child(value);
 
         let mut tiles = action_strip(&id, sf.hover);
+        // The keyboard is on this row, or on a tile in it: the strip is shown
+        // as it is under the pointer, whatever the pointer is doing.
+        if stop.is_some_and(|stop| stop.shown) {
+            tiles = tiles.visible();
+        }
         let mut has_tiles = false;
+        // The tiles and the keys run the same acts, through the same function,
+        // so a tile and its key cannot come to mean different things.
         if let Some(cwd) = row.reveal {
             has_tiles = true;
+            let act = InfoAct::Reveal(cwd);
             tiles = tiles.child(
                 self.info_tile(
                     "panel-info-reveal",
@@ -1390,18 +2053,15 @@ impl Tty59App {
                     reveal_label(),
                     cx,
                 )
-                .on_click(move |_, _window, cx| {
-                    cx.reveal_path(&crate::ui::path_display::native_separators(&cwd))
-                }),
+                .on_click(move |_, _window, cx| run_info_act(&act, cx)),
             );
         }
         if let Some(text) = row.copy {
             has_tiles = true;
+            let act = InfoAct::Copy(text);
             tiles = tiles.child(
                 self.info_tile(("panel-info-copy", i), IconName::Copy, copy_label, cx)
-                    .on_click(move |_, _window, cx| {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
-                    }),
+                    .on_click(move |_, _window, cx| run_info_act(&act, cx)),
             );
         }
         // A row with nothing to reveal gets no strip at all, rather than an
@@ -1450,7 +2110,10 @@ impl Tty59App {
             true => element.debug_selector(|| "panel-info-branch-row".into()),
             false => element,
         };
-        element.into_any_element()
+        match stop {
+            Some(stop) => self.info_stop(element, stop, cx),
+            None => element.into_any_element(),
+        }
     }
 
     /// The tile an Info row's hover strip is made of — the [`TILE_SIZE_XS`]
@@ -1583,6 +2246,7 @@ impl Tty59App {
     fn ports_section(
         &self,
         ctx: Option<&PaneForwardCtx>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let ctx = ctx?;
@@ -1764,7 +2428,7 @@ impl Tty59App {
         // Forwards no port row spoke for: the remote and dynamic ones, and any
         // local forward pointed somewhere this pane is not itself serving.
         for forward in forwards.iter().filter(|m| !paired.contains(&m.id)) {
-            list = list.child(self.forward_row(forward, &mono, cx));
+            list = list.child(self.forward_row(forward, &mono, window, cx));
         }
 
         let add = ctx.route.is_some().then(|| {
@@ -2457,6 +3121,12 @@ pub fn reveal_label() -> &'static str {
 fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
     crate::ui::path_display::abbreviate_home(&path.to_string_lossy(), home).into_owned()
 }
+
+#[cfg(test)]
+mod info_keys_tests;
+
+#[cfg(all(test, unix))]
+mod rebase_info_tests;
 
 #[cfg(test)]
 mod tests {

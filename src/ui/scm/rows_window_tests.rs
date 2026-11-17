@@ -27,23 +27,23 @@ use tty59_core::core::git::status::WorkingTreeStatus;
 /// Files committed to the fixture. The first `STAGED` of them are edited and
 /// staged, the next `EDITED` edited and left in the working tree; the rest
 /// stay as they are, one of them to be renamed.
-const BASE: usize = 660;
-const STAGED: usize = 325;
-const EDITED: usize = 325;
+pub(super) const BASE: usize = 660;
+pub(super) const STAGED: usize = 325;
+pub(super) const EDITED: usize = 325;
 /// The file `git mv` renames, staged.
-const RENAMED: usize = 655;
+pub(super) const RENAMED: usize = 655;
 
 /// A name long enough that the row has to truncate it.
 fn long_name() -> String {
     format!("long/{}.txt", "a_very_long_file_name_segment".repeat(8))
 }
 
-fn serial() -> std::sync::MutexGuard<'static, ()> {
+pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn scratch(name: &str) -> PathBuf {
+pub(super) fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tty59-rows-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -74,7 +74,13 @@ fn git_output(root: &Path, args: &[&str]) -> std::process::Output {
         .expect("git runs")
 }
 
-fn git(root: &Path, args: &[&str]) {
+// Keyboard-action fixtures also need the status predicate; setup failures use
+// git_output's full diagnostics through git() on every supported platform.
+pub(super) fn git_ok(root: &Path, args: &[&str]) -> bool {
+    git_output(root, args).status.success()
+}
+
+pub(super) fn git(root: &Path, args: &[&str]) {
     let out = git_output(root, args);
     assert!(
         out.status.success(),
@@ -86,11 +92,11 @@ fn git(root: &Path, args: &[&str]) {
     );
 }
 
-fn file(i: usize) -> String {
+pub(super) fn file(i: usize) -> String {
     format!("pkg_{:02}/file_{i:03}.txt", i / 25)
 }
 
-fn write(root: &Path, rel: &str, text: &str) {
+pub(super) fn write(root: &Path, rel: &str, text: &str) {
     let path = root.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
@@ -100,7 +106,7 @@ fn write(root: &Path, rel: &str, text: &str) {
 /// ~327 unstaged changes — a staged rename, a modified submodule and a very
 /// long name among them. Every group past the cap, so each one draws
 /// `MAX_RENDERED_FILES` rows and its "…and N more".
-fn big_repo(name: &str) -> PathBuf {
+pub(super) fn big_repo(name: &str) -> PathBuf {
     let base = scratch(name);
     let root = base.join("repo");
     let sub = base.join("sub-src");
@@ -159,7 +165,7 @@ fn big_repo(name: &str) -> PathBuf {
     root
 }
 
-fn panel_on(
+pub(super) fn panel_on(
     cx: &mut TestAppContext,
     root: &Path,
 ) -> (
@@ -202,12 +208,12 @@ fn panel_on(
     (app, vcx, pane)
 }
 
-fn draw(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+pub(super) fn draw(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
     app.update_in(vcx, |_, _, cx| cx.notify());
     vcx.run_until_parked();
 }
 
-fn status(
+pub(super) fn status(
     app: &Entity<Tty59App>,
     vcx: &mut VisualTestContext,
 ) -> std::sync::Arc<WorkingTreeStatus> {
@@ -220,7 +226,7 @@ fn status(
 /// The flat list's rows of `group`, in the order the panel draws them, as the
 /// selectors the rows carry. Leaked: `debug_bounds` takes `&'static str`, and
 /// a test process can spare a few kilobytes.
-fn flat_rows(status: &WorkingTreeStatus, group: ScmGroup) -> Vec<&'static str> {
+pub(super) fn flat_rows(status: &WorkingTreeStatus, group: ScmGroup) -> Vec<&'static str> {
     status
         .entries
         .iter()
@@ -230,12 +236,15 @@ fn flat_rows(status: &WorkingTreeStatus, group: ScmGroup) -> Vec<&'static str> {
         .collect()
 }
 
-fn header(group: ScmGroup) -> &'static str {
+pub(super) fn header(group: ScmGroup) -> &'static str {
     Box::leak(format!("scm-group-{group:?}").into_boxed_str())
 }
 
 /// Which of `rows` the last frame painted, by index, with their bounds.
-fn painted(vcx: &mut VisualTestContext, rows: &[&'static str]) -> Vec<(usize, Bounds<Pixels>)> {
+pub(super) fn painted(
+    vcx: &mut VisualTestContext,
+    rows: &[&'static str],
+) -> Vec<(usize, Bounds<Pixels>)> {
     rows.iter()
         .enumerate()
         .filter_map(|(i, sel)| vcx.debug_bounds(sel).map(|b| (i, b)))
@@ -243,16 +252,16 @@ fn painted(vcx: &mut VisualTestContext, rows: &[&'static str]) -> Vec<(usize, Bo
 }
 
 /// A file row's height plus the 1px between rows, at the rem in force now.
-fn pitch(vcx: &mut VisualTestContext) -> f32 {
+pub(super) fn pitch(vcx: &mut VisualTestContext) -> f32 {
     let rem = vcx.update(|window, _| window.rem_size().as_f32());
     ROW_H * rem / 16. + 1.
 }
 
-fn viewport(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Bounds<Pixels> {
+pub(super) fn viewport(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Bounds<Pixels> {
     app.update_in(vcx, |app, _, _| app.scm.scroll.bounds())
 }
 
-fn scroll_to(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, y: f32) {
+pub(super) fn scroll_to(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, y: f32) {
     app.update_in(vcx, |app, _, _| {
         app.scm.scroll.set_offset(point(px(0.), px(-y)))
     });
@@ -261,12 +270,12 @@ fn scroll_to(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, y: f32) {
     draw(app, vcx);
 }
 
-fn scroll_top(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> f32 {
+pub(super) fn scroll_top(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> f32 {
     app.update_in(vcx, |app, _, _| -app.scm.scroll.offset().y.as_f32())
 }
 
 /// Collapse every group but `keep`, so `keep`'s rows start near the top.
-fn only_group(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, keep: ScmGroup) {
+pub(super) fn only_group(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, keep: ScmGroup) {
     app.update_in(vcx, |app, _, cx| {
         for g in ScmGroup::ORDER {
             app.scm.set_group_collapsed(g, g != keep);
@@ -279,7 +288,7 @@ fn only_group(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, keep: ScmGrou
 /// How many rows a frame may build for one viewport: what fits, a partial row
 /// at each edge, and an overscan margin either side for each of the (at most
 /// two) runs that can share the viewport. Main built every row — 600-odd.
-fn row_budget(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> usize {
+pub(super) fn row_budget(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> usize {
     let fits = (viewport(app, vcx).size.height.as_f32() / pitch(vcx)).ceil() as usize;
     fits + 2 + 2 * 2 * 12
 }
@@ -316,7 +325,7 @@ fn assert_rows_on_pitch(
 
 /// Where the first row of `group` sits in window space at the current
 /// scroll, from its header — which is drawn whatever the scroll.
-fn first_row_top(vcx: &mut VisualTestContext, group: ScmGroup) -> f32 {
+pub(super) fn first_row_top(vcx: &mut VisualTestContext, group: ScmGroup) -> f32 {
     let h = vcx
         .debug_bounds(header(group))
         .expect("the group's header is drawn");
@@ -521,7 +530,7 @@ fn folding_hides_exactly_the_folded_rows(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
 }
 
-fn mouse(vcx: &mut VisualTestContext, button: MouseButton, at: gpui::Point<Pixels>) {
+pub(super) fn mouse(vcx: &mut VisualTestContext, button: MouseButton, at: gpui::Point<Pixels>) {
     vcx.update(|window, cx| {
         window.dispatch_event(
             PlatformInput::MouseMove(gpui::MouseMoveEvent {

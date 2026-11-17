@@ -66,6 +66,23 @@ impl Tty59App {
         )
     }
 
+    /// Whether the host list is its own bounded, scrolling box this render: a
+    /// query is typed, or Show all is on. The one definition both the list
+    /// (`render_hosts_group`) and the controls inside it ([`Self::ssh_list_scroll`])
+    /// use, so a control names the inner scroller only when the list built it.
+    fn ssh_list_bounded(&self, cx: &App) -> bool {
+        self.active_settings()
+            .is_some_and(|s| !s.ssh_filter.read(cx).value().trim().is_empty() || s.ssh_show_all)
+    }
+
+    /// The host list's scroller for a control inside it: `Some` only while the
+    /// list is bounded (otherwise the page's scroller alone holds the control).
+    pub(crate) fn ssh_list_scroll(&self, cx: &App) -> Option<gpui::ScrollHandle> {
+        self.active_settings()
+            .filter(|_| self.ssh_list_bounded(cx))
+            .map(|s| s.ssh_list_scroll.clone())
+    }
+
     fn render_hosts_group(&self, cx: &mut Context<Self>) -> AnyElement {
         let tk = Tk::of(cx);
         let Some(s) = self.active_settings() else {
@@ -182,39 +199,43 @@ impl Tty59App {
             }));
         #[cfg(test)]
         let filter_field = filter_field.debug_selector(|| "ssh-host-filter".to_string());
-        let import_link = kit::button(
-            "ssh-import-config",
-            t(L10nKey::SettingsImportFromSshConfig),
-            BtnKind::Link,
-        )
-        .text_size(fs(12.5))
-        .on_click(cx.listener(|this, _, window, cx| this.import_ssh_config_profiles(window, cx)));
-        let add_host = kit::button(
-            "ssh-add-host",
-            t(L10nKey::SettingsAddHost),
-            BtnKind::Secondary,
-        )
-        .icon("icons/settings/plus.svg")
-        .dimmed(adding.is_some())
-        .on_click(cx.listener(|this, _, window, cx| {
-            if this
-                .active_settings()
-                .and_then(|s| s.ssh_form.as_ref())
-                .is_some_and(|f| {
-                    !cx.global::<Config>()
-                        .ssh_profiles
-                        .iter()
-                        .any(|p| p.id == f.editing)
-                })
-            {
-                return;
-            }
-            let filter = this.active_settings().map(|s| s.ssh_filter.clone());
-            if let Some(filter) = filter {
-                filter.update(cx, |f, cx| f.set_value("", window, cx));
-            }
-            this.add_new_profile(window, cx);
-        }));
+        let import_link = self
+            .page_button(
+                "ssh-import-config",
+                t(L10nKey::SettingsImportFromSshConfig),
+                BtnKind::Link,
+            )
+            .text_size(fs(12.5))
+            .on_click(
+                cx.listener(|this, _, window, cx| this.import_ssh_config_profiles(window, cx)),
+            );
+        let add_host = self
+            .page_button(
+                "ssh-add-host",
+                t(L10nKey::SettingsAddHost),
+                BtnKind::Secondary,
+            )
+            .icon("icons/settings/plus.svg")
+            .dimmed(adding.is_some())
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this
+                    .active_settings()
+                    .and_then(|s| s.ssh_form.as_ref())
+                    .is_some_and(|f| {
+                        !cx.global::<Config>()
+                            .ssh_profiles
+                            .iter()
+                            .any(|p| p.id == f.editing)
+                    })
+                {
+                    return;
+                }
+                let filter = this.active_settings().map(|s| s.ssh_filter.clone());
+                if let Some(filter) = filter {
+                    filter.update(cx, |f, cx| f.set_value("", window, cx));
+                }
+                this.add_new_profile(window, cx);
+            }));
         // The filter takes whatever the buttons leave, never less than
         // HOST_FILTER_MIN_W. When the page is too narrow to hold the import
         // link beside it, the link goes on its own line below.
@@ -235,7 +256,7 @@ impl Tty59App {
             )
             .children(below.map(|link| h_flex().child(link)));
 
-        let bounded = !query.is_empty() || show_all;
+        let bounded = self.ssh_list_bounded(cx);
         let mut list = v_flex()
             .id("ssh-host-list-rows")
             .px(px(10.))
@@ -292,7 +313,7 @@ impl Tty59App {
                         t_plural(L10nKey::SettingsMoreHosts, rest, &[])
                     })
                     .child(
-                        kit::button(
+                        self.page_button(
                             "ssh-show-all",
                             if show_all {
                                 t(L10nKey::SettingsShowRecentOnly)
@@ -344,8 +365,9 @@ impl Tty59App {
     ) -> AnyElement {
         let tk = Tk::of(cx);
         let owned = key.to_string();
-        h_flex()
+        let head = h_flex()
             .id(SharedString::from(format!("ssh-group-{key}")))
+            .relative()
             .h(px(34.))
             .flex_shrink_0()
             .items_end()
@@ -379,7 +401,16 @@ impl Tty59App {
                     .text_color(tk.sub)
                     .child(count.to_string()),
             )
-            .on_click(cx.listener(move |this, _, _w, cx| this.toggle_ssh_group(owned.clone(), cx)))
+            .on_click(cx.listener(move |this, _, _w, cx| this.toggle_ssh_group(owned.clone(), cx)));
+        #[cfg(test)]
+        let head = head.debug_selector({
+            let selector = format!("ssh-group-{key}");
+            move || selector
+        });
+        kit::stop(SharedString::from(format!("ssh-group-{key}")), px(4.), head)
+            .inside()
+            .in_scroll(self.settings_scroll())
+            .in_inner_scroll(self.ssh_list_scroll(cx))
             .into_any_element()
     }
 
@@ -471,6 +502,7 @@ impl Tty59App {
 
         let head = div()
             .id(SharedString::from(format!("ssh-host-{}", id.as_u128())))
+            .relative()
             .role(gpui::Role::Button)
             .aria_label(match address.is_empty() {
                 true => title.clone(),
@@ -556,6 +588,17 @@ impl Tty59App {
                 }
                 cx.notify();
             }));
+        #[cfg(test)]
+        let head = head.debug_selector(move || format!("ssh-host-{}", id.as_u128()));
+        // Inside the row's edge: the list scrolls and its rows are flush.
+        let head = kit::stop(
+            SharedString::from(format!("ssh-host-{}", id.as_u128())),
+            px(8.),
+            head,
+        )
+        .inside()
+        .in_scroll(self.settings_scroll())
+        .in_inner_scroll(self.ssh_list_scroll(cx));
 
         let body = if editing {
             Some(self.render_host_editor(p.is_some(), cx))
@@ -647,11 +690,12 @@ impl Tty59App {
                     .gap(px(8.))
                     .items_center()
                     .child(
-                        kit::button(
+                        self.page_button(
                             "ssh-host-connect",
                             t(L10nKey::SettingsConnectInNewTab),
                             BtnKind::Primary,
                         )
+                        .in_inner_scroll(self.ssh_list_scroll(cx))
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 this.close_settings_then(window, cx, move |this, window, cx| {
@@ -661,11 +705,12 @@ impl Tty59App {
                         )),
                     )
                     .child(
-                        kit::button(
+                        self.page_button(
                             "ssh-host-edit",
                             t(L10nKey::SettingsEditHost),
                             BtnKind::Secondary,
                         )
+                        .in_inner_scroll(self.ssh_list_scroll(cx))
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 if let Some(profile) = cx
@@ -682,7 +727,7 @@ impl Tty59App {
                     )
                     .child(div().flex_1())
                     .child(
-                        kit::button(
+                        self.page_button(
                             "ssh-host-copy",
                             if copied {
                                 t(L10nKey::SettingsCopied)
@@ -691,6 +736,7 @@ impl Tty59App {
                             },
                             BtnKind::Link,
                         )
+                        .in_inner_scroll(self.ssh_list_scroll(cx))
                         .on_click(cx.listener(move |this, _, _w, cx| {
                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(command.clone()));
                             if let Some(s) = this.active_settings_mut() {
@@ -837,7 +883,7 @@ impl Tty59App {
                     .gap(px(8.))
                     .items_center()
                     .child(
-                        kit::button(
+                        self.page_button(
                             "ssh-form-save",
                             if saved {
                                 t(L10nKey::Save)
@@ -846,13 +892,15 @@ impl Tty59App {
                             },
                             BtnKind::Primary,
                         )
+                        .in_inner_scroll(self.ssh_list_scroll(cx))
                         .dimmed(!can_save)
                         .on_click(
                             cx.listener(|this, _, window, cx| this.save_host_form(window, cx)),
                         ),
                     )
                     .child(
-                        kit::button("ssh-form-cancel", t(L10nKey::Cancel), BtnKind::Link)
+                        self.page_button("ssh-form-cancel", t(L10nKey::Cancel), BtnKind::Link)
+                            .in_inner_scroll(self.ssh_list_scroll(cx))
                             .on_click(cx.listener(|this, _, _w, cx| this.cancel_ssh_form(cx))),
                     )
                     .child(
@@ -865,7 +913,7 @@ impl Tty59App {
                     .child(div().flex_1())
                     .when(saved, |r| {
                         r.child(
-                            kit::button(
+                            self.page_button(
                                 "ssh-form-remove",
                                 if confirm_remove {
                                     t(L10nKey::SettingsClickAgainToRemove)
@@ -878,6 +926,7 @@ impl Tty59App {
                                     BtnKind::Link
                                 },
                             )
+                            .in_inner_scroll(self.ssh_list_scroll(cx))
                             .on_click(cx.listener(
                                 move |this, _, _w, cx| {
                                     let confirmed = this

@@ -4083,6 +4083,92 @@ mod gpui_tests {
             prefer_character_input,
         }
     }
+
+    // ---- Shift+F10 in a focused terminal reaches the shell -----------------
+    //
+    // The switcher takes Shift+F10 for itself only while it is open. With a
+    // terminal focused the key is the shell's: it must come out of the pane as
+    // the bytes terminfo gives it, through the real keymap and window dispatch,
+    // once, with no switcher and no menu opened on the way. This is the
+    // dispatch claim; the encoder's own table and a closed switcher opening no
+    // menu are covered elsewhere and prove nothing about what reached the PTY.
+
+    /// The first thing the pane sent its daemon, if it sent anything within a
+    /// quarter of a second.
+    fn pane_input(daemon: &mut crate::daemon::transport::Stream) -> Option<Vec<u8>> {
+        use crate::daemon::protocol::ClientMsg;
+        use std::io::ErrorKind;
+
+        daemon
+            .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+            .expect("the pane socket takes a read timeout");
+        loop {
+            match ClientMsg::read(daemon) {
+                Ok(ClientMsg::Input(bytes)) => return Some(bytes),
+                Ok(_) => continue,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return None;
+                }
+                Err(e) => panic!("pane socket failed: {e}"),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn shift_f10_in_a_focused_terminal_reaches_the_pty_once(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |_| {});
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let daemon = &mut streams[0];
+        let popup_menu = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, _| {
+                window
+                    .context_stack()
+                    .iter()
+                    .any(|context| context.contains("PopupMenu"))
+            })
+        };
+        assert!(
+            app.update(&mut vcx, |app, _| app.switcher.is_none()),
+            "setup: no switcher is open"
+        );
+        assert!(!popup_menu(&mut vcx), "setup: no menu is open");
+
+        // Control: a typed key reaches this pane's daemon, so the reads below
+        // can see what the pane sends.
+        vcx.simulate_keystrokes("q");
+        vcx.run_until_parked();
+        assert_eq!(pane_input(daemon).as_deref(), Some(&b"q"[..]), "control");
+        assert_eq!(pane_input(daemon), None, "control: one write, then quiet");
+
+        // Plain F10 is kf10, Shift+F10 is kf22 with xterm's modifier 2: two
+        // different sequences, so a handler that ate the Shift or swapped one
+        // for the other shows.
+        for (keys, sequence) in [("f10", &b"\x1b[21~"[..]), ("shift-f10", &b"\x1b[21;2~"[..])] {
+            vcx.simulate_keystrokes(keys);
+            vcx.run_until_parked();
+            assert_eq!(
+                pane_input(daemon).as_deref(),
+                Some(sequence),
+                "{keys} reaches the PTY as {sequence:?}"
+            );
+            assert_eq!(
+                pane_input(daemon),
+                None,
+                "{keys} sent exactly one write, nothing after it"
+            );
+        }
+
+        assert!(
+            app.update(&mut vcx, |app, _| app.switcher.is_none()),
+            "Shift+F10 opened no switcher"
+        );
+        assert!(!popup_menu(&mut vcx), "Shift+F10 opened no menu");
+    }
 }
 
 /// The conformance gate over the keymap gpui really holds: what the toolkit
@@ -4561,5 +4647,175 @@ mod conformance {
                 "{found:?}"
             );
         });
+    }
+
+    // ---- Shift+F10: the switcher's raw key, which no binding may take ------
+    //
+    // The switcher opens the picked row's menu from its own key handler
+    // (`on_switcher_key`), not from an action. gpui matches bindings before a
+    // key handler runs, so a binding on Shift+F10 anywhere on the way — the
+    // toolkit's, the app's or the fixed table, in any context — would take the
+    // key from the switcher while it is open and from the shell while a
+    // terminal has focus. Two claims, kept apart: who OWNS the chord in the
+    // installed table (global), and what gpui DISPATCHES for it in the stacks a
+    // real window holds (live).
+
+    /// Every installed binding on `chord`, whatever the context, for the
+    /// shapes of config that change the table.
+    #[gpui::test]
+    fn no_installed_binding_owns_shift_f10_in_any_context(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // The spelling the table uses is the spelling the claim is made in.
+            assert_eq!(canonical("shift-f10"), "shift-f10");
+
+            super::gpui_tests::running_on_json(cx, "{}");
+            let table = gate(cx, "default config");
+            assert!(
+                owners_of(&table, "shift-f10").is_empty(),
+                "shift-f10 is owned by {:?}: a binding on it takes the key from the \
+                 switcher's own handler and from the terminal",
+                owners_of(&table, "shift-f10")
+            );
+
+            // Positive controls: the same read finds a chord that is bound ...
+            // `effective_key` takes the config's action id; the table holds the
+            // installed action's name, which is what the ownership read returns.
+            let palette = effective_key("TogglePalette", cx).expect("TogglePalette ships a chord");
+            assert!(
+                owners_of(&table, &palette)
+                    .iter()
+                    .any(|(a, _)| a == TogglePalette::name_for_type()),
+                "the read finds TogglePalette on {palette}"
+            );
+            // ... the nearest bound function-key chord, where there is one ...
+            if !cfg!(target_os = "macos") {
+                assert!(
+                    owners_of(&table, "shift-f3")
+                        .iter()
+                        .any(|(a, _)| a == FindPrevious::name_for_type()),
+                    "the read finds FindPrevious on shift-f3: {:?}",
+                    owners_of(&table, "shift-f3")
+                );
+            }
+            // ... and a binding that WERE on shift-f10 is reported, in any
+            // context.
+            for context in ["", "Terminal", "Switcher", "Input"] {
+                let mut injected = table.clone();
+                injected.push(row(Origin::Fixed, "shift-f10", context, "Injected"));
+                assert_eq!(
+                    owners_of(&injected, "shift-f10"),
+                    vec![("Injected".to_string(), context.to_string())],
+                    "an injected binding in {context:?} is seen"
+                );
+            }
+
+            // The tmux preset swaps whole chords for sequences.
+            cx.global_mut::<Config>().keybinding_preset = "tmux".to_string();
+            rebind(cx);
+            let table = gate(cx, "tmux preset");
+            assert!(owners_of(&table, "shift-f10").is_empty(), "tmux preset");
+
+            // A config that moves actions around, the group shortcuts on, and
+            // the Windows defaults listed as overrides.
+            cx.global_mut::<Config>().keybinding_preset = "default".to_string();
+            cx.global_mut::<Config>().tab_group_shortcuts = true;
+            cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
+                "NewAgentTab": [new_agent_tab_default(Os::Windows)],
+                "CopyRaw": [copy_raw_default(Os::Windows)],
+                "ToggleSwitcher": ["secondary-shift-9"],
+            }))
+            .expect("the overrides load");
+            rebind(cx);
+            let table = gate(cx, "overridden config");
+            assert!(owners_of(&table, "shift-f10").is_empty(), "overridden");
+        });
+    }
+
+    /// What gpui dispatches for Shift+F10 in the context stacks a real window
+    /// holds: the focused terminal's, and the open switcher's with its search
+    /// box focused. The stacks are read off the live window, not spelled out
+    /// here, so a context the switcher or the toolkit adds is covered.
+    #[gpui::test]
+    fn gpui_dispatches_no_action_for_shift_f10_in_the_terminal_or_the_open_switcher(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |_| {});
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        let hits = |vcx: &mut gpui::VisualTestContext,
+                    stack: &[gpui::KeyContext],
+                    keys: &str|
+         -> Vec<&'static str> {
+            let input: Vec<Keystroke> = keys
+                .split(' ')
+                .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))
+                .collect();
+            vcx.update(|_, cx| {
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, stack)
+                    .0
+                    .iter()
+                    .map(|b| b.action().name())
+                    .collect()
+            })
+        };
+        let palette = vcx
+            .update(|_, cx| effective_key("TogglePalette", cx))
+            .expect("TogglePalette ships a chord");
+
+        // The focused terminal.
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        draw(&mut vcx);
+        assert!(
+            app.update(&mut vcx, |app, _| app.switcher.is_none()),
+            "setup: no switcher is open over the terminal"
+        );
+        let terminal = vcx.update(|window, _| window.context_stack());
+        assert!(
+            terminal.iter().any(|c| c.contains("Terminal")),
+            "setup: the live stack is the focused terminal's: {terminal:?}"
+        );
+        assert_eq!(
+            hits(&mut vcx, &terminal, "shift-f10"),
+            Vec::<&str>::new(),
+            "no action answers Shift+F10 from the focused terminal"
+        );
+        assert!(
+            hits(&mut vcx, &terminal, &palette).contains(&TogglePalette::name_for_type()),
+            "control: the same stack dispatches {palette} to TogglePalette"
+        );
+
+        // The open switcher, search box focused.
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        draw(&mut vcx);
+        assert!(
+            app.update(&mut vcx, |app, _| app.switcher.is_some()),
+            "setup: the switcher is open"
+        );
+        let switcher = vcx.update(|window, _| window.context_stack());
+        assert!(
+            switcher.iter().any(|c| c.contains("Switcher")),
+            "setup: the live stack is the open switcher's: {switcher:?}"
+        );
+        assert_ne!(
+            switcher, terminal,
+            "setup: the switcher's stack is not the terminal's"
+        );
+        assert_eq!(
+            hits(&mut vcx, &switcher, "shift-f10"),
+            Vec::<&str>::new(),
+            "no action answers Shift+F10 inside the open switcher"
+        );
+        assert!(
+            hits(&mut vcx, &switcher, &palette).contains(&TogglePalette::name_for_type()),
+            "control: the switcher's stack dispatches {palette} to TogglePalette"
+        );
     }
 }

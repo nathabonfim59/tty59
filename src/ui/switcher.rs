@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, MouseButton, MouseDownEvent, Subscription,
-    Window, div, prelude::*, px,
+    Anchor, AnyElement, App, ClickEvent, Context, DismissEvent, Entity, FocusHandle,
+    Focusable as _, MouseButton, MouseDownEvent, Pixels, Point, Subscription, Window, anchored,
+    deferred, div, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem};
+use gpui_component::menu::{PopupMenu, PopupMenuItem};
+use gpui_component::popover::Popover;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 
 use tty59_core::core::machine::TabId;
@@ -24,6 +26,11 @@ use crate::ui::remote_connect::{self, HostChoice, RemoteWorkspaceRow};
 use crate::ui::remote_workspace::{ConnectFlow, MachineStatus, RemoteLinks};
 use crate::ui::text_elision::{ElidedLabel, Mode};
 
+#[cfg(test)]
+mod footer_clip_tests;
+#[cfg(test)]
+mod footer_hint_tests;
+mod footer_plan;
 mod machine_scope;
 pub(crate) use machine_scope::MachineScope;
 use machine_scope::RailEntry;
@@ -459,7 +466,26 @@ pub(crate) struct Switcher {
     /// `render_rail` renders from `&self`, and it is what tells a move from
     /// a steady frame.
     rail_followed: std::cell::Cell<Option<usize>>,
+    /// The workspace row menu while one is open, from the ellipsis, from
+    /// Shift+F10 or from a right click. Built once, by the event that opens
+    /// it, from the row as it was then: the menu acts on that workspace
+    /// whatever the list does underneath it afterwards.
+    row_menu: Option<RowMenu>,
     _subs: Vec<Subscription>,
+}
+
+/// An open workspace row menu: whose it is, the menu itself, the handle focus
+/// is read against when it closes, and the three subscriptions that close it.
+struct RowMenu {
+    ws: WorkspaceId,
+    /// Where a right click asked for it, in window coordinates. `None` is a
+    /// menu hung off the row's ellipsis, from the ellipsis or Shift+F10.
+    at: Option<Point<Pixels>>,
+    menu: Entity<PopupMenu>,
+    focus: FocusHandle,
+    _dismiss: Subscription,
+    _blur: Subscription,
+    _lost: Subscription,
 }
 
 impl Switcher {
@@ -473,6 +499,19 @@ impl Switcher {
     /// out from under them makes the workspace list unreachable by hand.
     fn hover_keeps_open(&self) -> bool {
         self.hover_card && !self.hover_tabs
+    }
+
+    /// Whether Shift+F10 has a workspace row menu to open: the list is up
+    /// (not the create form), the workspace column holds the cursor (the tab
+    /// column has no menu), no gesture is held, no rename owns the keys, and
+    /// a row stands under the cursor. The key, the footer hint and nothing
+    /// else decide it, from the frame's own `layout`.
+    fn row_menu_applies(&self, layout: &Layout) -> bool {
+        matches!(self.page, Page::List)
+            && self.column == Column::Left
+            && self.hold.is_none()
+            && self.renaming.is_none()
+            && layout.nav.get(self.left_sel).is_some()
     }
 }
 
@@ -696,6 +735,103 @@ fn rail_steps(rail: &[RailEntry]) -> bool {
         > 1
 }
 
+/// Test-only footer probes. Neither builds, wraps or restyles anything: one
+/// puts a debug selector on the hint's own element so a live frame reports
+/// where it was laid out, the other records the label string the hint was built
+/// with (empty when it carries none). Both are absent outside tests.
+#[cfg(test)]
+fn probe_hint(id: &'static str, hint: gpui::Div) -> gpui::Div {
+    hint.debug_selector(move || format!("switcher-hint:{id}"))
+}
+#[cfg(not(test))]
+fn probe_hint(_id: &'static str, hint: gpui::Div) -> gpui::Div {
+    hint
+}
+
+#[cfg(test)]
+fn note_hint_label(selector: &str, label: &str) {
+    crate::ui::paint_probe::note_label(selector, label);
+}
+
+/// Which footer hint an element is, for the test probes: the ordinary hints
+/// are named by id, and the picked row's Shift+F10 More has its own selector.
+#[derive(Clone, Copy)]
+enum HintKind {
+    Probe(&'static str),
+    Menu,
+}
+
+impl HintKind {
+    #[cfg(test)]
+    fn selector(self) -> String {
+        match self {
+            HintKind::Probe(id) => format!("switcher-hint:{id}"),
+            HintKind::Menu => "switcher-hint-row-menu".into(),
+        }
+    }
+}
+
+/// A footer hint before it is measured: its keycaps (none for a sentence), its
+/// words, and its rank for keeping room.
+struct FooterHint {
+    kind: HintKind,
+    rank: u8,
+    keys: Vec<String>,
+    label: String,
+}
+
+impl FooterHint {
+    fn keys(kind: HintKind, rank: u8, keys: Vec<String>, label: &str) -> Self {
+        Self {
+            kind,
+            rank,
+            keys,
+            label: label.to_string(),
+        }
+    }
+
+    fn sentence(id: &'static str, label: &str) -> Self {
+        Self::keys(
+            HintKind::Probe(id),
+            footer_plan::RANK_SENTENCE,
+            Vec::new(),
+            label,
+        )
+    }
+}
+
+/// One footer hint, drawn whole: its keycaps and, when `label` is given, its
+/// words. It never shrinks and never wraps (the planner decided it fits) and is
+/// never shorter than `min_h`, so a hint without words stands as tall as one
+/// with them.
+fn footer_hint(
+    kind: HintKind,
+    keys: &[String],
+    label: Option<String>,
+    min_h: gpui::Pixels,
+    cx: &gpui::App,
+) -> AnyElement {
+    #[cfg(test)]
+    note_hint_label(&kind.selector(), label.as_deref().unwrap_or(""));
+    let hint = h_flex()
+        .flex_shrink_0()
+        .whitespace_nowrap()
+        .min_h(min_h)
+        .items_center()
+        .gap(px(footer_plan::HINT_GAP))
+        .children(keys.iter().map(|key| keycap(key.clone(), cx)))
+        .children(label);
+    let hint = match kind {
+        HintKind::Probe(id) => probe_hint(id, hint),
+        HintKind::Menu => {
+            #[cfg(test)]
+            let hint = hint.debug_selector(|| "switcher-hint-row-menu".into());
+            hint
+        }
+    };
+    hint.into_any_element()
+}
+
 /// A tab's diff counts as the sidebar words them (`+3 −2`), or `None` for a
 /// clean tree so no separator is left pointing at nothing.
 fn diff_counts(added: u32, removed: u32) -> Option<String> {
@@ -884,6 +1020,7 @@ impl Tty59App {
             right_anchor: gpui::ScrollAnchor::for_handle(right_scroll),
             rail_scroll,
             rail_followed: std::cell::Cell::new(None),
+            row_menu: None,
             _subs: subs,
         });
         // Park the left cursor on this window's own workspace so the tab column
@@ -1901,6 +2038,7 @@ impl Tty59App {
                 cx.stop_propagation();
                 self.switcher_confirm(&layout, new_window, window, cx);
             }
+            Key::RowMenu => self.switcher_row_menu_key(ev.is_held, &layout, window, cx),
         }
     }
 
@@ -2007,6 +2145,150 @@ impl Tty59App {
             sw.column = column;
         }
         cx.notify();
+    }
+
+    /// Opens the workspace row menu for `row`, the one way it is opened: the
+    /// ellipsis and Shift+F10 both land here, with the row and machine as the
+    /// event saw them. The menu is built once, now, from those snapshots by
+    /// the same `row_menu` the right click uses, and takes focus the way the
+    /// toolkit's own dropdown does. A menu already open is closed first, so a
+    /// press on another row's ellipsis replaces it instead of stacking.
+    fn open_row_menu(
+        &mut self,
+        row: RowRef,
+        host: GroupRef,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_row_menu_at(row, host, None, window, cx)
+    }
+
+    /// `open_row_menu`, at the pointer when a right click asks for it. The
+    /// toolkit's own context menu is not used for the row: it keeps the menu
+    /// alive from its element state through a dismissal callback that points
+    /// back at the same state, so the menu is never released. This one is
+    /// owned by `row_menu` alone, like the ellipsis menu, and goes with it.
+    fn open_row_menu_at(
+        &mut self,
+        row: RowRef,
+        host: GroupRef,
+        at: Option<Point<Pixels>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .switcher
+            .as_ref()
+            .is_some_and(|sw| matches!(sw.page, Page::List))
+        {
+            return;
+        }
+        self.close_row_menu(window, cx);
+        let ws = row.id;
+        let app = cx.entity().downgrade();
+        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
+            row_menu(menu, &row, &host, app)
+        });
+        let focus = menu.focus_handle(cx);
+        focus.focus(window, cx);
+        // Dismissal (Escape, a click outside, an item taken) and focus
+        // leaving the menu for good (its row left the list under it) both end
+        // here, so nothing is left holding keys the panel cannot see.
+        let dismiss = cx.subscribe_in(
+            &menu,
+            window,
+            |this, _menu, _: &DismissEvent, window, cx| this.close_row_menu(window, cx),
+        );
+        let blur = cx.on_focus_out(&focus, window, |this, _ev, window, cx| {
+            this.close_row_menu(window, cx)
+        });
+        // Focus with nowhere to be, because the menu's node left the tree: the
+        // window's own fallback has already moved it by the time the blur
+        // above would look.
+        let lost = cx.on_focus_lost(window, |this, window, cx| this.row_menu_lost(window, cx));
+        if let Some(sw) = self.switcher.as_mut() {
+            sw.row_menu = Some(RowMenu {
+                ws,
+                at,
+                menu,
+                focus,
+                _dismiss: dismiss,
+                _blur: blur,
+                _lost: lost,
+            });
+        }
+        cx.notify();
+    }
+
+    /// Drops the open row menu, if any, and gives the search box its focus
+    /// back, but only when focus is still on the menu or stranded on it. An
+    /// item that moved focus on its own (Rename's box, the create form's
+    /// name) runs before the dismissal and keeps what it took.
+    fn close_row_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sw) = self.switcher.as_mut() else {
+            return;
+        };
+        let Some(RowMenu { focus, .. }) = sw.row_menu.take() else {
+            return;
+        };
+        let query = sw.query.clone();
+        let on_menu =
+            focus.contains_focused(window, cx) || window.focused(cx).is_some_and(|f| f == focus);
+        if on_menu {
+            query.update(cx, |state, cx| state.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Nothing in the window has focus while a row menu is registered. Every
+    /// other way focus leaves the menu closes it first (an item runs before
+    /// the dismissal, Escape and an outside click dismiss, a focus move
+    /// closes it through the blur), so this can only be the menu's own node
+    /// leaving the tree: its row went away under it. The window's fallback
+    /// has already parked focus on the terminal by now, and the panel is
+    /// still up, so the search box takes it back unconditionally.
+    fn row_menu_lost(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sw) = self.switcher.as_mut() else {
+            return;
+        };
+        if sw.row_menu.take().is_none() {
+            return;
+        }
+        let query = sw.query.clone();
+        query.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Shift+F10. Only a fresh press acts: a key held down repeats, and the
+    /// repeats that follow a dismissal must not open the menu again. Taken
+    /// (and so kept from the search box) only where the chord applies.
+    fn switcher_row_menu_key(
+        &mut self,
+        held: bool,
+        layout: &Layout,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(sw) = self.switcher.as_ref() else {
+            return;
+        };
+        if !sw.row_menu_applies(layout) {
+            return;
+        }
+        cx.stop_propagation();
+        if held || sw.row_menu.is_some() {
+            return;
+        }
+        let Some(&(g, r)) = layout.nav.get(sw.left_sel) else {
+            return;
+        };
+        let group = &layout.groups[g];
+        self.open_row_menu(
+            RowRef::of(group, &group.rows[r]),
+            GroupRef::of(group),
+            window,
+            cx,
+        );
     }
 
     fn switcher_step_left(
@@ -2261,6 +2543,7 @@ impl Tty59App {
                 picked,
                 Some(at),
                 show_machine,
+                window,
                 cx,
             ));
         }
@@ -2355,7 +2638,7 @@ impl Tty59App {
             .child(self.render_rail(&layout, cx))
             .child(body)
             .children(self.render_banners(&layout, cx))
-            .child(self.render_footer(&layout, cx))
+            .child(self.render_footer(&layout, card_w, window, cx))
             .into_any_element()
     }
 
@@ -2638,7 +2921,13 @@ impl Tty59App {
             .child(keycap("esc", cx))
     }
 
-    fn render_footer(&self, layout: &Layout, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_footer(
+        &self,
+        layout: &Layout,
+        card_w: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let theme = cx.theme();
         let (fg, muted, border) = (theme.foreground, theme.muted_foreground, theme.border);
         let hover = hover_fill(cx);
@@ -2651,96 +2940,176 @@ impl Tty59App {
             .as_ref()
             .is_some_and(|sw| !sw.text(cx).trim().is_empty());
         let (create_label, _) = create_preset_of(layout);
-        let hint = |keys: Vec<AnyElement>, label: String| {
-            h_flex()
-                .items_center()
-                .gap(px(6.))
-                .children(keys)
-                .child(label)
-                .into_any_element()
+        // Every hint is whole or not drawn, so what fits is decided here from
+        // real widths. The window's text system shapes with the font the root
+        // gives the whole UI (`Root` sets only the theme's family; the weight,
+        // features and fallbacks are the defaults) at the size layout resolves
+        // each rem value to, and layout rounds a text's width up: so does
+        // `width`.
+        let rem = window.rem_size();
+        let font = gpui::Font {
+            family: cx.theme().font_family.clone(),
+            features: Default::default(),
+            fallbacks: None,
+            weight: gpui::FontWeight::NORMAL,
+            style: gpui::FontStyle::Normal,
         };
-        let mut hints: Vec<AnyElement> = Vec::new();
+        let text_system = window.text_system();
+        let width = |text: &str, sixteenths: f32| -> f32 {
+            crate::ui::text_elision::measure_text(
+                text_system,
+                &font,
+                sixteenths / 16. * rem.as_f32(),
+                text,
+            )
+            .ceil()
+        };
+        // A hint is at least as tall as its words' line, with or without them,
+        // so dropping the words never changes the row's height. This is the
+        // line height gpui gives a text of that size.
+        let line_h = window.pixel_snap(
+            gpui::TextStyle::default()
+                .line_height
+                .to_pixels(px(footer_plan::HINT_TEXT / 16. * rem.as_f32()).into(), rem),
+        );
+        // In visual order; `rank` says who keeps the room.
+        let mut specs: Vec<FooterHint> = Vec::new();
         if holding {
-            hints.push(
-                div()
-                    .child(t(L10nKey::SwitcherHoldToSwitch))
-                    .into_any_element(),
-            );
+            specs.push(FooterHint::sentence(
+                "hold",
+                t(L10nKey::SwitcherHoldToSwitch),
+            ));
         } else {
             if filtering {
-                hints.push(
-                    div()
-                        .child(t(L10nKey::SwitcherTabToCrossColumns))
-                        .into_any_element(),
-                );
+                specs.push(FooterHint::sentence(
+                    "tab-cross",
+                    t(L10nKey::SwitcherTabToCrossColumns),
+                ));
             }
-            hints.push(hint(
-                vec![keycap("↑", cx), keycap("↓", cx)],
-                t(L10nKey::SwitcherHintNavigate).to_string(),
+            specs.push(FooterHint::keys(
+                HintKind::Probe("navigate"),
+                footer_plan::RANK_NAVIGATE,
+                vec!["↑".into(), "↓".into()],
+                t(L10nKey::SwitcherHintNavigate),
             ));
-            hints.push(hint(
-                vec![keycap("↵", cx)],
-                t(L10nKey::SwitcherHintOpen).to_string(),
+            specs.push(FooterHint::keys(
+                HintKind::Probe("open"),
+                footer_plan::RANK_OPEN,
+                vec!["↵".into()],
+                t(L10nKey::SwitcherHintOpen),
             ));
-            hints.push(hint(
-                vec![
-                    keycap(crate::ui::keymap::secondary_glyph(), cx),
-                    keycap("↵", cx),
-                ],
-                t(L10nKey::SwitcherHintNewWindow).to_string(),
+            specs.push(FooterHint::keys(
+                HintKind::Probe("new-window"),
+                footer_plan::RANK_NEW_WINDOW,
+                vec![crate::ui::keymap::secondary_glyph().into(), "↵".into()],
+                t(L10nKey::SwitcherHintNewWindow),
             ));
             if rail_steps(&layout.rail) {
                 let (modifiers, arrows) = machine_chord();
-                hints.push(hint(
-                    modifiers
-                        .into_iter()
-                        .chain(arrows)
-                        .map(|key| keycap(key, cx))
-                        .collect(),
-                    t(L10nKey::SwitcherHintMachine).to_string(),
+                specs.push(FooterHint::keys(
+                    HintKind::Probe("machine"),
+                    footer_plan::RANK_MACHINE,
+                    modifiers.into_iter().chain(arrows).collect(),
+                    t(L10nKey::SwitcherHintMachine),
+                ));
+            }
+            // Last, and the one a narrow footer keeps longest. Shown only
+            // where the chord does something, by the rule the key itself uses.
+            if self
+                .switcher
+                .as_ref()
+                .is_some_and(|sw| sw.row_menu_applies(layout))
+            {
+                specs.push(FooterHint::keys(
+                    HintKind::Menu,
+                    footer_plan::RANK_MORE,
+                    crate::ui::keymap::key_tokens("shift-f10"),
+                    t(L10nKey::TabTooltipMore),
                 ));
             }
         }
+        let items: Vec<footer_plan::Item> = specs
+            .iter()
+            .map(|spec| {
+                let glyphs: Vec<f32> = spec
+                    .keys
+                    .iter()
+                    .map(|key| width(key, footer_plan::KEYCAP_TEXT))
+                    .collect();
+                footer_plan::Item {
+                    rank: spec.rank,
+                    protected: spec.rank == footer_plan::RANK_MORE,
+                    full: footer_plan::hint_w(
+                        &glyphs,
+                        Some(width(&spec.label, footer_plan::HINT_TEXT)),
+                    ),
+                    keys_only: (!glyphs.is_empty()).then(|| footer_plan::hint_w(&glyphs, None)),
+                }
+            })
+            .collect();
+        let budget =
+            footer_plan::hints_budget(card_w, width(&create_label, footer_plan::CREATE_TEXT));
+        let shapes = footer_plan::plan(&items, budget, footer_plan::HINTS_GAP);
+        let hints: Vec<AnyElement> = specs
+            .into_iter()
+            .zip(shapes)
+            .filter_map(|(spec, shape)| {
+                let label = match shape {
+                    footer_plan::Shape::Absent => return None,
+                    footer_plan::Shape::KeysOnly => None,
+                    footer_plan::Shape::Full => Some(spec.label),
+                };
+                Some(footer_hint(spec.kind, &spec.keys, label, line_h, cx))
+            })
+            .collect();
+        let create = h_flex()
+            .id("switcher-new-workspace")
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(footer_plan::CREATE_GAP))
+            .h(px(28.))
+            .px(px(footer_plan::CREATE_PAD))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(move |r| r.bg(hover))
+            .text_size(gpui::rems(12.5 / 16.))
+            .text_color(fg)
+            .child(
+                Icon::new(IconName::Plus)
+                    .size(px(footer_plan::CREATE_ICON))
+                    .text_color(muted),
+            )
+            .child(create_label)
+            .on_click(cx.listener(|this, _, window, cx| {
+                let layout = this.switcher_layout(cx);
+                let (_, chosen) = create_preset_of(&layout);
+                this.switcher_to_form(chosen, window, cx);
+            }));
+        #[cfg(test)]
+        let create = create.debug_selector(|| "switcher-footer-new-workspace".into());
         h_flex()
             .items_center()
             .justify_between()
-            .gap(px(16.))
+            .gap(px(footer_plan::FOOTER_GAP))
             .border_t_1()
             .border_color(border)
             .h(px(FOOTER_H))
-            .pl(px(8.))
-            .pr(px(10.))
-            .child(
-                h_flex()
-                    .id("switcher-new-workspace")
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(8.))
-                    .h(px(28.))
-                    .px(px(10.))
-                    .rounded(px(6.))
-                    .cursor_pointer()
-                    .hover(move |r| r.bg(hover))
-                    .text_size(gpui::rems(12.5 / 16.))
-                    .text_color(fg)
-                    .child(Icon::new(IconName::Plus).size(px(10.)).text_color(muted))
-                    .child(create_label)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        let layout = this.switcher_layout(cx);
-                        let (_, chosen) = create_preset_of(&layout);
-                        this.switcher_to_form(chosen, window, cx);
-                    })),
-            )
-            .child(
-                h_flex()
+            .pl(px(footer_plan::FOOTER_PAD_L))
+            .pr(px(footer_plan::FOOTER_PAD_R))
+            .child(create)
+            .child({
+                let hints = h_flex()
                     .min_w_0()
                     .overflow_hidden()
                     .items_center()
-                    .gap(px(16.))
+                    .gap(px(footer_plan::HINTS_GAP))
                     .text_size(gpui::rems(11.5 / 16.))
                     .text_color(muted)
-                    .children(hints),
-            )
+                    .children(hints);
+                #[cfg(test)]
+                let hints = hints.debug_selector(|| "switcher-footer-hints".into());
+                hints
+            })
     }
 
     /// The machine-trouble bands between the list and the footer: install
@@ -3293,6 +3662,7 @@ impl Tty59App {
         picked: bool,
         nav_at: Option<usize>,
         show_machine: bool,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(sw) = self.switcher.as_ref()
@@ -3336,9 +3706,21 @@ impl Tty59App {
         let menu_host = gref.clone();
         let ctx_host = gref;
         let app = cx.entity().downgrade();
-        let app2 = app.clone();
         let key = row.id.element_key() as usize;
         let holding = self.switcher.as_ref().is_some_and(|sw| sw.hold.is_some());
+        // This row's menu, if it is the one open: it keeps its ellipsis shown.
+        // One a right click opened hangs off the pointer instead, drawn by the
+        // row below, and leaves the ellipsis alone.
+        let this_row_menu = self
+            .switcher
+            .as_ref()
+            .and_then(|sw| sw.row_menu.as_ref())
+            .filter(|open| open.ws == row.id);
+        let open_menu = this_row_menu
+            .filter(|open| open.at.is_none())
+            .map(|open| open.menu.clone());
+        let pointer_menu = this_row_menu.and_then(|open| Some((open.menu.clone(), open.at?)));
+        let revealed = picked || open_menu.is_some();
         // A machine with no link cannot show this row's panes right now; the
         // row stays, muted, and opening it is what asks for the connection.
         let unlit = group.target.is_some() && matches!(group.link, Link::Offline | Link::Failed);
@@ -3542,25 +3924,55 @@ impl Tty59App {
                 crate::ui::paint_probe::note("switcher.side", &mut side);
                 side
             })
-            .child(
-                div()
+            .child({
+                let more = crate::ui::tab_strip::hit_target(
+                    Button::new(("switcher-row-more", key))
+                        .icon(IconName::Ellipsis)
+                        .ghost()
+                        .xsmall(),
+                );
+                // A hidden element paints nothing and neither do its children,
+                // so this one is only measured while the ellipsis is revealed.
+                #[cfg(test)]
+                let more =
+                    more.debug_selector(move || format!("switcher-row-more:{}", probe_at(nav_at)));
+                // The ellipsis is the same control for the pointer and the
+                // keyboard: the toolkit's popover, held open by this panel's
+                // own state so Shift+F10 can open it too. Its press, and the
+                // keys, both build the menu through `open_row_menu` from the
+                // row as drawn here, never from the cursor.
+                let mut popover = Popover::new(("switcher-row-menu", key))
+                    .open(open_menu.is_some())
+                    .appearance(false)
+                    .overlay_closable(false)
+                    .anchor(Anchor::TopLeft)
+                    .trigger(more.tooltip(t(L10nKey::TabTooltipMore)))
+                    .on_open_change(move |open: &bool, window, cx| {
+                        let (row, host) = (menu_ref.clone(), menu_host.clone());
+                        let _ = app.update(cx, |this, cx| match *open {
+                            true => this.open_row_menu(row, host, window, cx),
+                            false => this.close_row_menu(window, cx),
+                        });
+                    });
+                if let Some(menu) = open_menu {
+                    popover = popover.content(move |_, _, _| menu.clone());
+                }
+                // Revealed under the cursor, as before, and now also on the
+                // picked row and for as long as its menu is open.
+                let slot = div()
                     .invisible()
                     .flex_shrink_0()
                     .group_hover("switcher-row", |x| x.visible())
+                    .when(revealed, |slot| slot.visible())
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        crate::ui::tab_strip::hit_target(
-                            Button::new(("switcher-row-more", key))
-                                .icon(IconName::Ellipsis)
-                                .ghost()
-                                .xsmall(),
-                        )
-                        .tooltip(t(L10nKey::TabTooltipMore))
-                        .dropdown_menu(move |menu, _window, _cx| {
-                            row_menu(menu, &menu_ref, &menu_host, app.clone())
-                        }),
-                    ),
-            )
+                    .child(popover);
+                // The slot is measured even while hidden, so a test can put
+                // the pointer on it before the ellipsis is shown.
+                #[cfg(test)]
+                let slot = slot
+                    .debug_selector(move || format!("switcher-row-more-slot:{}", probe_at(nav_at)));
+                slot
+            })
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 // One click aims the tab column at this workspace; opening it
                 // takes a second click, Enter, or the platform modifier.
@@ -3574,7 +3986,7 @@ impl Tty59App {
             }));
 
         #[cfg(test)]
-        let mut line = line;
+        let mut line = line.debug_selector(move || format!("switcher-row:{}", probe_at(nav_at)));
         #[cfg(test)]
         crate::ui::paint_probe::note("switcher.row", &mut line);
         // A held Ctrl makes every click a right click on macOS. Drop the menu
@@ -3593,9 +4005,20 @@ impl Tty59App {
                 )
                 .into_any_element(),
             false => line
-                .context_menu(move |menu, _window, _cx| {
-                    row_menu(menu, &ctx_ref, &ctx_host, app2.clone())
-                })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.open_row_menu_at(
+                            ctx_ref.clone(),
+                            ctx_host.clone(),
+                            Some(ev.position),
+                            window,
+                            cx,
+                        );
+                    }),
+                )
+                .children(pointer_menu.map(|(menu, at)| pointer_menu_overlay(menu, at, window)))
                 .into_any_element(),
         }
     }
@@ -4265,6 +4688,43 @@ pub(crate) fn host_form_label(target: &RemoteTarget) -> Option<&'static str> {
     }
 }
 
+/// The suffix the tests' measuring selectors carry: the row's place in the
+/// list, because a selector is a fixed string and a row's id is not.
+#[cfg(test)]
+fn probe_at(nav_at: Option<usize>) -> String {
+    nav_at.map_or_else(|| "none".to_string(), |at| at.to_string())
+}
+
+/// A right-click row menu as the row draws it: the layer the toolkit's own
+/// context menu uses (window-sized, so the wheel stays off the list under it),
+/// with the menu anchored at the pointer and snapped back inside the window.
+/// Reads only; the menu itself is owned by `Switcher::row_menu`.
+fn pointer_menu_overlay(menu: Entity<PopupMenu>, at: Point<Pixels>, window: &Window) -> AnyElement {
+    /// How far the menu keeps from the window's edge, as the toolkit's does.
+    const SNAP_MARGIN: Pixels = px(8.);
+    let size = window.bounds().size;
+    let holder = div();
+    #[cfg(test)]
+    let holder = holder.debug_selector(|| "switcher-pointer-menu".to_string());
+    deferred(
+        anchored().child(
+            div()
+                .w(size.width)
+                .h(size.height)
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(
+                    anchored()
+                        .position(at)
+                        .snap_to_window_with_margin(SNAP_MARGIN)
+                        .anchor(Anchor::TopLeft)
+                        .child(holder.child(menu)),
+                ),
+        ),
+    )
+    .with_priority(1)
+    .into_any_element()
+}
+
 fn row_menu(
     menu: gpui_component::menu::PopupMenu,
     row: &RowRef,
@@ -4437,6 +4897,8 @@ enum Key {
     ToColumn(Column),
     Tab(bool),
     Confirm(bool),
+    /// Shift+F10: the picked workspace row's menu.
+    RowMenu,
     Pass,
 }
 
@@ -4474,6 +4936,8 @@ fn key_intent(key: &str, mods: gpui::Modifiers) -> Key {
         // instead, which lands in the same place.
         "tab" if !mods.secondary() => Key::Tab(!mods.shift),
         "enter" if bare || mods.secondary() => Key::Confirm(mods.secondary()),
+        // Shift alone: any other modifier on F10 is somebody else's chord.
+        "f10" if mods.shift && !mods.control && !mods.platform && !mods.secondary() => Key::RowMenu,
         _ => Key::Pass,
     }
 }
@@ -7784,5 +8248,1035 @@ mod contrast_tests {
         }
         misses.assert_none("switcher row and keycap inks");
         unpicked.assert_none("unpicked switcher row inks");
+    }
+}
+
+/// Switcher F2: the picked workspace row's actions and the keyboard route to
+/// the same menu the pointer opens. Everything is driven the way a user does
+/// it, with real keys and mouse events against a drawn frame: the menu is told
+/// apart by the `PopupMenu` key context of whatever holds focus, and the
+/// ellipsis by the selectors the row builder mounts under test (a hidden
+/// element paints nothing, so the button's selector only exists while it is
+/// revealed).
+#[cfg(test)]
+mod row_menu_tests {
+    use gpui::{
+        Entity, FocusHandle, Focusable as _, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
+        Pixels, PlatformInput, Point, TestAppContext, VisualTestContext, point, px,
+    };
+
+    use super::{Column, Page, Tty59App};
+    use crate::core::session::{WindowView, WindowViews, WorkspaceId, WorkspaceStore};
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    /// One selector per list position: a selector is a fixed string.
+    const MORE: [&str; 3] = [
+        "switcher-row-more:0",
+        "switcher-row-more:1",
+        "switcher-row-more:2",
+    ];
+    const SLOT: [&str; 3] = [
+        "switcher-row-more-slot:0",
+        "switcher-row-more-slot:1",
+        "switcher-row-more-slot:2",
+    ];
+    const ROW: [&str; 3] = ["switcher-row:0", "switcher-row:1", "switcher-row:2"];
+    /// The footer's row of hints, mounted today, and the picked-row menu hint
+    /// inside it, which the production change mounts under this selector.
+    const FOOTER_HINTS: &str = "switcher-footer-hints";
+    const MENU_HINT: &str = "switcher-hint-row-menu";
+
+    struct Ids {
+        here: WorkspaceId,
+        bravo: WorkspaceId,
+        charlie: WorkspaceId,
+    }
+
+    struct Panel {
+        app: Entity<Tty59App>,
+        vcx: VisualTestContext,
+        ids: Ids,
+        _streams: Vec<crate::daemon::transport::Stream>,
+    }
+
+    impl Panel {
+        /// The switcher up over three local workspaces: this window's own
+        /// (row 0, picked on open), then bravo and charlie by recency.
+        fn open(cx: &mut TestAppContext) -> Self {
+            let (app, mut vcx, streams) = harness_with_tabs(cx, 1);
+            let here = app.update_in(&mut vcx, |app, _, _| app.workspace);
+            let ids = Ids {
+                here,
+                bravo: WorkspaceId::new(),
+                charlie: WorkspaceId::new(),
+            };
+            let mut panel = Self {
+                app,
+                vcx,
+                ids,
+                _streams: streams,
+            };
+            panel.install(&[
+                (panel.ids.here, "alpha", 0),
+                (panel.ids.bravo, "bravo", 60),
+                (panel.ids.charlie, "charlie", 120),
+            ]);
+            panel.app.update_in(&mut panel.vcx, |app, window, cx| {
+                app.open_switcher(window, cx)
+            });
+            panel.settle();
+            // The fixture is the first thing under test: every claim below
+            // that something is missing (an ellipsis, a menu, a hint) must
+            // be about a panel that is demonstrably up and drawn, with the
+            // pointer parked clear of every row and the cursor on row 0.
+            panel.hover(point(px(2.), px(2.)));
+            for at in 0..3 {
+                assert!(
+                    panel.vcx.debug_bounds(ROW[at]).is_some(),
+                    "setup: row {at} is mounted in the drawn panel"
+                );
+                assert!(
+                    panel.vcx.debug_bounds(SLOT[at]).is_some(),
+                    "setup: row {at}'s ellipsis slot is mounted, hidden or not"
+                );
+            }
+            assert!(
+                panel.vcx.debug_bounds(FOOTER_HINTS).is_some(),
+                "setup: the footer's hints are mounted"
+            );
+            assert!(
+                panel.vcx.debug_bounds(MORE[1]).is_none(),
+                "setup: with the pointer parked, an unpicked row's ellipsis is hidden"
+            );
+            assert!(panel.up(), "setup: the panel is up");
+            assert!(
+                panel.query_focused(),
+                "setup: the search box holds focus on open"
+            );
+            let cursor = panel.app.update(&mut panel.vcx, |app, _| {
+                app.switcher.as_ref().map(|sw| (sw.column, sw.left_sel))
+            });
+            assert_eq!(
+                cursor,
+                Some((Column::Left, 0)),
+                "setup: the cursor is on row 0 of the workspace column"
+            );
+            panel
+        }
+
+        /// Replaces the workspaces the list is built from, `age` seconds old.
+        fn install(&mut self, rows: &[(WorkspaceId, &str, u64)]) {
+            let now = crate::ui::home::now_secs();
+            let views = rows
+                .iter()
+                .map(|&(id, label, age)| WindowView {
+                    id,
+                    open: true,
+                    last_active: now.saturating_sub(age),
+                    label: Some(label.into()),
+                    ..WindowView::default()
+                })
+                .collect();
+            self.app.update_in(&mut self.vcx, |_, _, cx| {
+                WorkspaceStore::install_for_test(
+                    cx,
+                    WindowViews {
+                        views,
+                        active: None,
+                    },
+                );
+                cx.notify();
+            });
+            self.settle();
+        }
+
+        /// Draws and lets deferred work land, twice: a popover only knows
+        /// where its trigger is after its first frame.
+        fn settle(&mut self) {
+            for _ in 0..2 {
+                self.vcx.update(|window, cx| {
+                    let _ = window.draw(cx);
+                });
+                self.vcx.run_until_parked();
+            }
+        }
+
+        fn press(&mut self, keys: &str) {
+            self.vcx.simulate_keystrokes(keys);
+            self.settle();
+        }
+
+        fn up(&mut self) -> bool {
+            self.app
+                .update(&mut self.vcx, |app, _| app.switcher.is_some())
+        }
+
+        fn menu_open(&mut self) -> bool {
+            self.vcx.update(|window, _| {
+                window
+                    .context_stack()
+                    .iter()
+                    .any(|context| context.contains("PopupMenu"))
+            })
+        }
+
+        fn focused(&mut self) -> Option<FocusHandle> {
+            self.vcx.update(|window, cx| window.focused(cx))
+        }
+
+        fn query_focused(&mut self) -> bool {
+            self.app.update_in(&mut self.vcx, |app, window, cx| {
+                app.switcher
+                    .as_ref()
+                    .is_some_and(|sw| sw.query.read(cx).focus_handle(cx).is_focused(window))
+            })
+        }
+
+        fn renaming(&mut self) -> Option<WorkspaceId> {
+            self.app.update_in(&mut self.vcx, |app, _, _| {
+                app.switcher
+                    .as_ref()
+                    .and_then(|sw| sw.renaming.as_ref().map(|(id, _)| *id))
+            })
+        }
+
+        fn rename_focused(&mut self) -> bool {
+            self.app.update_in(&mut self.vcx, |app, window, cx| {
+                app.switcher
+                    .as_ref()
+                    .and_then(|sw| sw.renaming.as_ref())
+                    .is_some_and(|(_, input)| input.read(cx).focus_handle(cx).is_focused(window))
+            })
+        }
+
+        /// Whether the ellipsis of the row at list position `at` is painted.
+        fn ellipsis_shown(&mut self, at: usize) -> bool {
+            self.vcx.debug_bounds(MORE[at]).is_some()
+        }
+
+        fn center_of(&mut self, selector: &'static str) -> Point<Pixels> {
+            self.vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} was not measured"))
+                .center()
+        }
+
+        fn hover(&mut self, at: Point<Pixels>) {
+            self.vcx.simulate_mouse_move(at, None, Modifiers::none());
+            self.settle();
+        }
+
+        /// Shift+F10 on the picked row, and the claim every test below that
+        /// goes on to use the menu leans on.
+        fn open_menu(&mut self) {
+            self.press("shift-f10");
+            assert!(
+                self.menu_open(),
+                "Shift+F10 on the picked workspace row opens its menu"
+            );
+        }
+
+        /// Opens the ellipsis of row `at` with the pointer: hover reveals it,
+        /// a click opens it.
+        fn click_ellipsis(&mut self, at: usize) {
+            let target = self.center_of(SLOT[at]);
+            self.hover(target);
+            self.vcx.simulate_click(target, Modifiers::none());
+            self.settle();
+        }
+    }
+
+    // ---- the reveal -------------------------------------------------------
+
+    #[gpui::test]
+    fn the_picked_row_shows_its_ellipsis_without_the_pointer(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        assert!(
+            p.ellipsis_shown(0),
+            "the picked row's ellipsis is revealed with the pointer nowhere near it"
+        );
+    }
+
+    #[gpui::test]
+    fn the_reveal_follows_the_pick_down_the_list(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.press("down");
+        assert!(p.ellipsis_shown(1), "the row the arrow reached shows it");
+        assert!(!p.ellipsis_shown(0), "the row it left hides it again");
+        assert!(!p.ellipsis_shown(2));
+    }
+
+    /// What the reveal must not change: rows nobody picked or hovers keep it
+    /// hidden, hovering one shows it, and moving away hides it again.
+    #[gpui::test]
+    fn an_unpicked_row_shows_its_ellipsis_only_under_the_pointer(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        assert!(!p.ellipsis_shown(1), "an unpicked, unhovered row is quiet");
+        assert!(!p.ellipsis_shown(2));
+        let over = p.center_of(SLOT[1]);
+        p.hover(over);
+        assert!(p.ellipsis_shown(1), "hover still reveals it");
+        p.hover(point(px(2.), px(2.)));
+        assert!(!p.ellipsis_shown(1), "and moving away hides it again");
+    }
+
+    // ---- opening it from the keyboard --------------------------------------
+
+    #[gpui::test]
+    fn shift_f10_opens_the_picked_rows_menu(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        assert!(!p.menu_open(), "nothing is open before the key");
+        p.open_menu();
+        assert!(p.up(), "the panel stays up behind its menu");
+    }
+
+    /// Rename is the menu's first item and Down then Enter is the way to it,
+    /// the same as the toolkit's own keyboard-opened dropdown.
+    #[gpui::test]
+    fn the_keyboard_menu_acts_on_the_picked_workspace(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.press("down");
+        p.open_menu();
+        p.press("down");
+        p.press("enter");
+        let bravo = p.ids.bravo;
+        assert_eq!(
+            p.renaming(),
+            Some(bravo),
+            "Rename from the menu opened on row 1 renames row 1"
+        );
+    }
+
+    /// Rename moves focus to its own box before the menu closes, and the
+    /// close must not take it back for the search.
+    #[gpui::test]
+    fn renaming_from_the_menu_leaves_focus_on_the_rename_box(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.open_menu();
+        p.press("down");
+        p.press("enter");
+        assert!(p.renaming().is_some(), "Rename took");
+        assert!(p.rename_focused(), "the rename box holds focus");
+        assert!(!p.query_focused(), "and the search did not take it back");
+        assert!(!p.menu_open(), "the menu is gone");
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_menu_first_and_the_panel_second(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.open_menu();
+        p.press("escape");
+        assert!(p.up(), "the first Escape only closes the menu");
+        assert!(!p.menu_open());
+        assert!(p.query_focused(), "and focus is back in the search box");
+        p.press("escape");
+        assert!(!p.up(), "the second closes the panel");
+    }
+
+    #[gpui::test]
+    fn a_click_outside_the_menu_closes_it_and_focus_returns_to_the_search(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.open_menu();
+        // The far right of the tab column's foot: inside the card, clear of
+        // the rows and of the menu hanging off the first row's ellipsis.
+        let (viewport, card_w) = p.vcx.update(|window, _| {
+            let viewport = window.viewport_size();
+            let card_w = super::CARD_W
+                .min(viewport.width.as_f32() - 2. * super::CARD_MARGIN)
+                .max(320.);
+            (viewport, card_w)
+        });
+        let body_h = super::BODY_H
+            .min(
+                viewport.height.as_f32()
+                    - super::CARD_TOP
+                    - super::CARD_CHROME_H
+                    - super::CARD_MARGIN,
+            )
+            .max(120.);
+        let card_left = (viewport.width.as_f32() - card_w) / 2.;
+        let outside = point(
+            px(card_left + card_w - 40.),
+            px(super::CARD_TOP + super::SEARCH_H + super::RAIL_H + body_h - 30.),
+        );
+        p.vcx.simulate_click(outside, Modifiers::none());
+        p.settle();
+        assert!(p.up(), "the click belongs to the dismissal");
+        assert!(!p.menu_open(), "the menu is gone");
+        assert!(p.query_focused(), "and focus is back in the search box");
+    }
+
+    #[gpui::test]
+    fn a_second_shift_f10_does_not_stack_another_menu(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.open_menu();
+        let first = p.focused();
+        p.press("shift-f10");
+        assert!(p.menu_open());
+        assert!(
+            p.focused() == first,
+            "the same menu still holds focus, no second one was built"
+        );
+        p.press("escape");
+        assert!(!p.menu_open(), "one Escape closes it: there was only one");
+        assert!(p.query_focused());
+    }
+
+    #[gpui::test]
+    fn the_open_menu_is_the_same_menu_frame_after_frame(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.open_menu();
+        let held = p.focused();
+        assert!(held.is_some());
+        for _ in 0..5 {
+            p.settle();
+        }
+        assert!(p.menu_open());
+        assert!(
+            p.focused() == held,
+            "redrawing does not rebuild the menu or move focus off it"
+        );
+    }
+
+    // ---- stale selection and disappearing rows -------------------------------
+
+    /// The menu belongs to the row it was opened on. The list reorders under
+    /// it and the cursor index now points at another workspace; the items
+    /// still act on the row that was picked.
+    #[gpui::test]
+    fn a_reorder_under_the_open_menu_does_not_retarget_it(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.press("down");
+        p.open_menu();
+        let ids = (p.ids.here, p.ids.bravo, p.ids.charlie);
+        p.install(&[
+            (ids.0, "alpha", 0),
+            (ids.2, "charlie", 30),
+            (ids.1, "bravo", 900),
+        ]);
+        p.press("down");
+        p.press("enter");
+        assert_eq!(
+            p.renaming(),
+            Some(ids.1),
+            "bravo, not whoever the cursor index now points at"
+        );
+    }
+
+    #[gpui::test]
+    fn a_row_that_vanishes_under_its_menu_closes_it_and_keys_still_work(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.press("down");
+        p.open_menu();
+        let (here, charlie) = (p.ids.here, p.ids.charlie);
+        p.install(&[(here, "alpha", 0), (charlie, "charlie", 120)]);
+        p.settle();
+        assert!(p.up(), "the panel is still there");
+        assert!(!p.menu_open(), "the menu of a row that is gone is gone");
+        assert!(p.query_focused(), "and focus is back in the search box");
+        p.press("escape");
+        assert!(!p.up(), "so the next Escape reaches the panel");
+    }
+
+    // ---- the footer hint ------------------------------------------------------
+
+    /// The footer names the chord only where it does something: a picked
+    /// workspace row, no gesture held, no rename open, the workspace column
+    /// in front. The hint is mounted under `MENU_HINT` by the production
+    /// change; today nothing is, so the applicable cases fail and the
+    /// inapplicable ones hold, and the footer itself is asserted mounted by
+    /// the fixture so an absent hint cannot be an absent footer.
+    #[gpui::test]
+    fn the_footer_teaches_shift_f10_only_where_it_works(cx: &mut TestAppContext) {
+        fn query(p: &mut Panel, text: &'static str) {
+            p.app.update_in(&mut p.vcx, |app, window, cx| {
+                let query = app.switcher.as_ref().map(|sw| sw.query.clone());
+                if let Some(query) = query {
+                    query.update(cx, |state, cx| state.set_value(text, window, cx));
+                }
+            });
+            p.settle();
+        }
+        fn hinted(p: &mut Panel) -> bool {
+            p.vcx.debug_bounds(FOOTER_HINTS).is_some() && p.vcx.debug_bounds(MENU_HINT).is_some()
+        }
+
+        let mut p = Panel::open(cx);
+        // Applicable.
+        assert!(
+            hinted(&mut p),
+            "a picked workspace row: the footer names Shift+F10"
+        );
+        query(&mut p, "alpha");
+        assert!(
+            hinted(&mut p),
+            "a query that still leaves a picked row keeps the hint"
+        );
+        query(&mut p, "");
+
+        // Inapplicable, each undone before the next so one cannot hide another.
+        p.app
+            .update(&mut p.vcx, |app, cx| app.switcher_focus(Column::Right, cx));
+        p.settle();
+        assert!(
+            !hinted(&mut p) && p.vcx.debug_bounds(FOOTER_HINTS).is_some(),
+            "the tab column has no menu, so no hint"
+        );
+        p.app
+            .update(&mut p.vcx, |app, cx| app.switcher_focus(Column::Left, cx));
+        p.settle();
+        assert!(hinted(&mut p), "back on the workspace column it returns");
+
+        p.app.update(&mut p.vcx, |app, _| {
+            if let Some(sw) = app.switcher.as_mut() {
+                sw.hold = Some(Modifiers::control());
+            }
+        });
+        p.settle();
+        assert!(
+            !hinted(&mut p) && p.vcx.debug_bounds(FOOTER_HINTS).is_some(),
+            "a held gesture has its own footer and no menu"
+        );
+        p.app.update(&mut p.vcx, |app, _| {
+            if let Some(sw) = app.switcher.as_mut() {
+                sw.hold = None;
+            }
+        });
+        p.settle();
+        assert!(hinted(&mut p), "released, it returns");
+
+        query(&mut p, "zzz-nothing-matches");
+        assert!(
+            !hinted(&mut p) && p.vcx.debug_bounds(FOOTER_HINTS).is_some(),
+            "no row under the cursor, no hint"
+        );
+        query(&mut p, "");
+        assert!(hinted(&mut p), "the rows are back, so is the hint");
+
+        let here = p.ids.here;
+        p.app.update_in(&mut p.vcx, |app, window, cx| {
+            app.switcher_rename(here, window, cx)
+        });
+        p.settle();
+        assert!(
+            !hinted(&mut p) && p.vcx.debug_bounds(FOOTER_HINTS).is_some(),
+            "while a rename is open the chord is inert, so no hint"
+        );
+    }
+
+    // ---- where Shift+F10 does nothing (controls: true before and after) ------
+
+    #[gpui::test]
+    fn shift_f10_is_inert_in_the_create_form(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.app.update_in(&mut p.vcx, |app, window, cx| {
+            app.open_workspace_form(window, cx)
+        });
+        p.settle();
+        p.press("shift-f10");
+        assert!(!p.menu_open());
+        let on_form = p.app.update(&mut p.vcx, |app, _| {
+            app.switcher
+                .as_ref()
+                .is_some_and(|sw| matches!(sw.page, Page::Create(_)))
+        });
+        assert!(on_form, "the form is still showing");
+    }
+
+    #[gpui::test]
+    fn shift_f10_is_inert_while_a_rename_is_open(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        let here = p.ids.here;
+        p.app.update_in(&mut p.vcx, |app, window, cx| {
+            app.switcher_rename(here, window, cx)
+        });
+        p.settle();
+        p.press("shift-f10");
+        assert!(!p.menu_open());
+        assert_eq!(p.renaming(), Some(here), "the rename is undisturbed");
+        assert!(p.rename_focused());
+    }
+
+    #[gpui::test]
+    fn shift_f10_is_inert_in_the_tab_column(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.app
+            .update(&mut p.vcx, |app, cx| app.switcher_focus(Column::Right, cx));
+        p.settle();
+        p.press("shift-f10");
+        assert!(!p.menu_open(), "tab rows have no menu to open");
+        let column = p.app.update(&mut p.vcx, |app, _| {
+            app.switcher.as_ref().map(|sw| sw.column)
+        });
+        assert_eq!(column, Some(Column::Right));
+    }
+
+    #[gpui::test]
+    fn shift_f10_is_inert_during_a_held_gesture(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.app.update(&mut p.vcx, |app, _| {
+            if let Some(sw) = app.switcher.as_mut() {
+                sw.hold = Some(Modifiers::control());
+            }
+        });
+        p.settle();
+        p.press("shift-f10");
+        assert!(!p.menu_open(), "Ctrl+Tab's gesture has no menu to open");
+        assert!(p.up());
+    }
+
+    #[gpui::test]
+    fn shift_f10_is_inert_with_no_row_to_act_on(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.app.update_in(&mut p.vcx, |app, window, cx| {
+            let query = app.switcher.as_ref().map(|sw| sw.query.clone());
+            if let Some(query) = query {
+                query.update(cx, |state, cx| {
+                    state.set_value("zzz-nothing-matches", window, cx)
+                });
+            }
+        });
+        p.settle();
+        p.press("shift-f10");
+        assert!(!p.menu_open());
+        assert!(p.up());
+    }
+
+    /// Only Shift+F10 itself: F10 alone and F10 under other modifiers belong
+    /// to whoever else binds them.
+    #[gpui::test]
+    fn only_shift_f10_opens_the_menu(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        for keys in ["f10", "ctrl-shift-f10", "alt-shift-f10", "shift-f9"] {
+            p.press(keys);
+            assert!(!p.menu_open(), "{keys} opens nothing");
+            assert!(p.up(), "{keys} leaves the panel up");
+        }
+    }
+
+    #[gpui::test]
+    fn shift_f10_with_the_switcher_closed_opens_no_menu(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.simulate_keystrokes("shift-f10");
+        vcx.run_until_parked();
+        assert!(app.update(&mut vcx, |app, _| app.switcher.is_none()));
+        let menu = vcx.update(|window, _| {
+            window
+                .context_stack()
+                .iter()
+                .any(|context| context.contains("PopupMenu"))
+        });
+        assert!(!menu, "the terminal's Shift+F10 is the terminal's");
+    }
+
+    // ---- the pointer routes, which must not change ----------------------------
+
+    /// Clicking an unpicked row's ellipsis opens the menu for that row, not
+    /// for the picked one.
+    #[gpui::test]
+    fn clicking_a_rows_ellipsis_opens_the_menu_for_that_row(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.click_ellipsis(1);
+        assert!(p.menu_open(), "the click opened a menu");
+        p.press("down");
+        p.press("enter");
+        let bravo = p.ids.bravo;
+        assert_eq!(
+            p.renaming(),
+            Some(bravo),
+            "its Rename renames the clicked row"
+        );
+    }
+
+    #[gpui::test]
+    fn escape_after_a_pointer_open_returns_focus_to_the_search(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+        p.click_ellipsis(1);
+        assert!(p.menu_open());
+        p.press("escape");
+        assert!(p.up(), "Escape closed the menu only");
+        assert!(!p.menu_open());
+        assert!(p.query_focused(), "focus went back to the search box");
+    }
+
+    // ---- the key-repeat policy (written after the implementation) ------------
+
+    /// One delivered key event, with the repeat flag under the test's control:
+    /// the real `PlatformInput` the window dispatches, not a call into the
+    /// handler. Settles after, like every other key here.
+    fn deliver(p: &mut Panel, keys: &str, held: bool) {
+        let keystroke = Keystroke::parse(keys).expect("a valid keystroke");
+        p.vcx.update(|window, cx| {
+            window.dispatch_event(
+                PlatformInput::KeyDown(KeyDownEvent {
+                    keystroke,
+                    is_held: held,
+                    prefer_character_input: false,
+                }),
+                cx,
+            );
+        });
+        p.vcx.run_until_parked();
+        p.settle();
+    }
+
+    fn release(p: &mut Panel, keys: &str) {
+        let keystroke = Keystroke::parse(keys).expect("a valid keystroke");
+        p.vcx.update(|window, cx| {
+            window.dispatch_event(PlatformInput::KeyUp(KeyUpEvent { keystroke }), cx);
+        });
+        p.vcx.run_until_parked();
+        p.settle();
+    }
+
+    /// Only a fresh press opens the menu. A repeat (`is_held`) never does, so
+    /// the repeats still arriving after a dismissal cannot bring it back, and
+    /// the release that ends a press neither closes nor reopens it. This is
+    /// the guard on the delivered event; it claims nothing about the history
+    /// of a physically held chord. Added after the implementation, to pin the
+    /// policy the first 22 do not reach.
+    #[gpui::test]
+    fn only_a_fresh_shift_f10_opens_the_menu_and_repeats_never_do(cx: &mut TestAppContext) {
+        let mut p = Panel::open(cx);
+
+        // Repeats alone, with the menu closed: nothing opens.
+        for _ in 0..3 {
+            deliver(&mut p, "shift-f10", true);
+        }
+        assert!(!p.menu_open(), "repeats alone do not open the menu");
+        assert!(p.up() && p.query_focused(), "and the search is undisturbed");
+
+        // A fresh press opens it once; the release changes nothing.
+        deliver(&mut p, "shift-f10", false);
+        assert!(p.menu_open(), "a fresh press opens the menu");
+        let menu = p.focused();
+        release(&mut p, "shift-f10");
+        assert!(p.menu_open(), "the release does not close it");
+        assert!(p.focused() == menu, "nor rebuild it");
+
+        // Dismissed, the repeats and the release that follow leave it shut.
+        p.press("escape");
+        assert!(!p.menu_open() && p.query_focused(), "Escape closed it");
+        for _ in 0..3 {
+            deliver(&mut p, "shift-f10", true);
+        }
+        assert!(!p.menu_open(), "repeats after the dismissal stay shut");
+        release(&mut p, "shift-f10");
+        assert!(!p.menu_open(), "so does the release that ends the press");
+
+        // The next fresh press opens it again.
+        deliver(&mut p, "shift-f10", false);
+        assert!(p.menu_open(), "a new press opens it again");
+        p.press("escape");
+        assert!(!p.menu_open(), "and Escape closes it");
+    }
+
+    /// Shift+F10 and nothing else: the platform key (Super/Win off macOS, ⌘
+    /// on it) riding along makes it somebody else's chord. Off macOS the
+    /// secondary modifier is Control, so a check on control and secondary
+    /// alone lets this one through; today that is the failing case on Linux.
+    /// On macOS the platform key is the secondary modifier and was already
+    /// refused. Delivered as the real key event, like the repeat test above,
+    /// and added after the implementation.
+    #[gpui::test]
+    fn shift_f10_with_the_platform_key_down_opens_nothing(cx: &mut TestAppContext) {
+        let chord = Keystroke::parse("cmd-shift-f10").expect("a valid keystroke");
+        assert!(
+            chord.modifiers.platform
+                && chord.modifiers.shift
+                && !chord.modifiers.control
+                && !chord.modifiers.alt
+                && !chord.modifiers.function,
+            "setup: the chord is exactly platform+shift+F10"
+        );
+        let mut p = Panel::open(cx);
+        deliver(&mut p, "cmd-shift-f10", false);
+        assert!(!p.menu_open(), "platform+Shift+F10 opens no menu");
+        assert!(p.up(), "the panel is still up");
+        assert!(p.query_focused(), "and the search still holds focus");
+    }
+
+    /// Reviewer reproduction of the native right-click dismissal failure.
+    /// Uses the real ContextMenu and both right-button events. The existing
+    /// ContextMenu leak detector remains enabled; a teardown leak makes this
+    /// an inadmissible headless RED rather than permission to bypass it.
+    #[gpui::test]
+    fn right_click_escape_returns_typed_input_to_the_query_not_the_pty(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::ClientMsg;
+        use gpui::{MouseButton, MouseUpEvent};
+
+        fn read_input(stream: &mut crate::daemon::transport::Stream) -> Vec<u8> {
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+                .expect("control: the pane link accepts a read timeout");
+            let mut input = Vec::new();
+            loop {
+                match ClientMsg::read(stream) {
+                    Ok(ClientMsg::Input(bytes)) => input.extend_from_slice(&bytes),
+                    Ok(_) => {}
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        return input;
+                    }
+                    Err(err) => panic!("control: reading the pane link failed: {err}"),
+                }
+            }
+        }
+
+        let mut p = Panel::open(cx);
+        // Prove the PTY reader sees real terminal input before using its
+        // negative result as an oracle. These are setup focus changes only.
+        p.app
+            .update_in(&mut p.vcx, |app, window, cx| app.focus_active(window, cx));
+        p.settle();
+        p.press("q");
+        assert_eq!(read_input(&mut p._streams[0]), b"q", "control: live PTY");
+        p.app.update_in(&mut p.vcx, |app, window, cx| {
+            let query = app
+                .switcher
+                .as_ref()
+                .expect("setup: switcher open")
+                .query
+                .clone();
+            query.update(cx, |input, cx| input.focus(window, cx));
+        });
+        p.settle();
+        assert!(
+            p.query_focused(),
+            "setup: query focus restored before the real route"
+        );
+        let before = p.app.update(&mut p.vcx, |app, cx| {
+            app.switcher
+                .as_ref()
+                .unwrap()
+                .query
+                .read(cx)
+                .value()
+                .to_string()
+        });
+        assert!(before.is_empty(), "setup: the query starts empty");
+
+        let position = p.center_of(ROW[1]);
+        p.hover(position);
+        p.vcx
+            .simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        p.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        p.settle();
+        assert!(
+            p.menu_open(),
+            "setup: the actual right-click menu has focus"
+        );
+        p.press("escape");
+        assert!(!p.menu_open(), "Escape dismissed the right-click menu");
+        assert!(p.up(), "the switcher remains open");
+        // No focus call after dismissal. This key must take the same path a
+        // person's next typed character takes, and cannot reach the terminal.
+        p.press("x");
+        let query = p.app.update(&mut p.vcx, |app, cx| {
+            app.switcher
+                .as_ref()
+                .unwrap()
+                .query
+                .read(cx)
+                .value()
+                .to_string()
+        });
+        let pty = read_input(&mut p._streams[0]);
+        let query_focused = p.query_focused();
+        // Finish widget teardown before the behaviour assertion can panic.
+        // This is cleanup after every observation, not focus repair in the
+        // route under test; the normal leak detector remains enabled.
+        p.app
+            .update_in(&mut p.vcx, |app, window, cx| app.close_switcher(window, cx));
+        p.settle();
+        assert!(!p.up(), "cleanup: the switcher closed");
+        assert_eq!(
+            (query, pty),
+            ("x".to_string(), Vec::<u8>::new()),
+            "right-click Escape must return typing to the switcher query, not the PTY"
+        );
+        assert!(
+            query_focused,
+            "the query held the keyboard after typing, before cleanup"
+        );
+    }
+
+    /// The other half of the right-click dismissal rule: an item that takes
+    /// focus itself keeps it. Rename on a right-clicked row must leave the
+    /// rename box of that row focused, not hand focus back to the search.
+    #[gpui::test]
+    fn right_click_rename_keeps_focus_on_the_rename_input(cx: &mut TestAppContext) {
+        use gpui::{MouseButton, MouseUpEvent};
+
+        let mut p = Panel::open(cx);
+        let position = p.center_of(ROW[1]);
+        p.hover(position);
+        p.vcx
+            .simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        p.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        p.settle();
+        assert!(p.menu_open(), "setup: the actual right-click menu is open");
+        p.press("down");
+        p.press("enter");
+        let bravo = p.ids.bravo;
+        let renaming = p.renaming();
+        let rename_focused = p.rename_focused();
+        let query_focused = p.query_focused();
+        let menu_open = p.menu_open();
+        let up = p.up();
+        // Cleanup after every observation, so the leak detector stays on.
+        p.app
+            .update_in(&mut p.vcx, |app, window, cx| app.close_switcher(window, cx));
+        p.settle();
+        assert!(!p.up(), "cleanup: the switcher closed");
+        assert!(up, "the switcher stayed open behind the rename");
+        assert_eq!(
+            renaming,
+            Some(bravo),
+            "Rename renames the right-clicked row"
+        );
+        assert!(rename_focused, "the rename box holds focus");
+        assert!(!query_focused, "and the search did not take it back");
+        assert!(!menu_open, "the menu is gone");
+    }
+
+    /// A right-click menu is drawn at the pointer, not hung off the row's
+    /// ellipsis. The window is made large enough that the menu fits at the
+    /// row's own centre (asserted, not assumed), so nothing snaps it, and the
+    /// centre is well clear of the ellipsis at the row's end: the menu then
+    /// starts exactly at the pointer. Edge snapping is a separate scene.
+    #[gpui::test]
+    fn right_click_menu_opens_at_the_pointer_not_at_the_ellipsis(cx: &mut TestAppContext) {
+        use gpui::{MouseButton, MouseUpEvent};
+
+        let mut p = Panel::open(cx);
+        p.vcx.simulate_resize(gpui::size(px(1280.), px(1000.)));
+        p.settle();
+        let viewport = p.vcx.update(|window, _| window.viewport_size());
+        // A native pointer reports whole window coordinates, and the toolkit
+        // snaps a menu to whole pixels, so the real events use the row's
+        // centre rounded to one rather than a half-pixel no pointer sends.
+        let row = p
+            .vcx
+            .debug_bounds(ROW[1])
+            .expect("the second row was measured");
+        let centre = row.center();
+        let position = point(centre.x.round(), centre.y.round());
+        let ellipsis = p.center_of(SLOT[1]);
+        assert!(
+            row.contains(&position),
+            "setup: the whole-pixel pointer {position:?} is inside the row {row:?}"
+        );
+        assert_eq!(
+            (viewport.width, viewport.height),
+            (px(1280.), px(1000.)),
+            "setup: the fixture window has the size the claim is made at"
+        );
+        assert!(
+            (ellipsis.x - position.x).abs() > px(60.),
+            "setup: the pointer {position:?} is well apart from the ellipsis {ellipsis:?}"
+        );
+        p.hover(position);
+        p.vcx
+            .simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+        p.vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        p.settle();
+        let open = p.menu_open();
+        let menu = p.vcx.debug_bounds("switcher-pointer-menu");
+        let window_size = p.vcx.update(|window, _| window.bounds().size);
+        p.app
+            .update_in(&mut p.vcx, |app, window, cx| app.close_switcher(window, cx));
+        p.settle();
+        // Every number the claim is made from, in every message below.
+        let facts = format!(
+            "pointer {position:?}, menu {menu:?}, viewport {viewport:?}, \
+             window bounds {window_size:?}, ellipsis {ellipsis:?}"
+        );
+        assert!(open, "the right click opened a menu: {facts}");
+        let menu = menu.expect("the right-click menu is the pointer-anchored one");
+        assert!(
+            position.x + menu.size.width <= viewport.width - px(8.)
+                && position.y + menu.size.height <= viewport.height - px(8.),
+            "setup: the menu fits inside the window with the toolkit's margin, \
+             so nothing may move it off the pointer: {facts}"
+        );
+        assert!(
+            menu.contains(&position),
+            "the pointer is on the menu: {facts}"
+        );
+        assert!(
+            (menu.origin.x - position.x).abs() < px(1.)
+                && (menu.origin.y - position.y).abs() < px(1.),
+            "the menu starts at the pointer, not at the ellipsis: {facts}"
+        );
+    }
+
+    /// A right click on another row replaces the open menu instead of
+    /// stacking, and the new menu acts on the row that was clicked.
+    #[gpui::test]
+    fn right_click_on_another_row_replaces_the_open_menu(cx: &mut TestAppContext) {
+        use gpui::{MouseButton, MouseUpEvent};
+
+        let mut p = Panel::open(cx);
+        let first = p.center_of(ROW[1]);
+        // Left of the first menu, which hangs from the middle of its row.
+        let row = p
+            .vcx
+            .debug_bounds(ROW[2])
+            .expect("the third row was measured");
+        let second = point(row.origin.x + px(20.), row.center().y);
+        for position in [first, second] {
+            p.hover(position);
+            p.vcx
+                .simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
+            p.vcx.simulate_event(MouseUpEvent {
+                button: MouseButton::Right,
+                position,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+            });
+            p.settle();
+        }
+        let open = p.menu_open();
+        let menu = p.vcx.debug_bounds("switcher-pointer-menu");
+        p.press("down");
+        p.press("enter");
+        let charlie = p.ids.charlie;
+        let renaming = p.renaming();
+        p.app
+            .update_in(&mut p.vcx, |app, window, cx| app.close_switcher(window, cx));
+        p.settle();
+        assert!(open, "a menu is open after the second right click");
+        assert!(
+            menu.is_some_and(|menu| menu.contains(&second)),
+            "exactly the new menu is drawn, at the second pointer"
+        );
+        assert_eq!(
+            renaming,
+            Some(charlie),
+            "its Rename renames the row that was clicked last"
+        );
     }
 }
