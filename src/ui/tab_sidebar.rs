@@ -252,6 +252,62 @@ mod row_metrics {
     pub(super) const AVATAR: f32 = 16.;
     /// `gap_2p5` between the row's children.
     pub(super) const GAP: f32 = 10.;
+    /// The trailing action slot, laid over the row's right end instead of
+    /// beside the title. The hover × and the Alt badge are both drawn in it,
+    /// from these numbers and `tab_strip::MIN_TARGET` (the slot's width), so
+    /// the two cannot drift apart.
+    pub(super) const TRAIL_INSET: f32 = 6.;
+    /// The fade from the row into the slot's backing, to the slot's left.
+    pub(super) const TRAIL_FADE: f32 = 10.;
+    /// The badge's own box, centred in the slot.
+    pub(super) const BADGE: f32 = 20.;
+}
+
+/// The row's trailing action slot: absolute at the row's right inset and its
+/// full height (a two-line row's diff count sits under the button's band), a
+/// `TRAIL_FADE`px fade into `rest`, then `content` on `rest`.
+///
+/// Taking no room from the line is the point: what is in the slot (the hover
+/// × or the Alt badge) covers the last few glyphs of the row, it never makes
+/// the title give them up, so holding the shortcut chord moves nothing.
+/// `hovered` is the colour the row turns while the pointer is over it, for a
+/// slot that is on screen at rest (the badge) and must keep matching the row.
+fn trailing_slot(
+    rest: gpui::Hsla,
+    hovered: Option<(SharedString, gpui::Hsla)>,
+    content: impl IntoElement,
+) -> Div {
+    let fade = |color: gpui::Hsla| {
+        let mut from = color;
+        from.a = 0.;
+        linear_gradient(
+            90.,
+            linear_color_stop(from, 0.),
+            linear_color_stop(color, 1.),
+        )
+    };
+    let mut ramp = div().w(px(row_metrics::TRAIL_FADE)).h_full().bg(fade(rest));
+    let mut body = div().h_full().flex().items_center().bg(rest).child(content);
+    if let Some((group, color)) = hovered {
+        ramp = ramp.group_hover(group.clone(), move |s| s.bg(fade(color)));
+        body = body.group_hover(group, move |s| s.bg(color));
+    }
+    h_flex()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .right(px(row_metrics::TRAIL_INSET))
+        .child(ramp)
+        .child(body)
+}
+
+/// A status mark kept in the line, and so in the row's layout, but invisible
+/// while the shortcut badge stands over its place.
+fn hold_hidden(mark: gpui::AnyElement, hidden: bool) -> Div {
+    div()
+        .flex_shrink_0()
+        .when(hidden, |d| d.opacity(0.))
+        .child(mark)
 }
 
 /// The narrowest a group's heading is allowed to get: three or four capitals
@@ -460,7 +516,11 @@ impl Tty59App {
                 title: title.clone(),
             });
         });
+        let rail_fill: gpui::Hsla = gpui::rgb(sf.base).into();
+        let group = SharedString::from(format!("sidebar-agent-row-{slot}"));
         let row = sidebar_row_chrome(("sidebar-agent-row", slot), selected, sf)
+            // Named so the trailing badge can follow the row's hover fill.
+            .group(group.clone())
             .child(
                 canvas(
                     {
@@ -508,21 +568,22 @@ impl Tty59App {
                 row_metrics::AVATAR,
                 cx,
             ))
-            .child(
+            .child({
+                let title = div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
+                    .when(exited, |d| d.text_color(cx.theme().muted_foreground))
+                    .child(title);
+                #[cfg(test)]
+                let title = title.debug_selector(move || format!("sidebar-agent-title-{slot}"));
                 h_flex()
                     .flex_1()
                     .min_w_0()
                     .gap_1p5()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
-                            .when(exited, |d| d.text_color(cx.theme().muted_foreground))
-                            .child(title),
-                    )
+                    .child(title)
                     .when_some(marker, |d, marker| {
                         d.child(
                             div()
@@ -531,14 +592,41 @@ impl Tty59App {
                                 .text_color(cx.theme().muted_foreground)
                                 .child(marker),
                         )
-                    }),
+                    })
+            })
+            // In the line, and so in the title's budget, whether or not the
+            // chord is held; only invisible while the badge stands over it.
+            .children(
+                self.row_status_dot(status, 0, rail_fill, cx)
+                    .map(|mark| hold_hidden(mark, badge.is_some())),
             )
-            .children(self.row_status_dot(status, 0, gpui::rgb(sf.base).into(), cx))
             .when_some(badge, |d, pos| {
-                let badge = div().flex_shrink_0().text_xs().child(tab_badge_label(pos));
+                let badge = div()
+                    .size(px(row_metrics::BADGE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .child(tab_badge_label(pos));
                 #[cfg(test)]
                 let badge = badge.debug_selector(move || format!("sidebar-agent-badge-{slot}"));
-                d.child(badge)
+                // The row's own fills: what it rests on, and what it turns
+                // under the pointer.
+                let (rest, hovered): (gpui::Hsla, gpui::Hsla) = if selected {
+                    (gpui::rgb(sf.selected).into(), gpui::rgb(sf.selected).into())
+                } else {
+                    (rail_fill, gpui::rgb(sf.hover).into())
+                };
+                d.child(trailing_slot(
+                    rest,
+                    Some((group, hovered)),
+                    div()
+                        .size(px(crate::ui::tab_strip::MIN_TARGET))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(badge),
+                ))
             });
         #[cfg(test)]
         let row = row.debug_selector(move || format!("sidebar-agent-row-{slot}"));
@@ -1015,12 +1103,14 @@ impl Tty59App {
                 let agent_unread = tab.agent_unread_count(cx);
                 let git_cwd = git_click(tab, window, cx);
                 let zoomed = self.tab_is_zoomed(i);
-                // Status rides at the row's trailing end, where the badge
-                // would be; the badge wins while the modifier is held.
-                let status_dot = match show_badge {
-                    true => None,
-                    false => self.row_status_dot(agent_status, agent_unread, rail_fill, cx),
-                };
+                // Status rides at the row's trailing end. It stays in the
+                // line, and so in the title's budget, whether or not the
+                // modifier is held: the badge stands over it (the slot's
+                // backing hides it) and the mark itself is made invisible
+                // while that is so, never taken out of the layout.
+                let status_dot = self
+                    .row_status_dot(agent_status, agent_unread, rail_fill, cx)
+                    .map(|mark| hold_hidden(mark, show_badge));
                 let meta_size = META_REM * rem;
                 // Title: the *full* label. The label elides it against the
                 // width layout actually gives it, so a wide sidebar shows the
@@ -1453,23 +1543,48 @@ impl Tty59App {
                     })
                     .child(label_region)
                     .children(status_dot)
+                    // While the modifier is held the badge takes the trailing
+                    // slot the hover × uses, over the row, taking nothing
+                    // from the title. It rests on the row's own fill and
+                    // turns with it under the pointer.
                     .when_some(badge_pos, |row, badge_pos| {
-                        row.child(
-                            div()
-                                .flex_shrink_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .size(px(20.))
-                                .text_xs()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(if is_active {
-                                    gpui::rgb(sf.text_selected).into()
-                                } else {
-                                    cx.theme().muted_foreground
-                                })
-                                .child(tab_badge_label(badge_pos)),
-                        )
+                        let badge = div()
+                            .size(px(row_metrics::BADGE))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if is_active {
+                                gpui::rgb(sf.text_selected).into()
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(tab_badge_label(badge_pos));
+                        #[cfg(test)]
+                        let badge = badge.debug_selector(move || format!("sidebar-row-badge-{i}"));
+                        let slot = div()
+                            .size(px(crate::ui::tab_strip::MIN_TARGET))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(badge);
+                        #[cfg(test)]
+                        let slot = slot.debug_selector(move || format!("sidebar-row-hit-{i}"));
+                        let (rest, hovered): (gpui::Hsla, gpui::Hsla) = if is_active {
+                            (gpui::rgb(sf.selected).into(), gpui::rgb(sf.selected).into())
+                        } else {
+                            (rail_fill, gpui::rgb(sf.hover).into())
+                        };
+                        let trailing = trailing_slot(
+                            rest,
+                            Some((SharedString::from(format!("tab-row-{i}")), hovered)),
+                            slot,
+                        );
+                        #[cfg(test)]
+                        let trailing =
+                            trailing.debug_selector(move || format!("sidebar-row-trailing-{i}"));
+                        row.child(trailing)
                     })
                     .when(!show_badge, |row| {
                         let backing: gpui::Hsla = if is_active {
@@ -1477,50 +1592,40 @@ impl Tty59App {
                         } else {
                             gpui::rgb(sf.hover).into()
                         };
-                        let mut fade_from = backing;
-                        fade_from.a = 0.;
-                        row.child(
-                            // The row's full height, not the button's: on a
-                            // two-line row the diff count sits under the
-                            // button's band, and a band-high backing left the
-                            // bottom of "+2" showing beneath the ×.
-                            h_flex()
-                                .absolute()
-                                .top_0()
-                                .bottom_0()
-                                .right(px(6.))
-                                .opacity(0.)
-                                .group_hover(SharedString::from(format!("tab-row-{i}")), |s| {
-                                    s.opacity(1.)
-                                })
-                                .child(div().w(px(10.)).h_full().bg(linear_gradient(
-                                    90.,
-                                    linear_color_stop(fade_from, 0.),
-                                    linear_color_stop(backing, 1.),
-                                )))
-                                .child(
-                                    div().h_full().flex().items_center().bg(backing).child(
-                                        crate::ui::tab_strip::hit_target(
-                                            Button::new(("sidebar-close", i))
-                                                .icon(IconName::Close)
-                                                .ghost()
-                                                .xsmall(),
-                                        )
-                                        .tooltip(t(L10nKey::TabContextCloseTab))
-                                        // Held here, because the row behind it
-                                        // switches tabs on the release too:
-                                        // without this the same click closes
-                                        // tab `i` and then activates whichever
-                                        // tab slid into its place.
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.close_tab(i, window, cx);
-                                            }),
-                                        ),
-                                    ),
-                                ),
+                        let close = crate::ui::tab_strip::hit_target(
+                            Button::new(("sidebar-close", i))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall(),
                         )
+                        .tooltip(t(L10nKey::TabContextCloseTab))
+                        // Held here, because the row behind it
+                        // switches tabs on the release too:
+                        // without this the same click closes
+                        // tab `i` and then activates whichever
+                        // tab slid into its place.
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(i, window, cx);
+                            },
+                        ));
+                        #[cfg(test)]
+                        let close = close.debug_selector(move || format!("sidebar-row-hit-{i}"));
+                        // The row's full height, not the button's (see
+                        // `trailing_slot`): on a two-line row the diff count
+                        // sits under the button's band, and a band-high
+                        // backing left the bottom of "+2" showing beneath
+                        // the ×.
+                        let trailing = trailing_slot(backing, None, close)
+                            .opacity(0.)
+                            .group_hover(SharedString::from(format!("tab-row-{i}")), |s| {
+                                s.opacity(1.)
+                            });
+                        #[cfg(test)]
+                        let trailing =
+                            trailing.debug_selector(move || format!("sidebar-row-trailing-{i}"));
+                        row.child(trailing)
                     });
 
                 let menu_app = cx.entity().downgrade();
@@ -5165,36 +5270,43 @@ mod fold_tests {
         );
     }
 
-    /// A row with less room (the Alt badge column is on) still keeps the
-    /// title's floor: the working directory gives way, not the title.
+    /// Holding the tab chord (the real modifier event, and the real timer that
+    /// raises the badges) takes nothing from the row: the title keeps its floor
+    /// AND the room it had, and the working directory beside it keeps its own,
+    /// before, while and after the hold. The badge used to be a flex child
+    /// that took 30px from the line, which this test once required.
     #[gpui::test]
-    fn a_row_title_keeps_its_floor_when_the_row_has_less_room(cx: &mut TestAppContext) {
+    fn a_row_title_keeps_its_floor_and_its_room_while_the_badge_shows(cx: &mut TestAppContext) {
+        use super::a5alt_tests::{hold, release};
+
         let (app, mut vcx, _streams) = short_title_long_cwd(cx);
         draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
-        let roomy = vcx
-            .debug_bounds("sidebar-row-title-0")
-            .expect("the title was painted")
-            .size
-            .width;
-        app.update(&mut vcx, |app, cx| {
-            app.mod_hint_badges = true;
-            app.mod_hint_group = false;
-            cx.notify();
-        });
-        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
-        let tight = vcx
-            .debug_bounds("sidebar-row-title-0")
-            .expect("the title was painted with the badge column")
-            .size
-            .width;
-        assert!(
-            tight < roomy,
-            "the badge column took room from the line: {roomy:?} -> {tight:?}"
+        let bounds = |vcx: &mut VisualTestContext| {
+            (
+                vcx.debug_bounds("sidebar-row-title-0")
+                    .expect("the title was painted"),
+                vcx.debug_bounds("sidebar-row-cwd-0")
+                    .expect("the working directory was painted beside the title"),
+            )
+        };
+        let (roomy, roomy_cwd) = bounds(&mut vcx);
+        hold(&app, &mut vcx);
+        let (tight, tight_cwd) = bounds(&mut vcx);
+        assert_eq!(
+            tight, roomy,
+            "the held badge moved or resized the title: {roomy:?} -> {tight:?}"
+        );
+        assert_eq!(
+            tight_cwd, roomy_cwd,
+            "the held badge moved or resized the working directory"
         );
         assert!(
-            tight >= px(ROW_TITLE_FLOOR) - px(0.5),
-            "the title was squeezed to {tight:?}"
+            tight.size.width >= px(ROW_TITLE_FLOOR) - px(0.5),
+            "the title was squeezed to {:?}",
+            tight.size.width
         );
+        release(&app, &mut vcx);
+        assert_eq!(bounds(&mut vcx), (roomy, roomy_cwd), "release restores it");
     }
 
     /// A title takes the room a wider rail gives it.
@@ -6032,6 +6144,1004 @@ mod header_target_tests {
             walk(&mut vcx, "shift-tab") > back,
             "positive control: and a Shift+Tab stop"
         );
+    }
+}
+
+/// Shell F11: holding the tab chord raises the badges and moves nothing.
+///
+/// Every test here drives the REAL modifier event (`simulate_modifiers_change`
+/// with the chord the keymap says the badges answer to, and the real 200ms
+/// timer that raises them), never `mod_hint_badges` itself, and reads what
+/// the title labels drew from the elision observer and the layout bounds.
+/// Geometry, elision, behavior and status are collected as separate findings
+/// per case so that one cannot mask another: a case lists every line that
+/// failed rather than stopping at the first.
+#[cfg(test)]
+mod a5alt_tests {
+    use super::*;
+    use crate::core::cli_agent::{AgentSessionState, AgentStatus, CLIAgent};
+    use crate::core::config::ConfirmClose;
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::daemon::transport::Stream;
+    use crate::ui::app::test_window::harness_with_tabs_configured;
+    use crate::ui::text_elision::observe;
+    use gpui::{Bounds, ElementId, Entity, Modifiers, Pixels, TestAppContext, VisualTestContext};
+
+    const WIDTHS: [f32; 3] = [MIN_SIDEBAR_WIDTH, 240., 400.];
+
+    /// `debug_bounds` wants a `'static` selector; a test leaks a few bytes.
+    fn sel(prefix: &str, i: usize) -> &'static str {
+        Box::leak(format!("{prefix}-{i}").into_boxed_str())
+    }
+
+    fn fixture(
+        cx: &mut TestAppContext,
+        tabs: usize,
+        ui: f32,
+    ) -> (Entity<Tty59App>, VisualTestContext, Vec<Stream>) {
+        harness_with_tabs_configured(cx, tabs, move |cfg| {
+            cfg.ui_font_size = ui;
+            cfg.confirm_close = ConfirmClose::Never;
+        })
+    }
+
+    pub(super) fn settle(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        for _ in 0..2 {
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+    }
+
+    fn draw_at(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, width: f32) {
+        app.update(vcx, |app, cx| {
+            app.sidebar_width.set(width);
+            cx.notify();
+        });
+        settle(vcx);
+    }
+
+    fn badges_up(app: &Entity<Tty59App>, vcx: &VisualTestContext) -> bool {
+        app.read_with(vcx, |app, _| app.mod_hint_badges)
+    }
+
+    /// Presses the chord the badges answer to and waits, on the real timer,
+    /// until they are up; the modifier stays down. Answers the chord.
+    pub(super) fn hold(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Modifiers {
+        let modifiers = vcx
+            .update(|_, cx| crate::ui::keymap::tab_badge_hold(cx))
+            .expect("the shipped tab chords are on a modifier");
+        vcx.simulate_modifiers_change(modifiers);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            vcx.run_until_parked();
+            if badges_up(app, vcx) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the badges never came up within 5s of the held chord"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            !app.read_with(&*vcx, |app, _| app.mod_hint_group),
+            "the ordinary hold, not the group hold"
+        );
+        settle(vcx);
+        modifiers
+    }
+
+    /// Lets go of every modifier and waits for the badges to go.
+    pub(super) fn release(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        vcx.simulate_modifiers_change(Modifiers::none());
+        vcx.run_until_parked();
+        assert!(!badges_up(app, vcx), "releasing the chord dropped no badge");
+        settle(vcx);
+    }
+
+    fn near(a: Bounds<Pixels>, b: Bounds<Pixels>) -> bool {
+        let d = |x: Pixels, y: Pixels| (x - y).abs() <= px(0.01);
+        d(a.origin.x, b.origin.x)
+            && d(a.origin.y, b.origin.y)
+            && d(a.size.width, b.size.width)
+            && d(a.size.height, b.size.height)
+    }
+
+    fn near_opt(a: Option<Bounds<Pixels>>, b: Option<Bounds<Pixels>>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => near(a, b),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    fn finish(report: Vec<String>) {
+        assert!(report.is_empty(), "\n{}", report.join("\n"));
+    }
+
+    /// What a regular row drew in one frame.
+    #[derive(Clone, Debug)]
+    struct RowFrame {
+        row: Bounds<Pixels>,
+        title: Option<Bounds<Pixels>>,
+        cwd: Option<Bounds<Pixels>>,
+        badge: Option<Bounds<Pixels>>,
+        title_text: Option<observe::Label>,
+        cwd_text: Option<observe::Label>,
+        branch_text: Option<observe::Label>,
+    }
+
+    fn frame(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, rows: &[usize]) -> Vec<RowFrame> {
+        observe::clear();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let mut frames = Vec::new();
+        for &i in rows {
+            let row = app.read_with(&*vcx, |app, _| app.sidebar_slots.borrow()[i]);
+            frames.push(RowFrame {
+                row,
+                title: vcx.debug_bounds(sel("sidebar-row-title", i)),
+                cwd: vcx.debug_bounds(sel("sidebar-row-cwd", i)),
+                badge: vcx.debug_bounds(sel("sidebar-row-badge", i)),
+                title_text: observe::label(&ElementId::from(("sidebar-row-title", i))),
+                cwd_text: observe::label(&ElementId::from(("sidebar-row-cwd", i))),
+                branch_text: observe::label(&ElementId::from(("sidebar-row-branch", i))),
+            });
+        }
+        frames
+    }
+
+    struct Cycle {
+        before: Vec<RowFrame>,
+        during: Vec<RowFrame>,
+        after: Vec<RowFrame>,
+    }
+
+    /// One press and release of the chord around three frames.
+    fn cycle(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, rows: &[usize]) -> Cycle {
+        let before = frame(app, vcx, rows);
+        hold(app, vcx);
+        let during = frame(app, vcx, rows);
+        release(app, vcx);
+        let after = frame(app, vcx, rows);
+        Cycle {
+            before,
+            during,
+            after,
+        }
+    }
+
+    /// Every finding of one cycle, each on its own line and labeled by kind:
+    /// `behavior` (the badges came and went with the chord), `geometry` (a
+    /// rectangle moved) and `elision` (a label drew other text).
+    fn check(report: &mut Vec<String>, at: &str, rows: &[usize], c: &Cycle) {
+        for (n, &i) in rows.iter().enumerate() {
+            let (b, d, a) = (&c.before[n], &c.during[n], &c.after[n]);
+            if b.badge.is_some() || d.badge.is_none() || a.badge.is_some() {
+                report.push(format!(
+                    "{at} row {i}: behavior: the badge must be up only while the chord is held \
+                     (before {:?}, during {:?}, after {:?})",
+                    b.badge, d.badge, a.badge
+                ));
+            }
+            if b.title.is_none() {
+                report.push(format!("{at} row {i}: setup: the title was not drawn"));
+            }
+            for (phase, p) in [("while Alt is held", d), ("after release", a)] {
+                for (what, x, y) in [
+                    ("row", Some(b.row), Some(p.row)),
+                    ("title", b.title, p.title),
+                    ("cwd", b.cwd, p.cwd),
+                ] {
+                    if !near_opt(x, y) {
+                        report.push(format!(
+                            "{at} row {i}: geometry: the {what} moved {phase}: {x:?} -> {y:?}"
+                        ));
+                    }
+                }
+                for (what, x, y) in [
+                    ("title", &b.title_text, &p.title_text),
+                    ("cwd", &b.cwd_text, &p.cwd_text),
+                    ("branch", &b.branch_text, &p.branch_text),
+                ] {
+                    if x != y {
+                        report.push(format!(
+                            "{at} row {i}: elision: the {what} label drew other text {phase}: \
+                             {x:?} -> {y:?}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The matrix every geometry case runs: the narrowest, a middle and a wide
+    /// rail. `elided` are the positions in `rows` (with their full title)
+    /// whose painted title MUST differ from that full title at the narrowest
+    /// rail, so that "nothing changed" cannot be vacuous. A path that falls
+    /// back to its last segment is elided without an ellipsis, so the
+    /// condition is "not the whole title", not "contains an ellipsis".
+    fn matrix(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        rows: &[usize],
+        elided: &[(usize, &str)],
+        ui: f32,
+        what: &str,
+    ) -> Vec<String> {
+        let mut report = Vec::new();
+        for width in WIDTHS {
+            draw_at(app, vcx, width);
+            let c = cycle(app, vcx, rows);
+            let at = format!("{what} UI{ui} width {width}");
+            if width == MIN_SIDEBAR_WIDTH {
+                for &(n, full) in elided {
+                    let shown = c.before[n].title_text.as_ref();
+                    if !shown.is_some_and(|l| l.painted && !l.text.is_empty() && &*l.text != full) {
+                        report.push(format!(
+                            "{at} row {}: setup: the title is not elided here ({shown:?}), \
+                             the case would prove nothing",
+                            rows[n]
+                        ));
+                    }
+                }
+            }
+            check(&mut report, &at, rows, &c);
+        }
+        report
+    }
+
+    /// A tab's own plant, as the sibling module does it.
+    fn plant_plain(app: &Tty59App, i: usize, cwd: &str, cx: &mut gpui::App) {
+        use crate::terminal::git_status::GitStatusCache;
+        use crate::ui::host_ops::HostId;
+
+        let cwd = PathBuf::from(cwd);
+        let leaf = app.tabs[i].pane.first_leaf().expect("test tab has a pane");
+        leaf.terminal()
+            .expect("test pane is a terminal")
+            .update(cx, |view, _| {
+                view.set_git_status_cwd_for_test(Some(cwd.clone()))
+            });
+        cx.update_global::<GitStatusCache, _>(|cache, _| {
+            cache.finish_probe(HostId::LOCAL, &cwd, None);
+        });
+    }
+
+    /// Plants `branch` for tab `i`. The status cache is keyed by repo ROOT, so
+    /// two tabs that must show different branches need different roots.
+    fn plant_branch(
+        app: &Tty59App,
+        i: usize,
+        (root, cwd): (&str, &str),
+        branch: &str,
+        cx: &mut gpui::App,
+    ) {
+        use crate::terminal::git_status::{GitStatusCache, RepoSnapshot};
+        use crate::ui::host_ops::HostId;
+
+        let cwd = PathBuf::from(cwd);
+        let leaf = app.tabs[i].pane.first_leaf().expect("test tab has a pane");
+        leaf.terminal()
+            .expect("test pane is a terminal")
+            .update(cx, |view, _| {
+                view.set_git_status_cwd_for_test(Some(cwd.clone()))
+            });
+        cx.update_global::<GitStatusCache, _>(|cache, _| {
+            cache.finish_probe(
+                HostId::LOCAL,
+                &cwd,
+                Some(RepoSnapshot {
+                    root: PathBuf::from(root),
+                    home: PathBuf::from(root),
+                    branch: branch.into(),
+                    counts: Some((3, 1)),
+                }),
+            );
+        });
+    }
+
+    fn name_tabs(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, names: &[&'static str]) {
+        let names = names.to_vec();
+        app.update(vcx, move |app, cx| {
+            for (i, name) in names.iter().enumerate() {
+                app.tabs[i].name = Some((*name).into());
+            }
+            cx.notify();
+        });
+    }
+
+    fn report_agent(stream: &mut Stream, status: AgentStatus) {
+        DaemonMsg::Agent(Some(CLIAgent::Codex))
+            .encode(stream)
+            .unwrap();
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status,
+            ..Default::default()
+        }))
+        .encode(stream)
+        .unwrap();
+    }
+
+    /// Waits for the daemon message to reach tab `tab`'s model.
+    fn wait_tab_status(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        tab: usize,
+        status: AgentStatus,
+    ) {
+        for _ in 0..400 {
+            vcx.run_until_parked();
+            if app.read_with(&*vcx, |app, cx| app.tabs[tab].agent_status(cx)) == Some(status) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("tab {tab} never reached {status:?}");
+    }
+
+    // ---- regular rows: geometry + elision -------------------------------
+
+    const ORDINARY: [&str; 2] = [
+        "a-fairly-long-custom-tab-name-for-this-row-that-no-rail-can-hold-whole-at-all",
+        "second-tab-with-another-name-that-is-also-quite-long-indeed-and-then-some",
+    ];
+
+    fn ordinary_names_stay_put(cx: &mut TestAppContext, ui: f32) {
+        let (app, mut vcx, _streams) = fixture(cx, 2, ui);
+        name_tabs(&app, &mut vcx, &ORDINARY);
+        let full = [(0, ORDINARY[0]), (1, ORDINARY[1])];
+        finish(matrix(&app, &mut vcx, &[0, 1], &full, ui, "ordinary"));
+    }
+
+    #[gpui::test]
+    fn a5alt_ordinary_names_stay_put_ui16(cx: &mut TestAppContext) {
+        ordinary_names_stay_put(cx, 16.);
+    }
+
+    #[gpui::test]
+    fn a5alt_ordinary_names_stay_put_ui24(cx: &mut TestAppContext) {
+        ordinary_names_stay_put(cx, 24.);
+    }
+
+    const PATH_TITLES: [&str; 2] = [
+        "~/projects/acme/services/billing/crates/invoice-engine/src/pipeline/stages",
+        "/w/scratch/experiments/long-nested-directory-name-for-truncation/and-more",
+    ];
+
+    fn path_titles_stay_put(cx: &mut TestAppContext, ui: f32) {
+        let (app, mut vcx, _streams) = fixture(cx, 2, ui);
+        name_tabs(&app, &mut vcx, &PATH_TITLES);
+        let full = [(0, PATH_TITLES[0]), (1, PATH_TITLES[1])];
+        finish(matrix(&app, &mut vcx, &[0, 1], &full, ui, "path"));
+    }
+
+    #[gpui::test]
+    fn a5alt_path_titles_stay_put_ui16(cx: &mut TestAppContext) {
+        path_titles_stay_put(cx, 16.);
+    }
+
+    #[gpui::test]
+    fn a5alt_path_titles_stay_put_ui24(cx: &mut TestAppContext) {
+        path_titles_stay_put(cx, 24.);
+    }
+
+    const CJK_NAMES: [&str; 3] = [
+        "Очень-длинное-имя-вкладки-которое-не-помещается-в-боковую-панель-целиком",
+        "非常に長いタブの名前がサイドバーにまったく収まらないほど長く続いています",
+        "这是一个非常长的标签页名称它无法完整地放进侧边栏里即使侧边栏很宽",
+    ];
+
+    fn russian_and_cjk_titles_stay_put(cx: &mut TestAppContext, ui: f32) {
+        let (app, mut vcx, _streams) = fixture(cx, 3, ui);
+        name_tabs(&app, &mut vcx, &CJK_NAMES);
+        let full = [(0, CJK_NAMES[0]), (1, CJK_NAMES[1]), (2, CJK_NAMES[2])];
+        finish(matrix(&app, &mut vcx, &[0, 1, 2], &full, ui, "ru/ja/zh"));
+    }
+
+    #[gpui::test]
+    fn a5alt_russian_and_cjk_titles_stay_put_ui16(cx: &mut TestAppContext) {
+        russian_and_cjk_titles_stay_put(cx, 16.);
+    }
+
+    #[gpui::test]
+    fn a5alt_russian_and_cjk_titles_stay_put_ui24(cx: &mut TestAppContext) {
+        russian_and_cjk_titles_stay_put(cx, 24.);
+    }
+
+    fn two_line_rows_stay_put(cx: &mut TestAppContext, ui: f32) {
+        let (app, mut vcx, _streams) = fixture(cx, 3, ui);
+        name_tabs(&app, &mut vcx, &[ORDINARY[0], ORDINARY[1], PATH_TITLES[1]]);
+        app.update(&mut vcx, |app, cx| {
+            // Two rows in one group whose branches differ keep a branch line
+            // each (a group whose rows agree lifts it onto the header).
+            let group = PinnedGroup::label("work");
+            let id = group.id;
+            app.edit_groups(cx, |groups| groups.pinned.push(group));
+            for i in [0, 1] {
+                app.set_tab_group(i, Some(id), cx);
+            }
+            plant_branch(
+                app,
+                0,
+                ("/w/probed-a", "/w/probed-a/sub"),
+                "feature/checkout-flow-redesign-with-a-very-long-name",
+                cx,
+            );
+            plant_branch(
+                app,
+                1,
+                ("/w/probed-b", "/w/probed-b/other"),
+                "feature/another-long-branch-name-for-the-second-row-here",
+                cx,
+            );
+            // A plain row outside it, whose working directory rides on the
+            // title's own line.
+            plant_plain(
+                app,
+                2,
+                "/w/scratch/experiments/long-nested-directory-name-for-truncation/and-one-more",
+                cx,
+            );
+            cx.notify();
+        });
+        let full = [(0, ORDINARY[0]), (1, ORDINARY[1]), (2, PATH_TITLES[1])];
+        let mut report = matrix(&app, &mut vcx, &[0, 1, 2], &full, ui, "two-line + cwd");
+        // The branch label and the row's own height are part of the case: a
+        // two-line row stays two lines.
+        draw_at(&app, &mut vcx, MIN_SIDEBAR_WIDTH);
+        let rows = frame(&app, &mut vcx, &[0, 1, 2]);
+        for (i, row) in rows.iter().enumerate().take(2) {
+            if row.branch_text.is_none() || row.row.size.height != px(ROW_HEIGHT_TWO_LINE) {
+                report.push(format!(
+                    "two-line UI{ui}: setup: row {i} is not a two-line row ({:?})",
+                    row.row
+                ));
+            }
+        }
+        if rows[2].cwd.is_none() {
+            report.push(format!(
+                "two-line UI{ui}: setup: row 2 has no cwd beside it"
+            ));
+        }
+        finish(report);
+    }
+
+    #[gpui::test]
+    fn a5alt_two_line_and_cwd_rows_stay_put_ui16(cx: &mut TestAppContext) {
+        two_line_rows_stay_put(cx, 16.);
+    }
+
+    #[gpui::test]
+    fn a5alt_two_line_and_cwd_rows_stay_put_ui24(cx: &mut TestAppContext) {
+        two_line_rows_stay_put(cx, 24.);
+    }
+
+    /// A row that carries a status mark: the mark's own slot is in the line
+    /// beside the title, and the hold used to drop it (and put 30px of badge
+    /// in its place, a net 2px).
+    fn status_rows_stay_put(cx: &mut TestAppContext, ui: f32) {
+        let (app, mut vcx, mut streams) = fixture(cx, 2, ui);
+        name_tabs(&app, &mut vcx, &ORDINARY);
+        report_agent(&mut streams[0], AgentStatus::Waiting);
+        wait_tab_status(&app, &mut vcx, 0, AgentStatus::Waiting);
+        let full = [(0, ORDINARY[0]), (1, ORDINARY[1])];
+        finish(matrix(&app, &mut vcx, &[0, 1], &full, ui, "status row"));
+    }
+
+    #[gpui::test]
+    fn a5alt_status_rows_stay_put_ui16(cx: &mut TestAppContext) {
+        status_rows_stay_put(cx, 16.);
+    }
+
+    #[gpui::test]
+    fn a5alt_status_rows_stay_put_ui24(cx: &mut TestAppContext) {
+        status_rows_stay_put(cx, 24.);
+    }
+
+    struct En;
+
+    impl Drop for En {
+        fn drop(&mut self) {
+            crate::ui::i18n::set_locale("en");
+        }
+    }
+
+    /// The ended pane's words stay whole, and nothing about the row moves.
+    /// Widths are the measured ones of the B2 ended test (where the tail is
+    /// kept whole and the name is cut), and they hold at UI16; at UI24 only
+    /// the wide rail is asked, where the name still cannot fit.
+    fn ended_rows_stay_put(cx: &mut TestAppContext, ui: f32) {
+        const NAME: &str = "a-pane-with-a-very-long-name-that-no-row-can-hold-whole-and-then-some-more-words-after-it-to-be-sure";
+        let _en = En;
+        let (app, mut vcx, _streams) = fixture(cx, 1, ui);
+        let cases: [(&str, f32, &str); 4] = [
+            ("en", 240., " — process exited"),
+            ("ru-RU", 240., ": процесс завершён"),
+            ("ja-JP", 220., " — プロセスが終了しました"),
+            ("zh-CN", MIN_SIDEBAR_WIDTH, " — 进程已退出"),
+        ];
+        let mut report = Vec::new();
+        for (language, width, tail) in cases {
+            let width = if ui == 16. { width } else { 400. };
+            crate::ui::i18n::set_locale(language);
+            app.update(&mut vcx, |app, cx| {
+                let leaf = app.tabs[0].pane.first_leaf().expect("a tab has a pane");
+                leaf.terminal()
+                    .expect("a terminal pane")
+                    .update(cx, |view, cx| view.end_for_test(NAME, cx));
+                cx.notify();
+            });
+            draw_at(&app, &mut vcx, width);
+            let c = cycle(&app, &mut vcx, &[0]);
+            let at = format!("{language} UI{ui} width {width}");
+            check(&mut report, &at, &[0], &c);
+            for (phase, f) in [
+                ("before", &c.before[0]),
+                ("during", &c.during[0]),
+                ("after", &c.after[0]),
+            ] {
+                let text = f.title_text.as_ref().map(|l| l.text.clone());
+                if !text.as_ref().is_some_and(|t| t.ends_with(tail)) {
+                    report.push(format!(
+                        "{at}: elision: the ended tail was not whole {phase}: {text:?}"
+                    ));
+                }
+            }
+            let before = c.before[0].title_text.as_ref().map(|l| l.text.clone());
+            if !before.as_ref().is_some_and(|t| t.contains('…')) {
+                report.push(format!(
+                    "{at}: setup: the ended name does not elide here: {before:?}"
+                ));
+            }
+        }
+        finish(report);
+    }
+
+    #[gpui::test]
+    fn a5alt_ended_rows_stay_put_ui16(cx: &mut TestAppContext) {
+        ended_rows_stay_put(cx, 16.);
+    }
+
+    #[gpui::test]
+    fn a5alt_ended_rows_stay_put_ui24(cx: &mut TestAppContext) {
+        ended_rows_stay_put(cx, 24.);
+    }
+
+    // ---- regular rows: behavior and the trailing slot -------------------
+
+    /// The badges are the existing order, raised and dropped by the chord.
+    #[gpui::test]
+    fn a5alt_the_chord_numbers_rows_in_order_and_release_drops_them(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = fixture(cx, 3, 16.);
+        draw_at(&app, &mut vcx, 260.);
+        let positions = |app: &Entity<Tty59App>, vcx: &VisualTestContext| {
+            app.read_with(vcx, |app, cx| {
+                let sections = sidebar_sections(&app.sidebar_group_keys(cx), &app.sidebar_groups);
+                app.sidebar_badge_positions(&sections, cx)
+            })
+        };
+        assert_eq!(positions(&app, &vcx), None, "no badge before the chord");
+        let before: Vec<_> = (0..3)
+            .map(|i| vcx.debug_bounds(sel("sidebar-row-badge", i)))
+            .collect();
+        assert!(before.iter().all(Option::is_none), "{before:?}");
+
+        hold(&app, &mut vcx);
+        assert_eq!(
+            positions(&app, &vcx),
+            Some(vec![Some(0), Some(1), Some(2)]),
+            "the badges are the rows' visual order"
+        );
+        let mut tops = Vec::new();
+        for i in 0..3 {
+            let badge = vcx
+                .debug_bounds(sel("sidebar-row-badge", i))
+                .unwrap_or_else(|| panic!("row {i} drew no badge under the held chord"));
+            tops.push(badge.top());
+        }
+        assert!(
+            tops.windows(2).all(|w| w[0] < w[1]),
+            "badge 1, 2, 3 stand top to bottom: {tops:?}"
+        );
+
+        release(&app, &mut vcx);
+        assert_eq!(positions(&app, &vcx), None);
+        for i in 0..3 {
+            assert!(
+                vcx.debug_bounds(sel("sidebar-row-badge", i)).is_none(),
+                "row {i} kept its badge after the release"
+            );
+        }
+    }
+
+    /// The slot the hover × lives in: the live 24x24 close Button (the one
+    /// `hit_target` returns), centred vertically in the row at its right
+    /// inset, a 10px fade to its left, and the OUTER overlay (fade + button
+    /// backing) the row's full height. Unchanged by this work; the control the
+    /// Alt badge is compared with.
+    #[gpui::test]
+    fn a5alt_the_close_slot_is_24px_at_right_6_with_a_10px_fade(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = fixture(cx, 3, 16.);
+        draw_at(&app, &mut vcx, 260.);
+        let row = app.read_with(&vcx, |app, _| app.sidebar_slots.borrow()[1]);
+        vcx.simulate_mouse_move(row.center(), None::<gpui::MouseButton>, Modifiers::none());
+        settle(&mut vcx);
+        let outer = vcx.debug_bounds("sidebar-row-trailing-1").expect("outer");
+        let hit = vcx.debug_bounds("sidebar-row-hit-1").expect("hit");
+        let eq = |a: Pixels, b: Pixels| (a - b).abs() <= px(0.01);
+        let target = px(crate::ui::tab_strip::MIN_TARGET);
+        assert!(
+            eq(hit.size.width, target) && eq(hit.size.height, target),
+            "the live close hit box is 24x24: {hit:?}"
+        );
+        assert!(
+            eq(hit.center().y, row.center().y),
+            "the 24px hit box is centred vertically in the row: {hit:?} in {row:?}"
+        );
+        assert!(eq(hit.right(), outer.right()), "the hit box ends the slot");
+        assert!(
+            eq(outer.size.width - hit.size.width, px(10.)),
+            "the fade: {outer:?} {hit:?}"
+        );
+        assert!(eq(row.right() - outer.right(), px(6.)), "right 6");
+        assert!(
+            eq(outer.size.height, row.size.height) && eq(outer.top(), row.top()),
+            "the outer overlay is the row's full height: {outer:?} {row:?}"
+        );
+    }
+
+    /// The finding: the Alt badge stands in THAT slot — the outer rectangle
+    /// and the 24px hit box are the very ones the close button has, and the
+    /// 20px badge is centred on the live 24px hit box (not on the 34px outer
+    /// rectangle). The pointer rests on the row throughout.
+    fn badge_stands_in_the_close_slot(cx: &mut TestAppContext, ui: f32) {
+        let (app, mut vcx, _streams) = fixture(cx, 3, ui);
+        draw_at(&app, &mut vcx, 260.);
+        let row = app.read_with(&vcx, |app, _| app.sidebar_slots.borrow()[1]);
+        vcx.simulate_mouse_move(row.center(), None::<gpui::MouseButton>, Modifiers::none());
+        settle(&mut vcx);
+        let outer = vcx
+            .debug_bounds("sidebar-row-trailing-1")
+            .expect("the close slot is laid out");
+        let hit = vcx
+            .debug_bounds("sidebar-row-hit-1")
+            .expect("the close hit box is laid out");
+
+        hold(&app, &mut vcx);
+        let mut report = Vec::new();
+        let outer_held = vcx.debug_bounds("sidebar-row-trailing-1");
+        let hit_held = vcx.debug_bounds("sidebar-row-hit-1");
+        let badge = vcx.debug_bounds("sidebar-row-badge-1");
+        if badge.is_none() {
+            report.push("behavior: no badge under the held chord".to_string());
+        }
+        if !near_opt(Some(outer), outer_held) {
+            report.push(format!(
+                "geometry: the held badge's slot is not the close slot: {outer:?} -> {outer_held:?}"
+            ));
+        }
+        if !near_opt(Some(hit), hit_held) {
+            report.push(format!(
+                "geometry: the held badge's 24px hit box is not the close hit box: \
+                 {hit:?} -> {hit_held:?}"
+            ));
+        }
+        // The live close Button, read before the hold, is 24x24 and centred
+        // in the row; the outer overlay is the row's full height. Setup
+        // facts, kept apart from the finding.
+        let target = px(crate::ui::tab_strip::MIN_TARGET);
+        if (hit.size.width - target).abs() > px(0.01)
+            || (hit.size.height - target).abs() > px(0.01)
+            || (hit.center().y - row.center().y).abs() > px(0.01)
+            || (outer.size.height - row.size.height).abs() > px(0.01)
+        {
+            report.push(format!(
+                "setup: the close slot is not 24x24 centred in a full-height overlay: \
+                 {hit:?} {outer:?} {row:?}"
+            ));
+        }
+        if let Some(badge) = badge {
+            if badge.size.width != px(20.) || badge.size.height != px(20.) {
+                report.push(format!(
+                    "geometry: the badge is not 20x20: {:?}",
+                    badge.size
+                ));
+            }
+            // Against the close Button's own centre, not the 34px outer
+            // overlay's, and against the held hit box when one is drawn.
+            for (what, of) in [("live close", Some(hit)), ("held hit", hit_held)] {
+                let Some(of) = of else { continue };
+                let (c, h) = (badge.center(), of.center());
+                if (c.x - h.x).abs() > px(0.5) || (c.y - h.y).abs() > px(0.5) {
+                    report.push(format!(
+                        "geometry: the badge centre {c:?} is not the {what} 24px hit centre {h:?}"
+                    ));
+                }
+            }
+        }
+        finish(report);
+    }
+
+    #[gpui::test]
+    fn a5alt_the_badge_stands_in_the_close_slot_ui16(cx: &mut TestAppContext) {
+        badge_stands_in_the_close_slot(cx, 16.);
+    }
+
+    #[gpui::test]
+    fn a5alt_the_badge_stands_in_the_close_slot_ui24(cx: &mut TestAppContext) {
+        badge_stands_in_the_close_slot(cx, 24.);
+    }
+
+    /// What the slot does stays: while the chord is held a click there is the
+    /// row's (it activates the row, closes nothing); with the chord up the
+    /// same spot is the close button and closes the tab.
+    #[gpui::test]
+    fn a5alt_a_click_in_the_slot_activates_while_held_and_closes_when_not(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = fixture(cx, 3, 16.);
+        draw_at(&app, &mut vcx, 260.);
+        let row = app.read_with(&vcx, |app, _| app.sidebar_slots.borrow()[1]);
+        vcx.simulate_mouse_move(row.center(), None::<gpui::MouseButton>, Modifiers::none());
+        settle(&mut vcx);
+        let spot = vcx
+            .debug_bounds("sidebar-row-hit-1")
+            .expect("the close hit box is laid out")
+            .center();
+        assert_eq!(app.read_with(&vcx, |app, _| app.active), 0);
+
+        let modifiers = hold(&app, &mut vcx);
+        vcx.simulate_click(spot, modifiers);
+        vcx.run_until_parked();
+        assert_eq!(
+            app.read_with(&vcx, |app, _| (app.active, app.tabs.len())),
+            (1, 3),
+            "a click on the held badge activates its row and closes nothing"
+        );
+
+        release(&app, &mut vcx);
+        vcx.simulate_mouse_move(spot, None::<gpui::MouseButton>, Modifiers::none());
+        settle(&mut vcx);
+        vcx.simulate_click(spot, Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(
+            app.read_with(&vcx, |app, _| app.tabs.len()),
+            2,
+            "without the chord the same spot is the close button"
+        );
+    }
+
+    /// The status mark keeps its slot (and its value) under the hold: the
+    /// layout is the same, the mark is not removed from the line. GEOMETRY AND
+    /// VALUE ONLY: this says nothing about whether the mark is visible or
+    /// hidden while held (opacity/paint); the native pixel gate proves that.
+    #[gpui::test]
+    fn a5alt_a_status_mark_keeps_its_place_and_value_under_the_hold(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = fixture(cx, 2, 16.);
+        name_tabs(&app, &mut vcx, &ORDINARY);
+        report_agent(&mut streams[0], AgentStatus::Waiting);
+        wait_tab_status(&app, &mut vcx, 0, AgentStatus::Waiting);
+        draw_at(&app, &mut vcx, 260.);
+        let mark = |vcx: &mut VisualTestContext| vcx.debug_bounds("row-status-circle-0");
+        let before = mark(&mut vcx).expect("the waiting row draws its mark");
+
+        hold(&app, &mut vcx);
+        let mut report = Vec::new();
+        let during = mark(&mut vcx);
+        if !near_opt(Some(before), during) {
+            report.push(format!(
+                "geometry: the status slot moved or was dropped under the hold: \
+                 {before:?} -> {during:?}"
+            ));
+        }
+        let value = app.read_with(&vcx, |app, cx| app.tabs[0].agent_status(cx));
+        if value != Some(AgentStatus::Waiting) {
+            report.push(format!(
+                "value: the status changed under the hold: {value:?}"
+            ));
+        }
+        release(&app, &mut vcx);
+        let after = mark(&mut vcx);
+        if !near_opt(Some(before), after) {
+            report.push(format!(
+                "geometry: the status mark is not restored: {before:?} -> {after:?}"
+            ));
+        }
+        finish(report);
+    }
+
+    // ---- agent rows ------------------------------------------------------
+
+    const AGENT_NAMES: [&str; 2] = [
+        "an-agent-task-with-a-very-long-name-that-no-sidebar-width-can-hold-in-one-line-at-all",
+        "another-agent-task-whose-name-is-just-as-long-as-the-first-one-and-then-a-little-more",
+    ];
+
+    /// `agents` rows in the Agents list, each a real daemon-reported Waiting
+    /// agent, on tabs named for the long titles. The daemon streams are
+    /// answered too and the caller keeps them for the whole test: dropping
+    /// them ends the panes' feeds mid-test.
+    fn agent_fixture(
+        cx: &mut TestAppContext,
+        agents: usize,
+        ui: f32,
+    ) -> (Entity<Tty59App>, VisualTestContext, Vec<Stream>) {
+        let (app, mut vcx, mut streams) = fixture(cx, agents + 1, ui);
+        app.update_in(&mut vcx, |app, window, cx| {
+            for (i, name) in AGENT_NAMES.iter().enumerate().take(agents) {
+                app.tabs[i].name = Some((*name).into());
+            }
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
+        });
+        for stream in streams.iter_mut().take(agents) {
+            report_agent(stream, AgentStatus::Waiting);
+        }
+        let mut ready = false;
+        for _ in 0..400 {
+            vcx.run_until_parked();
+            ready = app.read_with(&vcx, |app, cx| app.agent_pane_summaries(cx).len() == agents);
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready, "the agent reports reached the collector");
+        settle(&mut vcx);
+        (app, vcx, streams)
+    }
+
+    #[derive(Debug)]
+    struct AgentFrame {
+        row: Option<Bounds<Pixels>>,
+        title: Option<Bounds<Pixels>>,
+        badge: Option<Bounds<Pixels>>,
+        mark: Option<Bounds<Pixels>>,
+    }
+
+    fn agent_frame(vcx: &mut VisualTestContext, slot: usize) -> AgentFrame {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        AgentFrame {
+            row: vcx.debug_bounds(sel("sidebar-agent-row", slot)),
+            title: vcx.debug_bounds(sel("sidebar-agent-title", slot)),
+            badge: vcx.debug_bounds(sel("sidebar-agent-badge", slot)),
+            mark: vcx.debug_bounds("row-status-circle-0"),
+        }
+    }
+
+    /// The agent title is a plain truncating line, so there is no elided text
+    /// to read: its drawn bounds are the proof here (same text, same font,
+    /// same width, same truncation), and the native pixel check is the other.
+    fn agent_title_stays_put(cx: &mut TestAppContext, ui: f32) {
+        let (app, mut vcx, _streams) = agent_fixture(cx, 1, ui);
+        let mut report = Vec::new();
+        let mut narrow_title = None;
+        for width in WIDTHS {
+            draw_at(&app, &mut vcx, width);
+            let before = agent_frame(&mut vcx, 0);
+            hold(&app, &mut vcx);
+            let during = agent_frame(&mut vcx, 0);
+            release(&app, &mut vcx);
+            let after = agent_frame(&mut vcx, 0);
+            let at = format!("agent UI{ui} width {width}");
+            if before.title.is_none() || before.row.is_none() {
+                report.push(format!("{at}: setup: row or title not drawn ({before:?})"));
+            }
+            if before.badge.is_some() || during.badge.is_none() || after.badge.is_some() {
+                report.push(format!(
+                    "{at}: behavior: the badge must be up only while the chord is held \
+                     ({:?} {:?} {:?})",
+                    before.badge, during.badge, after.badge
+                ));
+            }
+            for (phase, p) in [("while Alt is held", &during), ("after release", &after)] {
+                for (what, x, y) in [("row", before.row, p.row), ("title", before.title, p.title)] {
+                    if !near_opt(x, y) {
+                        report.push(format!(
+                            "{at}: geometry: the {what} moved {phase}: {x:?} -> {y:?}"
+                        ));
+                    }
+                }
+            }
+            if width == MIN_SIDEBAR_WIDTH {
+                narrow_title = before.title;
+            } else if let (Some(narrow), Some(wide)) = (narrow_title, before.title)
+                && wide.size.width <= narrow.size.width
+            {
+                report.push(format!(
+                    "{at}: setup: the title does not grow with the rail ({narrow:?} -> {wide:?})"
+                ));
+            }
+        }
+        finish(report);
+    }
+
+    #[gpui::test]
+    fn a5alt_agent_title_stays_put_ui16(cx: &mut TestAppContext) {
+        agent_title_stays_put(cx, 16.);
+    }
+
+    #[gpui::test]
+    fn a5alt_agent_title_stays_put_ui24(cx: &mut TestAppContext) {
+        agent_title_stays_put(cx, 24.);
+    }
+
+    /// The agent's status mark keeps its slot and value while the chord is
+    /// held and is where it was after release. GEOMETRY AND VALUE ONLY: whether
+    /// the badge visually replaces it is proven by the native pixel gate.
+    #[gpui::test]
+    fn a5alt_an_agent_status_mark_keeps_its_place_and_value_under_the_hold(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = agent_fixture(cx, 1, 16.);
+        draw_at(&app, &mut vcx, 260.);
+        let before = agent_frame(&mut vcx, 0);
+        let status = |app: &Entity<Tty59App>, vcx: &VisualTestContext| {
+            app.read_with(vcx, |app, cx| {
+                app.sidebar_agent_rows(&app.agent_pane_summaries(cx), cx)
+                    .first()
+                    .and_then(|row| row.status())
+            })
+        };
+        assert_eq!(status(&app, &vcx), Some(AgentStatus::Waiting));
+        assert!(before.mark.is_some(), "the agent row draws its mark");
+
+        hold(&app, &mut vcx);
+        let during = agent_frame(&mut vcx, 0);
+        let mut report = Vec::new();
+        if !near_opt(before.mark, during.mark) {
+            report.push(format!(
+                "geometry: the agent status slot moved or was dropped under the hold: \
+                 {:?} -> {:?}",
+                before.mark, during.mark
+            ));
+        }
+        if status(&app, &vcx) != Some(AgentStatus::Waiting) {
+            report.push("value: the agent status changed under the hold".to_string());
+        }
+        release(&app, &mut vcx);
+        let after = agent_frame(&mut vcx, 0);
+        if !near_opt(before.mark, after.mark) {
+            report.push(format!(
+                "geometry: the agent status mark is not restored: {:?} -> {:?}",
+                before.mark, after.mark
+            ));
+        }
+        finish(report);
+    }
+
+    /// Agent badges follow the list's order under the real chord, and a click
+    /// on one activates its row, as before.
+    #[gpui::test]
+    fn a5alt_agent_badges_follow_the_list_and_a_click_on_one_activates_its_row(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) = agent_fixture(cx, 2, 16.);
+        draw_at(&app, &mut vcx, 260.);
+        assert_eq!(app.read_with(&vcx, |app, _| app.active), 0);
+        let modifiers = hold(&app, &mut vcx);
+        let first = vcx
+            .debug_bounds("sidebar-agent-badge-0")
+            .expect("the first agent row draws badge 1");
+        let second = vcx
+            .debug_bounds("sidebar-agent-badge-1")
+            .expect("the second agent row draws badge 2");
+        assert!(first.top() < second.top(), "{first:?} above {second:?}");
+
+        vcx.simulate_click(second.center(), modifiers);
+        vcx.run_until_parked();
+        assert_eq!(
+            app.read_with(&vcx, |app, _| app.active),
+            1,
+            "a click on badge 2 activates the second agent's tab"
+        );
+
+        release(&app, &mut vcx);
+        assert!(vcx.debug_bounds("sidebar-agent-badge-0").is_none());
+        assert!(vcx.debug_bounds("sidebar-agent-badge-1").is_none());
     }
 }
 
@@ -7286,5 +8396,115 @@ mod agent_tests {
             .expect("second exited sidebar agent row rendered");
         assert_eq!(exited_p2.title, CLIAgent::Claude.display_name());
         assert!(vcx.debug_bounds("row-status-circle-0").is_none());
+    }
+}
+
+/// A5.1 agents F2 in the rail's Agents list.
+#[cfg(test)]
+mod a51_sidebar_tests {
+    use super::*;
+    use crate::core::cli_agent::{AgentDetectionSession, AgentSessionState, AgentStatus, CLIAgent};
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    fn report(stream: &mut crate::daemon::transport::Stream, agent: CLIAgent, status: AgentStatus) {
+        DaemonMsg::Agent(Some(agent)).encode(stream).unwrap();
+        DaemonMsg::AgentStatus(Some(AgentSessionState {
+            status,
+            detection: Some(AgentDetectionSession {
+                kind: agent.slug().into(),
+                epoch: 1,
+                exited: false,
+                source: None,
+                rule: None,
+            }),
+            ..Default::default()
+        }))
+        .encode(stream)
+        .unwrap();
+    }
+
+    /// One tab split `[Claude | shell | Codex]`: the rail's Agents list titles
+    /// each pane by its own agent and numbers the Codex pane 3/3, counting
+    /// the shell, with the marker as the row's separate muted span.
+    #[gpui::test]
+    fn a51_agents_list_titles_each_split_pane_by_its_agent(cx: &mut gpui::TestAppContext) {
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+        crate::ui::i18n::set_locale("en");
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 1);
+        app.update_in(&mut vcx, |app, window, cx| {
+            let (shell, shell_stream) = quiet_test_pane(10, window, cx);
+            let (sibling, sibling_stream) = quiet_test_pane(9, window, cx);
+            streams.push(shell_stream);
+            streams.push(sibling_stream);
+            let first = app.tabs[0].pane.first_leaf().unwrap();
+            app.tabs[0].pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::split_node(
+                    gpui::Axis::Vertical,
+                    0.5,
+                    Pane::leaf(PaneSlot::Ready(shell)),
+                    Pane::leaf(PaneSlot::Ready(sibling)),
+                ),
+            );
+            app.select_sidebar_list(SidebarList::Agents, window, cx);
+        });
+        report(&mut streams[0], CLIAgent::Claude, AgentStatus::Working);
+        report(&mut streams[2], CLIAgent::Codex, AgentStatus::Waiting);
+        let mut ready = false;
+        for _ in 0..200 {
+            ready = app.read_with(&vcx, |app, cx| app.agent_pane_summaries(cx).len() == 2);
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready, "both agent reports reached the collector");
+        let _ = take_rendered_sidebar_agent_rows();
+        for _ in 0..2 {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let rendered = take_rendered_sidebar_agent_rows();
+        let mut failures = Vec::new();
+        for (pane, want) in [
+            (1, CLIAgent::Claude.display_name()),
+            (9, CLIAgent::Codex.display_name()),
+        ] {
+            match rendered.iter().rfind(|row| row.key.pane == pane) {
+                Some(row) if row.title == want => {}
+                Some(row) => failures.push(format!(
+                    "pane {pane} rail title {:?}, want {want:?}",
+                    row.title
+                )),
+                None => failures.push(format!("pane {pane} drew no rail row")),
+            }
+        }
+        let markers = app.read_with(&vcx, |app, cx| {
+            app.sidebar_agent_rows(&app.agent_pane_summaries(cx), cx)
+                .iter()
+                .map(|row| (row.summary.location.key.pane, row.marker()))
+                .collect::<Vec<_>>()
+        });
+        for (pane, want) in [(1, "pane 1/3"), (9, "pane 3/3")] {
+            let got = markers
+                .iter()
+                .find(|(p, _)| *p == pane)
+                .and_then(|(_, marker)| marker.as_deref());
+            if got != Some(want) {
+                failures.push(format!("pane {pane} marker {got:?}, want {want:?}"));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} expectation(s) failed:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
     }
 }

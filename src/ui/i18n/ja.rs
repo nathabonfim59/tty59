@@ -2197,6 +2197,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptAgent => "起動方法",
         L10nKey::WorktreePromptShell => "シェル",
         L10nKey::WorktreePromptTask => "最初のタスク",
+        L10nKey::WorktreePromptTaskPlaceholder => "エージェントへの最初のメッセージ（任意）",
         L10nKey::WorktreePromptSetup => "最初に .tty59/setup を実行",
         L10nKey::WorktreePromptSetupHint => {
             ".tty59/setup がありません。追加すると新しいワークツリーで `{command}` を実行します"

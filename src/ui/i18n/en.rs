@@ -2134,6 +2134,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::WorktreePromptAgent => "Open With",
         L10nKey::WorktreePromptShell => "Shell",
         L10nKey::WorktreePromptTask => "First Task",
+        L10nKey::WorktreePromptTaskPlaceholder => "Optional first message for the agent",
         L10nKey::WorktreePromptSetup => "Runs .tty59/setup first",
         L10nKey::WorktreePromptSetupHint => {
             "No .tty59/setup. Add one to run `{command}` in new worktrees"

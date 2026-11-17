@@ -1790,6 +1790,7 @@ l10n_keys! {
     WorktreePromptAgent,
     WorktreePromptShell,
     WorktreePromptTask,
+    WorktreePromptTaskPlaceholder,
     WorktreePromptSetup,
     WorktreePromptSetupHint,
     AppWorktreeSetupTitle,

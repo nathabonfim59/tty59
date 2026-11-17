@@ -2355,6 +2355,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::WorktreePromptAgent => "Запуск через",
         L10nKey::WorktreePromptShell => "Оболочка",
         L10nKey::WorktreePromptTask => "Первая задача",
+        L10nKey::WorktreePromptTaskPlaceholder => "Первое сообщение агенту (необязательно)",
         L10nKey::WorktreePromptSetup => "Сначала запускается .tty59/setup",
         L10nKey::WorktreePromptSetupHint => {
             "Нет .tty59/setup. Добавьте его, чтобы выполнять `{command}` в новых worktree"
