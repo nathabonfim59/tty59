@@ -175,10 +175,26 @@ impl Tty59App {
         Some(ImageActions {
             // Only decoded pixels can be copied; a picture that failed has none.
             copy: doc.data.read(cx).image().is_some(),
-            // TODO(download): B contract. M2 turns it on for any open picture,
-            // a failed one included.
-            download: false,
+            // The file's own bytes go, not the decoded pixels, so a picture
+            // that failed to decode can still be downloaded.
+            download: true,
         })
+    }
+
+    /// Downloads the file behind the picture `id` to the Downloads folder.
+    /// The transfer and what it says (where it landed, or why it did not) are
+    /// the file tree's, so this reads the same as Download anywhere else.
+    pub(crate) fn editor_download_image(
+        &mut self,
+        id: BufferId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.image(id) else {
+            return;
+        };
+        let (host, path) = (doc.host.clone(), doc.path.clone());
+        self.download_to_downloads(host, &path, window, cx);
     }
 
     /// The picture in front of the active tab's editor, while the panel is
@@ -947,8 +963,8 @@ mod tests {
         })
     }
 
-    /// What can be done to a picture: copy only what has pixels, nothing to
-    /// anything that is not a picture.
+    /// What can be done to a picture: copy only what has pixels, download any
+    /// file, nothing to anything that is not a picture.
     #[gpui::test]
     fn image_actions_follow_what_the_picture_is(cx: &mut TestAppContext) {
         cx.executor().allow_parking();
@@ -973,17 +989,19 @@ mod tests {
         app.read_with(&vcx, |app, cx| {
             let ready = app.image_actions(good, cx).expect("a picture");
             assert!(ready.copy);
-            assert!(!ready.download, "download is not wired yet");
+            assert!(ready.download);
             let failed = app.image_actions(bad, cx).expect("a picture");
             assert!(!failed.copy, "nothing to copy from a picture that failed");
+            assert!(failed.download, "the file is still there to download");
             assert!(app.image_actions(text_id, cx).is_none(), "not a picture");
         });
     }
 
-    /// The palette offers Copy Image for the picture in front, and for nothing
-    /// else: not a text file, not a hidden panel, not a picture that failed.
+    /// The palette offers the picture commands for the picture in front, and
+    /// for nothing else: not a text file, not a hidden panel. A picture that
+    /// failed has nothing to copy but can still be downloaded.
     #[gpui::test]
-    fn the_palette_offers_copy_image_only_for_a_picture_in_front(cx: &mut TestAppContext) {
+    fn the_palette_offers_picture_commands_only_for_a_picture_in_front(cx: &mut TestAppContext) {
         use crate::ui::search::CommandKind;
 
         cx.executor().allow_parking();
@@ -1002,8 +1020,11 @@ mod tests {
         open(&app, &mut vcx, &good, 1);
         assert_eq!(
             palette_kinds(&app, &mut vcx),
-            [CommandKind::EditorCopyImage],
-            "a picture in front; no download row until it is wired"
+            [
+                CommandKind::EditorCopyImage,
+                CommandKind::EditorDownloadImage
+            ],
+            "a picture in front"
         );
 
         app.update_in(&mut vcx, |app, window, cx| {
@@ -1018,14 +1039,15 @@ mod tests {
         });
 
         open(&app, &mut vcx, &bad, 2);
-        assert!(
-            !palette_kinds(&app, &mut vcx).contains(&CommandKind::EditorCopyImage),
-            "a failed picture has nothing to copy"
+        assert_eq!(
+            palette_kinds(&app, &mut vcx),
+            [CommandKind::EditorDownloadImage],
+            "a failed picture has nothing to copy, but its file can be had"
         );
 
         open_text(&app, &mut vcx, &text);
         assert!(
-            !palette_kinds(&app, &mut vcx).contains(&CommandKind::EditorCopyImage),
+            palette_kinds(&app, &mut vcx).is_empty(),
             "a text file is in front"
         );
     }
@@ -1098,6 +1120,60 @@ mod tests {
         vcx.dispatch_action(EditorCopyImage);
         wait(&mut vcx, |vcx| clipboard_png(vcx).is_some());
         assert!(clipboard_png(&mut vcx).is_some(), "the picture was copied");
+    }
+
+    /// The bindable action hands the picture's file to the download helper,
+    /// which says how it went. The file is deleted first, so the helper fails
+    /// and writes nothing: no test writes into a real Downloads folder.
+    #[gpui::test]
+    fn the_download_action_reaches_the_download_helper(cx: &mut TestAppContext) {
+        use crate::core::actions::EditorDownloadImage;
+
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let png = real_dir(&dir).join("tty59-download-action-gone.png");
+        write_png(&png, 20, 10);
+        open(&app, &mut vcx, &png, 1);
+        std::fs::remove_file(&png).unwrap();
+        let notices =
+            |vcx: &mut VisualTestContext| vcx.update(|window, cx| window.notifications(cx).len());
+        let before = notices(&mut vcx);
+
+        vcx.dispatch_action(EditorDownloadImage);
+        wait(&mut vcx, |vcx| notices(vcx) > before);
+        assert!(notices(&mut vcx) > before, "the helper said how it went");
+        assert!(
+            !crate::ui::sftp::local_download_dir()
+                .join("tty59-download-action-gone.png")
+                .exists(),
+            "a file that is gone lands nowhere"
+        );
+    }
+
+    /// With a text file in front the download action does nothing and the key
+    /// goes on.
+    #[gpui::test]
+    fn the_download_action_ignores_a_text_file(cx: &mut TestAppContext) {
+        use crate::core::actions::EditorDownloadImage;
+
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let text = real_dir(&dir).join("notes.txt");
+        std::fs::write(&text, "hello\n").unwrap();
+        open_text(&app, &mut vcx, &text);
+        let notices =
+            |vcx: &mut VisualTestContext| vcx.update(|window, cx| window.notifications(cx).len());
+        let before = notices(&mut vcx);
+
+        vcx.dispatch_action(EditorDownloadImage);
+        settle(&mut vcx);
+        std::thread::sleep(Duration::from_millis(50));
+        settle(&mut vcx);
+        assert_eq!(notices(&mut vcx), before, "a text file downloads nothing");
     }
 
     /// A right-click on the picture opens the menu: the focus moves into it.

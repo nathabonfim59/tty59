@@ -7444,8 +7444,11 @@ impl Tty59App {
                     self.editor_copy_image(id, window, cx);
                 }
             }
-            // TODO(download): B contract. Never offered while `download` is false.
-            EditorDownloadImage => {}
+            EditorDownloadImage => {
+                if let Some(id) = self.editor_active_image() {
+                    self.editor_download_image(id, window, cx);
+                }
+            }
             RestartSshSession => self.restart_ssh_session(window, cx),
             SetTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
@@ -10772,9 +10775,13 @@ impl Render for Tty59App {
                         _ => cx.propagate(),
                     }
                 }))
-                .on_action(cx.listener(|_, _: &EditorDownloadImage, _, cx| {
-                    // TODO(download): B contract
-                    cx.propagate()
+                .on_action(cx.listener(|this, _: &EditorDownloadImage, window, cx| {
+                    match this.editor_active_image() {
+                        Some(id) if this.image_actions(id, cx).is_some_and(|a| a.download) => {
+                            this.editor_download_image(id, window, cx)
+                        }
+                        _ => cx.propagate(),
+                    }
                 }))
                 .on_action(
                     cx.listener(|this, _: &Quit, window, cx| this.quit_stop_sessions(window, cx)),
