@@ -2565,6 +2565,10 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ImagePreviewNotAnImage => {
             "\"{name}\" is named like an image but is neither an image nor text"
         }
+        L10nKey::ImageCopyFailed => "Couldn't copy {name}",
+        L10nKey::ImageCopyNoTool => {
+            "Copied for tty59 only. To paste the picture in other apps, install wl-clipboard (Wayland) or xclip (X11)."
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} could not be started. tty59 looks on PATH for: {programs}. Make sure {name} is installed and can run."

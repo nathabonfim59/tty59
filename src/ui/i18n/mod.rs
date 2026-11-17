@@ -2016,6 +2016,8 @@ l10n_keys! {
     ImagePreviewUnsupportedFeature,
     ImagePreviewSvgImages,
     ImagePreviewNotAnImage,
+    ImageCopyFailed,
+    ImageCopyNoTool,
     // B3-E: editor status, empty hint and gutter peek.
     LspMissingBody,
     LspErrorCount,

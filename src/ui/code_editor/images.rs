@@ -16,9 +16,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpui::{AnyElement, App, Entity, FocusHandle, RenderImage, SharedString};
+use gpui::{
+    AnyElement, App, ClipboardItem, Entity, FocusHandle, Image, ImageFormat, RenderImage,
+    SharedString,
+};
 
 use super::*;
+use crate::ui::clipboard_image::png_of_first_frame;
+#[cfg(target_os = "linux")]
+use crate::ui::clipboard_image::{ClipboardExport, write_clipboard_image};
+use crate::ui::image_preview::view::Content;
 use crate::ui::image_preview::{ImageData, ImageView};
 
 /// One open picture.
@@ -64,6 +71,10 @@ pub(super) struct ImageState {
     pub(super) views: RefCell<HashMap<ViewKey, Entity<ImageView>>>,
     pub(super) requests: HashMap<u64, ImageRequest>,
     pub(super) seq: u64,
+    /// How a copied picture reaches the desktop's clipboard, where gpui's own
+    /// write does not (Linux).
+    #[cfg(target_os = "linux")]
+    pub(super) export: ClipboardExport,
 }
 
 impl Tty59App {
@@ -370,6 +381,62 @@ impl Tty59App {
         let image = doc.data.read(cx).image();
         release_images(image.into_iter().collect(), cx);
         cx.notify();
+    }
+
+    /// Copies the picture `id` to the clipboard as a PNG of what the viewer
+    /// holds: the decoded first frame. So an SVG goes as its raster, an
+    /// animation as its first frame and a picture too large to hold whole as
+    /// the reduced pixels; the file's own bytes are not kept, and a copy that
+    /// is not what is on screen would surprise more than one that is. A
+    /// picture that failed to decode has nothing to copy.
+    ///
+    /// The encode, and the file the Linux tools read, are made off the UI
+    /// thread (a large picture's PNG takes long enough to be felt); only the
+    /// clipboard write comes back to it. gpui's write reaches other
+    /// applications on macOS and Windows; on Linux it pastes into tty59 only,
+    /// so the staged file is also exported (see `clipboard_image`).
+    pub(super) fn editor_copy_image(
+        &mut self,
+        id: BufferId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(doc) = self.image(id) else {
+            return;
+        };
+        let Content::Ready(shown) = &doc.data.read(cx).content else {
+            return;
+        };
+        let (pixels, name) = (shown.image.clone(), doc.name.clone());
+        #[cfg(target_os = "linux")]
+        let export = self.editor.images.export.clone();
+        cx.spawn_in(window, async move |app, cx| {
+            let staged = cx
+                .background_spawn(async move {
+                    let png = png_of_first_frame(&pixels)?;
+                    let image = Image::from_bytes(ImageFormat::Png, png);
+                    #[cfg(target_os = "linux")]
+                    let staged = Some(write_clipboard_image(&image)?);
+                    #[cfg(not(target_os = "linux"))]
+                    let staged: Option<PathBuf> = None;
+                    Some((image, staged))
+                })
+                .await;
+            let _ = app.update_in(cx, |_, window, cx| match staged {
+                Some((image, staged)) => {
+                    cx.write_to_clipboard(ClipboardItem::new_image(&image));
+                    #[cfg(target_os = "linux")]
+                    if let Some(file) = staged {
+                        export.submit(file, window, cx);
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = staged;
+                }
+                None => window
+                    .push_notification(t_fmt(L10nKey::ImageCopyFailed, &[("name", &name)]), cx),
+            });
+        })
+        .detach();
     }
 
     /// What the draw loop tidies about pictures: documents no tab shows any
@@ -1323,6 +1390,319 @@ mod tests {
             "no second copy beside the stale one"
         );
         assert!(app.read_with(&vcx, |app, _| app.editor.images.requests.is_empty()));
+    }
+
+    /// What is on the clipboard as a picture: its PNG bytes.
+    fn clipboard_png(vcx: &mut VisualTestContext) -> Option<Vec<u8>> {
+        let item = vcx.update(|_, cx| cx.read_from_clipboard())?;
+        item.entries().iter().find_map(|entry| match entry {
+            gpui::ClipboardEntry::Image(image) if image.format == gpui::ImageFormat::Png => {
+                Some(image.bytes.clone())
+            }
+            _ => None,
+        })
+    }
+
+    fn decoded(png: &[u8]) -> image::RgbaImage {
+        image::load_from_memory_with_format(png, image::ImageFormat::Png)
+            .expect("a PNG")
+            .to_rgba8()
+    }
+
+    fn copy(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, id: BufferId) {
+        app.update_in(vcx, |app, window, cx| app.editor_copy_image(id, window, cx));
+    }
+
+    /// The system tools are never started by a test: this stands in for them,
+    /// records what it was asked to export, and keeps an export open until it
+    /// is released.
+    #[cfg(target_os = "linux")]
+    mod standin {
+        use std::io;
+        use std::path::{Path, PathBuf};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        use crate::ui::clipboard_image::{ClipboardExport, ExportBackend, ExportJob};
+
+        pub(super) struct Standin {
+            pub(super) asked: Mutex<Vec<PathBuf>>,
+            held: Arc<AtomicBool>,
+            has_tool: bool,
+        }
+
+        struct Job(Arc<AtomicBool>);
+
+        impl ExportJob for Job {
+            fn finished(&mut self) -> bool {
+                !self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        impl ExportBackend for Standin {
+            fn start(&self, file: &Path) -> io::Result<Option<Box<dyn ExportJob>>> {
+                self.asked.lock().unwrap().push(file.to_path_buf());
+                Ok(self
+                    .has_tool
+                    .then(|| Box::new(Job(self.held.clone())) as Box<dyn ExportJob>))
+            }
+        }
+
+        impl Standin {
+            /// A tool whose exports end at once, or stay open while `held`.
+            pub(super) fn new(has_tool: bool, held: bool) -> Arc<Self> {
+                Arc::new(Self {
+                    asked: Mutex::default(),
+                    held: Arc::new(AtomicBool::new(held)),
+                    has_tool,
+                })
+            }
+
+            pub(super) fn release(&self) {
+                self.held.store(false, Ordering::SeqCst);
+            }
+
+            pub(super) fn asked(&self) -> Vec<PathBuf> {
+                self.asked.lock().unwrap().clone()
+            }
+
+            pub(super) fn install(
+                self: &Arc<Self>,
+                app: &gpui::Entity<crate::ui::app::Tty59App>,
+                vcx: &mut gpui::VisualTestContext,
+            ) {
+                let backend = self.clone();
+                app.update(vcx, |app, _| {
+                    app.editor.images.export =
+                        ClipboardExport::with_backend(backend, Arc::default());
+                });
+            }
+        }
+    }
+
+    /// Copy puts the picture on the clipboard as a PNG of the same size and
+    /// colour, and on Linux hands the staged file to the export.
+    #[gpui::test]
+    fn copying_a_picture_puts_its_png_on_the_clipboard(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let png = real_dir(&dir).join("shot.png");
+        write_png(&png, 40, 20);
+        open(&app, &mut vcx, &png, 1);
+        let id = id_of(&app, &mut vcx, &png);
+        #[cfg(target_os = "linux")]
+        let tool = {
+            let tool = standin::Standin::new(true, false);
+            tool.install(&app, &mut vcx);
+            tool
+        };
+
+        copy(&app, &mut vcx, id);
+        wait(&mut vcx, |vcx| {
+            #[cfg(target_os = "linux")]
+            let exported = !tool.asked().is_empty();
+            #[cfg(not(target_os = "linux"))]
+            let exported = true;
+            clipboard_png(vcx).is_some() && exported
+        });
+
+        let bytes = clipboard_png(&mut vcx).expect("a picture is on the clipboard");
+        let back = decoded(&bytes);
+        assert_eq!(back.dimensions(), (40, 20));
+        assert_eq!(back.get_pixel(7, 3).0, [40, 90, 200, 255]);
+        #[cfg(target_os = "linux")]
+        {
+            let asked = tool.asked();
+            assert_eq!(asked.len(), 1, "one export");
+            assert_eq!(
+                asked[0].parent(),
+                Some(std::env::temp_dir().join("tty59-clipboard").as_path()),
+                "staged where a terminal paste stages its pictures"
+            );
+            assert_eq!(std::fs::read(&asked[0]).unwrap(), bytes, "the same PNG");
+        }
+    }
+
+    /// A picture that did not decode has nothing to copy: nothing is written
+    /// and nothing is exported. The same steps with a picture that did decode
+    /// are the control.
+    #[gpui::test]
+    fn a_failed_picture_copies_nothing(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let (good, bad) = (
+            real_dir(&dir).join("good.png"),
+            real_dir(&dir).join("bad.png"),
+        );
+        write_png(&good, 8, 8);
+        std::fs::write(&bad, b"\x89PNG\r\n\x1a\nnot really").unwrap();
+        open(&app, &mut vcx, &good, 1);
+        open(&app, &mut vcx, &bad, 2);
+        let (ok, broken) = (id_of(&app, &mut vcx, &good), id_of(&app, &mut vcx, &bad));
+        #[cfg(target_os = "linux")]
+        let tool = {
+            let tool = standin::Standin::new(true, false);
+            tool.install(&app, &mut vcx);
+            tool
+        };
+
+        copy(&app, &mut vcx, ok);
+        wait(&mut vcx, |vcx| clipboard_png(vcx).is_some());
+        assert!(clipboard_png(&mut vcx).is_some(), "the control copies");
+        #[cfg(target_os = "linux")]
+        wait(&mut vcx, |_| tool.asked().len() == 1);
+
+        vcx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("keep".into())));
+        copy(&app, &mut vcx, broken);
+        settle(&mut vcx);
+        std::thread::sleep(Duration::from_millis(50));
+        settle(&mut vcx);
+        assert!(clipboard_png(&mut vcx).is_none(), "nothing was written");
+        assert_eq!(
+            vcx.update(|_, cx| cx.read_from_clipboard())
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("keep")
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(tool.asked().len(), 1, "nothing was exported");
+    }
+
+    /// An SVG goes as the raster the viewer holds, not as its own size.
+    #[gpui::test]
+    fn an_svg_copies_its_raster(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let svg = real_dir(&dir).join("logo.svg");
+        std::fs::write(
+            &svg,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="10"><rect width="30" height="10" fill="red"/></svg>"#,
+        )
+        .unwrap();
+        open(&app, &mut vcx, &svg, 1);
+        let id = id_of(&app, &mut vcx, &svg);
+        let raster = app.read_with(&vcx, |app, cx| {
+            match &app.image(id).unwrap().data.read(cx).content {
+                Content::Ready(shown) => shown.pixels,
+                Content::Failed(_) => panic!("the SVG should decode"),
+            }
+        });
+        #[cfg(target_os = "linux")]
+        standin::Standin::new(true, false).install(&app, &mut vcx);
+
+        copy(&app, &mut vcx, id);
+        wait(&mut vcx, |vcx| clipboard_png(vcx).is_some());
+        let back = decoded(&clipboard_png(&mut vcx).expect("a picture"));
+        assert_eq!(back.dimensions(), raster);
+        assert_eq!(back.get_pixel(1, 1).0, [255, 0, 0, 255]);
+    }
+
+    /// Advances the executor's clock a little at a time until `done`.
+    #[cfg(target_os = "linux")]
+    fn run_clock(vcx: &mut VisualTestContext, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() && Instant::now() < deadline {
+            vcx.update(|_, cx| {
+                cx.background_executor()
+                    .advance_clock(Duration::from_millis(60))
+            });
+            vcx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Never two tools at once: while one export is open a newer copy waits
+    /// in one slot, a still newer one replaces it, and the one that is left
+    /// goes when the open one ends.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn one_export_runs_at_a_time_and_the_latest_copy_wins(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let shots: Vec<PathBuf> = [20, 21, 22]
+            .iter()
+            .map(|w| {
+                let path = real_dir(&dir).join(format!("shot-{w}.png"));
+                write_png(&path, *w, 20);
+                path
+            })
+            .collect();
+        for (n, path) in shots.iter().enumerate() {
+            open(&app, &mut vcx, path, n + 1);
+        }
+        let ids: Vec<BufferId> = shots.iter().map(|p| id_of(&app, &mut vcx, p)).collect();
+        let tool = standin::Standin::new(true, true);
+        tool.install(&app, &mut vcx);
+
+        copy(&app, &mut vcx, ids[0]);
+        wait(&mut vcx, |_| tool.asked().len() == 1);
+        // Two more while the first is open: nothing is started for them.
+        copy(&app, &mut vcx, ids[1]);
+        wait(&mut vcx, |vcx| {
+            clipboard_png(vcx).is_some_and(|p| decoded(&p).width() == 21)
+        });
+        copy(&app, &mut vcx, ids[2]);
+        wait(&mut vcx, |vcx| {
+            clipboard_png(vcx).is_some_and(|p| decoded(&p).width() == 22)
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        settle(&mut vcx);
+        assert_eq!(tool.asked().len(), 1, "one tool at a time");
+
+        // The open one ends; the newest copy is exported, the middle one never.
+        tool.release();
+        run_clock(&mut vcx, || tool.asked().len() >= 2);
+        run_clock(&mut vcx, || false);
+        let asked = tool.asked();
+        assert_eq!(
+            asked.len(),
+            2,
+            "the replaced copy is never exported: {asked:?}"
+        );
+        let width = |path: &Path| decoded(&std::fs::read(path).unwrap()).width();
+        assert_eq!((width(&asked[0]), width(&asked[1])), (20, 22));
+    }
+
+    /// With no tool the copy still happens in the app, and the reader is told
+    /// once, not on every copy.
+    #[cfg(target_os = "linux")]
+    #[gpui::test]
+    fn no_tool_says_so_once(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let png = real_dir(&dir).join("shot.png");
+        write_png(&png, 10, 10);
+        open(&app, &mut vcx, &png, 1);
+        let id = id_of(&app, &mut vcx, &png);
+        let tool = standin::Standin::new(false, false);
+        tool.install(&app, &mut vcx);
+        let notices =
+            |vcx: &mut VisualTestContext| vcx.update(|window, cx| window.notifications(cx).len());
+        let before = notices(&mut vcx);
+
+        copy(&app, &mut vcx, id);
+        wait(&mut vcx, |_| tool.asked().len() == 1);
+        settle(&mut vcx);
+        assert!(
+            clipboard_png(&mut vcx).is_some(),
+            "the in-app copy happened"
+        );
+        assert_eq!(notices(&mut vcx), before + 1, "told once");
+
+        copy(&app, &mut vcx, id);
+        wait(&mut vcx, |_| tool.asked().len() == 2);
+        settle(&mut vcx);
+        assert_eq!(notices(&mut vcx), before + 1, "and not again");
     }
 
     /// A folder renamed: every picture under it follows, a folder whose name

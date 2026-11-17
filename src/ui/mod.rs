@@ -3,6 +3,7 @@ pub mod agent_launch;
 mod agent_vision;
 pub mod app;
 pub mod assets;
+pub(crate) mod clipboard_image;
 pub mod code_editor;
 pub mod dialog;
 pub mod diff_list;
