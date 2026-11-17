@@ -1215,17 +1215,72 @@ mod forwards {
                 std::env::temp_dir().join(format!("tty59-covtest-{}", std::process::id())),
                 "the child's config dir is its own"
             );
-            let socket = dir.join("daemon.sock");
-            assert_eq!(
-                crate::daemon::transport::endpoint_display(),
-                socket.display().to_string(),
-                "the transport dials the socket in that dir"
-            );
             crate::daemon::transport::remove_stale_endpoint();
             let listener = crate::daemon::transport::bind().expect("bind the fixture daemon");
+            // The endpoint only exists once bound: a Unix socket path is fixed
+            // by the config dir, a Windows endpoint is the loopback port the
+            // listener was given, published in the dir's port file.
+            #[cfg(unix)]
+            {
+                let socket = dir.join("daemon.sock");
+                assert_eq!(
+                    crate::daemon::transport::endpoint_display(),
+                    socket.display().to_string(),
+                    "the transport dials the socket in that dir"
+                );
+                assert_eq!(
+                    listener
+                        .local_addr()
+                        .expect("the listener has an address")
+                        .as_pathname(),
+                    Some(socket.as_path()),
+                    "the listener is bound to the socket in that dir"
+                );
+            }
+            #[cfg(windows)]
+            {
+                let port = listener
+                    .local_addr()
+                    .expect("the listener has an address")
+                    .port();
+                assert_eq!(
+                    crate::daemon::transport::endpoint_display(),
+                    format!("127.0.0.1:{port}"),
+                    "the transport dials the port the listener holds"
+                );
+                let published = std::fs::read_to_string(dir.join("daemon.port"))
+                    .expect("the port file is published in that dir");
+                assert_eq!(
+                    published.lines().next().map(str::trim),
+                    Some(port.to_string().as_str()),
+                    "the port file in that dir names the listener's port"
+                );
+            }
+            // Routing proof: the production dialer lands on this very listener
+            // and passes the transport's own authentication.
             listener
                 .set_nonblocking(true)
                 .expect("the listener goes non-blocking");
+            let probe = crate::daemon::transport::connect()
+                .expect("the production dialer reaches the fixture daemon");
+            let give_up = Instant::now() + Duration::from_secs(2);
+            let mut accepted = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == ErrorKind::WouldBlock && Instant::now() < give_up => {
+                        std::thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(e) => panic!("the dialed connection never reached the listener: {e}"),
+                }
+            };
+            accepted
+                .set_nonblocking(false)
+                .and_then(|()| accepted.set_read_timeout(Some(Duration::from_secs(2))))
+                .expect("bound the probe connection's I/O");
+            crate::daemon::transport::authenticate(&mut accepted)
+                .expect("the dialed connection authenticates against the listener");
+            drop(accepted);
+            drop(probe);
             let state = Arc::new(Mutex::new(State {
                 forwards,
                 ..State::default()
@@ -1298,6 +1353,11 @@ mod forwards {
             .and_then(|()| stream.set_write_timeout(Some(Duration::from_secs(2))))
         {
             return fail(format!("configure the connection: {e}"));
+        }
+        // The production client sends its auth token first on Windows; Unix
+        // authenticates nothing. A bad token is a failure, never skipped.
+        if let Err(e) = crate::daemon::transport::authenticate(stream) {
+            return fail(format!("authenticate the connection: {e}"));
         }
         let message = match ClientMsg::read(stream) {
             Ok(message) => message,

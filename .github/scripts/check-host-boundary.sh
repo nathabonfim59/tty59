@@ -164,6 +164,11 @@ src/ui/scm/rows_ownop_tests.rs|std::fs::
 src/ui/scm/rows_ring_inside_tests.rs|std::fs::
 src/ui/scm/rows_shared_tests.rs|std::fs::
 src/ui/scm/rows_stale_tests.rs|std::fs::
+
+# The settings keyboard fixture reads back the `daemon.port` its own test child
+# just published in the child-private pinned local config dir, to prove the
+# endpoint identity. Local test state, never a workspace or remote path.
+src/ui/settings/keyboard_tests.rs|std::fs::read_to_string
 EOF
 )
 
