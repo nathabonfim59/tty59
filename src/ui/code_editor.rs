@@ -2773,9 +2773,10 @@ impl Tty59App {
         this.editor_file_menu_items(menu, id, app, cx)
     }
 
-    /// What both menus offer for the file as a whole: open it outside tty59,
-    /// show it in its folder, copy where it is. Nothing for a file that has
-    /// never been saved, since it is not anywhere yet.
+    /// What both menus offer for a saved document as a whole, text or
+    /// picture: open it outside tty59, show it in its folder, copy where it
+    /// is. Nothing for one that has never been saved, since it is not anywhere
+    /// yet.
     fn editor_file_menu_items(
         &self,
         menu: PopupMenu,
@@ -2783,13 +2784,13 @@ impl Tty59App {
         app: &gpui::WeakEntity<Self>,
         cx: &gpui::App,
     ) -> PopupMenu {
-        let Some(f) = self.buffer(id).filter(|f| f.untitled.is_none()) else {
+        let Some((host, path)) = self.doc_location(id) else {
             return menu;
         };
-        let path = f.path.clone();
+        let path = path.to_path_buf();
         // Only this machine's desktop can open or show a file, and only a
         // file that is on this machine — the same rule as the file tree.
-        let local = f.host.id().is_local();
+        let local = host.is_local();
         let mut menu = menu.separator();
         if local && self.can_spawn_locally(cx) && !is_program(&path) {
             let browser = opens_in_browser(&path);
@@ -5711,6 +5712,35 @@ mod image_dispatch_tests {
         assert!(
             vcx.debug_bounds("image-preview-body").is_some(),
             "the image preview is what is painted in the editor's place"
+        );
+    }
+
+    /// A picture is a saved document like any other, so its tab menu has the
+    /// file items; it used to return early for anything but a text buffer.
+    #[gpui::test]
+    fn an_image_tab_menu_offers_the_file_items(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let svg = real_dir(&dir).join("logo.svg");
+        std::fs::write(&svg, VALID_SVG).unwrap();
+        open_and_wait(&app, &mut vcx, &svg);
+        let id = app
+            .read_with(&vcx, |app, _| app.tab_code().and_then(TabCode::active_id))
+            .expect("the picture is the active document");
+
+        let weak = app.downgrade();
+        let menu = vcx.update(|window, cx| {
+            PopupMenu::build(window, cx, move |menu, _window, cx| match weak.upgrade() {
+                Some(app) => app.read(cx).editor_file_menu_items(menu, id, &weak, cx),
+                None => menu,
+            })
+        });
+
+        assert!(
+            !vcx.read_entity(&menu, |menu, _| menu.is_empty()),
+            "a picture's menu has Copy Path and the rest, not nothing"
         );
     }
 
