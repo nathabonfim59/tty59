@@ -43,7 +43,19 @@ pub(super) fn serial() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// The directory name `scratch` never hands out: it is the seed's, and
+/// `scratch` empties a directory it is asked for before it returns it.
+const SEED_NAME: &str = "immutable-seed";
+
 pub(super) fn scratch(name: &str) -> PathBuf {
+    assert_ne!(
+        name, SEED_NAME,
+        "`{SEED_NAME}` is the fixture seed's directory; a test asking for it would empty the seed"
+    );
+    scratch_dir(name)
+}
+
+fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tty59-rows-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -70,6 +82,10 @@ fn git_output(root: &Path, args: &[&str]) -> std::process::Output {
         ])
         .args(args)
         .current_dir(root)
+        // Pinned for the child alone: the fixture's explicit `git status`
+        // refresh has to write the index even when the parent's environment
+        // says otherwise. A `--no-optional-locks` on a command line still wins.
+        .env("GIT_OPTIONAL_LOCKS", "1")
         .output()
         .expect("git runs")
 }
@@ -123,8 +139,70 @@ pub(super) fn write(root: &Path, rel: &str, text: &str) {
 /// ~327 unstaged changes — a staged rename, a modified submodule and a very
 /// long name among them. Every group past the cap, so each one draws
 /// `MAX_RENDERED_FILES` rows and its "…and N more".
+///
+/// Built once per test process (`seed_repo`) and handed to every test as its
+/// own copy: `git add` of the ~1000 files this takes dominates a test's cost on
+/// a slow filesystem, and a copy of the finished tree is far cheaper than
+/// running git again. The caller holds `serial()`, so the seed is built by one
+/// test while the others wait, as they wait for each other's panel already.
 pub(super) fn big_repo(name: &str) -> PathBuf {
+    let seed = seed_repo();
+    let seed_base = seed.parent().expect("the seed repo has a base directory");
     let base = scratch(name);
+    let root = base.join("repo");
+    copy_tree(&seed, &root);
+    copy_tree(&seed_base.join("sub-src"), &base.join("sub-src"));
+    // The copy's submodule URL still names the seed's `sub-src`; point it (and
+    // the module's own `origin`) at this copy's, so nothing a test does to its
+    // submodule can reach the seed or a sibling.
+    git(&root, &["submodule", "sync", "--recursive"]);
+    // The copied index carries the seed's file stamps. The panel reads status
+    // without taking the index lock, so without this every read of this copy
+    // would hash every file again.
+    git(&root, &["status", "-s"]);
+    root
+}
+
+/// The finished fixture every `big_repo` copies, built on first use.
+fn seed_repo() -> PathBuf {
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SEED.get_or_init(|| build_big_repo(scratch_dir(SEED_NAME)))
+        .clone()
+}
+
+/// Copy the directory `from` to `to`: files byte for byte, nothing else. The
+/// fixture holds no symbolic link, so meeting one is a bug in the fixture.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to)
+        .unwrap_or_else(|e| panic!("creating {} for the fixture copy: {e}", to.display()));
+    let entries = std::fs::read_dir(from)
+        .unwrap_or_else(|e| panic!("reading {} for the fixture copy: {e}", from.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| panic!("listing {}: {e}", from.display()));
+        let (src, dst) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry
+            .file_type()
+            .unwrap_or_else(|e| panic!("typing {}: {e}", src.display()));
+        if kind.is_dir() {
+            copy_tree(&src, &dst);
+        } else if kind.is_file() {
+            std::fs::copy(&src, &dst)
+                .unwrap_or_else(|e| panic!("copying {} to {}: {e}", src.display(), dst.display()));
+        } else {
+            panic!(
+                "the fixture seed holds a non-regular entry: {}",
+                src.display()
+            );
+        }
+    }
+}
+
+/// The fixture itself, built with git from nothing inside the empty directory
+/// `base`: the ground truth the seed is built from and the copies are compared
+/// with. Returns the superproject's root; its submodule's source is the sibling
+/// `sub-src`, named by the relative URL `../sub-src` so that `.gitmodules` is
+/// the same in every copy.
+fn build_big_repo(base: PathBuf) -> PathBuf {
     let root = base.join("repo");
     let sub = base.join("sub-src");
     std::fs::create_dir_all(&root).unwrap();
@@ -143,10 +221,7 @@ pub(super) fn big_repo(name: &str) -> PathBuf {
     write(&root, "conflict.txt", "base\n");
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "base"]);
-    git(
-        &root,
-        &["submodule", "add", "-q", sub.to_str().unwrap(), "ext/sub"],
-    );
+    git(&root, &["submodule", "add", "-q", "../sub-src", "ext/sub"]);
     git(&root, &["commit", "-qm", "submodule"]);
 
     git(&root, &["checkout", "-q", "-b", "side"]);
@@ -755,4 +830,276 @@ fn a_scrolled_long_list_goes_quiet(cx: &mut TestAppContext) {
         "a converged range never asks again"
     );
     let _ = std::fs::remove_dir_all(root.parent().unwrap());
+}
+
+// ---- The seed and its copies ------------------------------------------------
+//
+// `big_repo` hands out copies of one seed. What a test relies on is what a
+// fresh build would have given it, and that nothing it does to its copy
+// reaches the seed or another copy: these pin both. No commit id is compared
+// (the commits carry their timestamps); the comparison is of what the panel and
+// the keys read: statuses, index entries, history, the merge, the submodule.
+
+/// `p` as git and the rest of the fixture spell it: existing, canonical, plain.
+fn canon(p: &Path) -> PathBuf {
+    tty59_core::core::path_spelling::local_spelling_buf(
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|e| panic!("{} does not resolve: {e}", p.display())),
+    )
+}
+
+/// What a fresh build and a copy have to agree on.
+struct View {
+    status: String,
+    index: Vec<String>,
+    log: String,
+    branch: String,
+    merge_head_is_side: bool,
+    gitmodules: String,
+    submodules: Vec<(char, String)>,
+}
+
+fn view(root: &Path) -> View {
+    // The gitlink's object id is the submodule's HEAD commit, which carries
+    // the time it was made: its mode, stage and path are compared, not that id.
+    let index = git_stdout(root, &["ls-files", "-s"])
+        .lines()
+        .map(|line| match line.split_once('\t') {
+            Some((meta, path)) if meta.starts_with("160000 ") => {
+                let stage = meta.rsplit(' ').next().expect("a stage");
+                format!("160000 <gitlink> {stage}\t{path}")
+            }
+            _ => line.to_string(),
+        })
+        .collect();
+    let submodules = git_stdout(root, &["submodule", "status"])
+        .lines()
+        .map(|line| {
+            (
+                line.chars().next().expect("a status line"),
+                line.split_whitespace()
+                    .nth(1)
+                    .expect("a submodule path")
+                    .to_string(),
+            )
+        })
+        .collect();
+    View {
+        status: git_stdout(root, &["status", "--porcelain=v1", "-z"]),
+        index,
+        log: git_stdout(root, &["log", "--format=%s", "main"]),
+        branch: branch_name(root),
+        merge_head_is_side: git_stdout(root, &["rev-parse", "MERGE_HEAD"])
+            == git_stdout(root, &["rev-parse", "refs/heads/side"]),
+        gitmodules: std::fs::read_to_string(root.join(".gitmodules")).expect(".gitmodules"),
+        submodules,
+    }
+}
+
+fn branch_name(root: &Path) -> String {
+    git_stdout(root, &["branch", "--show-current"])
+        .trim()
+        .to_string()
+}
+
+/// The stages `conflict.txt` has in the index, in index order.
+fn conflict_stages(index: &[String]) -> Vec<String> {
+    index
+        .iter()
+        .filter_map(|line| {
+            let (meta, path) = line.split_once('\t')?;
+            (path == "conflict.txt").then(|| meta.rsplit(' ').next().unwrap_or("").to_string())
+        })
+        .collect()
+}
+
+fn read(root: &Path, rel: &str) -> String {
+    std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("reading {rel}: {e}"))
+}
+
+fn remove_fixture(root: &Path) {
+    let _ = std::fs::remove_dir_all(root.parent().unwrap_or(root));
+}
+
+/// A copy is the fixture a fresh build makes: the same changes in the same
+/// groups, the same conflict, the same history and the same submodule.
+#[test]
+fn a_copy_of_the_seed_is_what_a_fresh_build_makes() {
+    let _serial = serial();
+    let copy = big_repo("cmp-copy");
+    let fresh = build_big_repo(scratch("cmp-fresh"));
+    let (a, b) = (view(&copy), view(&fresh));
+    assert_eq!(a.status, b.status, "the same status, kind and path");
+    assert!(
+        a.status.matches('\0').count() > STAGED + EDITED,
+        "the fixture is past the per-group cap"
+    );
+    assert!(a.status.contains("moved/renamed_file.txt"), "the rename");
+    assert!(a.status.contains("ext/sub"), "the modified submodule");
+    assert_eq!(a.index, b.index, "the same index entries, modes and stages");
+    for (what, v) in [("the copy", &a), ("a fresh build", &b)] {
+        assert_eq!(
+            conflict_stages(&v.index),
+            ["1", "2", "3"],
+            "conflict.txt is unmerged at exactly stages 1, 2 and 3 in {what}"
+        );
+        assert!(
+            v.index.iter().any(|l| l == "160000 <gitlink> 0\text/sub"),
+            "ext/sub is a gitlink at stage 0 in {what}"
+        );
+    }
+    assert_eq!(a.log, b.log, "the same history");
+    assert_eq!((a.branch.as_str(), b.branch.as_str()), ("main", "main"));
+    assert!(
+        a.merge_head_is_side && b.merge_head_is_side,
+        "mid-merge with side"
+    );
+    assert_eq!(
+        a.gitmodules, b.gitmodules,
+        ".gitmodules is the same in every copy"
+    );
+    assert!(
+        a.gitmodules.contains("url = ../sub-src"),
+        "{}",
+        a.gitmodules
+    );
+    assert_eq!(a.submodules, b.submodules, "the same submodule state");
+    remove_fixture(&copy);
+    remove_fixture(&fresh);
+}
+
+/// What a copy's submodule is bound to: its own module directory, its own
+/// worktree and its own `sub-src`, never the seed's.
+fn assert_bound_to_itself(root: &Path) {
+    let base = root.parent().expect("a base directory");
+    let sub = root.join("ext/sub");
+    let from = |dir: &Path, args: &[&str]| canon(Path::new(git_stdout(dir, args).trim()));
+    assert_eq!(
+        from(&sub, &["rev-parse", "--absolute-git-dir"]),
+        canon(&root.join(".git/modules/ext/sub")),
+        "the module directory is the copy's"
+    );
+    assert_eq!(
+        from(&sub, &["rev-parse", "--show-toplevel"]),
+        canon(&sub),
+        "the submodule's worktree is the copy's"
+    );
+    assert_eq!(
+        from(&sub, &["config", "remote.origin.url"]),
+        canon(&base.join("sub-src")),
+        "the module's origin is the copy's sub-src"
+    );
+    assert_eq!(
+        from(root, &["config", "submodule.ext/sub.url"]),
+        canon(&base.join("sub-src")),
+        "the superproject's recorded url is the copy's sub-src"
+    );
+    git(root, &["submodule", "status"]);
+}
+
+/// What a test could change in a copy and what must not move for it. Status is
+/// read without optional locks, so taking a snapshot of the seed never
+/// rewrites its index.
+fn snapshot(root: &Path) -> Vec<String> {
+    let sub = root.join("ext/sub");
+    let src = root.parent().expect("a base directory").join("sub-src");
+    vec![
+        git_stdout(
+            root,
+            &["--no-optional-locks", "status", "--porcelain=v1", "-z"],
+        ),
+        git_stdout(root, &["rev-parse", "HEAD"]),
+        git_stdout(&sub, &["rev-parse", "HEAD"]),
+        git_stdout(&sub, &["--no-optional-locks", "status", "--porcelain=v1"]),
+        git_stdout(&src, &["for-each-ref", "--format=%(refname) %(objectname)"]),
+        std::fs::read_to_string(root.join(".gitmodules")).expect(".gitmodules"),
+    ]
+}
+
+/// Two copies and the seed are three repositories: a change, a commit in the
+/// submodule and a push from it to its origin, all in one copy, leave the
+/// other copy and the seed exactly as they were, and the other copy's own
+/// fetch from its origin never sees it.
+#[test]
+fn copies_are_isolated_from_each_other_and_from_the_seed() {
+    let _serial = serial();
+    let one = big_repo("iso-one");
+    let two = big_repo("iso-two");
+    let seed = seed_repo();
+    assert!(one != two && one != seed && two != seed, "three roots");
+    for root in [&one, &two, &seed] {
+        let root_canon = canon(root);
+        for other in [&one, &two, &seed] {
+            if other != root {
+                assert!(
+                    !root_canon.starts_with(canon(other)),
+                    "no root inside another"
+                );
+            }
+        }
+    }
+    assert_bound_to_itself(&one);
+    assert_bound_to_itself(&two);
+
+    // Files every copy starts with, the same bytes: the ones a shared file
+    // (a link, not a copy) would carry from one repository into another.
+    let (tracked, in_sub) = (file(0), "ext/sub/readme.txt");
+    let (original, original_sub) = ("line 0\nedited\n", "sub\nedited\n");
+    for root in [&one, &two, &seed] {
+        assert_eq!(read(root, &tracked), original, "{}", root.display());
+        assert_eq!(read(root, in_sub), original_sub, "{}", root.display());
+    }
+
+    let (two_before, seed_before) = (snapshot(&two), snapshot(&seed));
+    let one_before = snapshot(&one);
+    write(&one, "iso_new.txt", "new\n");
+    write(&one, &tracked, "copy one only\n");
+    write(&one, in_sub, "copy one only, in the submodule\n");
+    git(&one, &["add", "iso_new.txt", &tracked]);
+    let sub = one.join("ext/sub");
+    assert_eq!(read(&one, &tracked), "copy one only\n");
+    assert_eq!(read(&one, in_sub), "copy one only, in the submodule\n");
+    git(&sub, &["add", "readme.txt"]);
+    git(&sub, &["commit", "-qm", "iso"]);
+    git(&sub, &["push", "-q", "origin", "HEAD:refs/heads/iso"]);
+
+    let mine = snapshot(&one);
+    assert_ne!(mine, one_before, "the changes were made in the first copy");
+    assert!(mine[0].contains("A  iso_new.txt"), "{}", mine[0]);
+    assert_eq!(
+        git_stdout(
+            &one.parent().unwrap().join("sub-src"),
+            &["rev-parse", "refs/heads/iso"]
+        ),
+        git_stdout(&sub, &["rev-parse", "HEAD"]),
+        "the push reached this copy's own sub-src"
+    );
+    assert_eq!(snapshot(&two), two_before, "the other copy did not move");
+    assert_eq!(snapshot(&seed), seed_before, "the seed did not move");
+    assert!(!two.join("iso_new.txt").exists());
+    for root in [&two, &seed] {
+        assert_eq!(read(root, &tracked), original, "{}", root.display());
+        assert_eq!(read(root, in_sub), original_sub, "{}", root.display());
+    }
+    // The submodule's committed bytes, read back out of each repository.
+    let committed = |root: &Path| git_stdout(&root.join("ext/sub"), &["show", "HEAD:readme.txt"]);
+    assert_eq!(committed(&one), "copy one only, in the submodule\n");
+    assert_eq!(committed(&two), "sub\n");
+    assert_eq!(committed(&seed), "sub\n");
+
+    git(&two.join("ext/sub"), &["fetch", "-q", "origin"]);
+    assert!(
+        !git_ok(
+            &two.join("ext/sub"),
+            &["rev-parse", "--verify", "-q", "refs/remotes/origin/iso"]
+        ),
+        "the other copy's origin has no such branch"
+    );
+    assert_eq!(
+        snapshot(&two),
+        two_before,
+        "a fetch changed no tracked state"
+    );
+    remove_fixture(&one);
+    remove_fixture(&two);
 }
