@@ -1719,12 +1719,40 @@ impl Tty59App {
         cx.notify();
     }
 
-    /// Copy a file of a remote tree into this machine's Downloads folder,
+    /// Copy a file from `host` into this machine's Downloads folder,
     /// named and numbered the way the SFTP panel's Download does it.
-    fn file_tree_download(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(host) = self.active_host(cx) else {
-            return;
-        };
+    ///
+    /// Works for both hosts: a remote file is fetched (up to the daemon's
+    /// frame limit), a local one is streamed across. The result is a
+    /// notification naming where it landed, or the reason it did not. The
+    /// editor's menus and image viewer call this too, so they all say the same thing.
+    pub(crate) fn download_to_downloads(
+        &mut self,
+        host: SharedHost,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.download_into(
+            host,
+            path,
+            crate::ui::sftp::local_download_dir(),
+            window,
+            cx,
+        );
+    }
+
+    /// [`Self::download_to_downloads`] with the destination folder given.
+    /// `dir` exists only so tests can point it at a scratch folder instead of
+    /// the real Downloads.
+    fn download_into(
+        &mut self,
+        host: SharedHost,
+        path: &Path,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -1734,14 +1762,7 @@ impl Tty59App {
             host,
             window,
             cx,
-            move |h| {
-                file_copy::download_file(
-                    h,
-                    &src,
-                    &crate::ui::sftp::local_download_dir(),
-                    file_copy::REMOTE_FILE_MAX,
-                )
-            },
+            move |h| file_copy::download_file(h, &src, &dir, file_copy::REMOTE_FILE_MAX),
             move |_app, result: std::io::Result<PathBuf>, window, cx| match result {
                 Ok(local) => window.push_notification(
                     t_fmt(
@@ -2764,15 +2785,21 @@ impl Tty59App {
                     }
                 }),
             );
-        } else if !is_dir {
-            // Reveal's place on a remote tree: the file is not here to show in
-            // Finder, so the item that makes sense is the one that brings it
-            // here. A local file is already on this machine and gets Reveal.
+        }
+        // A remote file is not here to show in Finder, so Download is the item
+        // that makes sense there. A local file gets it too, after Reveal: one
+        // in a project folder is often wanted as a copy in Downloads, to
+        // attach it somewhere, and the editor's tab menu offers the same.
+        if !is_dir {
             menu = menu.item(PopupMenuItem::new(t(L10nKey::Download)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| this.file_tree_download(&p, window, cx));
+                    let _ = app.update(cx, |this, cx| {
+                        if let Some(host) = this.active_host(cx) {
+                            this.download_to_downloads(host, &p, window, cx);
+                        }
+                    });
                 }
             }));
         }
@@ -4947,6 +4974,26 @@ mod drop_gpui_tests {
             assert!(std::time::Instant::now() < deadline, "{what}");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[gpui::test]
+    fn a_local_file_downloads_into_the_chosen_folder(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("download-local");
+        let dest = scratch("download-local-dest");
+        std::fs::write(root.join("note.txt"), "hello").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let host = app.active_host(cx).expect("the panel has a host");
+            app.download_into(host, &root.join("note.txt"), dest.clone(), window, cx);
+        });
+        wait_until(&mut vcx, "the download never landed", |_| {
+            std::fs::read_to_string(dest.join("note.txt")).is_ok_and(|text| text == "hello")
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dest);
     }
 
     #[gpui::test]
