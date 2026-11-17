@@ -153,7 +153,8 @@ mod export {
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
     use std::time::Duration;
 
-    use gpui::{BackgroundExecutor, Context, Window};
+    use gpui::{AppContext as _, BackgroundExecutor, Context, Window};
+    use gpui_component::WindowExt as _;
 
     use super::{PathBuf, choose_tool};
     use crate::ui::i18n::{L10nKey, t};
