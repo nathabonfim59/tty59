@@ -41,7 +41,7 @@ use gpui::{
 };
 use tty59_core::core::config::RightPanelTab;
 
-use super::rows_window_tests::{git, scratch, serial, write};
+use super::rows_window_tests::{git, init_repo, scratch, serial, write};
 use crate::core::session::Session;
 use crate::daemon::protocol::DaemonMsg;
 use crate::terminal::git_data::ScmData;
@@ -67,7 +67,7 @@ fn marker(vcx: &mut VisualTestContext) -> Option<String> {
 fn clean_repo(name: &str) -> std::path::PathBuf {
     let root = scratch(name).join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
+    init_repo(&root);
     write(&root, "a.txt", "a\n");
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "a"]);
@@ -255,7 +255,6 @@ fn scenario(cx: &mut TestAppContext, name: &str, remove_git: bool) -> Observed {
 /// R was a repository and is not one when the read lands: the entry parked on
 /// the explicit pick must be dropped, and the keyboard must not have moved.
 /// Expected RED today: a NotARepo landing reads as Loading, which keeps it.
-#[cfg(unix)]
 #[gpui::test]
 fn an_explicit_pick_on_a_directory_that_stops_being_a_repository_is_dropped(
     cx: &mut TestAppContext,
@@ -278,7 +277,6 @@ fn an_explicit_pick_on_a_directory_that_stops_being_a_repository_is_dropped(
 
 /// Control: the same scenario with the repository kept, so the landing is a
 /// clean Ready status with nothing to enter. Expected GREEN today.
-#[cfg(unix)]
 #[gpui::test]
 fn an_explicit_pick_on_a_clean_repository_is_dropped_by_its_landing(cx: &mut TestAppContext) {
     let _serial = serial();

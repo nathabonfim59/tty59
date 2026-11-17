@@ -256,7 +256,6 @@ fn assert_middle(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, what: &str
 
 /// At the top of the list: the first header, the next header and the first file
 /// row, each reached by the real keys from the entry, at scroll offset 0.
-#[cfg(unix)]
 #[gpui::test]
 fn the_ring_stays_inside_at_the_top_of_the_changes_list(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -287,7 +286,6 @@ fn the_ring_stays_inside_at_the_top_of_the_changes_list(cx: &mut TestAppContext)
 /// In the middle of the list, reached by Down (the reveal leaves the row flush
 /// with the bottom edge) and then by Up (flush with the top edge), and one row
 /// that is off both edges.
-#[cfg(unix)]
 #[gpui::test]
 fn the_ring_stays_inside_in_the_middle_of_the_changes_list(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -328,7 +326,6 @@ fn the_ring_stays_inside_in_the_middle_of_the_changes_list(cx: &mut TestAppConte
 
 /// At the bottom of the list, End and then Home: the last row of the last group
 /// at the end of the scroll, and the first header back at offset 0.
-#[cfg(unix)]
 #[gpui::test]
 fn the_ring_stays_inside_at_the_bottom_of_the_changes_list_and_home_returns(
     cx: &mut TestAppContext,
@@ -424,7 +421,6 @@ fn check_info(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, what: &str, k
 
 /// Pane and working directory by Down, the last stop by End and the first by
 /// Home: the same two properties for the Info rows, which wear the same ring.
-#[cfg(unix)]
 #[gpui::test]
 fn the_ring_stays_inside_on_the_info_rows(cx: &mut TestAppContext) {
     let _serial = serial();

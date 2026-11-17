@@ -24,7 +24,9 @@ use gpui::{
     Entity, KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput, TestAppContext, VisualTestContext,
 };
 
-use super::rows_window_tests::{big_repo, draw, flat_rows, only_group, panel_on, serial, status};
+use super::rows_window_tests::{
+    big_repo, draw, flat_rows, git_stdout, only_group, panel_on, serial, status,
+};
 use crate::core::actions::ShowRightPanelChanges;
 use crate::daemon::protocol::ClientMsg;
 use crate::ui::app::Tty59App;
@@ -117,12 +119,9 @@ fn staged_dir_folds(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> usiz
 
 /// How many paths the index differs from HEAD in: what staging would move.
 fn cached_paths(root: &std::path::Path) -> usize {
-    let out = std::process::Command::new("git")
-        .args(["diff", "--cached", "--name-only"])
-        .current_dir(root)
-        .output()
-        .expect("git runs");
-    String::from_utf8_lossy(&out.stdout).lines().count()
+    git_stdout(root, &["diff", "--cached", "--name-only"])
+        .lines()
+        .count()
 }
 
 fn diff_open(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, group: ScmGroup) -> bool {
@@ -136,7 +135,6 @@ fn diff_open(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, group: ScmGrou
 /// Space on a tree directory, key-down AND key-up: the key-up would fold or
 /// open the directory through its click listener. It must not: a directory
 /// ignores Space completely. Entered by the real action, walked to by Down.
-#[cfg(unix)]
 #[gpui::test]
 fn space_down_and_up_on_a_directory_changes_nothing(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -208,7 +206,6 @@ fn space_down_and_up_on_a_directory_changes_nothing(cx: &mut TestAppContext) {
 /// here, and neither is which node the keyboard ends on (staging moves it to a
 /// neighbour; an exact-neighbour test of its own pins that): only that SOME node
 /// still holds it. Entered by the real action, walked to by Down.
-#[cfg(unix)]
 #[gpui::test]
 fn space_down_and_up_on_a_file_never_opens_its_diff(cx: &mut TestAppContext) {
     let _serial = serial();

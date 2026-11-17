@@ -116,7 +116,6 @@ fn pump_until(vcx: &mut VisualTestContext, secs: u64, mut until: impl FnMut() ->
 /// Enter on a group header the keyboard is on: a fresh press folds it once, a
 /// held (repeated) press does nothing, and the release never folds it a second
 /// time, so each fresh press toggles exactly once.
-#[cfg(unix)]
 #[gpui::test]
 fn a_fresh_enter_folds_a_header_once_and_a_held_one_does_nothing(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -149,7 +148,6 @@ fn a_fresh_enter_folds_a_header_once_and_a_held_one_does_nothing(cx: &mut TestAp
 }
 
 /// Enter on a tree directory: the same, once per fresh press, nothing held.
-#[cfg(unix)]
 #[gpui::test]
 fn a_fresh_enter_folds_a_directory_once_and_a_held_one_does_nothing(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -209,7 +207,6 @@ fn a_fresh_enter_folds_a_directory_once_and_a_held_one_does_nothing(cx: &mut Tes
 /// staged and nothing else is; the keyboard is on the EXACT next row of the
 /// list as it was before the press; no diff overlay of any group is open. A
 /// held Space afterwards stages nothing.
-#[cfg(unix)]
 #[gpui::test]
 fn space_stages_the_row_and_moves_the_keyboard_to_the_exact_neighbour(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -255,7 +252,6 @@ fn space_stages_the_row_and_moves_the_keyboard_to_the_exact_neighbour(cx: &mut T
 
 /// The same for Space on a staged file: it is unstaged, the keyboard is on the
 /// exact next row, and no diff overlay is open.
-#[cfg(unix)]
 #[gpui::test]
 fn space_unstages_the_row_and_moves_the_keyboard_to_the_exact_neighbour(cx: &mut TestAppContext) {
     let _serial = serial();

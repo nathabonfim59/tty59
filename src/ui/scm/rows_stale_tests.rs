@@ -34,7 +34,6 @@ fn marker(vcx: &mut gpui::VisualTestContext) -> Option<String> {
     })
 }
 
-#[cfg(unix)]
 #[gpui::test]
 fn a_stale_completion_leaves_a_newer_entry_in_place_to_be_settled(cx: &mut TestAppContext) {
     let _serial = serial();

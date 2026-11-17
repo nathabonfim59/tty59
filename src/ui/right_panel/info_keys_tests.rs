@@ -107,7 +107,10 @@ fn dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tty59-info-keys-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(&dir).unwrap()
+    // `canonicalize` answers `\\?\C:\…` on Windows, while the pane's copy tile
+    // writes the plain native spelling, so the root every pane directory
+    // derives from is handed out in the plain local spelling.
+    tty59_core::core::path_spelling::local_spelling_buf(std::fs::canonicalize(&dir).unwrap())
 }
 
 fn draw(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) {
@@ -189,7 +192,6 @@ fn root_focused(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) -> bo
 /// takes the keyboard, and the position the request chose is not kept. Coming
 /// back to the first pane afterwards settles nothing: there is no request left
 /// for that frame to find.
-#[cfg(unix)]
 #[gpui::test]
 fn a_request_for_one_pane_is_dropped_by_the_frame_of_another(cx: &mut TestAppContext) {
     let (app, mut vcx, (first, second), dirs) = two_tabs(cx, "cross");
@@ -257,7 +259,6 @@ fn a_request_for_one_pane_is_dropped_by_the_frame_of_another(cx: &mut TestAppCon
 /// and the choice it made is then emptied the way a vanished row would empty
 /// it, with the handle left focused so no row tracks it; the frame consumes
 /// the entry and moves no focus.
-#[cfg(unix)]
 #[gpui::test]
 fn the_root_probe_consumes_an_entry_no_row_answers(cx: &mut TestAppContext) {
     let (app, mut vcx, (first, _second), dirs) = two_tabs(cx, "root-probe");
@@ -292,7 +293,6 @@ fn the_root_probe_consumes_an_entry_no_row_answers(cx: &mut TestAppContext) {
 /// completion for an older ticket leaves a newer entry in place; the matching
 /// one consumes it on a failing validation too, and takes back the position it
 /// had chosen; one more for a ticket nobody holds does nothing.
-#[cfg(unix)]
 #[gpui::test]
 fn an_older_completion_leaves_a_newer_entry_and_a_matching_one_is_always_consumed(
     cx: &mut TestAppContext,

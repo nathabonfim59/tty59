@@ -5472,26 +5472,31 @@ mod render_idle_gpui_tests {
         let dir = std::env::temp_dir().join(format!("tty59-scm-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(&dir).unwrap()
+        // `canonicalize` answers `\\?\C:\…` on Windows, which is not the
+        // spelling the panel keys a repository root by: the plain local one.
+        tty59_core::core::path_spelling::local_spelling_buf(std::fs::canonicalize(&dir).unwrap())
     }
 
     fn git(root: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git runs");
-        assert!(out.status.success(), "git {args:?} failed");
+        git_out(root, args);
     }
 
-    /// `git` for the answers, not the side effects: what `rev-parse` says.
+    /// `git` for the answers, not the side effects: what `rev-parse` says. A
+    /// failure says everything git said.
     fn git_out(root: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .args(args)
             .current_dir(root)
             .output()
             .expect("git runs");
-        assert!(out.status.success(), "git {args:?} failed");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed in {}: {}\nstdout: {}\nstderr: {}",
+            root.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -6413,22 +6418,19 @@ mod render_idle_gpui_tests {
         render_probe::draws()
     }
 
-    /// The only test in this module that waits on `repo.root`, and so the only
-    /// one Windows cannot run: since #796 that root is keyed by one spelling
-    /// and carries a `Disk` prefix, while the pane's cwd came out of `scratch`
-    /// above — `std::fs::canonicalize`, so `\\?\C:\Users\—` and a
-    /// `VerbatimDisk` prefix — and the equality below never holds between the
-    /// two. The slashes are the red herring; `Path` compares by component, so
-    /// `C:/x` and `C:\x` are equal. Spelling `scratch`'s answer the way
-    /// `tty59_core::core::path_spelling` does should lift this, in a change
-    /// that can show it green. Its sibling keys off the pane's cwd instead,
-    /// and runs everywhere.
-    #[cfg(unix)]
+    /// The only test in this module that waits on `repo.root`. The panel keys
+    /// that root by one spelling (the plain local one, with a `Disk` prefix on
+    /// Windows), so the equality below holds only if the pane's cwd is spelled
+    /// the same way. `scratch` hands out that plain spelling (see its
+    /// `local_spelling_buf`), so the test runs on every platform. Its sibling
+    /// keys off the pane's cwd instead.
     #[gpui::test]
     fn a_settled_source_control_panel_reaches_render_idle(cx: &mut TestAppContext) {
         let _serial = serial();
         let root = scratch("settled");
         git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "core.longpaths", "true"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("a.rs"), "fn main() {}\n").unwrap();
         git(&root, &["add", "a.rs"]);
         std::fs::write(root.join("b.rs"), "// untracked\n").unwrap();

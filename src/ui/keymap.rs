@@ -4463,6 +4463,106 @@ mod conformance {
         assert_ne!(canonical("ctrl-alt-c"), canonical("ctrl-alt-shift-c"));
     }
 
+    /// The chord the two override fixtures give `ToggleSwitcher` while the
+    /// tab-group shortcuts are on. It has to fold to a chord no tab-group
+    /// default owns on ANY platform: `secondary-shift-9` folds to
+    /// `secondary-(`, which is macOS's `ActivateTabGroup9`.
+    const SWITCHER_FIXTURE_CHORD: &str = "secondary-alt-shift-9";
+
+    /// The tab-group chords of every platform, spelled out here and not read
+    /// from `shipped_bindings`, which answers for the host only. macOS takes
+    /// `secondary-shift-N`, every other platform `alt-shift-N`.
+    fn tab_group_chords_on_every_platform() -> Vec<(String, String)> {
+        (1..=9)
+            .flat_map(|n| {
+                [
+                    (
+                        format!("ActivateTabGroup{n} on macOS"),
+                        format!("secondary-shift-{n}"),
+                    ),
+                    (
+                        format!("ActivateTabGroup{n} off macOS"),
+                        format!("alt-shift-{n}"),
+                    ),
+                ]
+            })
+            .collect()
+    }
+
+    /// Every tab-group default, on any platform, that `chord` meets once both
+    /// are folded the way the live keymap folds them.
+    fn tab_group_chords_meeting(chord: &str) -> Vec<String> {
+        tab_group_chords_on_every_platform()
+            .into_iter()
+            .filter(|(_, group)| same_chord(chord, group) || canonical(chord) == canonical(group))
+            .map(|(what, group)| format!("{what} ({group})"))
+            .collect()
+    }
+
+    /// Host-independent: the fixture chord is judged against the macOS and the
+    /// Windows/Linux tab-group chords on whatever machine this runs, so a
+    /// Linux run sees the clash the macOS keymap would hold.
+    #[test]
+    fn the_switcher_fixture_chord_meets_no_tab_group_chord_on_any_platform() {
+        let met = tab_group_chords_meeting(SWITCHER_FIXTURE_CHORD);
+        assert!(
+            met.is_empty(),
+            "{SWITCHER_FIXTURE_CHORD} (canonical {}) meets {met:?}: with the group shortcuts \
+             on, the same-context clash gate fails on that platform",
+            canonical(SWITCHER_FIXTURE_CHORD)
+        );
+    }
+
+    /// Positive controls for the one above and for the gate it protects: the
+    /// read finds the collision a macOS table would hold, by spelling and by
+    /// fold, and the clash detector reports that very pair.
+    #[test]
+    fn the_tab_group_control_and_the_clash_detector_see_the_macos_collision() {
+        assert_eq!(
+            tab_group_chords_meeting("secondary-shift-9"),
+            vec!["ActivateTabGroup9 on macOS (secondary-shift-9)".to_string()],
+            "the control finds macOS's ActivateTabGroup9 on its own spelling"
+        );
+        assert_eq!(
+            tab_group_chords_meeting("secondary-("),
+            vec!["ActivateTabGroup9 on macOS (secondary-shift-9)".to_string()],
+            "and on the folded spelling the table holds"
+        );
+        assert!(
+            tab_group_chords_meeting("secondary-alt-shift-9").is_empty(),
+            "a chord on another modifier set meets nothing"
+        );
+
+        let folded = canonical("secondary-shift-9");
+        assert_eq!(
+            folded,
+            canonical("secondary-("),
+            "the two spellings fold to one"
+        );
+        let table = vec![
+            row(
+                Origin::Actions,
+                &folded,
+                "",
+                ActivateTabGroup9::name_for_type(),
+            ),
+            row(
+                Origin::Actions,
+                &folded,
+                "",
+                ToggleSwitcher::name_for_type(),
+            ),
+        ];
+        let found = same_context_conflicts(&table, &intentional_same_context());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains(ActivateTabGroup9::name_for_type())
+                && found[0].contains(ToggleSwitcher::name_for_type())
+                && found[0].contains(&folded),
+            "{found:?}"
+        );
+    }
+
     /// Runs the gate over the installed keymap for one config and returns the
     /// table so the caller can add its own claims.
     fn gate(cx: &gpui::App, label: &str) -> Vec<Installed> {
@@ -4530,7 +4630,7 @@ mod conformance {
             cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
                 "NewAgentTab": ["ctrl-alt-n"],
                 "CopyRaw": "",
-                "ToggleSwitcher": ["secondary-shift-9"],
+                "ToggleSwitcher": [SWITCHER_FIXTURE_CHORD],
             }))
             .expect("the overrides load");
             rebind(cx);
@@ -4545,7 +4645,7 @@ mod conformance {
                 "an unbound CopyRaw releases its shipped chord"
             );
             assert_eq!(
-                owners_of(&table, "secondary-shift-9"),
+                owners_of(&table, SWITCHER_FIXTURE_CHORD),
                 vec![(ToggleSwitcher::name_for_type().to_string(), String::new())],
                 "both spellings of the folded chord are installed, for the one action"
             );
@@ -4722,7 +4822,7 @@ mod conformance {
             cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
                 "NewAgentTab": [new_agent_tab_default(Os::Windows)],
                 "CopyRaw": [copy_raw_default(Os::Windows)],
-                "ToggleSwitcher": ["secondary-shift-9"],
+                "ToggleSwitcher": [SWITCHER_FIXTURE_CHORD],
             }))
             .expect("the overrides load");
             rebind(cx);

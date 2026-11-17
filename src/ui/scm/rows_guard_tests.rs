@@ -26,7 +26,9 @@ use std::path::Path;
 
 use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
 
-use super::rows_window_tests::{big_repo, draw, flat_rows, only_group, panel_on, serial, status};
+use super::rows_window_tests::{
+    big_repo, draw, flat_rows, git_stdout, only_group, panel_on, serial, status,
+};
 use crate::core::actions::ShowRightPanelChanges;
 use crate::ui::app::Tty59App;
 use crate::ui::i18n::{L10nKey, t};
@@ -75,16 +77,7 @@ fn path_of(row_id: &str) -> String {
 
 /// The set of lines real git prints for `args` in `root`.
 fn git_set(root: &Path, args: &[&str]) -> BTreeSet<String> {
-    let out = std::process::Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .expect("git runs");
-    assert!(out.status.success(), "git {args:?} failed");
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
+    git_stdout(root, args).lines().map(str::to_string).collect()
 }
 
 /// Paths with unstaged changes (what a discard of the Changes group reverts).
@@ -174,7 +167,6 @@ fn unstaged_of(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> BTreeSet<
 /// confirms. Exactly the approved path is discarded (real git), the keyboard is
 /// where the user left it (changes[7]) and NOT on the neighbour the hook would
 /// have chosen (changes[6]).
-#[cfg(unix)]
 #[gpui::test]
 fn a_row_moved_during_the_prompt_is_not_moved_back_and_only_the_approved_path_goes(
     cx: &mut TestAppContext,
@@ -222,7 +214,6 @@ fn a_row_moved_during_the_prompt_is_not_moved_back_and_only_the_approved_path_go
 /// of the hook from the generation and row conditions: the approved path is
 /// still discarded, the keyboard stays in the filter field and typing reaches
 /// it, and the list's keyboard node is NOT moved to the neighbour.
-#[cfg(unix)]
 #[gpui::test]
 fn focus_moved_to_the_filter_during_the_prompt_is_not_taken_back(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -320,7 +311,6 @@ fn filter_to_pkg_13_and_enter(app: &Entity<Tty59App>, vcx: &mut VisualTestContex
 /// B1: header Space with the filter on stages exactly the shown paths: the set
 /// real git gained in the index equals the shown set, the hidden control gained
 /// nothing, and nothing the filter hid was touched.
-#[cfg(unix)]
 #[gpui::test]
 fn header_space_with_a_filter_stages_exactly_the_shown_paths(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -358,7 +348,6 @@ fn header_space_with_a_filter_stages_exactly_the_shown_paths(cx: &mut TestAppCon
 /// B2: header Backspace with the filter on, confirmed: exactly the shown paths
 /// are discarded, the hidden control and every other changed path stay changed.
 /// One prompt, answered once.
-#[cfg(unix)]
 #[gpui::test]
 fn header_backspace_with_a_filter_discards_exactly_the_shown_paths(cx: &mut TestAppContext) {
     let _serial = serial();

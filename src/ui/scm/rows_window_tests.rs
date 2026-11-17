@@ -81,6 +81,12 @@ pub(super) fn git_ok(root: &Path, args: &[&str]) -> bool {
 }
 
 pub(super) fn git(root: &Path, args: &[&str]) {
+    git_stdout(root, args);
+}
+
+/// `git` for the answer, not the side effect: what it printed on stdout. A
+/// failure says everything git said, the way `git` does.
+pub(super) fn git_stdout(root: &Path, args: &[&str]) -> String {
     let out = git_output(root, args);
     assert!(
         out.status.success(),
@@ -90,6 +96,17 @@ pub(super) fn git(root: &Path, args: &[&str]) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// `git init` on branch `main`, with the two repository settings that make a
+/// fixture the same on every platform pinned BEFORE any data is written: no
+/// line-ending conversion (Git for Windows defaults to `autocrlf=true`, which
+/// rewrites what the fixtures write and reads back) and long paths.
+pub(super) fn init_repo(root: &Path) {
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "core.longpaths", "true"]);
+    git(root, &["config", "core.autocrlf", "false"]);
 }
 
 pub(super) fn file(i: usize) -> String {
@@ -113,16 +130,12 @@ pub(super) fn big_repo(name: &str) -> PathBuf {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&sub).unwrap();
 
-    git(&sub, &["init", "-q", "-b", "main"]);
-    git(&sub, &["config", "core.longpaths", "true"]);
-    git(&sub, &["config", "core.autocrlf", "false"]);
+    init_repo(&sub);
     write(&sub, "readme.txt", "sub\n");
     git(&sub, &["add", "-A"]);
     git(&sub, &["commit", "-qm", "sub"]);
 
-    git(&root, &["init", "-q", "-b", "main"]);
-    git(&root, &["config", "core.longpaths", "true"]);
-    git(&root, &["config", "core.autocrlf", "false"]);
+    init_repo(&root);
     for i in 0..BASE {
         write(&root, &file(i), &format!("line {i}\n"));
     }

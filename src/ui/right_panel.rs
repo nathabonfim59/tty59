@@ -3125,7 +3125,7 @@ fn compact_path(path: &std::path::Path, home: Option<&std::path::Path>) -> Strin
 #[cfg(test)]
 mod info_keys_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod rebase_info_tests;
 
 #[cfg(test)]

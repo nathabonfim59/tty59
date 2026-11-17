@@ -22,7 +22,7 @@ use gpui::{
 };
 use tty59_core::core::config::RightPanelTab;
 
-use super::rows_window_tests::{git, scratch, serial, write};
+use super::rows_window_tests::{git, init_repo, scratch, serial, write};
 use crate::core::session::Session;
 use crate::daemon::protocol::DaemonMsg;
 use crate::ui::app::{Tab, Tty59App, test_window};
@@ -47,7 +47,7 @@ fn marker(vcx: &mut VisualTestContext) -> Option<String> {
 fn clean_repo(name: &str) -> std::path::PathBuf {
     let root = scratch(name).join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
+    init_repo(&root);
     write(&root, "a.txt", "a\n");
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "a"]);
@@ -197,7 +197,6 @@ fn two_windows(
 /// and before any draw, so that no real landing can answer first (see the file
 /// header). Y's repository comes from an explicit pick stored in the entry, not
 /// from a lookup that could still be pending.
-#[cfg(unix)]
 #[gpui::test]
 fn a_landing_for_another_repository_leaves_a_parked_entry_alone(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -272,7 +271,6 @@ fn a_landing_for_another_repository_leaves_a_parked_entry_alone(cx: &mut TestApp
 /// A window that has been closed is not enumerated, so it is not told: its app
 /// entity can still be alive here (it is held), and its state must not move,
 /// while a live window still is told.
-#[cfg(unix)]
 #[gpui::test]
 fn a_closed_window_is_skipped_and_the_others_are_still_told(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -314,7 +312,6 @@ fn a_closed_window_is_skipped_and_the_others_are_still_told(cx: &mut TestAppCont
 
 /// A window whose root is not an app (not a `Root` around a `Tty59App`) is
 /// skipped without a panic, and the app windows are still told.
-#[cfg(unix)]
 #[gpui::test]
 fn a_window_that_is_not_an_app_is_skipped_and_the_others_are_still_told(cx: &mut TestAppContext) {
     let _serial = serial();

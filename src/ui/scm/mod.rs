@@ -30,7 +30,7 @@ mod rows_notarepo_fanout_tests;
 mod rows_notarepo_tests;
 #[cfg(test)]
 mod rows_ownop_tests;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod rows_ring_inside_tests;
 #[cfg(test)]
 mod rows_shared_tests;

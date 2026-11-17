@@ -4709,10 +4709,14 @@ mod error_tests {
     }
 
     /// The wrapped mapping and the long error, at the default UI font and at
-    /// 22px: the window's rem size really changes (read back), the panel is
-    /// the 260px asked for or the wider floor its tab labels need at that
-    /// font (read back, never a literal), and every bound is asserted again at
-    /// each legal width.
+    /// 22px: the window's rem size really changes (read back), and the panel
+    /// is asked for the legal request, 260px or the wider floor its tab labels
+    /// need at that font, captured before the width is set and the frame is
+    /// drawn. The layout width and the mounted box must both equal that
+    /// request, and every bound is asserted again at each legal width. The
+    /// exact 260px is claimed only for the default font off macOS; macOS's
+    /// wider floor and the 22px font are asked for their own floor, and
+    /// neither is forced down to 260.
     #[gpui::test]
     fn a_wrapped_mapping_stays_wrapped_and_a_long_error_is_one_truncated_line(
         cx: &mut TestAppContext,
@@ -4732,8 +4736,32 @@ mod error_tests {
                 config.ui_font_size = font;
                 cx.set_global(config);
             });
+            // An ordinary frame at this font first, so the tab metrics the
+            // panel's floor is measured from are this font's. The request is
+            // captured here, from that floor, BEFORE the width is set and the
+            // frame the assertions read is drawn; it is never derived from the
+            // width the panel ends up with.
+            vcx.run_until_parked();
+            draw(&mut vcx);
+            let floor = app.update_in(&mut vcx, |app, window, cx| {
+                app.right_panel_min_px(window, cx)
+            });
+            let request = 260_f32.max(floor);
+            // 260px is the ask. The product never draws the panel under its
+            // own floor, so where that floor is wider (macOS, whose floor
+            // counts the panel toggle beside the tabs, and any platform at
+            // 22px) the legal ask is the floor itself. Only the default font
+            // off macOS is exactly 260; a wider request there is a failure
+            // to investigate, not a width to follow, and 22px is not forced
+            // down to 260.
+            if font == crate::core::config::UI_FONT_SIZE_DEFAULT && cfg!(not(target_os = "macos")) {
+                assert_eq!(
+                    request, 260.,
+                    "off macOS the default font's panel floor {floor} is under the 260 asked for"
+                );
+            }
             app.update_in(&mut vcx, |app, _, cx| {
-                app.right_panel_width.set(260.);
+                app.right_panel_width.set(request);
                 cx.notify();
             });
             vcx.run_until_parked();
@@ -4746,30 +4774,27 @@ mod error_tests {
                 gpui::px(font),
                 "{font}px: the window's rem really is the UI font"
             );
-            // 260 is what is asked for; the panel is never narrower than the
-            // tab labels need at this font, so that floor is what is read back.
-            let (used, floor) = app.update_in(&mut vcx, |app, window, cx| {
-                (
-                    app.right_panel_px(window, cx),
-                    app.right_panel_min_px(window, cx),
-                )
-            });
+            // The width the layout used, after the clamp, and the box the
+            // frame mounted: each is the request captured above.
+            let used = app.update_in(&mut vcx, |app, window, cx| app.right_panel_px(window, cx));
             assert_eq!(
-                used,
-                260_f32.max(floor),
-                "{font}px: the panel is the requested 260 or its legal floor {floor}, whichever is wider"
+                used, request,
+                "{font}px: the panel layout used {used}px, not the {request}px asked for (floor {floor})"
             );
-            if font == crate::core::config::UI_FONT_SIZE_DEFAULT {
-                assert_eq!(
-                    used, 260.,
-                    "the default font draws the panel at the 260 asked for"
-                );
-            }
+            let mounted = vcx
+                .debug_bounds("right-panel")
+                .expect("the right panel was drawn");
+            assert_eq!(
+                mounted.size.width,
+                gpui::px(request),
+                "{font}px: the panel was drawn {:?} wide, not the {request}px asked for",
+                mounted.size.width
+            );
 
             let row = vcx.debug_bounds("forward-row-9").expect("row");
             assert!(
-                row.size.width > gpui::px(0.) && row.size.width <= gpui::px(used),
-                "{font}px: the mounted row ({:?}) fits the panel actually drawn ({used}px)",
+                row.size.width > gpui::px(0.) && row.size.width <= gpui::px(request),
+                "{font}px: the mounted row ({:?}) fits the panel actually drawn ({request}px)",
                 row.size.width
             );
             let chip = vcx.debug_bounds("forward-chip-9").expect("chip");

@@ -77,6 +77,10 @@ fn staged_repo_panel(cx: &mut TestAppContext, name: &str) -> Panel {
     crate::core::config::pin_test_config_dir();
     let root = scratch(name);
     git(&root, &["init", "--quiet"]);
+    // Pinned before any data is written, so the fixture reads back the same on
+    // every platform (Git for Windows defaults to `autocrlf=true`).
+    git(&root, &["config", "core.longpaths", "true"]);
+    git(&root, &["config", "core.autocrlf", "false"]);
     std::fs::write(root.join("a.txt"), "one\n").unwrap();
     git(&root, &["add", "a.txt"]);
     let panel = scm_panel_on(cx, &root, |app, cx| {

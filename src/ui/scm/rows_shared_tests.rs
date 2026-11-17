@@ -54,7 +54,7 @@ use gpui::{
 };
 use tty59_core::core::config::RightPanelTab;
 
-use super::rows_window_tests::{git, scratch, serial, write};
+use super::rows_window_tests::{git, init_repo, scratch, serial, write};
 use crate::core::session::Session;
 use crate::daemon::protocol::DaemonMsg;
 use crate::ui::app::{Tab, Tty59App, test_window};
@@ -80,7 +80,7 @@ fn marker(vcx: &mut VisualTestContext) -> Option<String> {
 fn clean_repo(name: &str) -> std::path::PathBuf {
     let root = scratch(name).join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
+    init_repo(&root);
     write(&root, "a.txt", "a\n");
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "a"]);
@@ -429,7 +429,6 @@ fn expect_dropped_and_never_resurfaces(o: &Outcome) {
 
 /// Control: the window that started the landing drops its waiting entry on the
 /// clean landing, and the dirty landing does not resurrect it. Passes today.
-#[cfg(unix)]
 #[gpui::test]
 fn the_initiating_window_drops_a_waiting_entry_on_a_clean_landing(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -440,7 +439,6 @@ fn the_initiating_window_drops_a_waiting_entry_on_a_clean_landing(cx: &mut TestA
 /// A window that did NOT start the landing: its waiting entry must also be
 /// dropped by the clean landing, so a later dirty landing cannot pull its
 /// keyboard into the list. Expected RED today.
-#[cfg(unix)]
 #[gpui::test]
 fn a_window_that_did_not_start_the_landing_drops_a_waiting_entry_too(cx: &mut TestAppContext) {
     let _serial = serial();

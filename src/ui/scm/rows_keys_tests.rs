@@ -1,4 +1,3 @@
-#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 //! Keyboard access to the Changes list and the Info rows (panels F5), written
 //! BEFORE the production change.
 //!
@@ -33,10 +32,12 @@ use gpui::{
 };
 use tty59_core::core::config::RightPanelTab;
 use tty59_core::core::git::status::WorkingTreeStatus;
+use tty59_core::core::path_spelling::local_spelling_buf;
 
 use super::rows_window_tests::{
-    EDITED, STAGED, big_repo, draw, file, flat_rows, git, git_ok, header, mouse, only_group,
-    painted, panel_on, row_budget, scratch, scroll_to, serial, status, viewport, write,
+    EDITED, STAGED, big_repo, draw, file, flat_rows, git, git_ok, git_stdout, header, init_repo,
+    mouse, only_group, painted, panel_on, row_budget, scratch, scroll_to, serial, status, viewport,
+    write,
 };
 use crate::core::actions::{ShowRightPanelChanges, ShowRightPanelInfo};
 use crate::daemon::protocol::{ClientMsg, DaemonMsg};
@@ -357,12 +358,7 @@ fn clean_up(root: &Path) {
 }
 
 fn tracked_edits(root: &Path) -> Vec<String> {
-    let out = std::process::Command::new("git")
-        .args(["diff", "--name-only"])
-        .current_dir(root)
-        .output()
-        .expect("git runs");
-    String::from_utf8_lossy(&out.stdout)
+    git_stdout(root, &["diff", "--name-only"])
         .lines()
         .map(str::to_string)
         .collect()
@@ -372,7 +368,6 @@ fn tracked_edits(root: &Path) -> Vec<String> {
 // All of these pass today.
 
 /// The PTY wire works: with the terminal focused a typed key reaches the pane.
-#[cfg(unix)]
 #[gpui::test]
 fn control_a_key_typed_at_the_terminal_reaches_the_pane(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -397,7 +392,6 @@ fn control_a_key_typed_at_the_terminal_reaches_the_pane(cx: &mut TestAppContext)
 
 /// The approval path works and is cancellable: the callee of every pointer
 /// discard (`scm_op`) asks, Cancel keeps the file, the verb discards exactly it.
-#[cfg(unix)]
 #[gpui::test]
 fn control_discard_asks_cancel_keeps_the_file_and_the_verb_discards_only_it(
     cx: &mut TestAppContext,
@@ -453,7 +447,6 @@ fn control_discard_asks_cancel_keeps_the_file_and_the_verb_discards_only_it(
 }
 
 /// The real action selects the Changes tab (today it does only that).
-#[cfg(unix)]
 #[gpui::test]
 fn control_the_changes_action_shows_the_changes_tab(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -476,7 +469,6 @@ fn control_the_changes_action_shows_the_changes_tab(cx: &mut TestAppContext) {
 /// A pointer click on a Changes header leaves the keyboard where it was, and
 /// typing still reaches the pane. Must stay true after the change: the pointer
 /// never moves focus into the list.
-#[cfg(unix)]
 #[gpui::test]
 fn control_a_pointer_click_on_a_header_leaves_the_keyboard_on_the_terminal(
     cx: &mut TestAppContext,
@@ -501,7 +493,6 @@ fn control_a_pointer_click_on_a_header_leaves_the_keyboard_on_the_terminal(
 /// The landing fixture works: from a hidden panel the real action shows the
 /// tab, the status is NOT cached at that moment, and the rows draw after the
 /// read lands.
-#[cfg(unix)]
 #[gpui::test]
 fn control_an_uncached_status_loads_after_the_action_and_draws(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -528,7 +519,6 @@ fn control_an_uncached_status_loads_after_the_action_and_draws(cx: &mut TestAppC
 
 /// RED today: the real action puts the keyboard on the first node (the first
 /// group's header) and the live dispatch tree says so.
-#[cfg(unix)]
 #[gpui::test]
 fn the_changes_action_puts_the_keyboard_on_the_first_header(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -545,7 +535,6 @@ fn the_changes_action_puts_the_keyboard_on_the_first_header(cx: &mut TestAppCont
 }
 
 /// RED today: two requests in one event are one entry, and it lands once.
-#[cfg(unix)]
 #[gpui::test]
 fn two_entry_requests_in_one_event_still_enter_once(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -569,7 +558,6 @@ fn two_entry_requests_in_one_event_still_enter_once(cx: &mut TestAppContext) {
 /// RED today: Down from the first header walks into rows that were never built
 /// (more than a viewport and its overscan away), the target is scrolled into
 /// view, and only a bounded number of rows are mounted.
-#[cfg(unix)]
 #[gpui::test]
 fn down_reaches_a_row_that_was_never_built_and_scrolls_it_into_view(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -602,7 +590,6 @@ fn down_reaches_a_row_that_was_never_built_and_scrolls_it_into_view(cx: &mut Tes
 /// RED today: the focused row stays built and focused after the list is
 /// scrolled far away, a B5 context menu on another row is built beside it, and
 /// Escape gives the focus back to the row.
-#[cfg(unix)]
 #[gpui::test]
 fn the_focused_row_and_a_menu_owner_both_stay_built_far_from_the_viewport(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -671,7 +658,6 @@ fn the_focused_row_and_a_menu_owner_both_stay_built_far_from_the_viewport(cx: &m
 
 /// RED today: Enter opens the diff of the row that holds the keyboard, an
 /// unbuilt row when it was reached.
-#[cfg(unix)]
 #[gpui::test]
 fn enter_opens_the_diff_of_a_row_that_was_never_built(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -696,7 +682,6 @@ fn enter_opens_the_diff_of_a_row_that_was_never_built(cx: &mut TestAppContext) {
 
 /// RED today: Space on the staged copy unstages exactly that path; its
 /// neighbours stay staged and the worktree keeps its edit.
-#[cfg(unix)]
 #[gpui::test]
 fn space_unstages_exactly_the_staged_copy_it_is_on(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -727,7 +712,6 @@ fn space_unstages_exactly_the_staged_copy_it_is_on(cx: &mut TestAppContext) {
 /// RED today: with the same path in both groups, Space on the Changes copy
 /// stages that path: the index takes the worktree edit (so the worktree and the
 /// index now agree), and the worktree bytes themselves are untouched.
-#[cfg(unix)]
 #[gpui::test]
 fn space_stages_the_changes_copy_of_a_path_that_is_also_staged(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -766,7 +750,6 @@ fn space_stages_the_changes_copy_of_a_path_that_is_also_staged(cx: &mut TestAppC
 /// RED today: in the tree, Left folds a directory, Down then skips its hidden
 /// children, Right opens it again; Space and Backspace on a directory do
 /// nothing at all (no prompt, no git change, no PTY bytes).
-#[cfg(unix)]
 #[gpui::test]
 fn the_tree_folds_with_left_right_and_a_directory_ignores_space_and_backspace(
     cx: &mut TestAppContext,
@@ -847,7 +830,6 @@ fn the_tree_folds_with_left_right_and_a_directory_ignores_space_and_backspace(
 }
 
 /// RED today: Escape from a row hands the keyboard back to the pane.
-#[cfg(unix)]
 #[gpui::test]
 fn escape_from_a_row_returns_the_keyboard_to_the_pane(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -883,7 +865,6 @@ fn on_changes_row(
 
 /// RED today: Backspace asks first; Cancel leaves the file, the row and the
 /// keyboard exactly as they were.
-#[cfg(unix)]
 #[gpui::test]
 fn backspace_then_cancel_keeps_the_file_the_row_and_the_keyboard(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -920,7 +901,6 @@ fn backspace_then_cancel_keeps_the_file_the_row_and_the_keyboard(cx: &mut TestAp
 
 /// RED today: confirming discards exactly that file, and only then the keyboard
 /// moves to the next row; it is not handed to the pane.
-#[cfg(unix)]
 #[gpui::test]
 fn backspace_then_confirm_discards_one_file_and_moves_to_the_next_row(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -975,7 +955,6 @@ fn backspace_then_confirm_discards_one_file_and_moves_to_the_next_row(cx: &mut T
 /// does. One prompt, not one per repeat. (Enter's held guard is not exercised
 /// here: a held Enter would open the same diff again, which this fixture cannot
 /// tell from one.)
-#[cfg(unix)]
 #[gpui::test]
 fn held_keys_never_act_and_a_held_backspace_asks_once(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1022,7 +1001,6 @@ fn held_keys_never_act_and_a_held_backspace_asks_once(cx: &mut TestAppContext) {
 /// Guard (passes today by absence; paired with the RED entry tests): while the
 /// terminal holds the keyboard, Space, Backspace, Enter and the arrows reach
 /// it and the Changes list does nothing: no prompt, no stage.
-#[cfg(unix)]
 #[gpui::test]
 fn guard_the_terminal_keeps_its_keys_while_the_panel_is_open(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1050,7 +1028,6 @@ fn guard_the_terminal_keeps_its_keys_while_the_panel_is_open(cx: &mut TestAppCon
 /// shift the row's index past the viewport; the keyboard stays on the same
 /// path (identity, not index), that row stays built, the mounted-row count
 /// stays bounded, and the panel goes quiet again.
-#[cfg(unix)]
 #[gpui::test]
 fn an_external_reorder_beyond_the_viewport_keeps_the_row_and_the_budget(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1122,7 +1099,6 @@ fn an_external_reorder_beyond_the_viewport_keeps_the_row_and_the_budget(cx: &mut
 /// RED today: when the row the keyboard is on goes away outside the panel
 /// (git restores it), the keyboard is handed to the pane: no orphan, keys
 /// alive; a later entry never lands on the vanished row.
-#[cfg(unix)]
 #[gpui::test]
 fn an_externally_removed_row_never_leaves_the_keyboard_on_an_orphan(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1164,7 +1140,6 @@ fn an_externally_removed_row_never_leaves_the_keyboard_on_an_orphan(cx: &mut Tes
 /// the filter field in the same event, before any frame: the late entry
 /// callback must not take it back. A plain request lands first (RED), so the
 /// scenario is known to be reachable.
-#[cfg(unix)]
 #[gpui::test]
 fn a_request_does_not_steal_the_keyboard_from_a_field_that_took_it(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1201,14 +1176,13 @@ fn a_request_does_not_steal_the_keyboard_from_a_field_that_took_it(cx: &mut Test
 /// RED today (guard half passes): a request, then the repository changes in
 /// the same event (an explicit repository pick), before the frame: the entry
 /// must not focus anything in the other repository.
-#[cfg(unix)]
 #[gpui::test]
 fn a_request_is_dropped_when_the_repository_changes_before_it_lands(cx: &mut TestAppContext) {
     let _serial = serial();
     let root = keys_repo("repo-a");
     let other = scratch("repo-b").join("repo");
     std::fs::create_dir_all(&other).unwrap();
-    git(&other, &["init", "-q", "-b", "main"]);
+    init_repo(&other);
     write(&other, "one.txt", "1\n");
     git(&other, &["add", "-A"]);
     git(&other, &["commit", "-qm", "one"]);
@@ -1224,7 +1198,7 @@ fn a_request_is_dropped_when_the_repository_changes_before_it_lands(cx: &mut Tes
 
     let b = RepoKey {
         host: HostId::LOCAL,
-        root: std::fs::canonicalize(&other).unwrap(),
+        root: local_spelling_buf(std::fs::canonicalize(&other).unwrap()),
     };
     app.update_in(&mut vcx, |app, window, cx| {
         app.show_right_panel_tab(RightPanelTab::Scm, window, cx);
@@ -1252,7 +1226,6 @@ fn a_request_is_dropped_when_the_repository_changes_before_it_lands(cx: &mut Tes
 /// RED today (guard half passes): a request, then the panel is hidden in the
 /// same event; showing it again by pointer afterwards does not resurrect the
 /// request.
-#[cfg(unix)]
 #[gpui::test]
 fn a_request_is_dropped_when_the_panel_is_hidden_before_it_lands(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1288,7 +1261,6 @@ fn a_request_is_dropped_when_the_panel_is_hidden_before_it_lands(cx: &mut TestAp
 
 /// RED today: from a window whose status has not been read, the real action
 /// parks; when the read lands the keyboard goes to the first header.
-#[cfg(unix)]
 #[gpui::test]
 fn an_entry_made_while_the_status_loads_completes_when_it_lands(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1320,14 +1292,13 @@ fn an_entry_made_while_the_status_loads_completes_when_it_lands(cx: &mut TestApp
 
 /// Guard: a request made while loading is dropped when the repository is
 /// switched before the read lands (the pick is made in the same event).
-#[cfg(unix)]
 #[gpui::test]
 fn guard_a_loading_request_is_dropped_by_a_repository_switch(cx: &mut TestAppContext) {
     let _serial = serial();
     let root = keys_repo("loading-switch");
     let other = scratch("loading-b").join("repo");
     std::fs::create_dir_all(&other).unwrap();
-    git(&other, &["init", "-q", "-b", "main"]);
+    init_repo(&other);
     write(&other, "one.txt", "1\n");
     git(&other, &["add", "-A"]);
     git(&other, &["commit", "-qm", "one"]);
@@ -1335,7 +1306,7 @@ fn guard_a_loading_request_is_dropped_by_a_repository_switch(cx: &mut TestAppCon
     let (app, mut vcx, _pane) = unloaded(cx, &root);
     let b = RepoKey {
         host: HostId::LOCAL,
-        root: std::fs::canonicalize(&other).unwrap(),
+        root: local_spelling_buf(std::fs::canonicalize(&other).unwrap()),
     };
     // Scenario validity, read in the requesting event itself: the first
     // repository's status was not cached and its lookup not started, so the
@@ -1369,7 +1340,6 @@ fn guard_a_loading_request_is_dropped_by_a_repository_switch(cx: &mut TestAppCon
 
 /// Guard: a request made while loading is dropped when the panel is hidden and
 /// shown again by pointer before the read lands.
-#[cfg(unix)]
 #[gpui::test]
 fn guard_a_loading_request_is_dropped_by_hiding_the_panel(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1401,7 +1371,6 @@ fn guard_a_loading_request_is_dropped_by_hiding_the_panel(cx: &mut TestAppContex
 
 /// Guard: pointer reveal of the tab (the pill, `set_right_panel_tab`) never
 /// takes the keyboard, with the status already cached.
-#[cfg(unix)]
 #[gpui::test]
 fn guard_a_pointer_reveal_of_the_tab_never_takes_the_keyboard(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1426,7 +1395,6 @@ fn guard_a_pointer_reveal_of_the_tab_never_takes_the_keyboard(cx: &mut TestAppCo
 /// RED today (guard half passes): re-entering after the filter hid the row the
 /// keyboard was on never lands on an orphan: it is a node that exists in the
 /// filtered list.
-#[cfg(unix)]
 #[gpui::test]
 fn a_filter_that_hides_the_remembered_row_never_leaves_an_orphan_on_entry(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1489,13 +1457,12 @@ fn assert_entry_is_a_no_op(
 
 /// Guard: a clean repository has nothing to enter. The action is a no-op; no
 /// key freezes; a later change in the repository does not pull the keyboard in.
-#[cfg(unix)]
 #[gpui::test]
 fn guard_a_clean_repository_has_nothing_to_enter_and_nothing_freezes(cx: &mut TestAppContext) {
     let _serial = serial();
     let root = scratch("clean").join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
+    init_repo(&root);
     write(&root, "a.txt", "a\n");
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "a"]);
@@ -1527,7 +1494,6 @@ fn guard_a_clean_repository_has_nothing_to_enter_and_nothing_freezes(cx: &mut Te
 }
 
 /// Guard: a directory that is not a repository.
-#[cfg(unix)]
 #[gpui::test]
 fn guard_a_directory_that_is_not_a_repository_has_nothing_to_enter(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -1553,13 +1519,12 @@ fn guard_a_directory_that_is_not_a_repository_has_nothing_to_enter(cx: &mut Test
 }
 
 /// Guard: a repository whose status cannot be read (a broken index).
-#[cfg(unix)]
 #[gpui::test]
 fn guard_a_repository_with_a_broken_index_has_nothing_to_enter(cx: &mut TestAppContext) {
     let _serial = serial();
     let root = scratch("broken").join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
+    init_repo(&root);
     write(&root, "a.txt", "a\n");
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "a"]);
@@ -1599,7 +1564,6 @@ fn guard_a_repository_with_a_broken_index_has_nothing_to_enter(cx: &mut TestAppC
 /// Not covered here, deliberately: Space on the working-directory row is
 /// Reveal, whose platform call is `unimplemented!()` in the test platform; that
 /// is a post-implementation control with its own requirements.
-#[cfg(unix)]
 #[gpui::test]
 fn info_rows_are_reachable_and_enter_copies_the_working_directory(cx: &mut TestAppContext) {
     let _serial = serial();

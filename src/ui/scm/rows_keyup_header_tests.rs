@@ -69,7 +69,6 @@ fn folded_by_choice(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool
 
 /// Space, key-down and key-up, on the group header the keyboard is on: the
 /// release must not fold the group.
-#[cfg(unix)]
 #[gpui::test]
 fn space_down_and_up_on_a_group_header_does_not_fold_it(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -104,7 +103,6 @@ fn space_down_and_up_on_a_group_header_does_not_fold_it(cx: &mut TestAppContext)
 /// unchanged, what it exercises is the press, not the release. (Before Enter had
 /// a key-down handler this was the release's click, which the Space filter had
 /// left in place.)
-#[cfg(unix)]
 #[gpui::test]
 fn enter_down_and_up_on_a_group_header_still_folds_it(cx: &mut TestAppContext) {
     let _serial = serial();

@@ -34,7 +34,7 @@ use gpui::{
 };
 use tty59_core::core::config::RightPanelTab;
 
-use super::rows_window_tests::{big_repo, draw, header, panel_on, scratch, serial};
+use super::rows_window_tests::{big_repo, draw, git_stdout, header, panel_on, scratch, serial};
 use crate::core::actions::{ShowRightPanelChanges, ShowRightPanelInfo};
 use crate::daemon::protocol::{ClientMsg, DaemonMsg};
 use crate::ui::app::Tty59App;
@@ -298,18 +298,14 @@ fn pane_moves_away(
 }
 
 fn branch_of(root: &Path) -> String {
-    let out = std::process::Command::new("git")
-        .args(["branch", "--show-current"])
-        .current_dir(root)
-        .output()
-        .expect("git runs");
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    git_stdout(root, &["branch", "--show-current"])
+        .trim()
+        .to_string()
 }
 
 /// Enter on the Branch row copies the branch name, Enter on the Changes row
 /// opens the diff and copies nothing; Shell, which has no action, is not a
 /// stop.
-#[cfg(unix)]
 #[gpui::test]
 fn enter_copies_the_branch_and_opens_the_diff_from_the_changes_row(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -346,7 +342,6 @@ fn enter_copies_the_branch_and_opens_the_diff_from_the_changes_row(cx: &mut Test
 
 /// A press acts once: a repeat of the key-down copies nothing, and neither
 /// does a key-up on its own; a fresh press copies again.
-#[cfg(unix)]
 #[gpui::test]
 fn a_held_enter_and_a_release_copy_nothing_more(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -375,7 +370,6 @@ fn a_held_enter_and_a_release_copy_nothing_more(cx: &mut TestAppContext) {
 /// nothing at all. A stray `reveal_path` would panic in the test platform, so
 /// reaching the end of the test is the observation; the clipboard and the
 /// keyboard are untouched and no diff opens.
-#[cfg(unix)]
 #[gpui::test]
 fn space_is_inert_on_rows_without_reveal(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -400,7 +394,6 @@ fn space_is_inert_on_rows_without_reveal(cx: &mut TestAppContext) {
 /// Down clamps at the last stop, Home and End go to the ends, Up goes back,
 /// and Up from the first row returns the keyboard to the root; from the root
 /// End enters the last row.
-#[cfg(unix)]
 #[gpui::test]
 fn the_rows_are_walked_clamped_and_left_by_up_from_the_first(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -452,7 +445,6 @@ fn the_rows_are_walked_clamped_and_left_by_up_from_the_first(cx: &mut TestAppCon
 /// Tab from the root lands on the first interactive row with no key handling
 /// of its own: the row tracks the stop while none is chosen. From there the
 /// keys work as everywhere.
-#[cfg(unix)]
 #[gpui::test]
 fn tab_from_the_root_reaches_the_first_row(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -479,7 +471,6 @@ fn tab_from_the_root_reaches_the_first_row(cx: &mut TestAppContext) {
 /// is not a repository, so the branch and changes rows go): the keyboard is
 /// handed to the pane by the app's own fallback, a typed key reaches the
 /// terminal, and asking for Info again then Down enters the rows afresh.
-#[cfg(unix)]
 #[gpui::test]
 fn a_row_that_vanishes_under_the_keyboard_hands_it_to_the_pane(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -529,7 +520,6 @@ fn a_row_that_vanishes_under_the_keyboard_hands_it_to_the_pane(cx: &mut TestAppC
 /// any event on this route, and the limitation is real: Tab re-entry only
 /// works after Info is asked for by name. That is what it would pin, not a
 /// claim that Tab works.
-#[cfg(unix)]
 #[gpui::test]
 fn tab_reaches_the_first_row_after_a_row_vanished_without_asking_for_info_again(
     cx: &mut TestAppContext,
@@ -589,7 +579,6 @@ fn tab_reaches_the_first_row_after_a_row_vanished_without_asking_for_info_again(
 /// reset), and a real Tab must land on, and keep, the first row (the Pane
 /// address after the rebase); one Down more reaches the working directory,
 /// whose Enter copies the CURRENT directory.
-#[cfg(unix)]
 #[gpui::test]
 fn tab_reaches_the_first_row_after_the_keyboard_had_already_left_and_the_row_vanished(
     cx: &mut TestAppContext,
@@ -655,7 +644,6 @@ fn tab_reaches_the_first_row_after_the_keyboard_had_already_left_and_the_row_van
 /// request runs, and the completion, which requires the keyboard to still be
 /// where the request found it, would drop the entry. If so this fails on the
 /// marker, and that failure is the finding; no guard is loosened here.
-#[cfg(unix)]
 #[gpui::test]
 fn the_changes_action_from_a_live_info_row_lands_on_the_first_header(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -689,7 +677,6 @@ fn the_changes_action_from_a_live_info_row_lands_on_the_first_header(cx: &mut Te
 /// pressed inside the panel), whose handle the tab switch also takes out of
 /// the tree. The Changes list's first header must get it, and a typed key must
 /// not reach the pane.
-#[cfg(unix)]
 #[gpui::test]
 fn the_changes_action_from_the_info_root_lands_on_the_first_header(cx: &mut TestAppContext) {
     let _serial = serial();
@@ -720,7 +707,6 @@ fn the_changes_action_from_the_info_root_lands_on_the_first_header(cx: &mut Test
 /// dropped by its unchanged origin guard and must not move the keyboard back:
 /// it stays in the field, no list row holds it, and a typed key reaches the
 /// field.
-#[cfg(unix)]
 #[gpui::test]
 fn a_user_move_while_the_changes_entry_is_parked_is_not_overridden(cx: &mut TestAppContext) {
     let _serial = serial();

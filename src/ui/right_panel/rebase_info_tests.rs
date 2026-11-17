@@ -29,7 +29,10 @@ fn scratch_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("tty59-rebase-info-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::canonicalize(&dir).unwrap()
+    // `canonicalize` answers `\\?\C:\…` on Windows, while the pane's copy tile
+    // writes the plain native spelling, so the directory the pane is sent (and
+    // the test compares against) is handed out in the plain local spelling.
+    tty59_core::core::path_spelling::local_spelling_buf(std::fs::canonicalize(&dir).unwrap())
 }
 
 fn draw(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) {
@@ -77,7 +80,6 @@ fn pane_id_of_entity(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) 
 /// exactly the directory the pane was sent) and the panel describes the pane
 /// the entity says it does. The only assertion that can differ between the two
 /// trees is the last one.
-#[cfg(unix)]
 #[gpui::test]
 fn enter_on_the_first_info_row_copies_the_pane_address(cx: &mut TestAppContext) {
     crate::core::config::pin_test_config_dir();

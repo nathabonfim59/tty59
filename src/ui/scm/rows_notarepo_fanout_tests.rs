@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use gpui::{AppContext as _, Entity, TestAppContext, VisualContext as _, VisualTestContext};
 use tty59_core::core::config::RightPanelTab;
 
-use super::rows_window_tests::{git, scratch, serial, write};
+use super::rows_window_tests::{git, init_repo, scratch, serial, write};
 use crate::core::session::Session;
 use crate::daemon::protocol::DaemonMsg;
 use crate::terminal::git_data::Landed;
@@ -47,7 +47,7 @@ type Stream = crate::daemon::transport::Stream;
 fn clean_repo(name: &str) -> std::path::PathBuf {
     let root = scratch(name).join("repo");
     std::fs::create_dir_all(&root).unwrap();
-    git(&root, &["init", "-q", "-b", "main"]);
+    init_repo(&root);
     write(&root, "a.txt", "a\n");
     git(&root, &["add", "-A"]);
     git(&root, &["commit", "-qm", "a"]);
@@ -122,7 +122,6 @@ struct Held {
     mapped_to: Option<std::path::PathBuf>,
 }
 
-#[cfg(unix)]
 #[gpui::test]
 fn a_not_a_repository_landing_clears_the_matching_unpicked_entry_and_mapping_only(
     cx: &mut TestAppContext,
