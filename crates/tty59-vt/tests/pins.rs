@@ -346,7 +346,7 @@ fn a_restored_screen_scrolls_away_and_the_new_shell_gets_a_blank_viewport() {
     // The new shell's first paint: conhost addressing row 1 of a buffer
     // it believes is blank.
     bytes.extend_from_slice(b"\x1b[?25l\x1b[1;1HPS C:\\> \x1b[?25h");
-    let mut term = term(40, 10, &bytes);
+    let term = term(40, 10, &bytes);
 
     let top: String = (0..term.view().columns())
         .map(|c| {
