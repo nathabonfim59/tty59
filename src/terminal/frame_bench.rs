@@ -122,7 +122,7 @@ fn bench_frame_build_200x50() {
                 )
                 .as_bytes(),
             );
-            bytes.extend(std::iter::repeat(b'x').take(COLS));
+            bytes.extend(std::iter::repeat_n(b'x', COLS));
             bytes.extend_from_slice(b"\x1b[0m");
         }
         bytes

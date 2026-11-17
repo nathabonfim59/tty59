@@ -634,7 +634,7 @@ pub fn decode(img: &mut Image) -> Option<(Arc<RenderImage>, u32, u32)> {
     // the SVG renderer run their premultiplied output through, divides the
     // color channels back out by alpha on the way in. Premultiplying here would
     // darken every translucent pixel of an `f=100` PNG twice over.
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     let buffer = RgbaImage::from_raw(w, h, rgba)?;
