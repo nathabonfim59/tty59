@@ -2758,10 +2758,9 @@ mod tests {
 
             note_pane_relink_outcome(cx, ws, 0);
             assert!(
-                cx.default_global::<RemoteLinks>()
+                !cx.default_global::<RemoteLinks>()
                     .pane_retries
-                    .get(&ws)
-                    .is_none(),
+                    .contains_key(&ws),
                 "every pane back means no clock left to run"
             );
         });

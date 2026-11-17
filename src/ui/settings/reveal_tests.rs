@@ -442,10 +442,9 @@ fn v7_pinned_stops_never_scroll_the_page(cx: &mut TestAppContext) {
     let at = offset_y(&app, &mut vcx);
     assert!(at < px(0.), "setup: the page is scrolled");
     focus_search(&app, &mut vcx);
-    for stop in ["settings-modified-filter"] {
-        assert!(walk_to(&mut vcx, stop, "tab", false), "FOCUS: reach {stop}");
-        assert_eq!(offset_y(&app, &mut vcx), at, "{stop} scrolled the page");
-    }
+    let stop = "settings-modified-filter";
+    assert!(walk_to(&mut vcx, stop, "tab", false), "FOCUS: reach {stop}");
+    assert_eq!(offset_y(&app, &mut vcx), at, "{stop} scrolled the page");
     // A nav item, reached by Shift-Tab from the modified row's neighbours.
     let nav = walk_nav(&mut vcx);
     assert!(nav.is_some(), "FOCUS: a nav stop was never reached");
@@ -517,7 +516,7 @@ fn v9_host_heads_in_the_inner_list_are_revealed_inner_then_outer(cx: &mut TestAp
     app.update_in(&mut vcx, |app, window, cx| {
         cx.global_mut::<Config>().ssh_profiles = (0..40)
             .map(|i| {
-                let mut p = crate::core::ssh_profile::SshProfile::new(&format!("host-{i:02}"));
+                let mut p = crate::core::ssh_profile::SshProfile::new(format!("host-{i:02}"));
                 p.host = format!("h{i}.example");
                 p
             })

@@ -2406,12 +2406,12 @@ mod layout_tests {
         // The title names the host and a long name is the one thing in the strip
         // with no break to wrap at: it stays inside the pill, not merely inside
         // the terminal the pill itself may overhang.
-        if let (Some(pill), Some(title)) = (get("ssh-strip-pill"), get("ssh-strip-title")) {
-            if !within(title, pill) {
-                misses.push(format!(
-                    "{case}: the title {title:?} leaves its pill {pill:?}"
-                ));
-            }
+        if let (Some(pill), Some(title)) = (get("ssh-strip-pill"), get("ssh-strip-title"))
+            && !within(title, pill)
+        {
+            misses.push(format!(
+                "{case}: the title {title:?} leaves its pill {pill:?}"
+            ));
         }
         let (Some(reason), Some(reconnect), Some(edit)) = (
             get("ssh-strip-reason"),

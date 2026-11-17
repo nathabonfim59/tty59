@@ -72,7 +72,6 @@ fn second_window(
             root.view()
                 .clone()
                 .downcast::<Tty59App>()
-                .ok()
                 .expect("window root wraps a Tty59App")
         })
         .unwrap();

@@ -786,9 +786,9 @@ mod tests {
         let previews = cx.new(|_| Previews {
             previews: vec![(state.clone(), preview_id, plugin.clone())],
         });
-        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        let (_, vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
         vcx.run_until_parked();
-        draw(&mut vcx);
+        draw(vcx);
         assert_eq!(
             plugin.parses(),
             1,
@@ -796,7 +796,7 @@ mod tests {
         );
 
         for _ in 0..8 {
-            rebuild(&mut vcx, &previews);
+            rebuild(vcx, &previews);
         }
 
         assert_eq!(
@@ -818,9 +818,9 @@ mod tests {
         let previews = cx.new(|_| Previews {
             previews: vec![(state.clone(), preview_id, plugin.clone())],
         });
-        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        let (_, vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
         vcx.run_until_parked();
-        draw(&mut vcx);
+        draw(vcx);
 
         // Select everything and read it back inside the same update: flushing
         // effects at the end of an update draws dirty windows in tests, and
@@ -838,7 +838,7 @@ mod tests {
         });
 
         for _ in 0..8 {
-            rebuild(&mut vcx, &previews);
+            rebuild(vcx, &previews);
         }
 
         let selected_after = vcx.update(|window, cx| window.selected_text(cx));
@@ -860,9 +860,9 @@ mod tests {
         let previews = cx.new(|_| Previews {
             previews: vec![(state.clone(), preview_id, plugin.clone())],
         });
-        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        let (_, vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
         vcx.run_until_parked();
-        draw(&mut vcx);
+        draw(vcx);
         assert_eq!(plugin.parses(), 1);
 
         let edited = "```mermaid\ngraph TD; A-->B-->C\n```\n";
@@ -873,7 +873,7 @@ mod tests {
             "a source edit must parse the new document"
         );
 
-        rebuild(&mut vcx, &previews);
+        rebuild(vcx, &previews);
         assert_eq!(
             plugin.parses(),
             2,
@@ -899,14 +899,14 @@ mod tests {
                 (second_state, second_id, second.clone()),
             ],
         });
-        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        let (_, vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
         vcx.run_until_parked();
-        draw(&mut vcx);
+        draw(vcx);
         assert_eq!(first.parses(), 1);
         assert_eq!(second.parses(), 1);
 
         for _ in 0..4 {
-            rebuild(&mut vcx, &previews);
+            rebuild(vcx, &previews);
         }
         assert_eq!(
             first.parses(),
@@ -1012,9 +1012,9 @@ mod tests {
         let previews = cx.new(|_| Previews {
             previews: vec![(state.clone(), preview_id, plugin.clone())],
         });
-        let (_, mut vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
+        let (_, vcx) = cx.add_window_view(|window, cx| Root::new(previews.clone(), window, cx));
         vcx.run_until_parked();
-        draw(&mut vcx);
+        draw(vcx);
         assert_eq!(plugin.parses(), 1);
 
         // Push the preview's identity out of the bounded cache.
@@ -1026,14 +1026,14 @@ mod tests {
             }
         });
 
-        rebuild(&mut vcx, &previews);
+        rebuild(vcx, &previews);
         assert_eq!(
             plugin.parses(),
             2,
             "an evicted preview parses once when its registry is rebuilt"
         );
 
-        rebuild(&mut vcx, &previews);
+        rebuild(vcx, &previews);
         assert_eq!(plugin.parses(), 2, "the rebuilt registry is stable again");
     }
 }

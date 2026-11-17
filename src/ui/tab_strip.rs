@@ -4713,11 +4713,10 @@ pub(crate) mod overflow_gpui_tests {
     ) -> Pixels {
         app.update(vcx, |app, _| {
             let slots = app.strip_slots.borrow();
-            let right = shown
+            shown
                 .iter()
                 .map(|&i| slots[i].right())
-                .fold(px(0.), |a, b| if b > a { b } else { a });
-            right
+                .fold(px(0.), |a, b| if b > a { b } else { a })
         })
     }
 

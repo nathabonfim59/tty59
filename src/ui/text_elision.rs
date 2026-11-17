@@ -256,7 +256,7 @@ fn natural_width(
     let size = face.size.as_f32();
     let mut measure = |s: &str| measure_text(text_system, &face.font, size, s);
     let width = match max_chars {
-        None => measure(&*face.whole()),
+        None => measure(&face.whole()),
         // The one policy pass the cap needs, with no pixel limit: the cap
         // alone decides what is left, and only that is shaped as a whole.
         Some(_) => {

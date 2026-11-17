@@ -823,10 +823,9 @@ mod primary_contrast_tests {
             enabled as usize,
             "a hover paint for an enabled button only"
         );
-        let hover = match hover.first() {
-            Some(h) => Some(h.fill.expect("a hover note carries its fill")),
-            None => None,
-        };
+        let hover = hover
+            .first()
+            .map(|h| h.fill.expect("a hover note carries its fill"));
         Paints {
             ink: rest[0].text.expect("a button always has an ink"),
             rest: rest[0].fill.expect("a button always has a rest fill"),
@@ -1089,7 +1088,7 @@ mod primary_contrast_tests {
                                 wcag(hover, fill),
                                 wcag(ink, hover)
                             ));
-                        } else if step.map_or(true, |s| s > first + 2) {
+                        } else if step.is_none_or(|s| s > first + 2) {
                             misses.push(format!(
                                 "{case}: the AWAY hover {hover:06x} is not the nearest qualifying point {nearest:06x} (step {first}) on the walk from the rest {fill:06x} toward {pole:06x}"
                             ));

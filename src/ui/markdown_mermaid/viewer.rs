@@ -1018,7 +1018,7 @@ mod tests {
     fn the_viewer_lifecycle(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let the_identity = identity(7, 0);
-        let (_, mut vcx) = cx.add_window_view(|window, cx| {
+        let (_, vcx) = cx.add_window_view(|window, cx| {
             let host = cx.new(|_| Host {
                 identity: the_identity,
             });
@@ -1038,7 +1038,7 @@ mod tests {
             );
         });
         assert!(vcx.update(|_, cx| is_open(the_identity, cx)));
-        settle(&mut vcx);
+        settle(vcx);
         vcx.update(|window, cx| {
             assert!(
                 cx.global::<DiagramViewers>().map[&the_identity]
@@ -1071,9 +1071,9 @@ mod tests {
                 cx,
             );
         });
-        settle(&mut vcx);
+        settle(vcx);
         vcx.simulate_keystrokes("escape");
-        settle(&mut vcx);
+        settle(vcx);
         assert!(
             !vcx.update(|_, cx| is_open(the_identity, cx)),
             "Escape closes the viewer"

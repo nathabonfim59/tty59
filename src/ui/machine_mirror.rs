@@ -679,9 +679,11 @@ mod tests {
         use crate::core::session::{WindowView, WindowViews, WorkspaceStore};
 
         cx.update(|cx| {
-            let mut view = WindowView::default();
-            view.label = Some("api".into());
-            view.subject = Some("/repo/api".into());
+            let view = WindowView {
+                label: Some("api".into()),
+                subject: Some("/repo/api".into()),
+                ..Default::default()
+            };
             let id = view.id;
             let entry = view.clone();
             WorkspaceStore::install_for_test(

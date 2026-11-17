@@ -83,7 +83,7 @@ fn enter_does_what_a_tile_does_and_space_is_reveal_only() {
     // The counts open their diff, and a clean tree or no target does nothing.
     assert!(matches!(
         counts(true, 3).enter_act(),
-        Some(InfoAct::OpenDiff(host, p)) if host == HostId::LOCAL && p == PathBuf::from("/w/repo")
+        Some(InfoAct::OpenDiff(host, p)) if host == HostId::LOCAL && p == *"/w/repo"
     ));
     assert!(counts(true, 3).space_act().is_none());
     assert!(counts(false, 3).enter_act().is_none());

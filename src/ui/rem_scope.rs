@@ -282,7 +282,7 @@ mod tests {
     fn rem_scope_scales_the_input_line_pitch(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let pitch = |scoped: bool, cx: &mut TestAppContext| -> f32 {
-            let (host, mut vcx) = cx.add_window_view(|window, cx| {
+            let (host, vcx) = cx.add_window_view(|window, cx| {
                 let state = cx.new(|cx| {
                     gpui_component::input::InputState::new(window, cx)
                         .multi_line(true)
@@ -315,7 +315,7 @@ mod tests {
                     })
                 })
             };
-            (top(3, &mut vcx) - top(0, &mut vcx)) / 3.
+            (top(3, vcx) - top(0, vcx)) / 3.
         };
 
         let base = pitch(false, cx);
