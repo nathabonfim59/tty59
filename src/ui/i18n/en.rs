@@ -1356,6 +1356,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorDuplicateLine => "Duplicate Line",
         L10nKey::EditorDeleteLine => "Delete Line",
         L10nKey::EditorCopyRelativePath => "Copy Relative Path",
+        L10nKey::EditorShowInFileTree => "Show in File Tree",
         L10nKey::EditorGitNextChange => "Go to Next Change",
         L10nKey::EditorGitPrevChange => "Go to Previous Change",
         L10nKey::EditorGitRevertChange => "Revert Change",

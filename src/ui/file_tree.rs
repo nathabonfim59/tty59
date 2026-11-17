@@ -986,6 +986,23 @@ impl Tty59App {
 
     pub(crate) fn file_tree_refresh_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.spawn_host(cx);
+        // "Show in File Tree" pins the tree to one folder, whatever the panes
+        // are doing; until it is cleared the panes' roots are not asked for.
+        if self.tab_code().is_some_and(|c| c.tree_focus.is_some()) {
+            let Some(host) = self.active_host(cx) else {
+                return;
+            };
+            if let Some(code) = self.tab_code_mut()
+                && let Some(root) = code.tree_focus.as_ref()
+                && code.roots.as_slice() != std::slice::from_ref(root)
+            {
+                code.roots = vec![root.clone()];
+                self.file_tree.invalidate_all();
+                cx.notify();
+            }
+            self.file_tree_sync_watch(host, cx);
+            return;
+        }
         let Some((host, mut roots)) = self.project_roots(cx) else {
             return;
         };
@@ -1034,6 +1051,74 @@ impl Tty59App {
         self.file_tree.show_hidden = want;
         self.file_tree.invalidate_all();
         cx.notify();
+    }
+
+    /// "Show in File Tree": roots the tree at `path`'s project — its
+    /// repository root, or its own folder outside one, the same rule the
+    /// panes' roots follow — and reveals the file there. The tree goes back
+    /// to following the panes when a terminal takes the focus or the tab is
+    /// switched (see `TabCode::tree_focus`).
+    ///
+    /// The repository lookup is a host call, so it runs off the UI thread; an
+    /// answer that arrives after the tab was switched is dropped, since the
+    /// tree it was for is no longer the one in front.
+    ///
+    /// The landing is always asynchronous, even when the root is already
+    /// known. The menu this runs from hands the focus back to where it came
+    /// from when it closes, and a landing inside the click would be undone by
+    /// that. The tree takes the focus when it lands, so the keyboard is in the
+    /// tree showing the file whichever way the race falls; if the focus ends up
+    /// in a terminal instead, the override ends, as it does for any terminal
+    /// that takes the focus.
+    pub(crate) fn file_tree_focus_file(
+        &mut self,
+        host: SharedHost,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(self.active).map(|t| t.tree_id.get()) else {
+            return;
+        };
+        let path = path.to_path_buf();
+        let known = self.file_tree.repo_roots.get(host.id(), &dir).cloned();
+        // An answer already in hand goes the same road: the menu this runs
+        // from hands the focus back to the terminal when it closes, and a
+        // landing that beat that would be cleared by it.
+        HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |h| known.unwrap_or_else(|| h.repo_root(&dir).ok().flatten().unwrap_or(dir)),
+            move |app, root, window, cx| {
+                let still_here = app
+                    .tabs
+                    .get(app.active)
+                    .is_some_and(|t| t.tree_id.get() == tab);
+                if still_here {
+                    app.file_tree_land_focus(&root, &path, window, cx);
+                }
+            },
+        );
+    }
+
+    fn file_tree_land_focus(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(code) = self.tab_code_mut_or_init() else {
+            return;
+        };
+        code.tree_focus = Some(root.to_path_buf());
+        self.file_tree_refresh_roots(window, cx);
+        self.file_tree_show(path, window, cx);
+        self.file_tree.focus_handle.focus(window, cx);
     }
 
     /// The project directories behind the active tab, on the host they live
