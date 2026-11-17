@@ -538,8 +538,8 @@ impl Tty59App {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -649,6 +649,9 @@ mod tests {
         app: Entity<Tty59App>,
         vcx: VisualTestContext,
         adds: Arc<Mutex<Vec<Vec<String>>>>,
+        /// The repository's root in the plain local spelling every platform's
+        /// `git` and `Path` agree on.
+        root: PathBuf,
         _repo: tempfile::TempDir,
     }
 
@@ -671,23 +674,98 @@ mod tests {
         });
     }
 
-    /// A window with the prompt open over a throwaway git repository.
+    /// One `git` child in `root`; a failing setup step says everything git
+    /// said, on every platform.
+    fn git_fixture(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed in {}: {}\nstdout: {}\nstderr: {}",
+            root.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    /// The initialized repository every `open` copies, built once per test
+    /// process: `git init` is a child process per test otherwise, and a copy
+    /// of the finished tree is far cheaper. The two settings that make a
+    /// fixture the same on every platform are pinned before anything is
+    /// written: no line-ending conversion (Git for Windows defaults to
+    /// `autocrlf=true`) and long paths.
+    fn seed_repo() -> &'static Path {
+        static SEED: OnceLock<tempfile::TempDir> = OnceLock::new();
+        SEED.get_or_init(|| {
+            let seed = tempfile::Builder::new()
+                .prefix("tty59-worktree-prompt-seed-")
+                .tempdir()
+                .expect("a temporary directory for the seed");
+            git_fixture(seed.path(), &["init", "-q", "-b", "main"]);
+            git_fixture(seed.path(), &["config", "core.longpaths", "true"]);
+            git_fixture(seed.path(), &["config", "core.autocrlf", "false"]);
+            seed
+        })
+        .path()
+    }
+
+    /// Copy the directory `from` into the existing directory `to`: files byte
+    /// for byte, nothing else. A fresh repository holds no symbolic link, so
+    /// meeting one is a bug in the fixture.
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to)
+            .unwrap_or_else(|e| panic!("creating {} for the fixture copy: {e}", to.display()));
+        let entries = std::fs::read_dir(from)
+            .unwrap_or_else(|e| panic!("reading {} for the fixture copy: {e}", from.display()));
+        for entry in entries {
+            let entry = entry.unwrap_or_else(|e| panic!("listing {}: {e}", from.display()));
+            let (src, dst) = (entry.path(), to.join(entry.file_name()));
+            let kind = entry
+                .file_type()
+                .unwrap_or_else(|e| panic!("typing {}: {e}", src.display()));
+            if kind.is_dir() {
+                copy_tree(&src, &dst);
+            } else if kind.is_file() {
+                std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+                    panic!("copying {} to {}: {e}", src.display(), dst.display())
+                });
+            } else {
+                panic!(
+                    "the fixture seed holds a non-regular entry: {}",
+                    src.display()
+                );
+            }
+        }
+    }
+
+    /// A window with the prompt open over a throwaway git repository: a fresh
+    /// directory per test holding a copy of the seed.
     fn open(cx: &mut TestAppContext, name: &str) -> Form {
         let repo = tempfile::tempdir().expect("a temporary directory");
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(repo.path())
-            .status()
-            .expect("git runs");
-        assert!(status.success(), "git init failed");
+        copy_tree(seed_repo(), repo.path());
+        // The plain local spelling: a `\\?\C:\…` root is read by git as a UNC
+        // hostname, and `Path` does not compare it equal to the plain one.
+        let root = tty59_core::core::path_spelling::local_spelling_buf(repo.path());
         let (app, mut vcx) = harness(cx);
         let adds = Arc::new(Mutex::new(Vec::new()));
         let host: SharedHost = Arc::new(RecordingGit {
             inner: tty59_core::host::local::LocalHost::new(),
             adds: Arc::clone(&adds),
         });
-        let dir = repo.path().join(".tty59").join("worktrees");
-        let cwd = repo.path().to_path_buf();
+        let dir = root.join(".tty59").join("worktrees");
+        let cwd = root.clone();
         app.update_in(&mut vcx, |app, window, cx| {
             app.open_worktree_prompt(host, cwd, defaults(name, dir), window, cx)
         });
@@ -696,6 +774,7 @@ mod tests {
             app,
             vcx,
             adds,
+            root,
             _repo: repo,
         }
     }
@@ -706,7 +785,7 @@ mod tests {
                 inner: tty59_core::host::local::LocalHost::new(),
                 adds: Arc::clone(&self.adds),
             });
-            let cwd = self._repo.path().to_path_buf();
+            let cwd = self.root.clone();
             let dir = cwd.join(".tty59").join("worktrees");
             self.app.update_in(&mut self.vcx, |app, window, cx| {
                 app.open_worktree_prompt(host, cwd, defaults(name, dir), window, cx)
@@ -1091,21 +1170,60 @@ mod tests {
         })
     }
 
-    const DEEP_RU: &str =
-        "/home/разработчик/Проекты/очень-длинное-название-репозитория/.tty59/worktrees";
-    const DEEP_ZH: &str = "/home/开发者/项目/一个名字非常非常长的代码仓库目录/.tty59/worktrees";
+    /// Display fixtures: the directory's components, lexical and explicit, so
+    /// the platform spelling is derived from them rather than baked in as a
+    /// POSIX string.
+    const DEEP_RU: &[&str] = &[
+        "home",
+        "разработчик",
+        "Проекты",
+        "очень-длинное-название-репозитория",
+        ".tty59",
+        "worktrees",
+    ];
+    const DEEP_ZH: &[&str] = &[
+        "home",
+        "开发者",
+        "项目",
+        "一个名字非常非常长的代码仓库目录",
+        ".tty59",
+        "worktrees",
+    ];
+    const SHORT_DIR: &[&str] = &["r", ".tty59", "worktrees"];
+
+    /// A rooted directory built from explicit components with the platform's
+    /// own separator. Not a `format!("/{..}")`: on Windows `PathBuf::from("/r")`
+    /// joined to a name is the mixed `/r\name`, a path no shell shows.
+    fn display_dir(parts: &[&str]) -> PathBuf {
+        let mut dir = PathBuf::from(std::path::MAIN_SEPARATOR_STR);
+        dir.extend(parts);
+        dir
+    }
+
+    /// What the preview shows, before any elision, for `parts` and `name`:
+    /// the components joined by the platform separator as a string. Built by
+    /// hand, so the prompt's own `join` is not the oracle for itself.
+    fn whole_path(parts: &[&str], name: &str) -> String {
+        let sep = std::path::MAIN_SEPARATOR;
+        let mut whole = String::new();
+        for part in parts.iter().copied().chain([name]) {
+            whole.push(sep);
+            whole.push_str(part);
+        }
+        whole
+    }
 
     /// F9(a): a preview wider than its field gives up its front, so the name
     /// that was just typed is the part still there. Russian and CJK, at the
     /// default size and at the largest.
-    fn assert_tail_survives(cx: &mut TestAppContext, dir: &str, name: &str) {
+    fn assert_tail_survives(cx: &mut TestAppContext, dir: &[&str], name: &str) {
         let mut form = open(cx, name);
         form.app.update_in(&mut form.vcx, |app, _, _| {
-            app.worktree_prompt.as_mut().expect("open").dir = PathBuf::from(dir);
+            app.worktree_prompt.as_mut().expect("open").dir = display_dir(dir);
         });
         for size in [16., 24.] {
             set_ui_font_size(&mut form, size);
-            let full = format!("{dir}/{name}");
+            let full = whole_path(dir, name);
             let shown = painted_preview(&mut form)
                 .unwrap_or_else(|| panic!("{name} at {size}: the preview is not a measured label"));
             assert_ne!(shown, full, "{name} at {size}: nothing was elided");
@@ -1138,19 +1256,19 @@ mod tests {
     fn the_preview_ends_in_the_name_as_it_is_typed(cx: &mut TestAppContext) {
         let mut form = open(cx, DEFAULT_NAME);
         form.app.update_in(&mut form.vcx, |app, _, _| {
-            app.worktree_prompt.as_mut().expect("open").dir = PathBuf::from("/r/.tty59/worktrees");
+            app.worktree_prompt.as_mut().expect("open").dir = display_dir(SHORT_DIR);
         });
         form.focus(name_box);
         form.type_over("alpha");
         assert_eq!(
             painted_preview(&mut form).as_deref(),
-            Some("/r/.tty59/worktrees/alpha"),
+            Some(whole_path(SHORT_DIR, "alpha").as_str()),
             "a path that fits is shown whole"
         );
         form.type_over("beta");
         assert_eq!(
             painted_preview(&mut form).as_deref(),
-            Some("/r/.tty59/worktrees/beta")
+            Some(whole_path(SHORT_DIR, "beta").as_str())
         );
     }
 }
