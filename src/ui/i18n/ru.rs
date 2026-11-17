@@ -2667,6 +2667,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopyNoTool => {
             "Скопировано только для tty59. Чтобы вставлять изображение в другие приложения, установите wl-clipboard (Wayland) или xclip (X11)."
         }
+        L10nKey::ImageCopy => "Копировать изображение",
+        L10nKey::CmdImageCopy => "Копировать изображение",
+        L10nKey::CmdImageDownload => "Скачать изображение",
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "Не удалось запустить {name}. tty59 ищет в PATH: {programs}. Проверьте, что сервер {name} установлен и запускается."

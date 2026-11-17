@@ -2018,6 +2018,9 @@ l10n_keys! {
     ImagePreviewNotAnImage,
     ImageCopyFailed,
     ImageCopyNoTool,
+    ImageCopy,
+    CmdImageCopy,
+    CmdImageDownload,
     // B3-E: editor status, empty hint and gutter peek.
     LspMissingBody,
     LspErrorCount,

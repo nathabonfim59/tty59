@@ -2385,6 +2385,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopyNoTool => {
             "仅复制到了 tty59 内部。若要将图片粘贴到其他应用，请安装 wl-clipboard（Wayland）或 xclip（X11）。"
         }
+        L10nKey::ImageCopy => "复制图片",
+        L10nKey::CmdImageCopy => "复制图片",
+        L10nKey::CmdImageDownload => "下载图片",
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "无法启动 {name}。tty59 会在 PATH 中查找：{programs}。请确认 {name} 已安装且可以运行。"

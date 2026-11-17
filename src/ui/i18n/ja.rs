@@ -2649,6 +2649,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopyNoTool => {
             "tty59 内でのみコピーされました。他のアプリに画像を貼り付けるには、wl-clipboard（Wayland）または xclip（X11）をインストールしてください。"
         }
+        L10nKey::ImageCopy => "画像をコピー",
+        L10nKey::CmdImageCopy => "画像をコピー",
+        L10nKey::CmdImageDownload => "画像をダウンロード",
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} を起動できませんでした。tty59 は PATH 上で次を探します：{programs}。{name} がインストールされ、実行できることを確認してください。"

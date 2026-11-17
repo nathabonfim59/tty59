@@ -676,9 +676,9 @@ impl Tty59App {
     // ---- Chrome ----
 
     /// The palette's editor rows: the open-files search while the panel holds
-    /// any file (text or image), the navigation rows while a text buffer is in
-    /// front of it.
-    pub(crate) fn editor_palette_items(&self) -> Vec<Item> {
+    /// any file (text or image), a picture's own rows while one is in front,
+    /// and the navigation rows while a text buffer is.
+    pub(crate) fn editor_palette_items(&self, cx: &App) -> Vec<Item> {
         use crate::ui::search::CommandGroup;
         let mut items = Vec::new();
         if !self.code_panel_visible() {
@@ -693,6 +693,30 @@ impl Tty59App {
                 .with_alias(t(L10nKey::CmdEditorSearchOpenFilesAlias))
                 .with_aliases_of(L10nKey::CmdEditorSearchOpenFilesAlias)
                 .in_group(CommandGroup::View),
+            );
+        }
+        // A picture is not a text buffer: its rows come before the text gate
+        // below, which would otherwise hide them.
+        if let Some(actions) = self
+            .editor_active_image()
+            .and_then(|id| self.image_actions(id, cx))
+        {
+            let rows = [
+                (
+                    actions.copy,
+                    L10nKey::CmdImageCopy,
+                    CommandKind::EditorCopyImage,
+                ),
+                (
+                    actions.download,
+                    L10nKey::CmdImageDownload,
+                    CommandKind::EditorDownloadImage,
+                ),
+            ];
+            items.extend(
+                rows.into_iter()
+                    .filter(|(offered, ..)| *offered)
+                    .map(|(_, key, kind)| Item::localized(key, kind).in_group(CommandGroup::View)),
             );
         }
         if self.active_buffer().is_none() {
@@ -1807,10 +1831,10 @@ pub(super) mod gpui_tests {
     fn the_palette_offers_the_editor_commands_only_with_a_file_open(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
         crate::ui::i18n::set_locale("en");
-        assert!(app.read_with(&vcx, |app, _| app.editor_palette_items().is_empty()));
+        assert!(app.read_with(&vcx, |app, cx| app.editor_palette_items(cx).is_empty()));
         open_rs(&app, &mut vcx, "/nav-test/a.rs");
-        let kinds: Vec<CommandKind> = app.read_with(&vcx, |app, _| {
-            app.editor_palette_items()
+        let kinds: Vec<CommandKind> = app.read_with(&vcx, |app, cx| {
+            app.editor_palette_items(cx)
                 .into_iter()
                 .map(|i| i.kind)
                 .collect()
@@ -1973,8 +1997,8 @@ pub(super) mod gpui_tests {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
         crate::ui::i18n::set_locale("en");
         let row = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| -> Option<Item> {
-            app.read_with(vcx, |app, _| {
-                app.editor_palette_items()
+            app.read_with(vcx, |app, cx| {
+                app.editor_palette_items(cx)
                     .into_iter()
                     .find(|i| i.kind == CommandKind::EditorSearchOpenFiles)
             })

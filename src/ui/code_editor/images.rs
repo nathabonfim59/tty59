@@ -77,6 +77,12 @@ pub(super) struct ImageState {
     pub(super) export: ClipboardExport,
 }
 
+/// What the menu and the palette may offer for one picture.
+pub(crate) struct ImageActions {
+    pub(crate) copy: bool,
+    pub(crate) download: bool,
+}
+
 impl Tty59App {
     pub(super) fn image(&self, id: BufferId) -> Option<&ImageDoc> {
         self.editor.images.docs.iter().find(|d| d.id() == id)
@@ -150,7 +156,66 @@ impl Tty59App {
     ) -> Option<AnyElement> {
         let tab = self.tabs.get(self.active)?.tree_id.get();
         let view = self.image_view(id, tab, slot, cx)?;
-        Some(div().relative().size_full().child(view).into_any_element())
+        let app = cx.entity().downgrade();
+        Some(
+            div()
+                .id(("image-preview-menu", slot))
+                .relative()
+                .size_full()
+                .child(view)
+                .context_menu(move |menu, _window, cx| Self::editor_image_menu(menu, &app, id, cx))
+                .into_any_element(),
+        )
+    }
+
+    /// What can be done to the picture `id`: the one answer the right-click
+    /// menu and the palette both read. `None` when `id` is not a picture.
+    pub(crate) fn image_actions(&self, id: BufferId, cx: &App) -> Option<ImageActions> {
+        let doc = self.image(id)?;
+        Some(ImageActions {
+            // Only decoded pixels can be copied; a picture that failed has none.
+            copy: doc.data.read(cx).image().is_some(),
+            // TODO(download): B contract. M2 turns it on for any open picture,
+            // a failed one included.
+            download: false,
+        })
+    }
+
+    /// The picture in front of the active tab's editor, while the panel is
+    /// showing.
+    pub(crate) fn editor_active_image(&self) -> Option<BufferId> {
+        if !self.code_panel_visible() {
+            return None;
+        }
+        let id = self.tab_code().and_then(TabCode::active_id)?;
+        self.image(id).map(ImageDoc::id)
+    }
+
+    /// Right-click on a picture: copy it, then what any file offers.
+    fn editor_image_menu(
+        menu: PopupMenu,
+        app: &gpui::WeakEntity<Self>,
+        id: BufferId,
+        cx: &App,
+    ) -> PopupMenu {
+        let Some(this) = app.upgrade() else {
+            return menu;
+        };
+        let this = this.read(cx);
+        let Some(actions) = this.image_actions(id, cx) else {
+            return menu;
+        };
+        let menu = menu.min_w(px(220.)).item(
+            PopupMenuItem::new(t(L10nKey::ImageCopy))
+                .disabled(!actions.copy)
+                .on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| this.editor_copy_image(id, window, cx));
+                    }
+                }),
+        );
+        this.editor_file_menu_items(menu, id, app, cx)
     }
 
     /// The focus of the active tab's front picture in the focused group.
@@ -395,7 +460,7 @@ impl Tty59App {
     /// clipboard write comes back to it. gpui's write reaches other
     /// applications on macOS and Windows; on Linux it pastes into tty59 only,
     /// so the staged file is also exported (see `clipboard_image`).
-    pub(super) fn editor_copy_image(
+    pub(crate) fn editor_copy_image(
         &mut self,
         id: BufferId,
         window: &mut Window,
@@ -847,6 +912,187 @@ mod tests {
         assert!(
             vcx.debug_bounds("image-preview-error").is_some(),
             "the name is a picture's, the content is not: said in the tab"
+        );
+    }
+
+    /// A PNG cut in half: it opens as a tab that says it cannot be shown.
+    fn write_corrupt_png(path: &Path) {
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(64, 64))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        png.truncate(png.len() / 2);
+        std::fs::write(path, &png).unwrap();
+    }
+
+    /// Opens a text file and waits until it is the buffer in front.
+    fn open_text(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, path: &Path) {
+        app.update_in(vcx, |app, window, cx| {
+            app.open_file_in_editor(path, window, cx);
+        });
+        wait(vcx, |vcx| {
+            app.read_with(vcx, |app, _| app.active_buffer().is_some())
+        });
+    }
+
+    fn palette_kinds(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+    ) -> Vec<crate::ui::search::CommandKind> {
+        app.read_with(vcx, |app, cx| {
+            app.editor_palette_items(cx)
+                .into_iter()
+                .map(|i| i.kind)
+                .collect()
+        })
+    }
+
+    /// What can be done to a picture: copy only what has pixels, nothing to
+    /// anything that is not a picture.
+    #[gpui::test]
+    fn image_actions_follow_what_the_picture_is(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let (good, bad, text) = (
+            real_dir(&dir).join("good.png"),
+            real_dir(&dir).join("bad.png"),
+            real_dir(&dir).join("note.txt"),
+        );
+        write_png(&good, 20, 10);
+        write_corrupt_png(&bad);
+        std::fs::write(&text, "hello\n").unwrap();
+        open(&app, &mut vcx, &good, 1);
+        open(&app, &mut vcx, &bad, 2);
+        open_text(&app, &mut vcx, &text);
+        let (good, bad) = (id_of(&app, &mut vcx, &good), id_of(&app, &mut vcx, &bad));
+        let text_id = app.read_with(&vcx, |app, _| {
+            app.tab_code().and_then(TabCode::active_id).expect("a file")
+        });
+        app.read_with(&vcx, |app, cx| {
+            let ready = app.image_actions(good, cx).expect("a picture");
+            assert!(ready.copy);
+            assert!(!ready.download, "download is not wired yet");
+            let failed = app.image_actions(bad, cx).expect("a picture");
+            assert!(!failed.copy, "nothing to copy from a picture that failed");
+            assert!(app.image_actions(text_id, cx).is_none(), "not a picture");
+        });
+    }
+
+    /// The palette offers Copy Image for the picture in front, and for nothing
+    /// else: not a text file, not a hidden panel, not a picture that failed.
+    #[gpui::test]
+    fn the_palette_offers_copy_image_only_for_a_picture_in_front(cx: &mut TestAppContext) {
+        use crate::ui::search::CommandKind;
+
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let (good, bad, text) = (
+            real_dir(&dir).join("good.png"),
+            real_dir(&dir).join("bad.png"),
+            real_dir(&dir).join("note.txt"),
+        );
+        write_png(&good, 20, 10);
+        write_corrupt_png(&bad);
+        std::fs::write(&text, "hello\n").unwrap();
+
+        open(&app, &mut vcx, &good, 1);
+        assert_eq!(
+            palette_kinds(&app, &mut vcx),
+            [CommandKind::EditorCopyImage],
+            "a picture in front; no download row until it is wired"
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.toggle_code_panel(window, cx)
+        });
+        assert!(
+            palette_kinds(&app, &mut vcx).is_empty(),
+            "the panel is hidden"
+        );
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.toggle_code_panel(window, cx)
+        });
+
+        open(&app, &mut vcx, &bad, 2);
+        assert!(
+            !palette_kinds(&app, &mut vcx).contains(&CommandKind::EditorCopyImage),
+            "a failed picture has nothing to copy"
+        );
+
+        open_text(&app, &mut vcx, &text);
+        assert!(
+            !palette_kinds(&app, &mut vcx).contains(&CommandKind::EditorCopyImage),
+            "a text file is in front"
+        );
+    }
+
+    /// The palette row runs the copy for the picture in front: the clipboard
+    /// then holds an image. Needs the real `editor_copy_image`, not the
+    /// placeholder.
+    #[gpui::test]
+    fn the_palette_command_copies_the_picture_in_front(cx: &mut TestAppContext) {
+        use crate::ui::search::CommandKind;
+
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let png = real_dir(&dir).join("shot.png");
+        write_png(&png, 20, 10);
+        open(&app, &mut vcx, &png, 1);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.run_command(CommandKind::EditorCopyImage, window, cx)
+        });
+        wait(&mut vcx, |vcx| vcx.read_from_clipboard().is_some());
+        let copied = vcx.read_from_clipboard().expect("something was copied");
+        assert!(
+            matches!(
+                copied.entries().first(),
+                Some(gpui::ClipboardEntry::Image(_))
+            ),
+            "the clipboard holds an image"
+        );
+    }
+
+    /// A right-click on the picture opens the menu: the focus moves into it.
+    #[gpui::test]
+    fn a_right_click_on_the_picture_opens_a_menu(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent};
+
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let png = real_dir(&dir).join("shot.png");
+        write_png(&png, 300, 200);
+        open(&app, &mut vcx, &png, 1);
+        let at = painted(&mut vcx, "image-preview-body").center();
+        click_at(&mut vcx, at);
+        settle(&mut vcx);
+        let before = vcx.update(|window, cx| window.focused(cx));
+
+        vcx.simulate_event(MouseDownEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(MouseUpEvent {
+            button: MouseButton::Right,
+            position: at,
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        });
+        settle(&mut vcx);
+        let open = vcx.update(|window, cx| window.focused(cx));
+        assert!(
+            open.is_some() && open != before,
+            "the right click opened a menu"
         );
     }
 

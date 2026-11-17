@@ -2569,6 +2569,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ImageCopyNoTool => {
             "Copied for tty59 only. To paste the picture in other apps, install wl-clipboard (Wayland) or xclip (X11)."
         }
+        L10nKey::ImageCopy => "Copy Image",
+        L10nKey::CmdImageCopy => "Copy Image",
+        L10nKey::CmdImageDownload => "Download Image",
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} could not be started. tty59 looks on PATH for: {programs}. Make sure {name} is installed and can run."
