@@ -1058,6 +1058,48 @@ mod tests {
         );
     }
 
+    /// The bindable action copies the picture in front, and with a text file
+    /// in front it leaves the clipboard alone (the key goes on).
+    #[gpui::test]
+    fn the_copy_action_acts_on_a_picture_only(cx: &mut TestAppContext) {
+        use crate::core::actions::EditorCopyImage;
+
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let (png, text) = (
+            real_dir(&dir).join("shot.png"),
+            real_dir(&dir).join("notes.txt"),
+        );
+        write_png(&png, 20, 10);
+        std::fs::write(&text, "hello\n").unwrap();
+        #[cfg(target_os = "linux")]
+        standin::Standin::new(true, false).install(&app, &mut vcx);
+
+        open_text(&app, &mut vcx, &text);
+        vcx.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("keep".into())));
+        vcx.dispatch_action(EditorCopyImage);
+        settle(&mut vcx);
+        std::thread::sleep(Duration::from_millis(50));
+        settle(&mut vcx);
+        assert!(
+            clipboard_png(&mut vcx).is_none(),
+            "a text file copies nothing"
+        );
+        assert_eq!(
+            vcx.update(|_, cx| cx.read_from_clipboard())
+                .and_then(|item| item.text())
+                .as_deref(),
+            Some("keep")
+        );
+
+        open(&app, &mut vcx, &png, 1);
+        vcx.dispatch_action(EditorCopyImage);
+        wait(&mut vcx, |vcx| clipboard_png(vcx).is_some());
+        assert!(clipboard_png(&mut vcx).is_some(), "the picture was copied");
+    }
+
     /// A right-click on the picture opens the menu: the focus moves into it.
     #[gpui::test]
     fn a_right_click_on_the_picture_opens_a_menu(cx: &mut TestAppContext) {

@@ -452,6 +452,8 @@ impl CommandKind {
             EditorNavigateBack => "EditorNavigateBack",
             EditorNavigateForward => "EditorNavigateForward",
             EditorSplitRight => "EditorSplitRight",
+            EditorCopyImage => "EditorCopyImage",
+            EditorDownloadImage => "EditorDownloadImage",
             RestartSshSession => "RestartSshSession",
             OpenSshProfiles => "OpenSshProfiles",
             ScmCommit => "ScmCommit",
@@ -497,8 +499,6 @@ impl CommandKind {
             | SaveSshSessionAsHost
             | QuickConnect(_)
             | SaveQuickConnect(_)
-            | EditorCopyImage
-            | EditorDownloadImage
             | LaunchAgent(_) => return None,
         };
         crate::ui::keymap::effective_key(action, cx)

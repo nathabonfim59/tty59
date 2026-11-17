@@ -10761,6 +10761,21 @@ impl Render for Tty59App {
                     }
                     this.toggle_editor_problems(cx)
                 }))
+                // The image commands carry no key context, so a bound chord
+                // reaches here from anywhere: they act only on a picture in
+                // front that can be copied, and hand the key back otherwise.
+                .on_action(cx.listener(|this, _: &EditorCopyImage, window, cx| {
+                    match this.editor_active_image() {
+                        Some(id) if this.image_actions(id, cx).is_some_and(|a| a.copy) => {
+                            this.editor_copy_image(id, window, cx)
+                        }
+                        _ => cx.propagate(),
+                    }
+                }))
+                .on_action(cx.listener(|_, _: &EditorDownloadImage, _, cx| {
+                    // TODO(download): B contract
+                    cx.propagate()
+                }))
                 .on_action(
                     cx.listener(|this, _: &Quit, window, cx| this.quit_stop_sessions(window, cx)),
                 )

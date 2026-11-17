@@ -890,6 +890,12 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("EditorJoinLines", ""),
         ("EditorRemoveSurroundingBrackets", ""),
         ("EditorFindReferences", ""),
+        // Shipped unbound, like the other editor commands without a VS Code
+        // chord: the palette row and the Keybindings page carry them, so a key
+        // is one line of config away. They act on the picture in front and
+        // hand the key back when there is none.
+        ("EditorCopyImage", ""),
+        ("EditorDownloadImage", ""),
         // Alt+F5 / Shift+Alt+F5 (VS Code's) are fixed `Input`-context
         // bindings: a default on a function key would hide it from the shell.
         ("EditorNextChange", ""),
@@ -1241,6 +1247,11 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "EditorFindReferences" => (
             CommandGroup::Terminal,
             t(L10nKey::LspFindReferences).to_string(),
+        ),
+        "EditorCopyImage" => (CommandGroup::Terminal, t(L10nKey::CmdImageCopy).to_string()),
+        "EditorDownloadImage" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdImageDownload).to_string(),
         ),
         "EditorGoToSymbol" => (
             CommandGroup::Terminal,
@@ -2124,6 +2135,10 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
             KeyBinding::new(keystroke, EditorRemoveSurroundingBrackets, None)
         }
         "EditorFindReferences" => KeyBinding::new(keystroke, EditorFindReferences, None),
+        // No key context: the image view's belongs to another change, so the
+        // handler gates on the picture in front instead.
+        "EditorCopyImage" => KeyBinding::new(keystroke, EditorCopyImage, None),
+        "EditorDownloadImage" => KeyBinding::new(keystroke, EditorDownloadImage, None),
         "EditorNextChange" => KeyBinding::new(keystroke, EditorNextChange, None),
         "EditorPrevChange" => KeyBinding::new(keystroke, EditorPrevChange, None),
         "EditorRevertChange" => KeyBinding::new(keystroke, EditorRevertChange, None),
@@ -3629,6 +3644,73 @@ mod gpui_tests {
                 fired(cx, per_platform("secondary-t", "secondary-shift-t")).first(),
                 Some(&NewTab::name_for_type()),
                 "and NewTab keeps its own default"
+            );
+        });
+    }
+
+    /// The image commands ship with no chord, so the keymap holds nothing for
+    /// them and the palette row shows no key until the user binds one.
+    #[gpui::test]
+    fn the_image_commands_ship_unbound(cx: &mut TestAppContext) {
+        use crate::ui::search::CommandKind;
+        for action in ["EditorCopyImage", "EditorDownloadImage"] {
+            assert!(
+                default_bindings().contains(&(action, "")),
+                "{action} has a slot and no default chord"
+            );
+        }
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            assert_eq!(CommandKind::EditorCopyImage.key_spec(cx), None);
+            assert_eq!(CommandKind::EditorDownloadImage.key_spec(cx), None);
+        });
+    }
+
+    /// On the Keybindings page they carry the same names as the palette rows.
+    #[test]
+    fn the_image_commands_are_named_on_the_keybindings_page() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(
+            authored_entry("EditorCopyImage")
+                .map(|(_, name)| name)
+                .as_deref(),
+            Some("Copy Image")
+        );
+        assert_eq!(
+            authored_entry("EditorDownloadImage")
+                .map(|(_, name)| name)
+                .as_deref(),
+            Some("Download Image")
+        );
+    }
+
+    /// A chord from config.json reaches the action, and the palette row shows
+    /// it.
+    #[gpui::test]
+    fn a_user_chord_runs_the_image_commands(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+
+        use crate::ui::search::CommandKind;
+        cx.update(|cx| {
+            running_on_json(
+                cx,
+                r#"{"keybindings": {"EditorCopyImage": "ctrl-f9", "EditorDownloadImage": "ctrl-f10"}}"#,
+            );
+            assert_eq!(
+                fired(cx, "ctrl-f9").first(),
+                Some(&EditorCopyImage::name_for_type())
+            );
+            assert_eq!(
+                fired(cx, "ctrl-f10").first(),
+                Some(&EditorDownloadImage::name_for_type())
+            );
+            assert_eq!(
+                CommandKind::EditorCopyImage.key_spec(cx).as_deref(),
+                Some("ctrl-f9")
+            );
+            assert_eq!(
+                CommandKind::EditorDownloadImage.key_spec(cx).as_deref(),
+                Some("ctrl-f10")
             );
         });
     }
