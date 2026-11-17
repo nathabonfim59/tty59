@@ -2615,10 +2615,40 @@ mod tests {
             eprintln!("skipping: pwsh not installed");
             return;
         };
-        let injection = setup(Some(&pwsh), &[], false).expect("powershell integration");
+        let mut injection = setup(Some(&pwsh), &[], false).expect("powershell integration");
+        // A private HOME and XDG tree, so pwsh never touches the machine's real
+        // profile, caches or runtime dir. The runtime dir must exist: PSReadLine's
+        // history mutex (.NET `Mutex.CreateMutexCore`) lstat()s it under
+        // $XDG_RUNTIME_DIR, and when it is missing the mutex fails with ENOENT and
+        // the shell never reaches the typed command's marks. `_private` keeps the
+        // tree alive until the helper has killed and reaped the shell.
+        let _private = tempfile::tempdir().expect("tempdir");
+        let home = _private.path().canonicalize().expect("canonical tempdir");
+        let runtime = home.join("runtime");
+        let config = home.join(".config");
+        let data = home.join(".local/share");
+        let cache = home.join(".cache");
+        for dir in [&runtime, &config, &data, &cache] {
+            std::fs::create_dir_all(dir).expect("create private dir");
+        }
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+                .expect("chmod 0700 runtime dir");
+        }
+        for (key, dir) in [
+            ("HOME", &home),
+            ("XDG_RUNTIME_DIR", &runtime),
+            ("XDG_CONFIG_HOME", &config),
+            ("XDG_DATA_HOME", &data),
+            ("XDG_CACHE_HOME", &cache),
+        ] {
+            injection
+                .env
+                .insert(key.to_string(), dir.to_string_lossy().into_owned());
+        }
         // From $HOME, so the title's `~` abbreviation is exercised rather than
         // assumed — it is the half that silently did nothing on Unix.
-        let home = PathBuf::from(std::env::var("HOME").expect("HOME"));
         let text = prompt_cycle_over_pty(&pwsh, &injection, b"false\r", Some(&home));
 
         for mark in ["133;A", "133;B", "133;C", FAILED_COMMAND_MARK] {
