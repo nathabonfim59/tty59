@@ -1384,7 +1384,7 @@ mod tests {
         );
     }
 
-    /// Ctrl+wheel zooms about the pointer with the default
+    /// Ctrl/Cmd+wheel zooms about the pointer with the default
     /// `mouse_zoom_modifier: None` — the platform modifier always zooms
     /// inside the viewer — and what is painted afterwards is the zoomed
     /// diagram with the point under the pointer still under it. Wheel up
@@ -1399,7 +1399,7 @@ mod tests {
         let ctrl_wheel = |dy: f32| gpui::ScrollWheelEvent {
             position: at,
             delta: gpui::ScrollDelta::Lines(gpui::point(0., dy)),
-            modifiers: gpui::Modifiers::control(),
+            modifiers: gpui::Modifiers::secondary_key(),
             touch_phase: gpui::TouchPhase::Moved,
         };
         vcx.simulate_event(ctrl_wheel(3.));

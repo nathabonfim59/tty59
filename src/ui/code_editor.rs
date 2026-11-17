@@ -5254,7 +5254,7 @@ mod zoom_gpui_tests {
 
     /// The full-screen diagram viewer in the real editor tree, where hit
     /// testing, the wheel-zoom wrapper and the scrolling preview all sit
-    /// around it: Ctrl+wheel zooms the *diagram* (and not the text, whatever
+    /// around it: Ctrl/Cmd+wheel zooms the *diagram* (and not the text, whatever
     /// `mouse_zoom_modifier` says), a middle drag and a plain wheel pan it (a
     /// left drag does not), and
     /// every change is in the frame the event asked for — nothing here
@@ -5296,13 +5296,13 @@ mod zoom_gpui_tests {
             assert!((got - want).abs() < 0.6, "{what}: got {got}, want {want}");
         };
 
-        // Ctrl+wheel over the diagram: the diagram grows about the pointer.
+        // Ctrl/Cmd+wheel over the diagram: the diagram grows about the pointer.
         let fitted = painted(&mut vcx);
         let at = fitted.center();
         vcx.simulate_event(gpui::ScrollWheelEvent {
             position: at,
             delta: gpui::ScrollDelta::Lines(gpui::point(0., 3.)),
-            modifiers: gpui::Modifiers::control(),
+            modifiers: gpui::Modifiers::secondary_key(),
             touch_phase: gpui::TouchPhase::Moved,
         });
         vcx.run_until_parked();
