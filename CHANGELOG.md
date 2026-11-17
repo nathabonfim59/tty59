@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.17.0] - 2026-11-17
+
+### Changed
+
+- **macOS and Windows builds are back**: this release carries the same
+  changes as 26.16.0, built and packaged for every platform. macOS and
+  Windows users who stayed on 26.11.0 can update to this one.
+
 ## [26.16.0] - 2026-11-17
 
 ### Added
