@@ -1,5 +1,6 @@
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, SharedString, Window, div, prelude::*, px, rgb,
+    AnyElement, Context, Focusable as _, FontWeight, MouseButton, SharedString, Window, div,
+    prelude::*, px, rems, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -66,12 +67,28 @@ pub(super) struct RenderedReaderHeader {
     pub title: String,
 }
 
+/// The key and localized string handed to the footer's text child in one
+/// frame; `None` when that frame's footer carried no text.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct RenderedHelp {
+    pub key: String,
+    pub text: String,
+}
+
 #[cfg(test)]
 std::thread_local! {
     static RENDERED_ROWS: std::cell::RefCell<Vec<RenderedAgentRow>> =
         const { std::cell::RefCell::new(Vec::new()) };
     static RENDERED_HEADERS: std::cell::RefCell<Vec<RenderedReaderHeader>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    static RENDERED_HELP: std::cell::RefCell<Vec<Option<RenderedHelp>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub(super) fn take_rendered_help() -> Vec<Option<RenderedHelp>> {
+    RENDERED_HELP.with(|help| std::mem::take(&mut *help.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -288,6 +305,18 @@ impl Tty59App {
                         .pl_0(),
                 ),
             );
+        #[cfg(test)]
+        let search = search.debug_selector(|| "agent-search-well".into());
+        // The keyboard ring of the existing input around the whole well: the shared ring, inside the well's own 7px corners, on the
+        // input's own focus handle (no new handle, no render-time repair).
+        let search = crate::ui::theme::FocusRing::new(
+            &self.agent_vision.input.focus_handle(cx),
+            crate::ui::theme::RingPlacement::Inside,
+            px(7.),
+            search,
+        );
+        #[cfg(test)]
+        let search = search.tagged("agent-search-ring");
         v_flex()
             .w(px(width))
             .h_full()
@@ -561,10 +590,13 @@ impl Tty59App {
 
     pub(in crate::ui) fn agent_vision_body(
         &self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let panes = self.agent_vision.filtered(cx);
+        // Whether the reader terminal really holds the window's focus, read
+        // from the one lookup the Inbox reader already makes this frame.
+        let mut terminal_has_focus = false;
         let body = if self.agent_vision.state.mode() == ViewMode::Kanban {
             let board = self.agent_vision.state.kanban_columns(&panes);
             let selected_column = panes
@@ -657,6 +689,11 @@ impl Tty59App {
                 L10nKey::VisionEmpty
             };
             let other_count = rows.other.len();
+            let reader_terminal =
+                selected.and_then(|pane| self.agent_terminal(pane.location.key, cx));
+            terminal_has_focus = reader_terminal
+                .as_ref()
+                .is_some_and(|terminal| terminal.focus_handle(cx).contains_focused(window, cx));
             let list = v_flex()
                 .w(px(320.))
                 .min_w(px(240.))
@@ -815,7 +852,7 @@ impl Tty59App {
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_hidden()
-                                .when_some(self.agent_terminal(key, cx), |reader, terminal| {
+                                .when_some(reader_terminal, |reader, terminal| {
                                     reader.child(terminal)
                                 }),
                         )
@@ -838,6 +875,19 @@ impl Tty59App {
                 .child(reader)
                 .into_any_element()
         };
+        // The zone is the window's real focus, never the `state.focus` mirror,
+        // which a click or a plain `window.focus` leaves stale.
+        let help = if terminal_has_focus {
+            Some(L10nKey::VisionTerminalHelp)
+        } else if self.agent_vision.list_focus.is_focused(window) {
+            Some(if self.agent_vision.state.mode() == ViewMode::Kanban {
+                L10nKey::VisionBoardHelp
+            } else {
+                L10nKey::VisionListHelp
+            })
+        } else {
+            None
+        };
         v_flex()
             .size_full()
             .min_h_0()
@@ -847,8 +897,59 @@ impl Tty59App {
                 view.key_context("AgentVisionList")
             })
             .child(div().flex_1().min_h_0().min_w_0().child(body))
+            .child(agent_help_footer(help, cx))
             .into_any_element()
     }
+}
+
+/// The status-bar height of the design system: the footer never gets shorter,
+/// and grows with the font because its text and padding are not fixed pixels.
+const HELP_FOOTER_MIN_H: f32 = 26.;
+
+/// The keyboard help strip under the list/board and the reader. The strip is
+/// always built so the layout never jumps; `help` is `None` while focus is
+/// outside the list and the reader (search, rename, a dialog), where no help
+/// text would be true. 12/16rem muted text on the workspace fill.
+fn agent_help_footer(help: Option<L10nKey>, cx: &gpui::App) -> AnyElement {
+    // The one localized string this frame: the value the child is built from
+    // is the value the test recorder captures.
+    let label = help.map(|key| (key, t(key)));
+    #[cfg(test)]
+    RENDERED_HELP.with(|rendered| {
+        rendered
+            .borrow_mut()
+            .push(label.map(|(key, text)| RenderedHelp {
+                key: format!("{key:?}"),
+                text: text.to_string(),
+            }));
+    });
+    let strip = h_flex()
+        .flex_none()
+        .w_full()
+        .min_h(px(HELP_FOOTER_MIN_H))
+        .px_3()
+        .py_1()
+        .items_center()
+        .overflow_hidden();
+    #[cfg(test)]
+    let strip = strip.debug_selector(|| "agent-help-footer".into());
+    strip
+        .children(label.map(|(key, text)| {
+            let line = div()
+                .min_w_0()
+                .truncate()
+                .text_size(rems(0.75))
+                .line_height(rems(1.))
+                .text_color(cx.theme().muted_foreground)
+                .child(text);
+            // The key names the selector only under test.
+            #[cfg(not(test))]
+            let _ = key;
+            #[cfg(test)]
+            let line = line.debug_selector(move || format!("agent-help-{key:?}"));
+            line
+        }))
+        .into_any_element()
 }
 
 #[cfg(test)]

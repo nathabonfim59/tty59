@@ -209,6 +209,10 @@ pub struct ChromeInk {
     /// to `CHROME_SMALL_META_TARGET` on the panel fill, the window fill and the selected tab pill
     /// (`Neutrals::secondary`) together, so one colour serves the selected and the unselected tab.
     pub tab_count: u32,
+    /// A failed forward's error line (`META` size, regular weight) on the sidebar's resting
+    /// fill and on its hover fill, which the keyboard-focused row shares: the semantic danger
+    /// ink, held to `CHROME_SMALL_META_TARGET` where it had to move.
+    pub forward_error_ink: u32,
 }
 
 /// Headroom by size, derived once in `apply_theme` and never at render time. Text painted at 12px or
@@ -861,6 +865,73 @@ impl Theme {
         }
     }
 
+    /// Every solid fill the 2px gap around a focused toolkit control can show:
+    /// the window, sidebar, rail and popover surfaces and each of their rungs
+    /// (the sets `Resolved` already caches), plus the two neutral wells
+    /// (`secondary`, `muted`: the tab chip's backing, the SFTP edit well).
+    ///
+    /// The one place the ring's union is written down, so the derivation and
+    /// the sweeps read the same fills. The SCM commit frame's committable
+    /// (inverted, foreground-filled) state is not in it: there both halves
+    /// draw an inset ring in the panel colour and no outer ring. Its
+    /// not-committable fill (`field_fill`, a blend of the sidebar's base and
+    /// hover rungs) keeps the ordinary outer ring, and is covered by the two
+    /// rungs it lies between, which are in the union.
+    pub(crate) fn focus_ring_fills(&self, r: &Resolved) -> Vec<u32> {
+        let mut fills: Vec<u32> = [&r.resting, &r.every_rung, &r.panel, &r.popover_rows]
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        fills.extend([r.m.secondary, r.m.muted]);
+        fills.sort_unstable();
+        fills.dedup();
+        fills
+    }
+
+    /// The fills the ring can touch: every fill of [`Self::focus_ring_fills`],
+    /// and the field wash painted over each of them.
+    ///
+    /// The ring is also the 1px focused edge of a toolkit field, which has the
+    /// surface outside it and the field's own fill (`wash`, the installed
+    /// `input_background()`, translucent in a dark theme) inside it. That inside
+    /// fill is the wash composited over whichever surface the field sits on.
+    /// The wash is passed in as the toolkit returned it, never rebuilt here.
+    pub(crate) fn focus_ring_field_fills(&self, r: &Resolved, wash: Hsla) -> Vec<u32> {
+        let mut fills = self.focus_ring_fills(r);
+        let inside: Vec<u32> = fills
+            .iter()
+            .map(|&surface| over_encoded(wash, surface))
+            .collect();
+        fills.extend(inside);
+        fills.sort_unstable();
+        fills.dedup();
+        fills
+    }
+
+    /// The keyboard focus ring's ink: opaque, and at least `ACCENT_FLOOR` (3:1,
+    /// the mark floor) on every fill of [`Self::focus_ring_field_fills`]. The
+    /// ring floats off a control, or is a field's edge, so the surface behind
+    /// it and the field fill inside it are the pairs that count. The seed is
+    /// the accent `ring` has always been; `legible_across` returns it untouched
+    /// wherever it already clears the floor on all of them. Derived once per
+    /// theme change, in `apply_theme`, with the wash it has just installed.
+    pub(crate) fn focus_ring_ink_from(&self, r: &Resolved, wash: Hsla) -> u32 {
+        legible_across(
+            &self.focus_ring_field_fills(r, wash),
+            r.m.accent,
+            ACCENT_FLOOR,
+        )
+    }
+
+    /// The ink the ring had before the field fills joined the union: the same
+    /// derivation over [`Self::focus_ring_fills`] alone. Kept for the old/new
+    /// report in the tests.
+    #[cfg(test)]
+    pub(crate) fn focus_ring_ink_outside_only(&self, r: &Resolved) -> u32 {
+        legible_across(&self.focus_ring_fills(r), r.m.accent, ACCENT_FLOOR)
+    }
+
     fn ansi_seed(&self, index: usize) -> u32 {
         let (r, g, b) = self.ansi16[index];
         (r as u32) << 16 | (g as u32) << 8 | b as u32
@@ -1191,6 +1262,11 @@ impl Theme {
             tab_count: legible_across(
                 &[m.background, m.sidebar, m.secondary],
                 m.muted_foreground,
+                CHROME_SMALL_META_TARGET,
+            ),
+            forward_error_ink: legible_across(
+                &[sf.sidebar.base, sf.sidebar.hover],
+                self.semantics_with(m).danger.ink,
                 CHROME_SMALL_META_TARGET,
             ),
         }
@@ -1856,6 +1932,22 @@ fn legible_across(fills: &[u32], seed: u32, floor: f32) -> u32 {
             true => ink,
             false => bisect_contrast(ink, away, fill, target),
         })
+}
+
+/// `wash` painted over the opaque `surface`, the way the renderer composites it: a
+/// straight "over" on the sRGB-ENCODED channels (the surface format is not sRGB, so
+/// there is no linearisation), `wash.rgb * wash.a + surface * (1 - wash.a)`, rounded
+/// to 8 bits. The wash is read through `gpui::Rgba::from`, the conversion `hsla_to_rgb`
+/// itself uses, so its colour and alpha are taken exactly as the toolkit returned them.
+fn over_encoded(wash: Hsla, surface: u32) -> u32 {
+    let w = gpui::Rgba::from(wash);
+    let channel = |wash_channel: f32, shift: u32| -> u32 {
+        let under = ((surface >> shift) & 0xff) as f32 / 255.0;
+        ((wash_channel * w.a + under * (1.0 - w.a)) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u32
+    };
+    channel(w.r, 16) << 16 | channel(w.g, 8) << 8 | channel(w.b, 0)
 }
 
 fn legible_accent(bg: u32, accent: u32) -> u32 {
@@ -4071,6 +4163,12 @@ ansi:
         );
         add("chrome panel_title", chrome.panel_title, &panel, AA_TEXT);
         add(
+            "chrome forward_error_ink",
+            chrome.forward_error_ink,
+            &[s.sidebar.base, s.sidebar.hover],
+            AA_TEXT,
+        );
+        add(
             "chrome port_chip_ink",
             chrome.port_chip_ink,
             &r.port_chip,
@@ -4875,6 +4973,7 @@ ansi:
             "chrome grip_idle",
             "chrome search_title",
             "chrome panel_title",
+            "chrome forward_error_ink",
             "chrome port_chip_ink",
             "chrome port_chip_hover_ink",
             "title window",
@@ -5508,6 +5607,13 @@ ansi:
                     &[m.background, m.sidebar, m.secondary][..],
                     AA_CHROME_SMALL_META,
                 ),
+                (
+                    "forward_error_ink",
+                    chrome.forward_error_ink,
+                    sem.danger.ink,
+                    &[s.sidebar.base, s.sidebar.hover][..],
+                    AA_CHROME_SMALL_META,
+                ),
             ]
             .into_iter()
             .map(|(what, color, seed, fills, floor)| {
@@ -5605,5 +5711,67 @@ ansi:
             tab_count_unreachable.last().map_or("-", String::as_str)
         );
         assert_no_misses("seeds kept", misses);
+    }
+
+    /// The failed-forward error line's cached ink, in every built-in and generated theme:
+    /// text at the 4.5:1 floor on the sidebar's resting fill and on its hover fill (the
+    /// keyboard-focused row paints the hover rung too), the semantic danger ink kept
+    /// where it already holds the small-text headroom target on both, and otherwise
+    /// walked to that target wherever a single pole ink can reach it on both. The target
+    /// is the shared constant, so raising it moves this with the derivation.
+    #[test]
+    fn forward_error_ink_holds_the_text_floor_on_the_rows_the_line_is_painted_on() {
+        let mut misses = Vec::new();
+        let mut moved = 0;
+        for t in sweep_themes() {
+            let r = t.resolve();
+            let sidebar = r.sf.sidebar;
+            let seed = t.semantics_with(&r.m).danger.ink;
+            let ink = t.chrome_ink_from(&r).forward_error_ink;
+            let fills = [
+                ("resting", sidebar.base),
+                ("hover and focus", sidebar.hover),
+            ];
+            for (state, fill) in fills {
+                if contrast(ink, fill) < AA_TEXT {
+                    misses.push(format!(
+                        "{}: error text {ink:#08x} on the {state} fill {fill:#08x} is {:.2}:1 (floor {AA_TEXT})",
+                        t.id,
+                        contrast(ink, fill)
+                    ));
+                }
+            }
+            let seed_holds = fills
+                .iter()
+                .all(|&(_, fill)| contrast(seed, fill) >= CHROME_SMALL_META_TARGET);
+            if seed_holds {
+                if ink != seed {
+                    misses.push(format!(
+                        "{}: error ink moved off a danger seed {seed:#08x} that already holds the target",
+                        t.id
+                    ));
+                }
+                continue;
+            }
+            moved += 1;
+            let reachable = [0xffffff, 0x000000].iter().any(|&pole| {
+                fills
+                    .iter()
+                    .all(|&(_, fill)| contrast(pole, fill) >= CHROME_SMALL_META_TARGET)
+            });
+            if reachable {
+                for (state, fill) in fills {
+                    if contrast(ink, fill) < CHROME_SMALL_META_TARGET {
+                        misses.push(format!(
+                            "{}: corrected error ink {ink:#08x} is {:.2}:1 on the {state} fill {fill:#08x}, under the {CHROME_SMALL_META_TARGET} target a pole ink reaches",
+                            t.id,
+                            contrast(ink, fill)
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(moved > 0, "the sweep never exercised a correction");
+        assert_no_misses("forward error ink", misses);
     }
 }

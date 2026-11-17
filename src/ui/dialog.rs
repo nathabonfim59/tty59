@@ -9,9 +9,11 @@
 //! semibold title there, the accent-filled primary everywhere. One place now,
 //! so two sheets on screen at once cannot disagree about what a dialog is.
 
+use std::rc::Rc;
+
 use gpui::{
-    App, ClickEvent, Div, ElementId, Hsla, SharedString, Stateful, Window, div, prelude::*, px,
-    rems,
+    AnyElement, App, ClickEvent, Div, ElementId, FocusHandle, Hsla, KeyDownEvent, SharedString,
+    Stateful, Window, div, prelude::*, px, rems,
 };
 use gpui_component::input::Input;
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
@@ -503,6 +505,101 @@ pub(crate) fn bounded_text_tooltip(
     .max_w(px(limit))
     .whitespace_normal()
     .build(window, cx)
+}
+
+/// What a footer button is to the keyboard: whether it is enabled, its own
+/// stable handle, and the handles of the enabled buttons of the same row in
+/// visual order, which the arrow keys move along. The handles are owned by
+/// the caller's state, never made while drawing; `enabled` is read off the
+/// same value that paints the button and gates its click, focus and ring.
+pub(crate) struct ButtonFocus<'a> {
+    pub enabled: bool,
+    pub handle: &'a FocusHandle,
+    pub row: &'a [FocusHandle],
+}
+
+/// A [`button`] a keyboard can reach: the same paint, and the same pointer
+/// path, but an enabled one is a tab stop on `focus.handle`, answers a fresh
+/// Enter or Space press by running `on_activate` once, moves focus along the
+/// row on Left and Right (stopping at the ends), and wears the shared focus
+/// ring while focused.
+///
+/// A disabled one is [`button`]'s inert button as it was: no handle, no key
+/// listener, no ring, and so no stop in the Tab order.
+///
+/// The press is taken on key-down, and only a first, unmodified one: a
+/// repeat of a held key does nothing, and the toolkit's own keyboard click,
+/// which fires on key-*up*, is dropped. The release of a key that was
+/// already down when a sheet appeared cannot then answer it.
+pub(crate) fn focus_button(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    tone: Tone,
+    rungs: Surface,
+    focus: &ButtonFocus<'_>,
+    cx: &App,
+    on_activate: impl Fn(&mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let enabled = focus.enabled;
+    let id: ElementId = id.into();
+    // Tests find the button by its id, disabled or not: `dialog-button-<id>`.
+    #[cfg(test)]
+    let selector = format!("dialog-button-{id}");
+    let on_activate = Rc::new(on_activate);
+    let on_click = {
+        let on_activate = on_activate.clone();
+        move |ev: &ClickEvent, window: &mut Window, cx: &mut App| {
+            if !ev.is_keyboard() {
+                on_activate(window, cx);
+            }
+        }
+    };
+    let el = button(id, text, tone, enabled, rungs, cx, on_click);
+    #[cfg(test)]
+    let el = gpui::InteractiveElement::debug_selector(el, move || selector);
+    if !enabled {
+        return el.into_any_element();
+    }
+    let own = focus.handle.clone();
+    let row = focus.row.to_vec();
+    let el = el
+        .track_focus(&focus.handle.clone().tab_stop(true))
+        .on_key_down({
+            let own = own.clone();
+            move |ev: &KeyDownEvent, window: &mut Window, cx: &mut App| {
+                if ev.keystroke.modifiers.modified() {
+                    return;
+                }
+                match ev.keystroke.key.as_str() {
+                    "enter" | "space" => {
+                        cx.stop_propagation();
+                        if !ev.is_held {
+                            on_activate(window, cx);
+                        }
+                    }
+                    key @ ("left" | "right") => {
+                        cx.stop_propagation();
+                        if let Some(at) = row.iter().position(|h| *h == own) {
+                            let to = match key {
+                                "left" => at.saturating_sub(1),
+                                _ => (at + 1).min(row.len() - 1),
+                            };
+                            if to != at {
+                                window.focus(&row[to], cx);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    crate::ui::theme::FocusRing::new(
+        &own,
+        crate::ui::theme::RingPlacement::Outside,
+        px(BUTTON_RADIUS),
+        el,
+    )
+    .into_any_element()
 }
 
 /// What the real-render contrast tests of the switcher, Search Everywhere, the

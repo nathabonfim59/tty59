@@ -6,7 +6,11 @@ use super::kit::{BtnKind, Tk, fs};
 use super::*;
 
 impl Tty59App {
-    pub(crate) fn render_settings_keybindings(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_settings_keybindings(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tk = Tk::of(cx);
         let Some(s) = self.active_settings() else {
             return div().into_any_element();
@@ -61,7 +65,7 @@ impl Tty59App {
                 .child(div().flex_1())
                 .when(changed > 0, |r| {
                     r.child(
-                        kit::button(
+                        self.page_button(
                             "kb-restore-all",
                             t_plural(L10nKey::SettingsRestoreChanged, changed, &[]),
                             BtnKind::Link,
@@ -224,13 +228,29 @@ impl Tty59App {
                 } else {
                     vec![kit::ring(tk.k15, 0.5, true)]
                 };
-                let focus_ring = hover_ring.clone();
                 let record_action = action.clone();
+                // The cell's own focus handle, kept by the framework for as
+                // long as the cell is drawn under this name, so a cell that
+                // moves in the list keeps its focus and one that is gone takes
+                // it away. Never made per frame.
+                //
+                // The same handle also brings the cell into view when the
+                // keyboard reaches it (the shared reveal, outside ring), in the
+                // page's scroller; `reveal_measure` is its pinned measuring
+                // child, added to the cell below.
+                let (focus, reveal_measure) = kit::armed_focus(
+                    &gpui::ElementId::from(SharedString::from(format!("kb-focus-{action}"))),
+                    self.settings_scroll().into_iter().collect(),
+                    true,
+                    window,
+                    cx,
+                );
+                let cell_radius = px(6.);
                 let keys_button = h_flex()
                     .id(SharedString::from(format!("kb-{action}")))
                     // Tab reaches the cell and Enter or Space starts recording
                     // through the click handler below, as a click does.
-                    .tab_index(0)
+                    .track_focus(&focus)
                     .role(gpui::Role::Button)
                     .aria_label(a11y_name)
                     .h(px(26.))
@@ -240,8 +260,11 @@ impl Tty59App {
                     .gap(px(5.))
                     .items_center()
                     .justify_end()
-                    .rounded(px(6.))
+                    .rounded(cell_radius)
                     .cursor_pointer()
+                    // Positioned (offsets none): the reveal's measuring child
+                    // lies over the cell's own box.
+                    .relative()
                     .when(is_recording, |b| b.bg(tk.page))
                     .shadow(ring)
                     // An unassigned cell is empty until the pointer or the
@@ -252,11 +275,10 @@ impl Tty59App {
                         let b = b.shadow(hover_ring.clone());
                         if unassigned { b.text_color(tk.sub) } else { b }
                     })
-                    // A2 handoff: replace this focus indicator with the app-wide ring.
-                    .focus_visible(move |b| {
-                        let b = b.shadow(focus_ring.clone());
-                        if unassigned { b.text_color(tk.sub) } else { b }
-                    })
+                    // The ring itself is the shared one drawn around the cell
+                    // below; keyboard focus still reveals an unassigned
+                    // cell's "Add".
+                    .focus_visible(move |b| if unassigned { b.text_color(tk.sub) } else { b })
                     .when(is_recording && shown.is_empty(), |b| {
                         b.child(
                             div()
@@ -287,6 +309,7 @@ impl Tty59App {
                         };
                         b.child(add)
                     })
+                    .children(reveal_measure)
                     .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
                         let already = this
                             .active_settings()
@@ -315,6 +338,17 @@ impl Tty59App {
                     let selector = format!("kb-{action}");
                     keys_button.debug_selector(move || selector)
                 };
+                // The shared keyboard ring: outside the cell, by the installed
+                // gap, only while the keyboard (not a click) holds focus.
+                let keys_button = crate::ui::theme::FocusRing::new(
+                    &focus,
+                    crate::ui::theme::RingPlacement::Outside,
+                    cell_radius,
+                    keys_button,
+                )
+                .keyboard_only(true);
+                #[cfg(test)]
+                let keys_button = keys_button.tagged(format!("kb-ring-{action}"));
                 let reset_action = action.clone();
                 let row = h_flex()
                     .h(px(34.))
@@ -332,18 +366,37 @@ impl Tty59App {
                             .items_center()
                             .child(div().min_w_0().truncate().child(label))
                             .when(modified, |r| {
+                                let reset = div()
+                                    .id(SharedString::from(format!("reset-{action}")))
+                                    // Positioned (offsets none): the stop's ring
+                                    // and measuring layers lie over the link.
+                                    .relative()
+                                    .flex_shrink_0()
+                                    .text_size(fs(11.5))
+                                    .text_color(tk.sub)
+                                    .cursor_pointer()
+                                    .hover(move |s| s.text_color(tk.fg))
+                                    .child(t(L10nKey::Reset))
+                                    .on_click(cx.listener(move |this, _, _w, cx| {
+                                        this.reset_keybinding(reset_action.clone(), cx)
+                                    }));
+                                // Neutral test hook: lets a test find and click the link.
+                                #[cfg(test)]
+                                let reset = {
+                                    let selector = format!("reset-{action}");
+                                    reset.debug_selector(move || selector)
+                                };
+                                // The link is a shared stop: Tab reaches it, Enter or
+                                // Space reset like a click, and it is brought into view
+                                // in the page's scroller. It removes itself when the
+                                // override goes; the keyed handle goes with it.
                                 r.child(
-                                    div()
-                                        .id(SharedString::from(format!("reset-{action}")))
-                                        .flex_shrink_0()
-                                        .text_size(fs(11.5))
-                                        .text_color(tk.sub)
-                                        .cursor_pointer()
-                                        .hover(move |s| s.text_color(tk.fg))
-                                        .child(t(L10nKey::Reset))
-                                        .on_click(cx.listener(move |this, _, _w, cx| {
-                                            this.reset_keybinding(reset_action.clone(), cx)
-                                        })),
+                                    kit::stop(
+                                        SharedString::from(format!("reset-{action}")),
+                                        px(4.),
+                                        reset,
+                                    )
+                                    .in_scroll(self.settings_scroll()),
                                 )
                             }),
                     )
@@ -378,7 +431,7 @@ impl Tty59App {
                             &[("keys", &keys), ("action", &other)],
                         )))
                         .child(
-                            kit::button(
+                            self.page_button(
                                 "kb-conflict-replace",
                                 t(L10nKey::SettingsReplace),
                                 BtnKind::Primary,
@@ -389,7 +442,7 @@ impl Tty59App {
                             )),
                         )
                         .child(
-                            kit::button(
+                            self.page_button(
                                 "kb-conflict-cancel",
                                 t(L10nKey::Cancel),
                                 BtnKind::Secondary,
@@ -947,5 +1000,448 @@ mod tests {
             );
         }
         crate::ui::i18n::set_locale("en");
+    }
+
+    // ---- F20: the shared focus ring around a focused cell ------------------
+    //
+    // Selector contract (what the ring implementation must publish): the ring
+    // of the cell for action `A` is `kb-ring-A`, the wrapper around the cell is
+    // `kb-ring-A-frame`, and the cell keeps `kb-A`. Nothing here names a ring
+    // type or a builder, so these tests compile against a page that draws no
+    // ring at all.
+    //
+    // What each test is, honestly:
+    //   * R1, R2, R3, R4, R7a, R7b assert a ring that does not exist yet. Each
+    //     runs its live setup controls first (page mounted whole, the cell
+    //     really focused through the keyboard, recording state as expected),
+    //     and only then the ring claim, so they fail on the missing ring and on
+    //     nothing before it.
+    //   * R5 and R6 are VACUOUS until the ring exists: "no ring" is trivially
+    //     true of a page with none. They are green negative controls that gain
+    //     meaning only paired with R1 (a ring appears when it should) and with
+    //     the mutation that removes the keyboard-only rule.
+    //   * Nothing here proves the ring's colour: its bounds are not its paint.
+
+    /// `(action, cell selector, ring selector)` for every action the page
+    /// lists. The selectors are leaked because `debug_bounds` only takes
+    /// `&'static str`; this is test code and the page has a few hundred.
+    fn ring_selectors(vcx: &mut VisualTestContext) -> Vec<(String, &'static str, &'static str)> {
+        let actions: Vec<String> = vcx.update(|_, cx| {
+            crate::ui::keymap::effective_chords(cx)
+                .into_iter()
+                .map(|(action, _)| action)
+                .collect()
+        });
+        actions
+            .into_iter()
+            .map(|action| {
+                let cell: &'static str = Box::leak(format!("kb-{action}").into_boxed_str());
+                let ring: &'static str = Box::leak(format!("kb-ring-{action}").into_boxed_str());
+                (action, cell, ring)
+            })
+            .collect()
+    }
+
+    type Selectors = [(String, &'static str, &'static str)];
+
+    /// The actions whose ring is mounted right now.
+    fn mounted_rings(vcx: &mut VisualTestContext, selectors: &Selectors) -> Vec<String> {
+        selectors
+            .iter()
+            .filter(|(_, _, ring)| vcx.debug_bounds(*ring).is_some())
+            .map(|(action, _, _)| action.clone())
+            .collect()
+    }
+
+    /// Every cell that is mounted, with where it is.
+    fn mounted_cells(
+        vcx: &mut VisualTestContext,
+        selectors: &Selectors,
+    ) -> Vec<(String, gpui::Bounds<gpui::Pixels>)> {
+        selectors
+            .iter()
+            .filter_map(|(action, cell, _)| vcx.debug_bounds(*cell).map(|b| (action.clone(), b)))
+            .collect()
+    }
+
+    fn focused_handle(vcx: &mut VisualTestContext) -> Option<gpui::FocusHandle> {
+        vcx.update(|window, cx| window.focused(cx))
+    }
+
+    /// Same box within half a pixel.
+    fn same_box(a: gpui::Bounds<gpui::Pixels>, b: gpui::Bounds<gpui::Pixels>) -> bool {
+        let near = |x: gpui::Pixels, y: gpui::Pixels| (x - y).abs() <= px(0.5);
+        near(a.origin.x, b.origin.x)
+            && near(a.origin.y, b.origin.y)
+            && near(a.size.width, b.size.width)
+            && near(a.size.height, b.size.height)
+    }
+
+    /// Focus on something that is not a cell: the page's own, mounted
+    /// shortcut filter. The app puts focus back somewhere when a window is
+    /// blurred, so "nothing focused" is not a state a test can hold; a real
+    /// field that keeps focus is. The field's real focus handle is returned
+    /// and proven to hold focus, so a cell holding it too is impossible.
+    fn focus_away_from_the_cells(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+    ) -> gpui::FocusHandle {
+        use gpui::Focusable as _;
+        let away = app.update_in(vcx, |app, window, cx| {
+            let field = app
+                .active_settings()
+                .expect("the settings page is open")
+                .shortcut_search
+                .clone();
+            field.update(cx, |field, cx| field.focus(window, cx));
+            field.read(cx).focus_handle(cx)
+        });
+        settle(vcx);
+        assert!(
+            vcx.update(|window, _| away.is_focused(window)),
+            "setup: the shortcut filter holds focus"
+        );
+        away
+    }
+
+    /// `cell` grown by `by` on every side.
+    fn grown(cell: gpui::Bounds<gpui::Pixels>, by: gpui::Pixels) -> gpui::Bounds<gpui::Pixels> {
+        gpui::Bounds {
+            origin: gpui::point(cell.origin.x - by, cell.origin.y - by),
+            size: gpui::size(cell.size.width + by * 2.0, cell.size.height + by * 2.0),
+        }
+    }
+
+    /// The page with every cell mounted, New Tab's cell focused through the
+    /// keyboard and nothing recording. Every claim a test makes about a ring
+    /// rests on the controls here, and none of them mentions a ring:
+    /// * the enumeration covers every action, so a ring count is a count over
+    ///   the whole page;
+    /// * a click focused the New Tab cell (recording started) and Esc ended it
+    ///   with a real key, so the last input was the keyboard;
+    /// * Enter, a real key down and up, records for New Tab, which can only be
+    ///   true if that cell holds focus; a second Esc ends it again.
+    fn keyboard_focused_new_tab(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        Vec<(String, &'static str, &'static str)>,
+    ) {
+        let (app, mut vcx) = page_with_new_tab_unassigned(cx);
+        let selectors = ring_selectors(&mut vcx);
+        assert!(selectors.len() > 10, "setup: the page lists many actions");
+        assert_eq!(
+            mounted_cells(&mut vcx, &selectors).len(),
+            selectors.len(),
+            "setup: every action's cell is mounted, so a count of rings is a count over the page"
+        );
+        click_new_tab(&mut vcx);
+        assert_eq!(
+            recording(&app, &mut vcx),
+            Some(("NewTab".to_string(), Vec::new())),
+            "setup: the click records for New Tab"
+        );
+        press(&mut vcx, "escape");
+        settle(&mut vcx);
+        assert_eq!(recording(&app, &mut vcx), None, "setup: Esc cancels");
+        press(&mut vcx, "enter");
+        settle(&mut vcx);
+        assert_eq!(
+            recording(&app, &mut vcx),
+            Some(("NewTab".to_string(), Vec::new())),
+            "setup: Enter records for New Tab, so its cell holds focus"
+        );
+        press(&mut vcx, "escape");
+        settle(&mut vcx);
+        assert_eq!(recording(&app, &mut vcx), None, "setup: Esc cancels again");
+        assert!(
+            focused_handle(&mut vcx).is_some(),
+            "setup: the cell still holds focus"
+        );
+        (app, vcx, selectors)
+    }
+
+    /// R1: a cell focused from the keyboard draws the ring: right around the
+    /// cell, by the installed gap and the shared stroke, inside its 34px row,
+    /// and the only ring on the page. The gap is read from the installed theme,
+    /// not written here, so this holds for any gap the theme installs.
+    #[gpui::test]
+    fn a_keyboard_focused_cell_draws_the_shared_ring(cx: &mut TestAppContext) {
+        let (_app, mut vcx, selectors) = keyboard_focused_new_tab(cx);
+        let cell = new_tab_cell(&mut vcx);
+        let gap = vcx.update(|_, cx| {
+            use gpui_component::ActiveTheme as _;
+            cx.theme().focus_ring_offset()
+        });
+        let outset = gap + px(1.5);
+
+        let ring = vcx.debug_bounds("kb-ring-NewTab").expect(
+            "the keyboard-focused New Tab cell draws no ring: kb-ring-NewTab is not mounted",
+        );
+        assert!(
+            same_box(ring, grown(cell, outset)),
+            "the ring {ring:?} is the cell {cell:?} grown by the stroke and the gap ({outset:?})"
+        );
+        assert!(
+            ring.size.height <= px(34.),
+            "the ring ({:?} high) fits its 34px row",
+            ring.size.height
+        );
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            ["NewTab".to_string()],
+            "exactly one ring on the whole page"
+        );
+    }
+
+    /// R2: a real Tab carries the ring to the next cell and Shift-Tab brings it
+    /// back. The next cell is read off the mounted layout (the nearest cell
+    /// below), then confirmed against what really has focus by recording
+    /// through Enter, so neither the action catalogue's order nor a guess
+    /// stands in for the real tab order.
+    #[gpui::test]
+    fn a_real_tab_moves_the_ring_to_the_next_cell(cx: &mut TestAppContext) {
+        let (app, mut vcx, selectors) = keyboard_focused_new_tab(cx);
+        let here = new_tab_cell(&mut vcx);
+        let next = mounted_cells(&mut vcx, &selectors)
+            .into_iter()
+            .filter(|(action, b)| action != "NewTab" && b.origin.y > here.origin.y)
+            .min_by(|x, y| x.1.origin.y.as_f32().total_cmp(&y.1.origin.y.as_f32()))
+            .map(|(action, _)| action)
+            .expect("setup: a cell is mounted below New Tab");
+
+        let before = focused_handle(&mut vcx);
+        press(&mut vcx, "tab");
+        settle(&mut vcx);
+        let after = focused_handle(&mut vcx);
+        assert!(
+            before.is_some() && after.is_some() && before != after,
+            "setup: a real Tab key moved focus"
+        );
+        press(&mut vcx, "enter");
+        settle(&mut vcx);
+        assert_eq!(
+            recording(&app, &mut vcx).map(|(action, _)| action),
+            Some(next.clone()),
+            "setup: Tab landed on the cell mounted directly below New Tab"
+        );
+        press(&mut vcx, "escape");
+        settle(&mut vcx);
+        assert_eq!(recording(&app, &mut vcx), None, "setup: Esc cancels");
+
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            [next.clone()],
+            "the ring is on {next} and nowhere else after Tab"
+        );
+
+        press(&mut vcx, "shift-tab");
+        settle(&mut vcx);
+        assert!(
+            focused_handle(&mut vcx) == before,
+            "setup: Shift-Tab returned focus to the New Tab cell"
+        );
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            ["NewTab".to_string()],
+            "and the ring comes back with it"
+        );
+    }
+
+    /// R3: the ring goes when focus does.
+    #[gpui::test]
+    fn the_ring_goes_when_focus_leaves_the_cell(cx: &mut TestAppContext) {
+        let (app, mut vcx, selectors) = keyboard_focused_new_tab(cx);
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            ["NewTab".to_string()],
+            "the focused cell shows its ring first"
+        );
+        let cell_focus = focused_handle(&mut vcx);
+        let away = focus_away_from_the_cells(&app, &mut vcx);
+        assert!(
+            focused_handle(&mut vcx) != cell_focus,
+            "setup: focus left the New Tab cell"
+        );
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            Vec::<String>::new(),
+            "no ring once focus left the cell for the shortcut filter"
+        );
+        assert!(
+            vcx.update(|window, _| away.is_focused(window)),
+            "and the filter still holds it"
+        );
+    }
+
+    /// R4: the ring moves nothing. Every cell is where it was with focus on
+    /// the shortcut filter, and the wrapper that carries the ring is the
+    /// cell's own box.
+    #[gpui::test]
+    fn the_ring_moves_no_cell_and_its_wrapper_adds_no_size(cx: &mut TestAppContext) {
+        let (app, mut vcx) = page_with_new_tab_unassigned(cx);
+        let selectors = ring_selectors(&mut vcx);
+        let away = focus_away_from_the_cells(&app, &mut vcx);
+        let baseline = mounted_cells(&mut vcx, &selectors);
+        assert_eq!(
+            baseline.len(),
+            selectors.len(),
+            "setup: every cell is mounted in the baseline"
+        );
+
+        click_new_tab(&mut vcx);
+        press(&mut vcx, "escape");
+        settle(&mut vcx);
+        assert!(
+            focused_handle(&mut vcx).is_some() && !vcx.update(|window, _| away.is_focused(window)),
+            "setup: the New Tab cell holds focus, not the filter"
+        );
+        let focused = mounted_cells(&mut vcx, &selectors);
+        assert_eq!(focused.len(), baseline.len(), "setup: the same cells");
+        for ((action, was), (_, now)) in baseline.iter().zip(&focused) {
+            assert!(
+                same_box(*was, *now),
+                "setup: {action}'s cell was {was:?} and is {now:?} with New Tab focused"
+            );
+        }
+
+        let cell = new_tab_cell(&mut vcx);
+        let frame = vcx
+            .debug_bounds("kb-ring-NewTab-frame")
+            .expect("the cell has no ring wrapper: kb-ring-NewTab-frame is not mounted");
+        assert!(
+            same_box(frame, cell),
+            "the wrapper {frame:?} is the cell's own box {cell:?}"
+        );
+    }
+
+    /// R5, VACUOUS until the ring exists (see the note above): a click that
+    /// focuses a cell draws no ring. Its fixture is live (recording starts);
+    /// its meaning comes from R1 and from removing the keyboard-only rule.
+    #[gpui::test]
+    fn a_mouse_focused_cell_draws_no_ring(cx: &mut TestAppContext) {
+        let (app, mut vcx) = page_with_new_tab_unassigned(cx);
+        let selectors = ring_selectors(&mut vcx);
+        assert_eq!(
+            mounted_cells(&mut vcx, &selectors).len(),
+            selectors.len(),
+            "setup: every cell is mounted"
+        );
+        click_new_tab(&mut vcx);
+        assert_eq!(
+            recording(&app, &mut vcx),
+            Some(("NewTab".to_string(), Vec::new())),
+            "setup: the click focused the cell and started recording"
+        );
+        assert!(
+            focused_handle(&mut vcx).is_some(),
+            "setup: the cell holds focus"
+        );
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            Vec::<String>::new(),
+            "a mouse-focused cell draws no ring"
+        );
+    }
+
+    /// R6, VACUOUS until the ring exists: the pointer over a cell draws no
+    /// ring, only the hover shadow the cell already had.
+    #[gpui::test]
+    fn pointing_at_a_cell_draws_no_ring(cx: &mut TestAppContext) {
+        let (app, mut vcx) = page_with_new_tab_unassigned(cx);
+        let selectors = ring_selectors(&mut vcx);
+        let away = focus_away_from_the_cells(&app, &mut vcx);
+        let cell = new_tab_cell(&mut vcx);
+        vcx.simulate_mouse_move(cell.center(), None, Modifiers::default());
+        settle(&mut vcx);
+        assert_eq!(
+            vcx.debug_bounds("kb-NewTab"),
+            Some(cell),
+            "setup: the pointer is on a cell that stays where it was"
+        );
+        assert!(
+            vcx.update(|window, _| away.is_focused(window)),
+            "setup: hovering left focus on the shortcut filter"
+        );
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            Vec::<String>::new(),
+            "hover alone draws no ring"
+        );
+    }
+
+    /// R7a: a cell that is recording and holds keyboard focus keeps recording
+    /// its chord and still shows the ring.
+    #[gpui::test]
+    fn a_recording_cell_keeps_its_state_and_shows_the_ring(cx: &mut TestAppContext) {
+        let (app, mut vcx) = page_with_new_tab_unassigned(cx);
+        let selectors = ring_selectors(&mut vcx);
+        click_new_tab(&mut vcx);
+        press(&mut vcx, "enter");
+        settle(&mut vcx);
+        let chord = Some(("NewTab".to_string(), vec!["enter".to_string()]));
+        assert_eq!(
+            recording(&app, &mut vcx),
+            chord,
+            "setup: New Tab is recording and Enter went in as its chord"
+        );
+        assert!(
+            focused_handle(&mut vcx).is_some(),
+            "setup: the cell holds focus"
+        );
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            ["NewTab".to_string()],
+            "the recording, keyboard-focused cell shows the ring"
+        );
+        assert_eq!(
+            recording(&app, &mut vcx),
+            chord,
+            "and the ring left its recording alone"
+        );
+    }
+
+    /// R7b: a cell the page asks about (its chord is taken by another action)
+    /// keeps that question and still shows the ring while it holds keyboard
+    /// focus. The question is put to the page the way `commit_recording` does,
+    /// without the recording timer.
+    #[gpui::test]
+    fn a_conflicted_cell_keeps_its_question_and_shows_the_ring(cx: &mut TestAppContext) {
+        let (app, mut vcx, selectors) = keyboard_focused_new_tab(cx);
+        app.update_in(&mut vcx, |app, _, cx| {
+            if let Some(s) = app.active_settings_mut() {
+                s.kb_conflict = Some(crate::ui::settings::KeyConflict {
+                    action: "NewTab".to_string(),
+                    spec: "secondary-shift-f9".to_string(),
+                    other: "CloseActiveTab".to_string(),
+                });
+            }
+            cx.notify();
+        });
+        settle(&mut vcx);
+        let asked = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, _, _| {
+                app.active_settings()
+                    .and_then(|s| s.kb_conflict.as_ref())
+                    .map(|c| (c.action.clone(), c.other.clone()))
+            })
+        };
+        let question = Some(("NewTab".to_string(), "CloseActiveTab".to_string()));
+        assert_eq!(asked(&app, &mut vcx), question, "setup: the page is asking");
+        assert!(
+            focused_handle(&mut vcx).is_some() && vcx.debug_bounds("kb-NewTab").is_some(),
+            "setup: the cell is still mounted and focused"
+        );
+        assert_eq!(
+            mounted_rings(&mut vcx, &selectors),
+            ["NewTab".to_string()],
+            "the conflicted, keyboard-focused cell shows the ring"
+        );
+        assert_eq!(
+            asked(&app, &mut vcx),
+            question,
+            "and the ring left the question alone"
+        );
     }
 }

@@ -4,12 +4,29 @@
 
 use std::rc::Rc;
 
+use gpui::ClickEvent;
+
 use super::kit::{self, BtnKind, Tk, fs};
 use super::*;
 use crate::ui::app::{TITLE_BAR_BORDER, TitleStripRow as _};
 
 /// What a menu row does when picked.
 pub(crate) type PickFn = Rc<dyn Fn(&mut Tty59App, &mut Window, &mut Context<Tty59App>)>;
+
+/// The pickable rows of a plain menu: each Item's index among the entries and
+/// its pick, in order. Taken before the entries move into the panel.
+pub(crate) fn menu_items(entries: &[MenuEntry]) -> Rc<Vec<(usize, PickFn)>> {
+    Rc::new(
+        entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| match entry {
+                MenuEntry::Item { on_pick, .. } => Some((i, on_pick.clone())),
+                _ => None,
+            })
+            .collect(),
+    )
+}
 
 /// The settings page's own close tile, hung in the top band's right corner.
 const CLOSE_TILE: f32 = 26.;
@@ -120,12 +137,18 @@ impl Tty59App {
         };
         if s.menu.as_ref() == Some(&id) {
             s.menu = None;
-            let handle = s.focus_handle.clone();
-            window.focus(&handle, cx);
+            s.menu_keyboard = false;
+            s.menu_watch = None;
+            self.focus_after_menu(window, cx);
             cx.notify();
             return;
         }
         s.menu = Some(id);
+        // A menu opened here is the pointer's (or a search box's): its rows
+        // show no keyboard highlight until a key moves it, and whatever watched
+        // the menu it replaces is over (a plain menu's opener re-installs one).
+        s.menu_keyboard = false;
+        s.menu_watch = None;
         s.menu_hi = highlight;
         let query = s.menu_query.clone();
         let scroll = s.menu_scroll.clone();
@@ -147,10 +170,96 @@ impl Tty59App {
             return;
         };
         if s.menu.take().is_some() {
-            let handle = s.focus_handle.clone();
-            window.focus(&handle, cx);
+            s.menu_keyboard = false;
+            s.menu_watch = None;
+            self.focus_after_menu(window, cx);
             cx.notify();
         }
+    }
+
+    /// Watches the trigger that just opened the plain menu `id`: when it loses
+    /// focus (Tab, a click elsewhere, the trigger leaving the page, the window
+    /// deactivating) the menu closes, with no pick and no refocus. The watch is
+    /// held in the page state, not by the trigger, so it outlives the trigger.
+    /// The trigger is whatever holds focus now (a click and a key both leave it
+    /// focused); with nothing focused there is nothing to watch.
+    ///
+    /// Focus-out listeners run in the draw's focus phase, where a redraw cannot
+    /// be requested, so the listener only queues the close with `Window::defer`;
+    /// the close runs after the draw and notifies normally. The queued close
+    /// carries a weak reference to this open's token and does nothing unless
+    /// that is still the current watch.
+    pub(crate) fn watch_menu_focus(
+        &mut self,
+        id: &SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(trigger) = window.focused(cx) else {
+            return;
+        };
+        if !self.settings_menu_open(id) {
+            return;
+        }
+        let token = Rc::new(());
+        let queued = Rc::downgrade(&token);
+        let app = cx.weak_entity();
+        let id = id.clone();
+        let focus_out = window.on_focus_out(&trigger, cx, move |_, window, cx| {
+            let (app, id, queued) = (app.clone(), id.clone(), queued.clone());
+            window.defer(cx, move |_, cx| {
+                let _ = app.update(cx, |this, cx| this.close_menu_after_blur(&id, &queued, cx));
+            });
+        });
+        if let Some(s) = self.active_settings_mut() {
+            s.menu_watch = Some(MenuWatch {
+                token,
+                _focus_out: focus_out,
+            });
+        }
+    }
+
+    /// The queued close of [`Self::watch_menu_focus`]: only for the open it was
+    /// queued by (the weak token is still the current watch's) and only while
+    /// that menu is still open. Closes without touching focus.
+    pub(crate) fn close_menu_after_blur(
+        &mut self,
+        id: &SharedString,
+        queued: &std::rc::Weak<()>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(s) = self.active_settings_mut() else {
+            return;
+        };
+        let current = s
+            .menu_watch
+            .as_ref()
+            .is_some_and(|watch| std::rc::Weak::ptr_eq(queued, &Rc::downgrade(&watch.token)));
+        if !current || s.menu.as_ref() != Some(id) {
+            return;
+        }
+        s.menu = None;
+        s.menu_keyboard = false;
+        s.menu_watch = None;
+        cx.notify();
+    }
+
+    /// Where the keyboard goes when a menu closes. The page root takes it,
+    /// unless focus already sits on a stop of its own outside the menu's query
+    /// box (the dropdown's trigger, which a key just used): that one keeps it,
+    /// so the next key is still the trigger's. A query box inside the menu is
+    /// going away, and with nothing focused the keys would be dispatched from
+    /// the window root, so both fall back to the page root.
+    fn focus_after_menu(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(s) = self.active_settings() else {
+            return;
+        };
+        let in_query = s.menu_query.read(cx).focus_handle(cx).is_focused(window);
+        if !in_query && window.focused(cx).is_some() {
+            return;
+        }
+        let root = s.focus_handle.clone();
+        window.focus(&root, cx);
     }
 
     /// A dropdown: the trigger showing the current value, and while open, its
@@ -170,18 +279,22 @@ impl Tty59App {
             .iter()
             .position(|e| matches!(e, MenuEntry::Item { checked: true, .. }))
             .unwrap_or(0);
-        let toggle_id = id.clone();
-        let trigger = kit::select_trigger(
-            ElementId::Name(SharedString::from(format!("{id}-trigger"))),
-            label,
-            leading,
-            open,
-            false,
-            &tk,
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.toggle_settings_menu(toggle_id.clone(), checked_at, false, window, cx)
-        }));
+        // The keyboard half of the trigger, built from the entries before they
+        // move into the panel: the pickable rows, so Enter on an open menu picks
+        // the highlighted one and the arrows walk them.
+        let items = menu_items(&entries);
+        let trigger_key = ElementId::Name(SharedString::from(format!("{id}-trigger")));
+        let trigger = kit::select_trigger(trigger_key.clone(), label, leading, open, false, &tk)
+            .relative()
+            .on_click({
+                let (id, items) = (id.clone(), items.clone());
+                cx.listener(move |this, ev: &ClickEvent, window, cx| {
+                    this.activate_settings_menu(&id, ev, &items, checked_at, window, cx)
+                })
+            });
+        let trigger = kit::stop(trigger_key, px(6.), trigger)
+            .in_scroll(self.settings_scroll())
+            .on_key(self.settings_menu_key(id.clone(), items, checked_at, cx));
         div()
             .relative()
             .flex_shrink_0()
@@ -197,6 +310,95 @@ impl Tty59App {
             .into_any_element()
     }
 
+    /// The trigger's click. A keyboard click (Enter or Space, on key-up) on an
+    /// OPEN menu picks the highlighted row and closes it; every other click, and
+    /// a keyboard click on a closed one, toggles as it always did. A menu a
+    /// keyboard click opens shows its highlight from then on.
+    pub(crate) fn activate_settings_menu(
+        &mut self,
+        id: &SharedString,
+        ev: &ClickEvent,
+        items: &[(usize, PickFn)],
+        checked_at: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keyboard = ev.is_keyboard();
+        if keyboard && self.settings_menu_open(id) {
+            let hi = self.active_settings().map_or(0, |s| s.menu_hi);
+            if let Some((_, pick)) = items.iter().find(|(row, _)| *row == hi) {
+                let pick = pick.clone();
+                self.close_settings_menu(window, cx);
+                pick(self, window, cx);
+                return;
+            }
+        }
+        self.toggle_settings_menu(id.clone(), checked_at, false, window, cx);
+        if keyboard && let Some(s) = self.active_settings_mut() {
+            s.menu_keyboard = s.menu.is_some();
+        }
+        self.watch_menu_focus(id, window, cx);
+    }
+
+    /// The arrow keys of a plain dropdown's trigger, which keeps the focus while
+    /// its menu is open (the menu's rows are never tab stops, and the popover is
+    /// painted after the whole page). Down on a closed menu opens it; open, Down
+    /// and Up step over the pickable rows, Home and End go to the first and
+    /// last. Enter and Space are the trigger's click, Escape is the page's.
+    pub(crate) fn settings_menu_key(
+        &self,
+        id: SharedString,
+        items: Rc<Vec<(usize, PickFn)>>,
+        checked_at: usize,
+        cx: &Context<Self>,
+    ) -> impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static {
+        let app = cx.weak_entity();
+        move |ev, window, cx| {
+            let key = ev.keystroke.key.as_str();
+            if !kit::plain_key(ev) || !matches!(key, "down" | "up" | "home" | "end") {
+                return;
+            }
+            let Some(app) = app.upgrade() else {
+                return;
+            };
+            cx.stop_propagation();
+            app.update(cx, |this, cx| {
+                if !this.settings_menu_open(&id) {
+                    if key == "down" {
+                        this.toggle_settings_menu(id.clone(), checked_at, false, window, cx);
+                        if let Some(s) = this.active_settings_mut() {
+                            s.menu_keyboard = s.menu.is_some();
+                        }
+                        this.watch_menu_focus(&id, window, cx);
+                    }
+                    return;
+                }
+                let rows: Vec<usize> = items.iter().map(|(row, _)| *row).collect();
+                let Some(last) = rows.len().checked_sub(1) else {
+                    return;
+                };
+                let Some(s) = this.active_settings_mut() else {
+                    return;
+                };
+                let now = rows
+                    .iter()
+                    .position(|row| *row == s.menu_hi)
+                    .or_else(|| rows.iter().position(|row| *row > s.menu_hi))
+                    .unwrap_or(0);
+                let to = match key {
+                    "down" => (now + 1).min(last),
+                    "up" => now.saturating_sub(1),
+                    "home" => 0,
+                    _ => last,
+                };
+                s.menu_hi = rows[to];
+                s.menu_keyboard = true;
+                s.menu_scroll.scroll_to_item(s.menu_hi);
+                cx.notify();
+            });
+        }
+    }
+
     pub(crate) fn settings_menu_panel(
         &self,
         id: &str,
@@ -204,6 +406,11 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) -> Div {
         let tk = Tk::of(cx);
+        // The row a key has highlighted; a pointer-opened menu shows none.
+        let highlight = self
+            .active_settings()
+            .filter(|s| s.menu_keyboard)
+            .map(|s| s.menu_hi);
         let mut panel = kit::menu_panel(&tk);
         // A choice menu keeps a column for its tick so the labels line up
         // whichever one is picked. A menu of actions ticks nothing, and the
@@ -223,7 +430,7 @@ impl Tty59App {
                 } => panel.child(
                     kit::menu_row(
                         ElementId::Name(SharedString::from(format!("{id}-item-{i}"))),
-                        false,
+                        highlight == Some(i),
                         &tk,
                     )
                     .when(ticks, |r| r.child(kit::check_mark(checked, &tk)))
@@ -282,17 +489,15 @@ impl Tty59App {
         let open = self.settings_menu_open(&id);
         let toggle_id = id.clone();
         let start = current.unwrap_or(0);
-        let trigger = kit::select_trigger(
-            ElementId::Name(SharedString::from(format!("{id}-trigger"))),
-            label,
-            None,
-            open,
-            false,
-            &tk,
-        )
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.toggle_settings_menu(toggle_id.clone(), start, true, window, cx)
-        }));
+        let trigger_key = ElementId::Name(SharedString::from(format!("{id}-trigger")));
+        let trigger = kit::select_trigger(trigger_key.clone(), label, None, open, false, &tk)
+            .relative()
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.toggle_settings_menu(toggle_id.clone(), start, true, window, cx)
+            }));
+        // A stop for the trigger alone: opening it puts the caret in the menu's
+        // query box, whose own keys (and Escape) are the menu's.
+        let trigger = kit::stop(trigger_key, px(6.), trigger).in_scroll(self.settings_scroll());
         let popover = open.then(|| {
             let Some(s) = self.active_settings() else {
                 return div();
@@ -560,8 +765,10 @@ impl Tty59App {
             .when(modified, |line| match resettable {
                 Some(entry) => {
                     let key = entry.title;
+                    let reset_id = SharedString::from(format!("reset-setting-{key:?}"));
                     let reset = div()
-                        .id(SharedString::from(format!("reset-setting-{key:?}")))
+                        .id(reset_id.clone())
+                        .relative()
                         .role(gpui::Role::Button)
                         .aria_label(reset_name.clone())
                         .flex_shrink_0()
@@ -580,7 +787,7 @@ impl Tty59App {
                         let id = reset_debug_id.clone();
                         move || id.clone()
                     });
-                    line.child(reset)
+                    line.child(kit::stop(reset_id, px(4.), reset).in_scroll(self.settings_scroll()))
                 }
                 None => {
                     let tag = div()
@@ -702,18 +909,25 @@ impl Tty59App {
     ) -> AnyElement {
         let tk = Tk::of(cx);
         let invalid = error.is_some();
+        #[cfg(test)]
+        let field_id = input.entity_id().as_u64();
         v_flex()
             .items_end()
             .gap(px(4.))
             .child(self.settings_text_input(input, width, invalid, cx))
             .when_some(error, |col, e| {
-                col.child(
-                    div()
-                        .max_w(px(width.max(220.)))
-                        .text_size(fs(12.))
-                        .text_color(tk.danger)
-                        .child(e),
-                )
+                // The explanation the page really drew, found by the same
+                // entity as its field: its text and its measured box.
+                #[cfg(test)]
+                crate::ui::paint_probe::note_label(&format!("settings-field-{field_id}-error"), &e);
+                let line = div()
+                    .max_w(px(width.max(220.)))
+                    .text_size(fs(12.))
+                    .text_color(tk.danger)
+                    .child(e);
+                #[cfg(test)]
+                let line = line.debug_selector(move || format!("settings-field-{field_id}-error"));
+                col.child(line)
             })
             .into_any_element()
     }
@@ -834,6 +1048,30 @@ impl Tty59App {
     }
 
     /// A switch bound to a setter.
+    /// The page's own scroller, for the controls that sit in its scrolling
+    /// content and should be brought into view when the keyboard reaches them
+    /// (`in_scroll`). Read per render from the open page's state, so a closed
+    /// and re-opened page hands out its new scroller. Never for the nav rail,
+    /// the title band (Back, Close) or the save banner: those do not scroll.
+    pub(crate) fn settings_scroll(&self) -> Option<gpui::ScrollHandle> {
+        self.active_settings().map(|s| s.content_scroll.clone())
+    }
+
+    /// `kit::button` for a button in the page's scrolling content.
+    pub(crate) fn page_button(
+        &self,
+        id: impl Into<ElementId>,
+        label: impl Into<SharedString>,
+        kind: BtnKind,
+    ) -> kit::Btn {
+        kit::button(id, label, kind).in_scroll(self.settings_scroll())
+    }
+
+    /// `kit::switch` for a switch in the page's scrolling content.
+    pub(crate) fn page_switch(&self, id: impl Into<ElementId>) -> kit::Switch {
+        kit::switch(id).in_scroll(self.settings_scroll())
+    }
+
     pub(crate) fn settings_switch(
         &self,
         id: &'static str,
@@ -842,7 +1080,7 @@ impl Tty59App {
         set: impl Fn(&mut Self, bool, &mut Window, &mut Context<Self>) + 'static,
     ) -> InlineControl {
         inline_control(
-            kit::switch(id).checked(on).on_click(
+            self.page_switch(id).checked(on).on_click(
                 cx.listener(move |this, on: &bool, window, cx| set(this, *on, window, cx)),
             ),
         )
@@ -855,7 +1093,7 @@ impl Tty59App {
         cx: &mut Context<Self>,
         act: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
     ) -> kit::Btn {
-        kit::button(id, label, BtnKind::Secondary)
+        self.page_button(id, label, BtnKind::Secondary)
             .on_click(cx.listener(move |this, _, window, cx| act(this, window, cx)))
     }
 
@@ -925,7 +1163,7 @@ impl Tty59App {
                 SettingsSection::Ssh => self.render_settings_ssh(cx),
                 SettingsSection::Mobile => self.render_settings_mobile(cx),
                 SettingsSection::Agents => self.render_settings_agents(cx),
-                SettingsSection::Keybindings => self.render_settings_keybindings(cx),
+                SettingsSection::Keybindings => self.render_settings_keybindings(window, cx),
                 SettingsSection::About => self.render_settings_about(cx),
             };
             (
@@ -941,8 +1179,9 @@ impl Tty59App {
         // way back was never drawn — while what was left of its height pushed
         // the title 16px below every other page's.
         let back = (!searching && section == SettingsSection::Keybindings).then(|| {
-            h_flex()
+            let back = h_flex()
                 .id("settings-back")
+                .relative()
                 .ml(px(-2.))
                 .gap(px(4.))
                 .items_center()
@@ -954,7 +1193,8 @@ impl Tty59App {
                 .child(t(L10nKey::SettingsNavInput))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.navigate_settings(SettingsSection::KeyboardMouse, None, window, cx)
-                }))
+                }));
+            kit::stop("settings-back", px(4.), back)
         });
 
         let header = h_flex()
@@ -1036,6 +1276,35 @@ impl Tty59App {
                 ))
             });
 
+        let close = div()
+            .id("settings-close")
+            .absolute()
+            // On the chrome line rather than in the middle of the band:
+            // the band spends a point of its height below its contents,
+            // so `TITLE_BAR_HEIGHT / 2` is not where the rest sits.
+            .top(crate::ui::app::title_strip_centre() - px(CLOSE_TILE / 2.))
+            .right(px(12.))
+            .size(px(CLOSE_TILE))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .occlude()
+            .cursor_pointer()
+            .hover(move |s| s.bg(tk.k05))
+            .child(
+                Icon::empty()
+                    .path("icons/settings/close.svg")
+                    .size(px(10.))
+                    .text_color(tk.sub),
+            )
+            .tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new(t(L10nKey::Close)).build(window, cx)
+            })
+            .on_click(cx.listener(|this, _, window, cx| this.close_settings_checked(window, cx)));
+        #[cfg(test)]
+        let close = close.debug_selector(|| "settings-close".to_string());
+
         let root = div()
             .size_full()
             .relative()
@@ -1099,36 +1368,8 @@ impl Tty59App {
                 )
                 .on_double_click(|_, window, _| window.titlebar_double_click()),
             )
-            .child(
-                div()
-                    .id("settings-close")
-                    .absolute()
-                    // On the chrome line rather than in the middle of the band:
-                    // the band spends a point of its height below its contents,
-                    // so `TITLE_BAR_HEIGHT / 2` is not where the rest sits.
-                    .top(crate::ui::app::title_strip_centre() - px(CLOSE_TILE / 2.))
-                    .right(px(12.))
-                    .size(px(CLOSE_TILE))
-                    .rounded(px(6.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .occlude()
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(tk.k05))
-                    .child(
-                        Icon::empty()
-                            .path("icons/settings/close.svg")
-                            .size(px(10.))
-                            .text_color(tk.sub),
-                    )
-                    .tooltip(|window, cx| {
-                        gpui_component::tooltip::Tooltip::new(t(L10nKey::Close)).build(window, cx)
-                    })
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.close_settings_checked(window, cx)),
-                    ),
-            )
+            // Already absolute, so already a positioned box for the ring layer.
+            .child(kit::stop("settings-close", px(6.), close))
             // While a popover is open the page under it only takes one click:
             // the one that closes it.
             .when(menu_open, |r| {
@@ -1189,7 +1430,7 @@ impl Tty59App {
                         h_flex()
                             .gap(px(8.))
                             .child(
-                                kit::button(
+                                self.page_button(
                                     "save-theme-draft",
                                     t(L10nKey::SettingsSaveChanges),
                                     BtnKind::Primary,
@@ -1201,7 +1442,7 @@ impl Tty59App {
                                 )),
                             )
                             .child(
-                                kit::button(
+                                self.page_button(
                                     "cancel-theme-draft",
                                     t(L10nKey::Cancel),
                                     BtnKind::Secondary,
@@ -1316,11 +1557,12 @@ impl Tty59App {
 
         let items = counts.into_iter().map(|(target, count)| {
             let active = !searching && section == target;
-            h_flex()
+            let item = h_flex()
                 .id(SharedString::from(format!(
                     "settings-nav-{}",
                     target.profile_label()
                 )))
+                .relative()
                 .role(gpui::Role::Tab)
                 .aria_label(t(target.title()))
                 .aria_selected(active)
@@ -1358,7 +1600,20 @@ impl Tty59App {
                 })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.navigate_settings(target, None, window, cx)
-                }))
+                }));
+            #[cfg(test)]
+            let item = item.debug_selector({
+                let id = format!("settings-nav-{}", target.profile_label());
+                move || id
+            });
+            // The rail scrolls and its items sit a pixel apart, so the ring is
+            // drawn inside each item's edge.
+            kit::stop(
+                SharedString::from(format!("settings-nav-{}", target.profile_label())),
+                px(7.),
+                item,
+            )
+            .inside()
         });
 
         v_flex()
@@ -1422,43 +1677,49 @@ impl Tty59App {
             )
             .child(
                 div().p(px(12.)).border_t_1().border_color(tk.k08).child(
-                    h_flex()
-                        .id("settings-modified-filter")
-                        .h(px(28.))
-                        .px(px(8.))
-                        .gap(px(10.))
-                        .items_center()
-                        .rounded(px(7.))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(tk.k05))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(tk.sub)
-                                .child(t(L10nKey::SettingsModifiedOnly)),
-                        )
-                        .when(total > 0, |r| {
-                            r.child(
+                    kit::stop(
+                        "settings-modified-filter",
+                        px(7.),
+                        h_flex()
+                            .id("settings-modified-filter")
+                            .relative()
+                            .h(px(28.))
+                            .px(px(8.))
+                            .gap(px(10.))
+                            .items_center()
+                            .rounded(px(7.))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(tk.k05))
+                            .child(
                                 div()
-                                    .text_size(fs(11.5))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_color(tk.sub)
-                                    .child(total.to_string()),
+                                    .child(t(L10nKey::SettingsModifiedOnly)),
                             )
-                        })
-                        .child(
-                            kit::switch("settings-modified-switch")
-                                .label(t(L10nKey::SettingsModifiedOnly))
-                                .small()
-                                .checked(modified_only),
-                        )
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            if let Some(s) = this.active_settings_mut() {
-                                s.modified_only = !s.modified_only;
-                            }
-                            this.autoselect_settings_search(cx);
-                        })),
+                            .when(total > 0, |r| {
+                                r.child(
+                                    div()
+                                        .text_size(fs(11.5))
+                                        .text_color(tk.sub)
+                                        .child(total.to_string()),
+                                )
+                            })
+                            .child(
+                                kit::switch("settings-modified-switch")
+                                    .label(t(L10nKey::SettingsModifiedOnly))
+                                    .small()
+                                    .checked(modified_only),
+                            )
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                if let Some(s) = this.active_settings_mut() {
+                                    s.modified_only = !s.modified_only;
+                                }
+                                this.autoselect_settings_search(cx);
+                            })),
+                    )
+                    .inside(),
                 ),
             )
             .into_any_element()
@@ -1479,7 +1740,11 @@ impl Tty59App {
                 let handle = s.search.read(cx).focus_handle(cx);
                 window.focus(&handle, cx);
                 if let Some(s) = self.active_settings_mut() {
+                    // Focus was just given to the search box above; the menu
+                    // and the watch on its trigger end here with it.
                     s.menu = None;
+                    s.menu_keyboard = false;
+                    s.menu_watch = None;
                 }
                 cx.stop_propagation();
                 cx.notify();
@@ -1661,7 +1926,7 @@ impl Tty59App {
                 self.settings_row(
                     t(title),
                     entry.description(),
-                    kit::button(
+                    self.page_button(
                         SharedString::from(format!("search-open-{title:?}")),
                         t(L10nKey::SettingsOpenSetting),
                         BtnKind::Secondary,
@@ -1775,7 +2040,7 @@ impl Tty59App {
                     .child(text)
                     .when(!query.is_empty(), |col| {
                         col.child(
-                            kit::button(
+                            self.page_button(
                                 "settings-clear-search",
                                 t(L10nKey::SettingsClearSearch),
                                 BtnKind::Link,

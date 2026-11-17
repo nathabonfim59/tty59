@@ -28,11 +28,20 @@ pub(crate) struct Painted {
     pub border_alpha: Option<f32>,
     pub opacity: Option<f32>,
     pub corners: [Option<gpui::AbsoluteLength>; 4],
+    /// The FIRST box shadow the element set (a field's focus / error ring is
+    /// one): its packed RGB, its own alpha, its spread and whether it is
+    /// inset. `None` where the element set no shadow.
+    pub shadow: Option<u32>,
+    pub shadow_alpha: Option<f32>,
+    pub shadow_spread: Option<f32>,
+    pub shadow_inset: Option<bool>,
 }
 
 thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
-    static PAINTED: RefCell<HashMap<&'static str, Vec<Painted>>> = RefCell::new(HashMap::new());
+    // Keyed by an owned string so a probe can name one element out of many
+    // (`settings.field-{entity id}`); callers still pass plain `&str` keys.
+    static PAINTED: RefCell<HashMap<String, Vec<Painted>>> = RefCell::new(HashMap::new());
     static LABELS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
@@ -43,7 +52,7 @@ pub(crate) fn hsla24(color: gpui::Hsla) -> u32 {
 
 /// Records the style `element` currently carries — call after the paints
 /// under test are applied, before the element is wrapped.
-pub(crate) fn note<E: gpui::Styled>(key: &'static str, element: &mut E) {
+pub(crate) fn note<E: gpui::Styled>(key: &str, element: &mut E) {
     if !ENABLED.get() {
         return;
     }
@@ -55,6 +64,7 @@ pub(crate) fn note<E: gpui::Styled>(key: &'static str, element: &mut E) {
             .and_then(|f| f.color())
             .and_then(|b| b.as_solid())
     };
+    let first_shadow = style.box_shadow.as_ref().and_then(|s| s.first());
     let painted = Painted {
         fill: solid().map(hsla24),
         text: style.text.color.map(hsla24),
@@ -69,8 +79,17 @@ pub(crate) fn note<E: gpui::Styled>(key: &'static str, element: &mut E) {
             style.corner_radii.bottom_right,
             style.corner_radii.bottom_left,
         ],
+        shadow: first_shadow.map(|s| hsla24(s.color)),
+        shadow_alpha: first_shadow.map(|s| s.color.a),
+        shadow_spread: first_shadow.map(|s| s.spread_radius.as_f32()),
+        shadow_inset: first_shadow.map(|s| s.inset),
     };
-    PAINTED.with(|p| p.borrow_mut().entry(key).or_default().push(painted));
+    PAINTED.with(|p| {
+        p.borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .push(painted)
+    });
 }
 
 /// Records the visible label a settings button was built with, by its id, so a
@@ -88,7 +107,7 @@ pub(crate) fn label(id: &str) -> Option<String> {
 }
 
 /// Every note recorded for `key`, in the order the elements were built.
-pub(crate) fn all(key: &'static str) -> Vec<Painted> {
+pub(crate) fn all(key: &str) -> Vec<Painted> {
     PAINTED.with(|p| p.borrow().get(key).cloned().unwrap_or_default())
 }
 

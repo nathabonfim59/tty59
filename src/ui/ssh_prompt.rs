@@ -4,7 +4,7 @@ use gpui::{
 };
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, FocusTrapElement as _, Sizable as _, Size, h_flex, v_flex};
 
 use crate::core::keychain::{CredentialStore as _, OsCredentialStore};
 use crate::daemon::protocol::{AuthPromptKind, AuthResponse, SshPhase};
@@ -314,7 +314,15 @@ pub(crate) struct SshPromptState {
     phase: Option<SshPhase>,
     routed: Option<crate::ui::remote_connect::PendingAuth>,
     routed_host: Option<tty59_core::host::HostId>,
+    /// The card, and the trap's container: focus inside it stays inside it.
+    /// Not a tab stop itself.
     focus_handle: FocusHandle,
+    /// The footer's two actions, one handle each for the life of the app:
+    /// the back-out (Cancel, Abort) and the answer (Submit, Trust,
+    /// Override). Whichever sheet is up lends them to its buttons, and a
+    /// button that is not drawn, or is disabled, simply does not hold one.
+    cancel_focus: FocusHandle,
+    accept_focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
 
@@ -332,6 +340,8 @@ impl SshPromptState {
             routed: None,
             routed_host: None,
             focus_handle: cx.focus_handle(),
+            cancel_focus: cx.focus_handle(),
+            accept_focus: cx.focus_handle(),
             _subs: Vec::new(),
         }
     }
@@ -418,9 +428,6 @@ impl Tty59App {
                         },
                     ));
                 }
-                if let Some(first) = inputs.first() {
-                    first.update(cx, |s, cx| s.focus(window, cx));
-                }
                 self.ssh_prompt.pane = Some(view.clone());
                 self.ssh_prompt.pane_id = Some(pane_id);
                 self.ssh_prompt.request_id = request_id;
@@ -428,6 +435,7 @@ impl Tty59App {
                 self.ssh_prompt.inputs = inputs;
                 self.ssh_prompt.remember = false;
                 self.ssh_prompt._subs = subs;
+                self.focus_prompt(window, cx);
             }
         }
         cx.notify();
@@ -470,9 +478,6 @@ impl Tty59App {
                 },
             ));
         }
-        if let Some(first) = inputs.first() {
-            first.update(cx, |s, cx| s.focus(window, cx));
-        }
         self.ssh_prompt.pane = None;
         self.ssh_prompt.pane_id = None;
         self.ssh_prompt.request_id = 0;
@@ -482,6 +487,7 @@ impl Tty59App {
         self.ssh_prompt._subs = subs;
         self.ssh_prompt.routed_host = Some(pending.host);
         self.ssh_prompt.routed = Some(pending);
+        self.focus_prompt(window, cx);
         cx.notify();
         SheetOutcome::Raised
     }
@@ -593,6 +599,35 @@ impl Tty59App {
     pub(crate) fn toggle_ssh_remember(&mut self, cx: &mut Context<Self>) {
         self.ssh_prompt.remember = !self.ssh_prompt.remember;
         cx.notify();
+    }
+
+    /// Where focus goes when a sheet comes up, once its model is installed:
+    /// a host-key sheet opens on Abort, so an Enter that is already on its
+    /// way can only refuse; a credential sheet opens on its first field.
+    /// Runs when the sheet is raised, never while it is drawn.
+    fn focus_prompt(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.ssh_prompt.model {
+            Some(PromptModel::HostKeyUnknown { .. } | PromptModel::HostKeyChanged { .. }) => {
+                window.focus(&self.ssh_prompt.cancel_focus, cx);
+            }
+            Some(_) => {
+                if let Some(first) = self.ssh_prompt.inputs.first() {
+                    first.update(cx, |s, cx| s.focus(window, cx));
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// A footer button's action as the focus-aware button wants it: run on
+    /// the app, from a press the button took itself.
+    fn ssh_action(
+        app: gpui::WeakEntity<Self>,
+        action: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) -> impl Fn(&mut Window, &mut App) + 'static {
+        move |window, cx| {
+            let _ = app.update(cx, |this, cx| action(this, window, cx));
+        }
     }
 
     pub(crate) fn push_ssh_connect_error(&mut self, reason: String, cx: &mut Context<Self>) {
@@ -839,15 +874,23 @@ impl Tty59App {
                 .child(text)
         };
 
+        // A modal: Tab and Shift+Tab cycle inside the card, over whatever
+        // inside it is a tab stop. The trap tracks the card's handle itself,
+        // and that handle is not a stop.
         let card = dialog::card("ssh-prompt-card", title.clone(), SHEET_W, cx)
-            .track_focus(&self.ssh_prompt.focus_handle)
+            .focus_trap("ssh-prompt-trap", &self.ssh_prompt.focus_handle)
             .key_context("SshPrompt")
             // The changed-key sheet is the one card allowed a coloured edge:
             // it is what a man-in-the-middle looks like.
             .when(danger_sheet, |panel| panel.border_color(danger))
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
                 if ev.keystroke.key == "escape" {
-                    this.cancel_ssh_prompt(window, cx);
+                    cx.stop_propagation();
+                    // A held Escape repeats into whatever is raised next, so
+                    // only a fresh press backs out.
+                    if !ev.is_held {
+                        this.cancel_ssh_prompt(window, cx);
+                    }
                 }
             }))
             .child(dialog::header(
@@ -959,24 +1002,42 @@ impl Tty59App {
                             muted,
                         ))
                     });
+                let (abort, trust) = (
+                    self.ssh_prompt.cancel_focus.clone(),
+                    self.ssh_prompt.accept_focus.clone(),
+                );
+                let row = [abort.clone(), trust.clone()];
+                let app = cx.entity().downgrade();
                 let footer = dialog::footer(cx)
-                    .child(dialog::button(
+                    .child(dialog::focus_button(
                         "ssh-hk-abort",
                         t(L10nKey::Abort),
                         Tone::Secondary,
-                        true,
                         rungs,
+                        &dialog::ButtonFocus {
+                            enabled: true,
+                            handle: &abort,
+                            row: &row,
+                        },
                         cx,
-                        cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
+                        Self::ssh_action(app.clone(), |this, window, cx| {
+                            this.cancel_ssh_prompt(window, cx)
+                        }),
                     ))
-                    .child(dialog::button(
+                    .child(dialog::focus_button(
                         "ssh-hk-trust",
                         t(L10nKey::Trust),
                         Tone::Primary,
-                        true,
                         rungs,
+                        &dialog::ButtonFocus {
+                            enabled: true,
+                            handle: &trust,
+                            row: &row,
+                        },
                         cx,
-                        cx.listener(|this, _, window, cx| this.trust_ssh_host_key(window, cx)),
+                        Self::ssh_action(app, |this, window, cx| {
+                            this.trust_ssh_host_key(window, cx)
+                        }),
                     ))
                     .into_any_element();
                 (body, footer)
@@ -1040,24 +1101,49 @@ impl Tty59App {
                 // inert until the word is typed, so it stays faint until armed
                 // and then goes red — the emphasis arrives exactly when the
                 // button does.
+                //
+                // The arrows and Tab visit only what is enabled, so the row
+                // has Override in it exactly when it is armed.
+                let (abort, over) = (
+                    self.ssh_prompt.cancel_focus.clone(),
+                    self.ssh_prompt.accept_focus.clone(),
+                );
+                let row: Vec<FocusHandle> = if can_override {
+                    vec![over.clone(), abort.clone()]
+                } else {
+                    vec![abort.clone()]
+                };
+                let app = cx.entity().downgrade();
                 let footer = dialog::footer(cx)
-                    .child(dialog::button(
+                    .child(dialog::focus_button(
                         "ssh-hkc-override",
                         t(L10nKey::Override),
                         Tone::Danger,
-                        can_override,
                         rungs,
+                        &dialog::ButtonFocus {
+                            enabled: can_override,
+                            handle: &over,
+                            row: &row,
+                        },
                         cx,
-                        cx.listener(|this, _, window, cx| this.submit_ssh_prompt(window, cx)),
+                        Self::ssh_action(app.clone(), |this, window, cx| {
+                            this.submit_ssh_prompt(window, cx)
+                        }),
                     ))
-                    .child(dialog::button(
+                    .child(dialog::focus_button(
                         "ssh-hkc-abort",
                         t(L10nKey::Abort),
                         Tone::Primary,
-                        true,
                         rungs,
+                        &dialog::ButtonFocus {
+                            enabled: true,
+                            handle: &abort,
+                            row: &row,
+                        },
                         cx,
-                        cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
+                        Self::ssh_action(app, |this, window, cx| {
+                            this.cancel_ssh_prompt(window, cx)
+                        }),
                     ))
                     .into_any_element();
                 (body, footer)
@@ -1082,6 +1168,7 @@ impl Tty59App {
             Checkbox::new("ssh-remember")
                 .label(t(L10nKey::SshPromptSaveToKeychain))
                 .with_size(Size::Medium)
+                .unchecked_border(cx.theme().muted_foreground)
                 .checked(self.ssh_prompt.remember)
                 .on_click(cx.listener(|this, _, _w, cx| this.toggle_ssh_remember(cx))),
         )
@@ -1094,24 +1181,40 @@ impl Tty59App {
     /// the app raises; a sheet the app draws itself has no reason to mirror it.
     fn render_ssh_actions(&self, submit_label: &str, cx: &mut Context<Self>) -> AnyElement {
         let rungs = dialog::popover_rungs(cx);
+        let (cancel, submit) = (
+            self.ssh_prompt.cancel_focus.clone(),
+            self.ssh_prompt.accept_focus.clone(),
+        );
+        let row = [cancel.clone(), submit.clone()];
+        let app = cx.entity().downgrade();
         dialog::footer(cx)
-            .child(dialog::button(
+            .child(dialog::focus_button(
                 "ssh-cancel",
                 t(L10nKey::Cancel),
                 Tone::Secondary,
-                true,
                 rungs,
+                &dialog::ButtonFocus {
+                    enabled: true,
+                    handle: &cancel,
+                    row: &row,
+                },
                 cx,
-                cx.listener(|this, _, window, cx| this.cancel_ssh_prompt(window, cx)),
+                Self::ssh_action(app.clone(), |this, window, cx| {
+                    this.cancel_ssh_prompt(window, cx)
+                }),
             ))
-            .child(dialog::button(
+            .child(dialog::focus_button(
                 "ssh-submit",
                 submit_label.to_string(),
                 Tone::Primary,
-                true,
                 rungs,
+                &dialog::ButtonFocus {
+                    enabled: true,
+                    handle: &submit,
+                    row: &row,
+                },
                 cx,
-                cx.listener(|this, _, window, cx| this.submit_ssh_prompt(window, cx)),
+                Self::ssh_action(app, |this, window, cx| this.submit_ssh_prompt(window, cx)),
             ))
             .into_any_element()
     }
@@ -1937,5 +2040,916 @@ mod passphrase_card_tests {
                 "a click on the checkbox must flip remember to {expected}"
             );
         }
+    }
+}
+
+/// The SSH sheet is a modal: real Tab / Shift+Tab stay inside it and reach
+/// every enabled control, Escape from anywhere inside aborts it, and a
+/// host-key sheet opens on its safe answer. Every key here goes through the
+/// window as a platform event (a down and an up where a press is meant), in
+/// the real app tree under `Root`, against the routed-auth channel the
+/// backend answers on.
+///
+/// No key is ever pressed while focus is outside the sheet: a press that
+/// would leave it is reported first, so a failing run cannot click anything
+/// behind the scrim.
+#[cfg(test)]
+mod modal_keyboard_tests {
+    use super::*;
+    use crate::core::config::Config;
+    use crate::core::session::Session;
+    use crate::daemon::protocol::KiPrompt;
+    use gpui::{
+        AppContext, KeyDownEvent, KeyUpEvent, Keystroke, TestAppContext, VisualTestContext,
+    };
+    use std::sync::Arc;
+    use std::sync::mpsc::{Receiver, TryRecvError};
+    use tty59_core::host::HostId;
+
+    type Rx = Receiver<AuthResponse>;
+
+    const SENTINEL: &str = "sentinel-not-a-secret";
+
+    fn decision(accept: bool) -> AuthResponse {
+        AuthResponse::HostKeyDecision {
+            accept,
+            remember: accept,
+        }
+    }
+
+    /// The prompt is still waiting: nothing has been sent and the channel is
+    /// open, so the sheet's owner has not answered or dropped it.
+    fn assert_pending(rx: &Rx, what: &str) {
+        assert_eq!(
+            rx.try_recv(),
+            Err(TryRecvError::Empty),
+            "{what}: the prompt must still be waiting, with nothing sent"
+        );
+    }
+
+    /// After the one answer was taken: nothing further was sent. The sender
+    /// goes with the answer, so a closed channel counts as nothing further.
+    fn assert_no_more(rx: &Rx, what: &str) {
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(TryRecvError::Empty | TryRecvError::Disconnected)
+            ),
+            "{what}: a second message was sent after the answer"
+        );
+    }
+
+    fn password() -> AuthPromptKind {
+        AuthPromptKind::Password {
+            user: "me".into(),
+            host: "example".into(),
+        }
+    }
+
+    fn passphrase() -> AuthPromptKind {
+        AuthPromptKind::KeyPassphrase {
+            key_path: "~/.ssh/id_test".into(),
+            comment: String::new(),
+            rejected: false,
+        }
+    }
+
+    fn ki(prompts: usize) -> AuthPromptKind {
+        AuthPromptKind::KeyboardInteractive {
+            name: "2FA".into(),
+            instructions: String::new(),
+            prompts: (0..prompts)
+                .map(|i| KiPrompt {
+                    text: format!("Code {i}:"),
+                    echo: true,
+                })
+                .collect(),
+            stored_rejected: false,
+        }
+    }
+
+    fn unknown_host() -> AuthPromptKind {
+        AuthPromptKind::HostKeyUnknown {
+            host: "example".into(),
+            port: 22,
+            algorithm: "ssh-ed25519".into(),
+            fingerprint_sha256: "SHA256:zzz".into(),
+            previously_known_as: None,
+        }
+    }
+
+    fn changed_host() -> AuthPromptKind {
+        AuthPromptKind::HostKeyChanged {
+            host: "example".into(),
+            port: 22,
+            algorithm: "ssh-ed25519".into(),
+            fingerprint_sha256: "SHA256:new".into(),
+            old_fingerprint_sha256: "SHA256:old".into(),
+        }
+    }
+
+    /// Name, prompt, how many controls are eligible (the input or inputs,
+    /// Remember where the sheet has one, Cancel and the submit button), and
+    /// whether the sheet has a Remember checkbox.
+    fn credential_cases() -> Vec<(&'static str, AuthPromptKind, usize, bool)> {
+        vec![
+            ("password", password(), 4, true),
+            ("passphrase", passphrase(), 4, true),
+            ("keyboard-interactive, 1 prompt", ki(1), 3, false),
+            ("keyboard-interactive, 2 prompts", ki(2), 4, false),
+        ]
+    }
+
+    /// What the changed-key sheet has eligible for each typed answer: the
+    /// input and Abort, plus Override once the text is exactly what arms it.
+    const ARMING: [(&str, usize); 5] = [("", 2), ("ye", 2), ("yes", 3), (" Yes ", 3), ("yes!", 2)];
+
+    struct Rig {
+        app: Entity<Tty59App>,
+        vcx: VisualTestContext,
+        next_host: u64,
+        /// Somebody has to stay waiting on each raised sheet, or it is
+        /// retracted as abandoned: the waiting counts live as long as the rig.
+        askers: Vec<Arc<()>>,
+    }
+
+    impl Rig {
+        fn new(cx: &mut TestAppContext) -> Self {
+            crate::core::config::pin_test_config_dir();
+            cx.executor().allow_parking();
+            cx.update(|cx| {
+                gpui_component::init(cx);
+                cx.set_global(Config::default());
+                crate::ui::keymap::init(cx);
+            });
+            let window = cx.add_window(|window, cx| {
+                let app =
+                    cx.new(|cx| Tty59App::with_session(None, Some(Session::default()), window, cx));
+                gpui_component::Root::new(app, window, cx)
+            });
+            window
+                .update(cx, |_, window, _| window.activate_window())
+                .unwrap();
+            cx.background_executor.run_until_parked();
+            let app = window
+                .update(cx, |root, _, _| {
+                    root.view()
+                        .clone()
+                        .downcast::<Tty59App>()
+                        .unwrap_or_else(|_| panic!("window root wraps a Tty59App"))
+                })
+                .unwrap();
+            let vcx = VisualTestContext::from_window(window.into(), cx);
+            Rig {
+                app,
+                vcx,
+                next_host: 0x59d0,
+                askers: Vec::new(),
+            }
+        }
+
+        fn settle(&mut self) {
+            self.vcx.run_until_parked();
+            let _ = self.vcx.update(|window, cx| window.draw(cx));
+            self.vcx.run_until_parked();
+        }
+
+        /// Raises a routed sheet and waits until it is drawn. The returned
+        /// receiver is where the backend would read the answer.
+        fn raise(&mut self, prompt: AuthPromptKind) -> Rx {
+            self.next_host += 1;
+            let (pending, rx, asker) =
+                crate::ui::remote_connect::PendingAuth::for_test(HostId(self.next_host), prompt);
+            self.askers.push(asker);
+            self.app.update_in(&mut self.vcx, |app, window, cx| {
+                let outcome = app.raise_routed_auth(pending, window, cx);
+                assert!(
+                    matches!(outcome, crate::ui::remote_workspace::SheetOutcome::Raised),
+                    "setup: the sheet must be raised"
+                );
+            });
+            self.settle();
+            assert!(
+                self.vcx.debug_bounds("ssh-prompt-card").is_some(),
+                "setup: the raised sheet must be mounted and drawn"
+            );
+            rx
+        }
+
+        fn type_into(&mut self, ix: usize, text: &str) {
+            let text = text.to_string();
+            self.app.update_in(&mut self.vcx, |app, window, cx| {
+                let input = app.ssh_prompt.inputs[ix].clone();
+                input.update(cx, |s, cx| s.set_value(text, window, cx));
+            });
+            self.settle();
+        }
+
+        fn type_into_all(&mut self, text: &str) {
+            let n = self
+                .app
+                .read_with(&self.vcx, |app, _| app.ssh_prompt.inputs.len());
+            for ix in 0..n {
+                self.type_into(ix, text);
+            }
+        }
+
+        fn toggle_remember(&mut self) {
+            self.app.update_in(&mut self.vcx, |app, _, cx| {
+                app.toggle_ssh_remember(cx);
+            });
+            self.settle();
+        }
+
+        fn model_is_up(&mut self) -> bool {
+            self.app
+                .read_with(&self.vcx, |app, _| app.ssh_prompt.model.is_some())
+        }
+
+        fn card(&mut self) -> gpui::FocusHandle {
+            self.app
+                .read_with(&self.vcx, |app, _| app.ssh_prompt.focus_handle.clone())
+        }
+
+        fn focused(&mut self) -> Option<gpui::FocusHandle> {
+            self.vcx.update(|window, cx| window.focused(cx))
+        }
+
+        fn in_card(&mut self) -> bool {
+            let card = self.card();
+            self.vcx
+                .update(|window, cx| card.contains_focused(window, cx))
+        }
+
+        fn assert_in_card(&mut self, what: &str) {
+            let at = self.focused();
+            assert!(
+                self.in_card(),
+                "{what}: focus must be inside the SSH sheet, it is on {at:?}"
+            );
+        }
+
+        fn key_down(&mut self, key: &str, held: bool) {
+            self.assert_in_card(&format!("before {key} (down, held={held})"));
+            self.vcx.simulate_event(KeyDownEvent {
+                keystroke: Keystroke::parse(key).expect("a key"),
+                is_held: held,
+                prefer_character_input: false,
+            });
+        }
+
+        /// The release is allowed to land anywhere: the press may have
+        /// closed the sheet.
+        fn key_up(&mut self, key: &str) {
+            self.vcx.simulate_event(KeyUpEvent {
+                keystroke: Keystroke::parse(key).expect("a key"),
+            });
+        }
+
+        /// One whole press: down, a frame, up, a frame.
+        fn press(&mut self, key: &str) {
+            self.settle();
+            self.key_down(key, false);
+            self.settle();
+            self.key_up(key);
+            self.settle();
+        }
+
+        /// Presses `key` `n` times and returns where focus was after each,
+        /// failing at the first press that leaves the sheet or lands on its
+        /// container.
+        fn walk(&mut self, key: &str, n: usize, what: &str) -> Vec<gpui::FocusHandle> {
+            let card = self.card();
+            let mut seen = Vec::new();
+            for step in 1..=n {
+                self.press(key);
+                let at = self.focused();
+                assert!(
+                    self.in_card(),
+                    "{what}: {key} #{step} of {n} left the SSH sheet (focus is on {at:?}); \
+                     a modal must keep {key} inside itself"
+                );
+                assert!(
+                    at.as_ref() != Some(&card),
+                    "{what}: {key} #{step} of {n} stopped on the sheet's own container; \
+                     the trap container must not be a tab stop"
+                );
+                seen.push(at.expect("focus is inside the sheet"));
+            }
+            seen
+        }
+
+        fn go_to(&mut self, key: &str, n: usize, what: &str) {
+            let _ = self.walk(key, n, what);
+        }
+
+        /// `eligible` presses of `key` visit `eligible` different controls and
+        /// come back to the one they started on.
+        fn assert_cycle(&mut self, key: &str, eligible: usize, what: &str) {
+            self.assert_in_card(&format!("{what}: the sheet must hold focus when up"));
+            let start = self.focused().expect("focus is inside the sheet");
+            let seen = self.walk(key, eligible, what);
+            let mut distinct: Vec<gpui::FocusHandle> = Vec::new();
+            for handle in &seen {
+                if !distinct.contains(handle) {
+                    distinct.push(handle.clone());
+                }
+            }
+            assert_eq!(
+                distinct.len(),
+                eligible,
+                "{what}: {eligible} presses of {key} must reach {eligible} different controls"
+            );
+            assert!(
+                seen.last() == Some(&start),
+                "{what}: a full {key} cycle must come back to the control it started on"
+            );
+        }
+
+        /// Escape, and everything it must do: the one cancel answer, nothing
+        /// more, the sheet gone, and focus handed back to the app.
+        fn escape_expecting(&mut self, rx: &Rx, expected: AuthResponse, what: &str) {
+            self.press("escape");
+            assert_eq!(
+                rx.try_recv().ok(),
+                Some(expected),
+                "{what}: Escape must answer with the sheet's cancel answer"
+            );
+            assert_no_more(rx, &format!("{what}: Escape"));
+            assert!(
+                !self.model_is_up(),
+                "{what}: Escape must take the sheet down"
+            );
+            let card = self.card();
+            let (inside, any) = self.vcx.update(|window, cx| {
+                (
+                    card.contains_focused(window, cx),
+                    window.focused(cx).is_some(),
+                )
+            });
+            assert!(!inside, "{what}: focus is still on the closed sheet");
+            assert!(any, "{what}: Escape must hand focus back to the app");
+        }
+
+        fn answer_of(&mut self, rx: &Rx) -> Option<AuthResponse> {
+            self.settle();
+            rx.try_recv().ok()
+        }
+
+        /// A real left press and release at the middle of the button the
+        /// drawn frame reports under `dialog-button-<id>`.
+        fn click(&mut self, selector: &'static str, what: &str) {
+            self.settle();
+            let bounds = self
+                .vcx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{what}: the sheet drew no button {selector:?}"));
+            self.vcx
+                .simulate_click(bounds.center(), gpui::Modifiers::none());
+            self.settle();
+        }
+    }
+
+    /// Positive controls. If these fail the other tests prove nothing: the
+    /// sheets mount, and the backend answers the way it always did through
+    /// the existing entry points.
+    #[gpui::test]
+    fn the_sheets_mount_and_the_backend_still_answers(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+
+        let rx = rig.raise(password());
+        rig.type_into(0, SENTINEL);
+        rig.app
+            .update_in(&mut rig.vcx, |app, w, cx| app.submit_ssh_prompt(w, cx));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(AuthResponse::Secret(SENTINEL.into())),
+            "control: submitting a password sheet sends the typed secret"
+        );
+
+        let rx = rig.raise(unknown_host());
+        rig.app
+            .update_in(&mut rig.vcx, |app, w, cx| app.trust_ssh_host_key(w, cx));
+        assert_eq!(rx.try_recv().ok(), Some(decision(true)), "control: trust");
+
+        let rx = rig.raise(unknown_host());
+        rig.app
+            .update_in(&mut rig.vcx, |app, w, cx| app.cancel_ssh_prompt(w, cx));
+        assert_eq!(rx.try_recv().ok(), Some(decision(false)), "control: abort");
+
+        let rx = rig.raise(changed_host());
+        rig.type_into(0, "ye");
+        rig.app
+            .update_in(&mut rig.vcx, |app, w, cx| app.submit_ssh_prompt(w, cx));
+        assert_pending(&rx, "control: \"ye\" on a changed-key sheet");
+        assert!(
+            rig.model_is_up(),
+            "control: \"ye\" must leave the changed-key sheet up"
+        );
+        rig.type_into(0, "yes");
+        rig.app
+            .update_in(&mut rig.vcx, |app, w, cx| app.submit_ssh_prompt(w, cx));
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(decision(true)),
+            "control: \"yes\" accepts a changed key"
+        );
+
+        for (what, prompt, _, _) in credential_cases() {
+            let rx = rig.raise(prompt);
+            rig.app
+                .update_in(&mut rig.vcx, |app, w, cx| app.cancel_ssh_prompt(w, cx));
+            assert_eq!(
+                rx.try_recv().ok(),
+                Some(AuthResponse::Cancelled),
+                "control: cancelling the {what} sheet"
+            );
+        }
+    }
+
+    /// Tab and Shift+Tab cycle inside a credential sheet over exactly its
+    /// eligible controls. Observed before: Tab 3 left the sheet for the
+    /// sidebar and Tab 4 for the workspace switcher behind it.
+    #[gpui::test]
+    fn credential_sheets_trap_tab_and_reach_every_control(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        for (what, prompt, eligible, _) in credential_cases() {
+            let rx = rig.raise(prompt);
+            rig.assert_cycle("tab", eligible, &format!("{what}, forward"));
+            rig.assert_cycle("shift-tab", eligible, &format!("{what}, reverse"));
+            rig.escape_expecting(&rx, AuthResponse::Cancelled, what);
+        }
+    }
+
+    #[gpui::test]
+    fn host_key_sheets_trap_tab_and_reach_every_control(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+
+        let rx = rig.raise(unknown_host());
+        rig.assert_cycle("tab", 2, "unknown host, forward");
+        rig.assert_cycle("shift-tab", 2, "unknown host, reverse");
+        rig.escape_expecting(&rx, decision(false), "unknown host");
+
+        for (typed, eligible) in ARMING {
+            let what = format!("changed key typed {typed:?}");
+            let rx = rig.raise(changed_host());
+            if !typed.is_empty() {
+                rig.type_into(0, typed);
+            }
+            rig.assert_cycle("tab", eligible, &format!("{what}, forward"));
+            rig.assert_cycle("shift-tab", eligible, &format!("{what}, reverse"));
+            rig.escape_expecting(&rx, decision(false), &what);
+        }
+    }
+
+    /// Escape from the input, from Remember and from each button answers
+    /// Cancelled once, whatever was typed or ticked, and closes the sheet.
+    #[gpui::test]
+    fn escape_cancels_credential_sheets_from_every_position(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        for (what, prompt, eligible, remember) in credential_cases() {
+            for position in 0..eligible {
+                let label = format!("{what}, position {position}");
+                let rx = rig.raise(prompt.clone());
+                rig.type_into_all(SENTINEL);
+                if remember {
+                    rig.toggle_remember();
+                }
+                rig.go_to("tab", position, &label);
+                rig.escape_expecting(&rx, AuthResponse::Cancelled, &label);
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn escape_aborts_host_key_sheets_from_every_position(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let cases = [
+            ("unknown host", unknown_host(), "", 2),
+            ("changed key", changed_host(), "", 2),
+            ("changed key, armed", changed_host(), "yes", 3),
+        ];
+        for (what, prompt, typed, eligible) in cases {
+            for position in 0..eligible {
+                let label = format!("{what}, position {position}");
+                let rx = rig.raise(prompt.clone());
+                if !typed.is_empty() {
+                    rig.type_into(0, typed);
+                }
+                rig.go_to("tab", position, &label);
+                rig.escape_expecting(&rx, decision(false), &label);
+            }
+        }
+    }
+
+    /// Both host-key sheets open on Abort, so the Enter or Space that is
+    /// already down when the sheet appears can only ever say no.
+    #[gpui::test]
+    fn host_key_sheets_open_on_abort_and_a_plain_press_never_trusts(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        for (what, prompt) in [
+            ("unknown host", unknown_host()),
+            ("changed key", changed_host()),
+        ] {
+            for key in ["enter", "space"] {
+                let rx = rig.raise(prompt.clone());
+                rig.assert_in_card(&format!("{what}: a fresh sheet must hold focus"));
+                rig.press(key);
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    Some(decision(false)),
+                    "{what}: {key} on a freshly opened sheet must take the safe Abort answer"
+                );
+                assert_no_more(&rx, &format!("{what}: {key}"));
+                assert!(!rig.model_is_up(), "{what}: {key} must close the sheet");
+            }
+        }
+    }
+
+    /// Trust is reached only on purpose, by Tab or the arrows, and the arrows
+    /// stop at the ends of the row.
+    #[gpui::test]
+    fn unknown_host_reaches_trust_only_by_deliberate_navigation(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let cases: [(&str, &[&str], &str, bool); 8] = [
+            ("tab, enter", &["tab"], "enter", true),
+            ("shift-tab wraps, enter", &["shift-tab"], "enter", true),
+            ("right, enter", &["right"], "enter", true),
+            ("right, space", &["right"], "space", true),
+            ("right then left, enter", &["right", "left"], "enter", false),
+            ("left stops at Abort", &["left"], "enter", false),
+            ("right stops at Trust", &["right", "right"], "enter", true),
+            ("tab twice wraps to Abort", &["tab", "tab"], "enter", false),
+        ];
+        for (what, moves, activate, trusts) in cases {
+            let rx = rig.raise(unknown_host());
+            for key in moves {
+                rig.press(key);
+                rig.assert_in_card(&format!("{what}: after {key}"));
+            }
+            rig.press(activate);
+            assert_eq!(
+                rx.try_recv().ok(),
+                Some(decision(trusts)),
+                "{what}: wrong answer"
+            );
+            assert_no_more(&rx, what);
+            assert!(!rig.model_is_up(), "{what}: the sheet must close");
+        }
+    }
+
+    /// A held Enter is one activation, and repeats with no fresh press are
+    /// none at all.
+    #[gpui::test]
+    fn a_held_enter_activates_the_focused_button_once(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+
+        let rx = rig.raise(unknown_host());
+        rig.press("tab");
+        rig.assert_in_card("Trust focused");
+        rig.settle();
+        rig.key_down("enter", false);
+        rig.settle();
+        for _ in 0..3 {
+            // Past the answer the repeats would be the app's, not the
+            // sheet's: stop feeding them once it is gone.
+            if !rig.model_is_up() {
+                break;
+            }
+            rig.key_down("enter", true);
+            rig.settle();
+        }
+        rig.key_up("enter");
+        rig.settle();
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(decision(true)),
+            "a complete Enter press on Trust must trust"
+        );
+        assert_no_more(&rx, "held repeats");
+
+        let rx = rig.raise(unknown_host());
+        rig.press("tab");
+        for _ in 0..3 {
+            // A repeat that did activate would close the sheet: stop there
+            // so the assertion below names it.
+            if !rig.model_is_up() {
+                break;
+            }
+            rig.key_down("enter", true);
+            rig.settle();
+        }
+        assert_pending(&rx, "repeats with no fresh press");
+        assert!(
+            rig.model_is_up(),
+            "repeats with no fresh press must leave the sheet up"
+        );
+        rig.escape_expecting(&rx, decision(false), "after held repeats");
+    }
+
+    /// Override is armed by exactly the text that armed it before, and no
+    /// key can reach it, or accept for it, until then.
+    #[gpui::test]
+    fn changed_key_override_follows_the_arming_policy(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        for (typed, eligible) in ARMING {
+            let armed = eligible == 3;
+            for key in ["enter", "space"] {
+                let mut outcomes = Vec::new();
+                for position in 0..eligible {
+                    let label = format!("typed {typed:?}, {key}, position {position}");
+                    let rx = rig.raise(changed_host());
+                    if !typed.is_empty() {
+                        rig.type_into(0, typed);
+                    }
+                    rig.go_to("tab", position, &label);
+                    rig.press(key);
+                    outcomes.push(rig.answer_of(&rx));
+                    if rig.model_is_up() {
+                        rig.escape_expecting(&rx, decision(false), &label);
+                    }
+                }
+                let accepts = outcomes
+                    .iter()
+                    .filter(|o| **o == Some(decision(true)))
+                    .count();
+                let aborts = outcomes
+                    .iter()
+                    .filter(|o| **o == Some(decision(false)))
+                    .count();
+                // Enter in the input is the old submit path and so accepts
+                // once armed; Space there types nothing. Override accepts
+                // with either key. Abort always aborts.
+                let expected = match (armed, key) {
+                    (false, _) => 0,
+                    (true, "enter") => 2,
+                    (true, _) => 1,
+                };
+                assert_eq!(
+                    accepts, expected,
+                    "typed {typed:?}, {key}: {outcomes:?} accepted {accepts} times, expected {expected}"
+                );
+                assert_eq!(
+                    aborts, 1,
+                    "typed {typed:?}, {key}: exactly Abort aborts: {outcomes:?}"
+                );
+            }
+        }
+    }
+
+    /// The Enter that submitted one sheet is released after the next prompt
+    /// is already up. Whatever the buttons do on a press, that release is
+    /// not a press on the new sheet. Green at the baseline, and must stay so.
+    #[gpui::test]
+    fn the_release_of_the_press_that_answered_a_sheet_cannot_answer_the_next(
+        cx: &mut TestAppContext,
+    ) {
+        let mut rig = Rig::new(cx);
+        let first = rig.raise(password());
+        rig.type_into(0, SENTINEL);
+        rig.settle();
+        rig.key_down("enter", false);
+        rig.settle();
+        assert_eq!(
+            first.try_recv().ok(),
+            Some(AuthResponse::Secret(SENTINEL.into())),
+            "setup: Enter in the input submits the password sheet"
+        );
+        assert!(!rig.model_is_up(), "setup: the first sheet is gone");
+
+        let second = rig.raise(unknown_host());
+        rig.key_up("enter");
+        rig.settle();
+        assert_pending(&second, "the release of the previous sheet's Enter");
+        assert!(
+            rig.model_is_up(),
+            "the release of the previous sheet's Enter must not close the new sheet"
+        );
+        // Taken down through the backend entry point: Escape on this sheet is
+        // covered by the tests of the keyboard path itself.
+        rig.app
+            .update_in(&mut rig.vcx, |app, w, cx| app.cancel_ssh_prompt(w, cx));
+        assert_eq!(
+            second.try_recv().ok(),
+            Some(decision(false)),
+            "cleanup: cancelling the new sheet rejects the host key"
+        );
+        assert_no_more(&second, "cleanup");
+    }
+
+    /// A key held through Escape repeats into whatever is raised next.
+    #[gpui::test]
+    fn a_held_escape_cannot_abort_the_next_prompt(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+        let first = rig.raise(password());
+        rig.settle();
+        rig.key_down("escape", false);
+        rig.settle();
+        assert_eq!(
+            first.try_recv().ok(),
+            Some(AuthResponse::Cancelled),
+            "setup: Escape cancels the first sheet"
+        );
+
+        let second = rig.raise(password());
+        rig.assert_in_card("the second sheet");
+        for _ in 0..2 {
+            // A repeat that did abort the sheet takes it down: stop there so
+            // the assertion below names it.
+            if !rig.model_is_up() {
+                break;
+            }
+            rig.key_down("escape", true);
+            rig.settle();
+        }
+        assert_pending(&second, "a held Escape repeating into the next prompt");
+        assert!(
+            rig.model_is_up(),
+            "a held Escape repeating into the next prompt must not abort it"
+        );
+        rig.key_up("escape");
+        rig.escape_expecting(&second, AuthResponse::Cancelled, "a fresh Escape press");
+    }
+
+    /// Dismissal leaves nothing behind: the next sheet opens on its own
+    /// default, not on the control the last one was left on.
+    #[gpui::test]
+    fn a_reopened_sheet_starts_from_its_own_defaults(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+
+        let rx = rig.raise(unknown_host());
+        rig.press("tab");
+        rig.escape_expecting(&rx, decision(false), "the first host-key sheet");
+        let rx = rig.raise(unknown_host());
+        rig.assert_in_card("the reopened host-key sheet");
+        rig.press("enter");
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(decision(false)),
+            "a reopened host-key sheet must open on Abort, not where the last one ended"
+        );
+
+        let rx = rig.raise(passphrase());
+        rig.toggle_remember();
+        rig.type_into(0, SENTINEL);
+        rig.go_to("tab", 2, "the first passphrase sheet");
+        rig.escape_expecting(&rx, AuthResponse::Cancelled, "the first passphrase sheet");
+
+        let rx = rig.raise(password());
+        let (remember, typed) = rig.app.read_with(&rig.vcx, |app, cx| {
+            (
+                app.ssh_prompt.remember,
+                app.ssh_prompt.inputs[0].read(cx).value().to_string(),
+            )
+        });
+        assert!(!remember, "Remember must not carry over to the next sheet");
+        assert!(typed.is_empty(), "typed text must not carry over");
+        rig.assert_cycle("tab", 4, "the reopened password sheet");
+        rig.escape_expecting(&rx, AuthResponse::Cancelled, "the reopened password sheet");
+    }
+
+    /// Reviewer-added after the implementation (not a pre-fix RED). The arrow
+    /// keys on the changed-key sheet move only between enabled buttons: an
+    /// unarmed Override is never a target, an armed one is, and the row stops
+    /// at both ends.
+    #[gpui::test]
+    fn changed_key_arrows_skip_a_disabled_override_and_clamp_when_it_is_armed(
+        cx: &mut TestAppContext,
+    ) {
+        let mut rig = Rig::new(cx);
+
+        let unarmed: [&[&str]; 4] = [
+            &["left"],
+            &["right"],
+            &["right", "left"],
+            &["left", "right", "right"],
+        ];
+        for typed in ["", "ye"] {
+            for moves in unarmed {
+                let what = format!("typed {typed:?}, arrows {moves:?}");
+                let rx = rig.raise(changed_host());
+                if !typed.is_empty() {
+                    rig.type_into(0, typed);
+                }
+                for key in moves {
+                    rig.press(key);
+                    rig.assert_in_card(&format!("{what}: after {key}"));
+                }
+                rig.press("enter");
+                assert_eq!(
+                    rx.try_recv().ok(),
+                    Some(decision(false)),
+                    "{what}: with Override disabled focus must have stayed on Abort"
+                );
+                assert_no_more(&rx, &what);
+            }
+        }
+
+        let armed: [(&[&str], bool); 6] = [
+            (&["left"], true),
+            (&["right"], false),
+            (&["left", "left"], true),
+            (&["left", "right"], false),
+            (&["right", "left"], true),
+            (&["left", "right", "right"], false),
+        ];
+        for (moves, accepts) in armed {
+            let what = format!("typed \"yes\", arrows {moves:?}");
+            let rx = rig.raise(changed_host());
+            rig.type_into(0, "yes");
+            for key in moves {
+                rig.press(key);
+                rig.assert_in_card(&format!("{what}: after {key}"));
+            }
+            rig.press("enter");
+            assert_eq!(
+                rx.try_recv().ok(),
+                Some(decision(accepts)),
+                "{what}: Enter must act on the clamped arrow position"
+            );
+            assert_no_more(&rx, &what);
+        }
+    }
+
+    /// Reviewer-added after the implementation (not a pre-fix RED). A real
+    /// left press and release on each footer button takes the same callback
+    /// as before, once; a disabled Override sends nothing, an armed one
+    /// accepts.
+    #[gpui::test]
+    fn a_pointer_click_on_a_footer_button_runs_its_action_once(cx: &mut TestAppContext) {
+        let mut rig = Rig::new(cx);
+
+        let cases = [
+            (
+                "unknown host Abort",
+                unknown_host(),
+                "dialog-button-ssh-hk-abort",
+                decision(false),
+            ),
+            (
+                "unknown host Trust",
+                unknown_host(),
+                "dialog-button-ssh-hk-trust",
+                decision(true),
+            ),
+            (
+                "changed key Abort",
+                changed_host(),
+                "dialog-button-ssh-hkc-abort",
+                decision(false),
+            ),
+            (
+                "password Cancel",
+                password(),
+                "dialog-button-ssh-cancel",
+                AuthResponse::Cancelled,
+            ),
+            (
+                "password Submit",
+                password(),
+                "dialog-button-ssh-submit",
+                AuthResponse::Secret(SENTINEL.into()),
+            ),
+        ];
+        for (what, prompt, selector, expected) in cases {
+            let rx = rig.raise(prompt);
+            rig.type_into_all(SENTINEL);
+            rig.click(selector, what);
+            assert_eq!(
+                rx.try_recv().ok(),
+                Some(expected),
+                "{what}: a click must run the button's own action"
+            );
+            assert_no_more(&rx, what);
+            assert!(!rig.model_is_up(), "{what}: the answered sheet must close");
+        }
+
+        for typed in ["", "ye"] {
+            let what = format!("changed key typed {typed:?}, Override");
+            let rx = rig.raise(changed_host());
+            if !typed.is_empty() {
+                rig.type_into(0, typed);
+            }
+            rig.click("dialog-button-ssh-hkc-override", &what);
+            assert_pending(&rx, &what);
+            assert!(
+                rig.model_is_up(),
+                "{what}: a disabled Override must leave the sheet up"
+            );
+            rig.app
+                .update_in(&mut rig.vcx, |app, w, cx| app.cancel_ssh_prompt(w, cx));
+            assert_eq!(rx.try_recv().ok(), Some(decision(false)), "cleanup: {what}");
+        }
+
+        let rx = rig.raise(changed_host());
+        rig.type_into(0, "yes");
+        rig.click("dialog-button-ssh-hkc-override", "armed Override");
+        assert_eq!(
+            rx.try_recv().ok(),
+            Some(decision(true)),
+            "armed Override: a click must accept the changed key"
+        );
+        assert_no_more(&rx, "armed Override");
+        assert!(!rig.model_is_up(), "armed Override: the sheet must close");
     }
 }

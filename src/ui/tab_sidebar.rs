@@ -186,8 +186,29 @@ fn sidebar_row_chrome(
 /// group carries it.
 const PIN_MARK: &str = "icons/pin.svg";
 
-/// The mark's size: the header's 11px text, like a row's branch icon.
-const PIN_MARK_SIZE: f32 = 11.;
+/// The mark's size, and the glyph of the header's pin and "+" actions: one
+/// 12px size, so the status mark and the buttons that replace it read as a set.
+const PIN_MARK_SIZE: f32 = 12.;
+
+/// A read-only record of which header action's press handler ran, in order,
+/// for the tests that must tell one press from two: pinning an already pinned
+/// group is a no-op, so a final state cannot show a handler firing twice.
+#[cfg(test)]
+mod header_action_probe {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static CALLS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(action: &'static str) {
+        CALLS.with(|c| c.borrow_mut().push(action));
+    }
+
+    pub(super) fn take() -> Vec<&'static str> {
+        CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+    }
+}
 
 /// A single-line tab row: one line of `text_sm` and a little air.
 const ROW_HEIGHT: f32 = 30.;
@@ -1657,35 +1678,32 @@ impl Tty59App {
                         )
                     })
                     // Every kept group carries the mark; it is what sets them
-                    // apart from the derived groups below. On a folder group it
-                    // is also the way to stop keeping it — a click unpins, and
-                    // the folder's tabs fall back to the groups their cwds
-                    // resolve to. A label group's mark is only a mark: without a
-                    // folder there is nothing to fall back on, so letting go of
-                    // it is Delete Group, in its menu, not a stray click.
-                    .when_some(pinned_id, |header, id| {
+                    // apart from the derived groups below. It is status only,
+                    // on a folder group and a label group alike: a glyph that
+                    // reads as status is no place for an act with no undo, and
+                    // a stray click on it used to scatter a folder's tabs back
+                    // into auto groups. Letting go is Unpin (a folder group) or
+                    // Delete Group, in the header's menu; a click here folds
+                    // the group like the rest of the header.
+                    //
+                    // Backported from l0ng-ai/tty7 8693c732.
+                    .when(pinned, |header| {
+                        let tip = if pinned_folder.is_some() {
+                            L10nKey::SidebarPinnedFolderMark
+                        } else {
+                            L10nKey::SidebarPinnedGroupMark
+                        };
                         let mark = div()
+                            .id(("sidebar-group-pin-mark", group_ix))
                             .flex_shrink_0()
-                            .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)));
-                        header.child(match pinned_folder.is_some() {
-                            false => mark.into_any_element(),
-                            true => mark
-                                .id(("sidebar-group-unpin", group_ix))
-                                .cursor_pointer()
-                                .hover(|s| s.text_color(cx.theme().foreground))
-                                .tooltip(|window, cx| {
-                                    gpui_component::tooltip::Tooltip::new(t(
-                                        L10nKey::SidebarUnpinGroup,
-                                    ))
-                                    .build(window, cx)
-                                })
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(move |this, _, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.delete_group(id, cx);
-                                }))
-                                .into_any_element(),
-                        })
+                            .child(Icon::empty().path(PIN_MARK).size(px(PIN_MARK_SIZE)))
+                            .tooltip(move |window, cx| {
+                                gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
+                            });
+                        #[cfg(test)]
+                        let mark = mark
+                            .debug_selector(move || format!("sidebar-group-pin-mark-{group_ix}"));
+                        header.child(mark)
                     })
                     .child(match renaming_group {
                         Some(input) => div()
@@ -1760,9 +1778,17 @@ impl Tty59App {
                         if has_counts {
                             branch = branch.tail(META_SEP_TRIMMED);
                         }
+                        // The line may give up room, down to its counts: the
+                        // branch inside it is the shrinkable part and the counts
+                        // never shrink. Held rigid, a header that was exactly
+                        // full (the narrowest rail, the heading on its floor,
+                        // the line on its half) pushed the counts past the
+                        // padding as soon as anything in front of it grew by a
+                        // pixel, such as a 12px pin mark.
                         let line = h_flex()
                             .id(("sidebar-group-git", group_ix))
-                            .flex_shrink_0()
+                            .flex_shrink(1.)
+                            .min_w_0()
                             .max_w(relative(0.5))
                             .items_center()
                             .gap_1p5()
@@ -2431,35 +2457,44 @@ impl Tty59App {
         let mut fade = backing;
         fade.a = 0.;
         let muted = cx.theme().muted_foreground;
-        let ink = cx.theme().foreground;
-        let button = |id: &'static str, glyph: AnyElement, tip: L10nKey| {
-            div()
-                .id((id, group_ix))
-                .flex_shrink_0()
-                .p(px(2.))
-                .rounded_sm()
-                .cursor_pointer()
-                .text_color(muted)
-                .hover(move |s| s.text_color(ink))
-                .child(glyph)
-                .tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(t(tip)).build(window, cx)
-                })
+        // Each target is `MIN_TARGET` wide and the header's own height tall;
+        // `hit_target` sets the 24 square and only the height is narrowed back,
+        // so a target never reaches into the line above or below the header.
+        // The glyph is a child at its own size, not `.icon()`: the toolkit sets
+        // an icon's size from the button's, and the child keeps both the 12px
+        // and the button's centring. Out of the Tab order on purpose: they are
+        // revealed by the pointer alone, and a stop that appears nowhere is a
+        // stop a keyboard user cannot see. The keyboard path is a later change.
+        let button = |id: &'static str, path: &'static str, tip: L10nKey| {
+            let glyph = div()
+                .flex_none()
+                .child(Icon::empty().path(path).size(px(PIN_MARK_SIZE)));
+            #[cfg(test)]
+            let glyph = glyph.debug_selector(move || format!("{id}-glyph-{group_ix}"));
+            let target = crate::ui::tab_strip::hit_target(
+                Button::new((id, group_ix))
+                    .ghost()
+                    .xsmall()
+                    .text_color(muted)
+                    .child(glyph)
+                    .tab_stop(false)
+                    .tooltip(t(tip)),
+            )
+            .h(px(HEADER_HEIGHT));
+            #[cfg(test)]
+            let target = target.debug_selector(move || format!("{id}-{group_ix}"));
+            target
         };
         let mut buttons = h_flex().gap_0p5().bg(backing);
         if let Some(auto) = key.auto().cloned() {
             buttons = buttons.child(
-                button(
-                    "sidebar-group-pin",
-                    // The mark the group will carry once kept, the size of
-                    // the icon beside it so the two buttons line up.
-                    Icon::empty().path(PIN_MARK).xsmall().into_any_element(),
-                    L10nKey::SidebarPinGroup,
-                )
-                .on_mouse_down(
+                // The mark the group will carry once kept.
+                button("sidebar-group-pin", PIN_MARK, L10nKey::SidebarPinGroup).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
+                        #[cfg(test)]
+                        header_action_probe::record("pin");
                         this.pin_auto_group(auto.clone(), cx);
                     }),
                 ),
@@ -2469,16 +2504,15 @@ impl Tty59App {
             buttons = buttons.child(
                 button(
                     "sidebar-group-add",
-                    Icon::empty()
-                        .path("icons/plus.svg")
-                        .xsmall()
-                        .into_any_element(),
+                    "icons/plus.svg",
                     L10nKey::SidebarGroupNewTab,
                 )
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
+                        #[cfg(test)]
+                        header_action_probe::record("add");
                         this.new_tab_in_group(key.clone(), window, cx);
                     }),
                 ),
@@ -2488,11 +2522,11 @@ impl Tty59App {
             h_flex()
                 .absolute()
                 .right(px(4.))
-                // Centred on the heading's line: 16px of buttons in `HEADER_HEIGHT`.
-                .top(px((HEADER_HEIGHT - 16.) / 2.))
+                // The strip is the header's height, so it needs no offset.
+                .top_0()
                 .opacity(0.)
                 .group_hover(hover, |s| s.opacity(1.))
-                .child(div().w(px(10.)).h(px(16.)).bg(linear_gradient(
+                .child(div().w(px(10.)).h(px(HEADER_HEIGHT)).bg(linear_gradient(
                     90.,
                     linear_color_stop(fade, 0.),
                     linear_color_stop(backing, 1.),
@@ -5071,7 +5105,8 @@ mod fold_tests {
             assert!(
                 (counts.right() - git.right()).abs() < px(0.5)
                     && (bar.right() - px(8.) - counts.right()).abs() < px(0.5),
-                "at {width}: the counts are not flush right"
+                "at {width}: the counts are not flush right: bar {bar:?}, name {name:?}, git {git:?}, counts {counts:?}, counts to padding edge {:?}",
+                bar.right() - px(8.) - counts.right()
             );
             counts_widths.push(counts.size.width);
         }
@@ -5232,7 +5267,10 @@ mod fold_tests {
                 .unwrap_or_else(|| panic!("at {width}: the counts were not painted"));
             assert!(
                 (bar.right() - px(8.) - counts.right()).abs() < px(0.5),
-                "at {width}: the counts are not flush right"
+                "at {width}: the counts are not flush right: bar {bar:?}, name {:?}, git {:?}, counts {counts:?}, counts to padding edge {:?}",
+                vcx.debug_bounds("sidebar-group-name-0"),
+                vcx.debug_bounds("sidebar-group-git-0"),
+                bar.right() - px(8.) - counts.right()
             );
             counts_widths.push(counts.size.width);
         }
@@ -5320,6 +5358,680 @@ mod fold_tests {
                 "with the box focused for typing"
             );
         });
+    }
+}
+
+/// A group header's pin and "+" targets, and its pinned mark: mounted bounds,
+/// real pointer events and real Tab keystrokes. The numbers below are literal
+/// oracles on purpose: they are the accepted geometry, not the production
+/// constants, so a change to either side shows up as a failure.
+#[cfg(test)]
+mod header_target_tests {
+    use super::*;
+    use crate::daemon::transport::Stream;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use gpui::{
+        Bounds, Entity, Modifiers, Pixels, Point, TestAppContext, VisualTestContext, point, size,
+    };
+
+    const TARGET_W: f32 = 24.;
+    const TARGET_H: f32 = 22.;
+    const GLYPH: f32 = 12.;
+    const GAP: f32 = 2.;
+
+    /// A `'static` selector for `prefix` followed by `ix`: `debug_bounds` wants
+    /// a literal, and building one per index from `concat!` needs neither a
+    /// leak nor a lint allowance. A test that outgrows 16 rows or headers
+    /// fails here with the index it asked for.
+    macro_rules! numbered {
+        ($prefix:literal, $ix:expr) => {
+            match $ix {
+                0 => concat!($prefix, "0"),
+                1 => concat!($prefix, "1"),
+                2 => concat!($prefix, "2"),
+                3 => concat!($prefix, "3"),
+                4 => concat!($prefix, "4"),
+                5 => concat!($prefix, "5"),
+                6 => concat!($prefix, "6"),
+                7 => concat!($prefix, "7"),
+                8 => concat!($prefix, "8"),
+                9 => concat!($prefix, "9"),
+                10 => concat!($prefix, "10"),
+                11 => concat!($prefix, "11"),
+                12 => concat!($prefix, "12"),
+                13 => concat!($prefix, "13"),
+                14 => concat!($prefix, "14"),
+                15 => concat!($prefix, "15"),
+                n => panic!("no selector literal for {}{}", $prefix, n),
+            }
+        };
+    }
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum Target {
+        Pin,
+        Add,
+    }
+
+    impl Target {
+        fn selector(self, ix: usize) -> &'static str {
+            match self {
+                Target::Pin => numbered!("sidebar-group-pin-", ix),
+                Target::Add => numbered!("sidebar-group-add-", ix),
+            }
+        }
+
+        fn action(self) -> &'static str {
+            match self {
+                Target::Pin => "pin",
+                Target::Add => "add",
+            }
+        }
+    }
+
+    fn near(a: Pixels, b: f32) -> bool {
+        (f32::from(a) - b).abs() < 0.51
+    }
+
+    fn alpha() -> AutoKey {
+        AutoKey::Repo(PathBuf::from("/w/alpha"))
+    }
+
+    fn beta() -> AutoKey {
+        AutoKey::Repo(PathBuf::from("/w/beta"))
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// Two auto groups of two tabs each: headers 0 and 1, each with a pin and
+    /// a "+".
+    fn two_groups(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContext, Vec<Stream>) {
+        let (app, mut vcx, streams) = harness_with_tabs(cx, 4);
+        app.update(&mut vcx, |app, cx| {
+            for (i, key) in [(0, alpha()), (1, alpha()), (2, beta()), (3, beta())] {
+                *app.tabs[i].auto_group.borrow_mut() = Some(key);
+            }
+            cx.notify();
+        });
+        draw(&mut vcx);
+        (app, vcx, streams)
+    }
+
+    fn bounds(vcx: &mut VisualTestContext, selector: &'static str) -> Bounds<Pixels> {
+        vcx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is drawn"))
+    }
+
+    /// Fold state of every group: the folded auto keys and each pinned flag.
+    fn folds(app: &Tty59App) -> (Vec<AutoKey>, Vec<bool>) {
+        (
+            app.sidebar_groups.auto_collapsed.clone(),
+            app.sidebar_groups
+                .pinned
+                .iter()
+                .map(|g| g.collapsed)
+                .collect(),
+        )
+    }
+
+    /// Whether the auto group `key` is folded, wherever its fold is kept: in
+    /// the auto list, or on the kept group that took its folder when pinned.
+    fn is_folded(app: &Tty59App, key: &AutoKey) -> bool {
+        let AutoKey::Repo(path) = key else {
+            return false;
+        };
+        app.sidebar_groups.auto_collapsed.contains(key)
+            || app
+                .sidebar_groups
+                .pinned
+                .iter()
+                .any(|g| g.collapsed && g.folder.as_deref() == path.to_str())
+    }
+
+    /// The title of each of the first `n` rows is drawn.
+    fn rows_are_shown(vcx: &mut VisualTestContext, n: usize, label: &str) {
+        for i in 0..n {
+            assert!(
+                vcx.debug_bounds(numbered!("sidebar-row-title-", i))
+                    .is_some(),
+                "{label}: row {i} is on screen"
+            );
+        }
+    }
+
+    /// One point just inside each of a target's four edges.
+    fn inside_edges(b: Bounds<Pixels>) -> [(&'static str, Point<Pixels>); 4] {
+        let half = px(0.5);
+        [
+            ("top", point(b.center().x, b.top() + half)),
+            ("bottom", point(b.center().x, b.bottom() - half)),
+            ("left", point(b.left() + half, b.center().y)),
+            ("right", point(b.right() - half, b.center().y)),
+        ]
+    }
+
+    /// Both targets of every header are 24 by the header's height, their glyphs
+    /// are 12px and centred, and the two are 2px apart without overlapping, so
+    /// the centres are 26px apart.
+    #[gpui::test]
+    fn header_targets_are_full_size_with_twelve_pixel_glyphs(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams) = two_groups(cx);
+        for ix in 0..2 {
+            let header = bounds(&mut vcx, numbered!("sidebar-group-", ix));
+            let pin = bounds(&mut vcx, Target::Pin.selector(ix));
+            let add = bounds(&mut vcx, Target::Add.selector(ix));
+            let pin_glyph = bounds(&mut vcx, numbered!("sidebar-group-pin-glyph-", ix));
+            let add_glyph = bounds(&mut vcx, numbered!("sidebar-group-add-glyph-", ix));
+
+            for (name, target, glyph) in [("pin", pin, pin_glyph), ("add", add, add_glyph)] {
+                assert!(
+                    near(target.size.width, TARGET_W) && near(target.size.height, TARGET_H),
+                    "header {ix} {name} target is {:?}, not 24 x 22",
+                    target.size
+                );
+                assert!(
+                    near(target.size.height, f32::from(header.size.height)),
+                    "header {ix} {name} target is as tall as the header it sits in"
+                );
+                assert!(
+                    near(target.top(), f32::from(header.top())),
+                    "header {ix} {name} target starts at the header's top, not above it"
+                );
+                assert!(
+                    near(glyph.size.width, GLYPH) && near(glyph.size.height, GLYPH),
+                    "header {ix} {name} glyph is {:?}, not 12 x 12",
+                    glyph.size
+                );
+                assert!(
+                    near(glyph.center().x, f32::from(target.center().x))
+                        && near(glyph.center().y, f32::from(target.center().y)),
+                    "header {ix} {name} glyph is centred in its target"
+                );
+            }
+            assert!(
+                near(add.left() - pin.right(), GAP),
+                "header {ix}: the targets are {:?} apart, not 2px",
+                add.left() - pin.right()
+            );
+            assert!(
+                pin.right() <= add.left(),
+                "header {ix}: the two targets do not overlap"
+            );
+            assert!(
+                near(add.center().x - pin.center().x, TARGET_W + GAP),
+                "header {ix}: the centres are 26px apart"
+            );
+        }
+    }
+
+    /// A real press just inside each of a target's four edges reaches that
+    /// target's callback exactly once, does not fold the header, and does not
+    /// fall through to a row. The probe records each callback entry, because
+    /// pinning twice leaves the same state as pinning once.
+    #[gpui::test]
+    fn a_press_inside_any_edge_of_a_target_fires_it_exactly_once(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = two_groups(cx);
+        for ix in 0..2 {
+            for target in [Target::Pin, Target::Add] {
+                for edge in 0..4 {
+                    draw(&mut vcx);
+                    // The press points come from the accepted 24 x 22 box
+                    // anchored at the mounted target's left and the header's
+                    // top, not from the mounted size, so a target that came
+                    // out smaller misses its own edge.
+                    let header = bounds(&mut vcx, numbered!("sidebar-group-", ix));
+                    let mounted = bounds(&mut vcx, target.selector(ix));
+                    let expected = Bounds {
+                        origin: point(mounted.left(), header.top()),
+                        size: size(px(TARGET_W), px(TARGET_H)),
+                    };
+                    let (edge_name, at) = inside_edges(expected)[edge];
+                    let label = format!("{target:?} of header {ix}, {edge_name} edge");
+
+                    let (before_active, before_tabs) =
+                        app.read_with(&vcx, |a, _| (a.active, a.tabs.len()));
+                    app.read_with(&vcx, |a, _| {
+                        assert!(
+                            !is_folded(a, &alpha()) && !is_folded(a, &beta()),
+                            "{label}: both groups start open"
+                        );
+                    });
+                    rows_are_shown(&mut vcx, before_tabs, &label);
+                    header_action_probe::take();
+                    vcx.simulate_click(at, Modifiers::none());
+                    draw(&mut vcx);
+
+                    assert_eq!(
+                        header_action_probe::take(),
+                        vec![target.action()],
+                        "{label}: the callback ran exactly once"
+                    );
+                    // The group is open before and after, whichever container
+                    // (auto list or kept list) holds its fold now, and its
+                    // rows are still on screen.
+                    app.read_with(&vcx, |a, _| {
+                        assert!(
+                            !is_folded(a, &alpha()) && !is_folded(a, &beta()),
+                            "{label}: the header did not fold"
+                        );
+                        if a.tabs.len() == before_tabs {
+                            assert_eq!(a.active, before_active, "{label}: no row took the press");
+                        } else {
+                            assert_eq!(
+                                a.tabs.len(),
+                                before_tabs + 1,
+                                "{label}: at most one tab opened"
+                            );
+                            assert!(
+                                a.active >= before_tabs,
+                                "{label}: only the new tab took the focus, no existing row"
+                            );
+                        }
+                        match target {
+                            Target::Pin => assert_eq!(
+                                a.sidebar_groups.pinned.len(),
+                                1,
+                                "{label}: the group is kept, once"
+                            ),
+                            Target::Add => assert!(
+                                a.sidebar_groups.pinned.is_empty(),
+                                "{label}: nothing was pinned"
+                            ),
+                        }
+                    });
+                    rows_are_shown(&mut vcx, before_tabs, &label);
+
+                    // Undo the pin so the next press meets the same header.
+                    if target == Target::Pin {
+                        let id = app.read_with(&vcx, |a, _| a.sidebar_groups.pinned[0].id);
+                        app.update(&mut vcx, |a, cx| a.delete_group(id, cx));
+                        draw(&mut vcx);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Just outside a target is the header, not the target: the press folds the
+    /// header exactly once and runs no action. The gap between the two targets
+    /// is outside both, so they do not overlap in effect either.
+    #[gpui::test]
+    fn a_press_just_outside_a_target_reaches_the_header(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = two_groups(cx);
+        let key = GroupKey::Auto(alpha());
+        let half = px(0.5);
+        let pin = bounds(&mut vcx, Target::Pin.selector(0));
+        let add = bounds(&mut vcx, Target::Add.selector(0));
+        let outside = [
+            ("left of the pin", point(pin.left() - half, pin.center().y)),
+            (
+                "in the gap between the two",
+                point(pin.right() + px(1.), pin.center().y),
+            ),
+            ("right of the +", point(add.right() + half, add.center().y)),
+        ];
+        for (name, at) in outside {
+            let before = app.read_with(&vcx, |a, _| folds(a));
+            header_action_probe::take();
+            vcx.simulate_click(at, Modifiers::none());
+            draw(&mut vcx);
+            assert!(
+                header_action_probe::take().is_empty(),
+                "{name}: no header action ran"
+            );
+            app.read_with(&vcx, |a, _| {
+                assert_ne!(folds(a), before, "{name}: the header took the press");
+                assert!(a.sidebar_groups.pinned.is_empty(), "{name}: nothing pinned");
+            });
+            app.update(&mut vcx, |a, cx| a.toggle_sidebar_group(Some(&key), cx));
+            draw(&mut vcx);
+        }
+
+        // Above and below the box is not the target either.
+        for (name, at) in [
+            ("above the pin", point(pin.center().x, pin.top() - half)),
+            ("below the pin", point(pin.center().x, pin.bottom() + half)),
+            ("below the +", point(add.center().x, add.bottom() + half)),
+        ] {
+            header_action_probe::take();
+            vcx.simulate_click(at, Modifiers::none());
+            draw(&mut vcx);
+            assert!(
+                header_action_probe::take().is_empty(),
+                "{name}: no header action ran"
+            );
+            app.read_with(&vcx, |a, _| {
+                assert!(a.sidebar_groups.pinned.is_empty(), "{name}: nothing pinned");
+            });
+            draw(&mut vcx);
+        }
+    }
+
+    /// Acted on at the press: a press on a target followed by a drag never
+    /// lifts the header. A drag started beside the targets does, which is what
+    /// makes the first half mean something.
+    #[gpui::test]
+    fn pressing_a_target_never_picks_the_header_up(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = two_groups(cx);
+        let lifted = |app: &Entity<Tty59App>, vcx: &VisualTestContext| {
+            app.read_with(vcx, |a, _| a.reorder.borrow().is_some())
+        };
+
+        let header = bounds(&mut vcx, "sidebar-group-0");
+        let beside = point(header.left() + px(2.), header.center().y);
+        vcx.simulate_mouse_down(beside, MouseButton::Left, Modifiers::none());
+        vcx.simulate_mouse_move(
+            point(beside.x, beside.y + px(20.)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        assert!(
+            lifted(&app, &vcx),
+            "positive control: a drag from the header's own edge lifts it"
+        );
+        vcx.simulate_mouse_up(
+            point(beside.x, beside.y + px(20.)),
+            MouseButton::Left,
+            Modifiers::none(),
+        );
+        draw(&mut vcx);
+
+        for target in [Target::Pin, Target::Add] {
+            let b = bounds(&mut vcx, target.selector(0));
+            let at = b.center();
+            header_action_probe::take();
+            vcx.simulate_mouse_down(at, MouseButton::Left, Modifiers::none());
+            vcx.simulate_mouse_move(
+                point(at.x, at.y + px(20.)),
+                Some(MouseButton::Left),
+                Modifiers::none(),
+            );
+            assert!(
+                !lifted(&app, &vcx),
+                "{target:?}: a drag from a header action does not lift the header"
+            );
+            vcx.simulate_mouse_up(
+                point(at.x, at.y + px(20.)),
+                MouseButton::Left,
+                Modifiers::none(),
+            );
+            draw(&mut vcx);
+            header_action_probe::take();
+        }
+    }
+
+    /// A pinned group's mark is status only, for a folder group and a label
+    /// group alike: a press on it never unpins or deletes, it folds the header
+    /// like the rest of it. Delete Group still removes a label group.
+    #[gpui::test]
+    fn a_pinned_marks_click_only_folds_and_keeps_the_group(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        let (kept, work) = app.update(&mut vcx, |app, cx| {
+            app.pin_folder(PathBuf::from("/w/kept"), cx);
+            let kept = app
+                .sidebar_groups
+                .pinned
+                .iter()
+                .find(|g| g.folder.as_deref() == Some("/w/kept"))
+                .expect("just pinned")
+                .id;
+            let group = PinnedGroup::label("work");
+            let work = group.id;
+            app.edit_groups(cx, |groups| groups.pinned.push(group));
+            app.set_tab_group(0, Some(kept), cx);
+            app.set_tab_group(1, Some(work), cx);
+            cx.notify();
+            (kept, work)
+        });
+        draw(&mut vcx);
+
+        for (ix, id) in [(0, kept), (1, work)] {
+            let mark = bounds(&mut vcx, numbered!("sidebar-group-pin-mark-", ix));
+            assert!(
+                near(mark.size.width, GLYPH) && near(mark.size.height, GLYPH),
+                "header {ix}: the mark is {:?}, not 12 x 12",
+                mark.size
+            );
+            for press in 1..=2 {
+                header_action_probe::take();
+                vcx.simulate_click(mark.center(), Modifiers::none());
+                draw(&mut vcx);
+                assert!(header_action_probe::take().is_empty());
+                app.read_with(&vcx, |a, _| {
+                    assert!(
+                        a.sidebar_groups.pinned.iter().any(|g| g.id == id),
+                        "header {ix}: press {press} on the mark kept the group"
+                    );
+                    assert_eq!(a.tabs[ix].group.get(), Some(id), "and its tab");
+                    assert_eq!(
+                        a.sidebar_groups.pinned[ix].collapsed,
+                        press == 1,
+                        "header {ix}: press {press} folded or unfolded it, once"
+                    );
+                });
+            }
+        }
+
+        // The explicit command is untouched: Delete Group lets a label go.
+        app.update(&mut vcx, |a, cx| a.delete_group(work, cx));
+        draw(&mut vcx);
+        app.read_with(&vcx, |a, _| {
+            assert!(a.sidebar_groups.pinned.iter().all(|g| g.id != work));
+            assert_eq!(a.tabs[1].group.get(), None, "its tab is back to auto");
+        });
+    }
+
+    /// The header menu is how a folder group is let go of now: right-click,
+    /// then Up, Up, Enter. A fresh menu has nothing selected, the first Up
+    /// takes the last item (Delete Group) and the second the one above it
+    /// (Unpin), so the count holds however many items come before. Without the
+    /// Unpin item the second Up lands on New Tab and the group stays, which is
+    /// what the final assertion catches. The mark control: a press on the
+    /// mark just before it never unpinned anything.
+    ///
+    /// A plain `#[test]` with a context it never tears down, for the same
+    /// reason as `scm::rows_window_tests`' menu test: an open `ContextMenu`
+    /// trips `#[gpui::test]`'s leak detector through a known toolkit cycle
+    /// (`ui-audit/bugs/gpui-component-contextmenu-leak.md`). That is a
+    /// limit of this harness, not proof that this menu releases its state.
+    #[test]
+    fn the_header_menu_still_unpins_a_folder_group() {
+        let mut cx = TestAppContext::build(gpui::TestDispatcher::new(0), None);
+        // Forgotten on every path, a failed assertion included: dropping the
+        // context after a panic would run the leak teardown a second time and
+        // abort, which would hide the assertion that actually failed.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            unpin_from_the_header_menu(&mut cx)
+        }));
+        if outcome.is_ok() {
+            cx.run_until_parked();
+        }
+        std::mem::forget(cx);
+        if let Err(failure) = outcome {
+            std::panic::resume_unwind(failure);
+        }
+    }
+
+    fn unpin_from_the_header_menu(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
+        let (kept, work) = app.update(&mut vcx, |app, cx| {
+            app.pin_folder(PathBuf::from("/w/kept"), cx);
+            let kept = app
+                .sidebar_groups
+                .pinned
+                .iter()
+                .find(|g| g.folder.as_deref() == Some("/w/kept"))
+                .expect("just pinned")
+                .id;
+            let group = PinnedGroup::label("work");
+            let work = group.id;
+            app.edit_groups(cx, |groups| groups.pinned.push(group));
+            app.set_tab_group(0, Some(kept), cx);
+            app.set_tab_group(1, Some(work), cx);
+            cx.notify();
+            (kept, work)
+        });
+        draw(&mut vcx);
+
+        // The mark is not the way out: pressed twice, the group is still kept.
+        let mark = bounds(&mut vcx, "sidebar-group-pin-mark-0");
+        for _ in 0..2 {
+            vcx.simulate_click(mark.center(), Modifiers::none());
+            draw(&mut vcx);
+        }
+        app.read_with(&vcx, |a, _| {
+            assert!(
+                a.sidebar_groups.pinned.iter().any(|g| g.id == kept),
+                "pressing the mark did not unpin the folder group"
+            );
+        });
+
+        let header = bounds(&mut vcx, "sidebar-group-0");
+        let at = point(header.left() + px(2.), header.center().y);
+        let before = vcx.update(|window, cx| window.focused(cx));
+        vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        vcx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        // Drawn, not just parked: parking only drains the dispatcher, and the
+        // menu's focus and key context exist once its frame is mounted.
+        draw(&mut vcx);
+        let open = vcx.update(|window, cx| window.focused(cx));
+        assert!(
+            open.is_some() && open != before,
+            "the right click opened a menu and focused it"
+        );
+        assert!(
+            vcx.update(|window, _| window.context_stack())
+                .iter()
+                .any(|c| c.contains("PopupMenu")),
+            "the focus is in a popup menu, so the keys below reach it"
+        );
+
+        vcx.simulate_keystrokes("up up enter");
+        vcx.run_until_parked();
+        draw(&mut vcx);
+
+        app.read_with(&vcx, |a, _| {
+            assert!(
+                a.sidebar_groups.pinned.iter().all(|g| g.id != kept),
+                "Up, Up, Enter chose Unpin, and the folder group is gone"
+            );
+            assert_eq!(a.tabs[0].group.get(), None, "its tab is back to auto");
+            assert!(a.tabs.len() >= 2, "no tab was closed");
+            assert!(
+                a.sidebar_groups.pinned.iter().any(|g| g.id == work),
+                "the other kept group is untouched"
+            );
+            assert_eq!(a.tabs[1].group.get(), Some(work));
+        });
+    }
+
+    /// Tab presses from the rail's search field, answered with how many stops
+    /// were reached before focus came back or stopped moving.
+    fn walk(vcx: &mut VisualTestContext, key: &str) -> usize {
+        let search = bounds(vcx, "sidebar-search");
+        vcx.simulate_click(search.center(), Modifiers::none());
+        vcx.run_until_parked();
+        let start = vcx
+            .update(|window, cx| window.focused(cx))
+            .expect("clicking the search field focuses it");
+        let mut seen = Vec::new();
+        for _ in 0..64 {
+            vcx.simulate_keystrokes(key);
+            vcx.run_until_parked();
+            let Some(now) = vcx.update(|window, cx| window.focused(cx)) else {
+                break;
+            };
+            if now == start || seen.contains(&now) {
+                break;
+            }
+            seen.push(now);
+        }
+        seen.len()
+    }
+
+    /// The header targets are revealed by the pointer alone and stay out of
+    /// the Tab order: more headers, or a header that loses its pin, change
+    /// nothing about where Tab and Shift+Tab stop. A tab row's close button is
+    /// a normal Button, and adding one does change it, so the count can move.
+    #[gpui::test]
+    fn header_targets_add_no_tab_stops(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 2);
+        app.update(&mut vcx, |app, cx| {
+            let group = PinnedGroup::label("work");
+            let id = group.id;
+            app.edit_groups(cx, |groups| groups.pinned.push(group));
+            app.set_tab_group(0, Some(id), cx);
+            *app.tabs[1].auto_group.borrow_mut() = Some(alpha());
+            cx.notify();
+        });
+        draw(&mut vcx);
+        let (fwd, back) = (walk(&mut vcx, "tab"), walk(&mut vcx, "shift-tab"));
+        assert!(
+            fwd > 0 && back > 0,
+            "Tab and Shift+Tab move focus off the search field ({fwd}, {back})"
+        );
+
+        // More headers: three empty kept groups, each with a hidden "+".
+        app.update(&mut vcx, |app, cx| {
+            for name in ["one", "two", "three"] {
+                let group = PinnedGroup::label(name);
+                app.edit_groups(cx, |groups| groups.pinned.push(group));
+            }
+        });
+        draw(&mut vcx);
+        for ix in 0..4 {
+            assert!(
+                vcx.debug_bounds(Target::Add.selector(ix)).is_some(),
+                "header {ix} draws its hidden +"
+            );
+        }
+        assert_eq!(
+            walk(&mut vcx, "tab"),
+            fwd,
+            "Tab: hidden + targets are no stops"
+        );
+        assert_eq!(
+            walk(&mut vcx, "shift-tab"),
+            back,
+            "Shift+Tab: hidden + targets are no stops"
+        );
+
+        // A header that loses its pin: the auto group becomes a kept one.
+        app.update(&mut vcx, |app, cx| app.pin_auto_group(alpha(), cx));
+        draw(&mut vcx);
+        assert_eq!(walk(&mut vcx, "tab"), fwd, "Tab: a hidden pin is no stop");
+        assert_eq!(
+            walk(&mut vcx, "shift-tab"),
+            back,
+            "Shift+Tab: a hidden pin is no stop"
+        );
+
+        // Positive control: two more rows, each with a normal close Button.
+        app.update_in(&mut vcx, |app, window, cx| {
+            for id in [100, 101] {
+                let (view, stream) = crate::terminal::view::quiet_test_pane(id, window, cx);
+                app.tabs
+                    .push(crate::ui::app::Tab::new(crate::ui::pane::Pane::leaf(
+                        crate::ui::pane::PaneSlot::Ready(view),
+                    )));
+                streams.push(stream);
+            }
+            cx.notify();
+        });
+        draw(&mut vcx);
+        assert!(
+            walk(&mut vcx, "tab") > fwd,
+            "positive control: a normal Button in a new row is a Tab stop"
+        );
+        assert!(
+            walk(&mut vcx, "shift-tab") > back,
+            "positive control: and a Shift+Tab stop"
+        );
     }
 }
 
@@ -5855,6 +6567,20 @@ mod agent_tests {
             .collect()
     }
 
+    /// The chord New Agent Tab ships on, spelled out per platform rather than
+    /// read from the keymap: macOS cmd-shift-a; Windows ctrl-alt-shift-insert
+    /// (Insert avoids the tested Polish AltGr printable shapes); Linux
+    /// ctrl-alt-shift-a.
+    fn shipped_new_agent_chord() -> Vec<(String, gpui::Modifiers)> {
+        if cfg!(target_os = "macos") {
+            strokes(&["cmd-shift-a"])
+        } else if cfg!(target_os = "windows") {
+            strokes(&["ctrl-alt-shift-insert"])
+        } else {
+            strokes(&["ctrl-alt-shift-a"])
+        }
+    }
+
     fn rail_chord(
         app: &Entity<Tty59App>,
         vcx: &mut gpui::VisualTestContext,
@@ -5924,14 +6650,13 @@ mod agent_tests {
         use crate::core::config::KeybindingOverride::Add;
         let (app, mut vcx, _streams) = empty_agents_rail(cx, Some(Add("ctrl-alt-m".into())));
         let chord = rail_chord(&app, &mut vcx);
-        // macOS ships New Agent Tab on cmd-shift-a and the added chord comes
-        // after it; elsewhere the action ships unbound and the added one leads.
-        let expected = if cfg!(target_os = "macos") {
-            strokes(&["cmd-shift-a"])
-        } else {
-            strokes(&["ctrl-alt-m"])
-        };
-        assert_eq!(chord, expected, "the first binding the keymap holds");
+        // Every platform ships a New Agent Tab chord and the added one comes
+        // after it, so the first binding the keymap holds is the shipped one.
+        assert_eq!(
+            chord,
+            shipped_new_agent_chord(),
+            "the first binding the keymap holds"
+        );
         assert!(vcx.debug_bounds("sidebar-new-agent-chord").is_some());
     }
 
@@ -5953,16 +6678,10 @@ mod agent_tests {
     #[gpui::test]
     fn the_new_agent_row_follows_the_shipped_default(cx: &mut gpui::TestAppContext) {
         let (app, mut vcx, _streams) = empty_agents_rail(cx, None);
-        let expected = if cfg!(target_os = "macos") {
-            strokes(&["cmd-shift-a"])
-        } else {
-            Vec::new()
-        };
-        assert_eq!(rail_chord(&app, &mut vcx), expected);
-        assert_eq!(
+        assert_eq!(rail_chord(&app, &mut vcx), shipped_new_agent_chord());
+        assert!(
             vcx.debug_bounds("sidebar-new-agent-chord").is_some(),
-            cfg!(target_os = "macos"),
-            "Linux and Windows ship New Agent Tab unbound, so no chord is drawn"
+            "every platform ships New Agent Tab on a chord, so the row draws it"
         );
     }
 

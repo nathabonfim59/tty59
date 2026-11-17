@@ -137,6 +137,38 @@ src/ui/scm/rows_window_tests.rs|Command::new("git")
 src/terminal/view/gpui_tests/path_links.rs|std::fs::create_dir_all
 src/terminal/view/gpui_tests/path_links.rs|std::fs::write
 src/terminal/view/gpui_tests/path_links.rs|std::fs::remove_dir_all
+
+# The Info and Changes keyboard tests, each in a file of its own rather than a
+# trailing `mod tests`. They are cfg(test) fixture code: they make a scratch
+# directory (or a seeded repository, via `git`) beneath this machine's temporary
+# directory, send it to a test pane as its working directory, and remove it
+# afterwards. The paths are local temporary test repos and seed data by
+# construction, never a workspace path and never a remote one. Exact file and
+# literal pattern only; a new construct in these files still trips the guard.
+src/ui/right_panel/info_keys_tests.rs|std::fs::
+src/ui/right_panel/rebase_info_tests.rs|std::fs::
+src/ui/scm/panel/render_idle_gpui_tests/commit_ring_tests.rs|std::fs::write
+src/ui/scm/rows_guard_tests.rs|std::fs::
+src/ui/scm/rows_guard_tests.rs|Command::new("git")
+src/ui/scm/rows_info_tests.rs|std::fs::
+src/ui/scm/rows_info_tests.rs|Command::new("git")
+src/ui/scm/rows_keys_tests.rs|std::fs::
+src/ui/scm/rows_keys_tests.rs|Command::new("git")
+src/ui/scm/rows_keyup_header_tests.rs|std::fs::
+src/ui/scm/rows_keyup_tests.rs|std::fs::
+src/ui/scm/rows_keyup_tests.rs|Command::new("git")
+src/ui/scm/rows_landing_fanout_tests.rs|std::fs::
+src/ui/scm/rows_notarepo_fanout_tests.rs|std::fs::
+src/ui/scm/rows_notarepo_tests.rs|std::fs::
+src/ui/scm/rows_ownop_tests.rs|std::fs::
+src/ui/scm/rows_ring_inside_tests.rs|std::fs::
+src/ui/scm/rows_shared_tests.rs|std::fs::
+src/ui/scm/rows_stale_tests.rs|std::fs::
+
+# The settings keyboard fixture reads back the `daemon.port` its own test child
+# just published in the child-private pinned local config dir, to prove the
+# endpoint identity. Local test state, never a workspace or remote path.
+src/ui/settings/keyboard_tests.rs|std::fs::read_to_string
 EOF
 )
 
