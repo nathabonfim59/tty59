@@ -1213,8 +1213,13 @@ mod layout_tests {
         observe::label(&ElementId::from(("panel-forward-target", id as usize)))
     }
 
-    /// The width the forward panel is drawn at in these tests: the 260px a
-    /// narrow window gives it, above the panel's 240px floor.
+    /// The narrow width the forward panel is asked for in these tests: the
+    /// 260px a narrow window gives it. It is a request, not a promise: the
+    /// product never draws the panel under its own measured minimum
+    /// (`right_panel_min_px`), and on macOS that minimum, which counts the
+    /// panel toggle beside the tabs, is wider than 260px. The width a narrow
+    /// scene really asks for is `narrow_panel_request`: this, or that minimum
+    /// where it is the larger. The product floor is never lowered or bypassed.
     const PANEL_W: f32 = 260.;
 
     /// A panel wide enough for a short bind chip and a short target to share
@@ -1222,8 +1227,32 @@ mod layout_tests {
     /// fixed ports are counted.
     const WIDE_PANEL_W: f32 = 420.;
 
-    fn set_panel_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) {
-        set_width(app, vcx, PANEL_W);
+    /// The narrowest legal request for these scenes: `PANEL_W`, or the panel's
+    /// own measured minimum where that is wider (macOS). The minimum follows
+    /// the tab metrics the tab row is drawn from, so an ordinary frame is drawn
+    /// first to refresh them for the scene's locale and font. Captured here,
+    /// before anything is set or drawn at it, and never derived from the width
+    /// the panel ends up with. Where the floor is not the macOS one, the
+    /// request is exactly `PANEL_W`: a larger one on Linux or Windows is a
+    /// failure to investigate, not a width to follow.
+    fn narrow_panel_request(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) -> f32 {
+        draw(vcx);
+        let floor = app.update_in(vcx, |app, window, cx| app.right_panel_min_px(window, cx));
+        let request = PANEL_W.max(floor);
+        if cfg!(not(target_os = "macos")) {
+            assert_eq!(
+                request, PANEL_W,
+                "off macOS the panel floor {floor} is under the 260px request"
+            );
+        }
+        request
+    }
+
+    /// Asks for the narrow request and returns it, for `assert_panel_width`.
+    fn set_panel_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) -> f32 {
+        let request = narrow_panel_request(app, vcx);
+        set_width(app, vcx, request);
+        request
     }
 
     fn set_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext, width: f32) {
@@ -1233,10 +1262,21 @@ mod layout_tests {
         });
     }
 
-    /// The panel is really `PANEL_W` wide: the width layout used, read back
-    /// after the clamp that keeps it between its floor and its ceiling.
-    fn assert_panel_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext) {
-        assert_width(app, vcx, PANEL_W);
+    /// The panel is really `request` wide, the width `set_panel_width` captured
+    /// before drawing: the width layout used, read back after the clamp that
+    /// keeps it between its floor and its ceiling, and the box the frame drew,
+    /// read from the `right-panel` selector.
+    fn assert_panel_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext, request: f32) {
+        assert_width(app, vcx, request);
+        let drawn = vcx
+            .debug_bounds("right-panel")
+            .expect("the right panel was drawn");
+        assert_eq!(
+            drawn.size.width,
+            px(request),
+            "the panel was drawn {:?} wide, not the {request}px asked for",
+            drawn.size.width
+        );
     }
 
     fn assert_width(app: &gpui::Entity<Tty59App>, vcx: &mut VisualTestContext, width: f32) {
@@ -1253,9 +1293,9 @@ mod layout_tests {
             app.loopback_panel.managed = forwards;
             cx.notify();
         });
-        set_panel_width(app, vcx);
+        let request = set_panel_width(app, vcx);
         draw(vcx);
-        assert_panel_width(app, vcx);
+        assert_panel_width(app, vcx, request);
     }
 
     /// What `…` kept of `source` on each side. Both are derived from the text
@@ -1365,8 +1405,9 @@ mod layout_tests {
     /// A bind host as long as a person can type: the chip is as wide as its
     /// line and no wider, its host elided inside it with the `:port` kept, and
     /// the target wrapped onto a line of its own below it instead of being
-    /// squeezed out beside it. A guarantee about the 260px panel; the wrap is
-    /// what spares the target, so it never goes without a host character.
+    /// squeezed out beside it. A guarantee about the narrowest legal panel (the
+    /// 260px request, or the product's wider floor on macOS); the wrap is what
+    /// spares the target, so it never goes without a host character.
     #[gpui::test]
     fn a_long_bind_host_is_elided_in_its_chip_and_the_target_wraps_below(cx: &mut TestAppContext) {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
@@ -1549,9 +1590,9 @@ mod layout_tests {
                 .update(cx, |input, cx| input.set_value("8080", window, cx));
             cx.notify();
         });
-        set_panel_width(&app, &mut vcx);
+        let request = set_panel_width(&app, &mut vcx);
         draw(&mut vcx);
-        assert_panel_width(&app, &mut vcx);
+        assert_panel_width(&app, &mut vcx, request);
 
         let row = vcx
             .debug_bounds("forward-port-row")
@@ -1852,6 +1893,32 @@ mod layout_tests {
         )
     }
 
+    /// The scene of the original finding with its terminal made exactly 440px,
+    /// for the two tests that are about that width and no other. 440px is the
+    /// terminal's content width; the outer window that leaves it is a platform
+    /// matter, because the rail, the panel's floor and the window chrome differ
+    /// (on macOS the panel's floor is wider than 260px). So the scene is built
+    /// as [`narrow_scene_host`] builds it (960x600, 260px rail and panel asked
+    /// for), the terminal and the viewport it really got are read back, and the
+    /// window's width is corrected once by what the terminal is short of or over
+    /// 440px. Height and the requests are unchanged; there is no search. The
+    /// tests' own precondition still measures the terminal at 440px. English at
+    /// UI16, in the theme given (the tests use the dark one).
+    fn narrow_scene_exact_440(
+        cx: &mut TestAppContext,
+        theme: &crate::ui::presets::Theme,
+        reason: &str,
+        host: &str,
+    ) -> (Entity<Tty59App>, VisualTestContext) {
+        let (app, mut vcx) = narrow_scene_host(cx, "en", 16., theme, reason, host);
+        let viewport = vcx.update(|window, _| window.viewport_size());
+        let terminal = terminal_area(&app, &mut vcx);
+        let outer = viewport.width + (px(440.) - terminal.size.width);
+        vcx.simulate_resize(gpui::size(outer, viewport.height));
+        draw(&mut vcx);
+        (app, vcx)
+    }
+
     /// A saved host whose name is as long as real ones get: no break a layout
     /// can use, longer than the terminal.
     const LONG_SAVED_HOST: &str = "demo@this-host-name-is-deliberately-long-so-the-failure-reason-wraps-in-a-narrow-terminal.invalid";
@@ -2077,16 +2144,19 @@ mod layout_tests {
         misses
     }
 
-    /// The scene of the original finding, exactly: en, UI16, dark, 960x600
-    /// with the rail and the right panel at 260px, which must leave a 440px
-    /// terminal. A different terminal here is a failed precondition, not a
-    /// pass or a layout miss.
+    /// The scene of the original finding: en, UI16, dark, the rail and the
+    /// right panel asked for 260px, in a window whose outer width is corrected
+    /// once (`narrow_scene_exact_440`) so that the terminal is 440px. The 440px
+    /// is the terminal's CONTENT width, the one the regression was written
+    /// about; the outer window may be wider than the historical 960px, because
+    /// macOS chrome and its wider panel floor take more of it. A different
+    /// terminal here is a failed precondition, not a pass or a layout miss.
     #[gpui::test]
     fn the_original_440px_scene_keeps_the_strip_and_both_actions_inside(cx: &mut TestAppContext) {
         let _probe = probe::scope();
         let theme = both_themes().remove(0);
         let natural = natural_actions(cx, "en", 16., &theme);
-        let (app, mut vcx) = narrow_scene(cx, "en", 16., &theme, LONG_REASON);
+        let (app, mut vcx) = narrow_scene_exact_440(cx, &theme, LONG_REASON, "");
         let area = terminal_area(&app, &mut vcx);
         assert!(
             (area.size.width - px(440.)).abs() < px(1.),
@@ -2193,7 +2263,10 @@ mod layout_tests {
     /// that names it stays inside the pill, and so inside the terminal, with the
     /// reason and both actions holding every rule of the other scenes. The pane
     /// really dialled the long host: its title is wider than the terminal when
-    /// nothing constrains it.
+    /// nothing constrains it. The 440px is the terminal's CONTENT width, the one
+    /// the regression was written about; the outer window is corrected once
+    /// (`narrow_scene_exact_440`) and, on macOS, may be wider than the
+    /// historical 960px to compensate for chrome.
     #[gpui::test]
     fn a_long_saved_host_name_stays_inside_the_pill_in_the_original_440px_scene(
         cx: &mut TestAppContext,
@@ -2202,7 +2275,7 @@ mod layout_tests {
         let theme = both_themes().remove(0);
         let natural = natural_actions(cx, "en", 16., &theme);
         let free = natural_title(cx, "en", 16., &theme, LONG_SAVED_HOST);
-        let (app, mut vcx) = narrow_scene_host(cx, "en", 16., &theme, LONG_REASON, LONG_SAVED_HOST);
+        let (app, mut vcx) = narrow_scene_exact_440(cx, &theme, LONG_REASON, LONG_SAVED_HOST);
         let area = terminal_area(&app, &mut vcx);
         assert!(
             (area.size.width - px(440.)).abs() < px(1.),
