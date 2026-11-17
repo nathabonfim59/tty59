@@ -1050,6 +1050,8 @@ pub enum ClientMsg {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Boxing AgentStatus changes a wire-protocol type; out of scope for a lint fix.
+#[allow(clippy::large_enum_variant)]
 pub enum DaemonMsg {
     Spawned {
         pane_id: u64,

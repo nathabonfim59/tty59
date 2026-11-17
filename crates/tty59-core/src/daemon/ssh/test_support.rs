@@ -312,8 +312,10 @@ impl FakeSshd {
             .expect("bind a loopback port");
         let addr = listener.local_addr().expect("bound address");
 
-        let mut config = server::Config::default();
-        config.inactivity_timeout = None;
+        let mut config = server::Config {
+            inactivity_timeout: None,
+            ..server::Config::default()
+        };
         config
             .keys
             .push(PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32])));
@@ -443,8 +445,10 @@ impl FakeSshdListener {
             .await
             .expect("bind a loopback port");
         let port = listener.local_addr().expect("bound address").port();
-        let mut config = server::Config::default();
-        config.inactivity_timeout = None;
+        let mut config = server::Config {
+            inactivity_timeout: None,
+            ..server::Config::default()
+        };
         config
             .keys
             .push(PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32])));
@@ -613,12 +617,14 @@ impl PasswordFake {
             .expect("bind a loopback port");
         let addr = listener.local_addr().expect("bound address");
 
-        let mut config = server::Config::default();
-        config.inactivity_timeout = None;
-        // Rejections are deliberately slow in the default config, and these
-        // tests walk through several.
-        config.auth_rejection_time = Duration::from_millis(0);
-        config.auth_rejection_time_initial = Some(Duration::from_millis(0));
+        let mut config = server::Config {
+            inactivity_timeout: None,
+            // Rejections are deliberately slow in the default config, and these
+            // tests walk through several.
+            auth_rejection_time: Duration::from_millis(0),
+            auth_rejection_time_initial: Some(Duration::from_millis(0)),
+            ..server::Config::default()
+        };
         config
             .keys
             .push(PrivateKey::from(Ed25519Keypair::from_seed(&[9; 32])));

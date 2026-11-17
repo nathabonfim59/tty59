@@ -30,7 +30,7 @@ fn record(role: &str, info: &std::panic::PanicHookInfo<'_>) {
     append(&path, &record);
 }
 
-fn append(path: &PathBuf, record: &str) {
+fn append(path: &std::path::Path, record: &str) {
     let _ = super::logfile::append_rotating(path, record.as_bytes(), MAX_BYTES);
 }
 

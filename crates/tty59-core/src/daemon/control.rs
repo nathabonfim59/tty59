@@ -679,6 +679,8 @@ impl WireErrorKind {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+// Boxing the Layout delta is a wire-type refactor, out of scope for a lint fix.
+#[allow(clippy::large_enum_variant)]
 pub enum ControlEvent {
     Watch {
         id: u64,
@@ -955,6 +957,8 @@ impl ControlClientMsg {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+// Large only because it wraps ControlEvent; boxing it is out of scope for a lint fix.
+#[allow(clippy::large_enum_variant)]
 pub enum ControlServerMsg {
     HelloOk(ControlHelloOk),
     Response {

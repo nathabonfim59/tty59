@@ -1814,7 +1814,7 @@ mod tests {
 
         let roots = Roots::under(home.path());
         assert!(scan(&roots, &[]).is_empty(), "nowhere to resume either");
-        let found = scan(&roots, &[known.clone()]);
+        let found = scan(&roots, std::slice::from_ref(&known));
         assert_eq!(found.len(), 1);
         assert_eq!(
             (
