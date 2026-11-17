@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use tty59_core::client::{ControlClient, PaneClient};
+use tty59_core::client::{ControlClient, PaneClient, PaneSession};
 use tty59_core::core::group_key::{PinnedGroup, WorkspaceGroups};
 use tty59_core::daemon::control::{ControlHello, ControlRequest, ReplyOk};
 use tty59_core::daemon::protocol::{DaemonMsg, PROTOCOL_VERSION, ShellSpec, WinSize};
@@ -12,6 +12,14 @@ const DAEMON_ENV: &str = "TTY59_CLI_E2E_DAEMON";
 const PASTE_AWARE_FIXTURE_ARG: &str = "--tty59-e2e-paste-aware-fixture";
 const PASTE_AWARE_TEXT: &str = "tty59 paste aware input";
 const PASTE_BURST_WINDOW: Duration = Duration::from_millis(120);
+const RESIZE_FIXTURE_ARG: &str = "--tty59-e2e-resize-fixture";
+/// The two modes the resize fixture switches on, in the order it does. This is
+/// exactly what the default `capture` has to restore ahead of the newest
+/// segment, so it is written out rather than derived.
+const RESIZE_MODES: &str = "\x1b[?2004h\x1b[?1007h";
+const RESIZE_A: &str = "\x1b[?2004h\x1b[?1007hTTY59_RESIZE_A\r\nTTY59_RESIZE_READY\r\n";
+const RESIZE_B: &str = "TTY59_RESIZE_B\r\n";
+const RESIZE_ACK: u8 = b'g';
 const READY_WITHIN: Duration = Duration::from_secs(30);
 const SETTLE_WITHIN: Duration = Duration::from_secs(60);
 const CLOSE_WITHIN: Duration = Duration::from_secs(5);
@@ -19,6 +27,10 @@ const CLOSE_WITHIN: Duration = Duration::from_secs(5);
 fn main() {
     if std::env::args().any(|arg| arg == PASTE_AWARE_FIXTURE_ARG) {
         run_paste_aware_fixture();
+        return;
+    }
+    if std::env::args().any(|arg| arg == RESIZE_FIXTURE_ARG) {
+        run_resize_fixture();
         return;
     }
     if std::env::var(DAEMON_ENV).as_deref() == Ok("1") {
@@ -165,6 +177,41 @@ fn run_paste_aware_fixture() {
             last_text_at = Some(read_at);
         }
     }
+}
+
+/// A child that prints in two phases, with nothing in between.
+///
+/// It writes its first segment once, then blocks until the test says the
+/// resize has been taken (one ack byte), then writes its second segment and
+/// holds. It installs no `SIGWINCH` handler, whose default action is to ignore
+/// the signal, so the resize itself makes it print nothing: the only bytes the
+/// pane's replay ring ever sees from it are the two writes below, on either
+/// side of the resize the test performs between them. The writes carry explicit
+/// CRLF because raw mode switches output post-processing off.
+fn run_resize_fixture() {
+    let _raw = raw_mode::enable();
+    let mut out = std::io::stdout();
+    out.write_all(RESIZE_A.as_bytes())
+        .expect("write the fixture's first segment");
+    out.flush().expect("flush the fixture's first segment");
+
+    let mut chunk = [0_u8; 16];
+    loop {
+        let read = std::io::stdin()
+            .read(&mut chunk)
+            .expect("read the fixture's ack");
+        assert_ne!(read, 0, "fixture input ended before the ack");
+        if chunk[..read].contains(&RESIZE_ACK) {
+            break;
+        }
+    }
+
+    out.write_all(RESIZE_B.as_bytes())
+        .expect("write the fixture's second segment");
+    out.flush().expect("flush the fixture's second segment");
+
+    // Held until the daemon goes, so the pane stays alive and silent.
+    while matches!(std::io::stdin().read(&mut chunk), Ok(read) if read > 0) {}
 }
 
 #[cfg(unix)]
@@ -723,13 +770,13 @@ fn collect_pane_output_until(session: &mut tty59_core::client::PaneSession, mark
                 }
             }
             Ok(DaemonMsg::Exited { code }) => panic!(
-                "paste-aware fixture exited ({code:?}) before {:?}; saw {:?}",
+                "pane fixture exited ({code:?}) before {:?}; saw {:?}",
                 String::from_utf8_lossy(marker),
                 String::from_utf8_lossy(&seen)
             ),
             Ok(_) => {}
             Err(error) => panic!(
-                "paste-aware fixture ended before {:?}: {error}; saw {:?}",
+                "pane fixture ended before {:?}: {error}; saw {:?}",
                 String::from_utf8_lossy(marker),
                 String::from_utf8_lossy(&seen)
             ),
@@ -906,104 +953,333 @@ fn capture_plain_returns_text_not_escapes(daemon: &Daemon) {
 /// pane with zero bytes and exit `0`, indistinguishable from a blank one
 /// (#841). Dropping byte-less segments is what fixes that.
 ///
-/// What is asserted here is shaped by how much of that is portable. On Unix a
-/// resize raises SIGWINCH and the shell repaints its prompt, so the segment the
-/// resize opened is *not* empty — it holds the repaint, and the newest
-/// non-empty segment is that prompt rather than the one holding the pane's
-/// output. On Windows nothing answers the resize, the segment stays empty, and
-/// the fix reaches back to the output. So "the default form still carries the
-/// marker" is true on one platform and false on the other for reasons that have
-/// nothing to do with the fix, and asserting it would be asserting an accident.
+/// The default form is not the end of the ring. It is the *newest segment*,
+/// preceded by the terminal modes the older segments left on (bracketed paste
+/// from a shell prompt, say), so that the newest segment is replayed into the
+/// state it was written in. That prefix is prepended to the newest segment and
+/// is not part of the raw newest segment, so the full default form need not be
+/// a suffix of `--scrollback`'s bytes, and equating them — which the first
+/// version of this test did, against a real shell — failed whenever the shell
+/// had left such a mode on at the boundary.
 ///
-/// What holds everywhere is the pair the fix actually guarantees: the default
-/// form comes back with bytes rather than with the resize's placeholder, and it
-/// is the end of what `--scrollback` returns — that second one is what would
-/// catch a fix reaching for the wrong segment. The marker itself is pinned
-/// against `--scrollback`, the form that promises to hold it. The segment
-/// picking is pinned exactly, on every platform, by the `what_was_asked_for`
-/// tests in `backend/real.rs`.
+/// So the pane here is a child that prints exactly two segments with the resize
+/// between them, and the test asserts what the contract says, exactly, against
+/// the daemon's raw replay rather than against another capture:
+///
+/// - before the child's second segment the resize has left only the empty
+///   placeholder, and the default form still answers with the output, not with
+///   zero bytes (#841);
+/// - after it, `--scrollback` is every segment, both forms end with the raw
+///   newest segment, and the default form is exactly the restored modes
+///   followed by that segment.
+///
+/// What the restored modes are is pinned by the unit tests in `backend/real.rs`
+/// on every platform, and literally here on Unix. On Windows the console host
+/// may print bytes of its own around a resize, so the raw newest segment is
+/// only required to end with the child's output there, and the restored modes
+/// are the core's fold of the raw older segments; nothing is stripped on either.
 fn capture_still_answers_after_a_resize(daemon: &Daemon) {
+    let fixture = std::env::current_exe().expect("locate the resize fixture");
+    let shell = ShellSpec {
+        program: fixture.display().to_string(),
+        args: vec![RESIZE_FIXTURE_ARG.into()],
+        args_are_tty59_defaults: false,
+    };
     let mut pane = PaneClient::at(daemon.pane_endpoint())
         .spawn(
             None,
-            WinSize {
-                cols: 100,
-                rows: 24,
-                cell_w: 8,
-                cell_h: 16,
-            },
-            None,
+            resize_fixture_size(100),
+            Some(shell),
             Some("resize-capture-e2e".into()),
             None,
         )
-        .expect("spawn a pane to resize");
-    let address = format!("%{}", pane.pane_id());
+        .expect("spawn the resize fixture");
+    pane.set_recv_timeout(Some(SETTLE_WITHIN))
+        .expect("bound fixture output reads");
+    let pane_id = pane.pane_id();
+    let address = format!("%{pane_id}");
 
-    daemon.run_ok(&["send", &address, "echo tty59_e2e_resize_marker", "--enter"]);
-    let deadline = Instant::now() + SETTLE_WITHIN;
-    loop {
-        if daemon
-            .run_ok(&["capture", &address, "--scrollback"])
-            .contains("tty59_e2e_resize_marker")
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the marker never reached the pane's replay"
+    // The whole first segment, line ending included: a marker that stopped
+    // short of it could leave the tail of that write to land after the resize.
+    collect_pane_output_until(&mut pane, b"TTY59_RESIZE_READY\r\n");
+
+    let narrower = resize_fixture_size(80);
+    pane.resize(narrower).expect("resize the pane");
+    // The daemon echoes the new size in stream order, after sealing the ring's
+    // segment under the state lock: once it arrives the boundary exists.
+    wait_for_size_echo(&mut pane, 80);
+
+    // Before the fixture's second segment: the ring is the output sealed at
+    // the old width, then the empty placeholder at the new one.
+    let placeholder = capture_while_still(daemon, &address, pane_id, 80);
+    if cfg!(unix) {
+        assert_eq!(
+            placeholder.raw.len(),
+            2,
+            "expected the output and the empty placeholder: {:#?}",
+            placeholder.raw
         );
-        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            placeholder.raw[0],
+            RawSegment {
+                cols: Some(100),
+                bytes: RESIZE_A.as_bytes().to_vec(),
+            }
+        );
+        assert_eq!(
+            placeholder.raw[1],
+            RawSegment {
+                cols: Some(80),
+                bytes: Vec::new(),
+            },
+            "the resize should leave the child's ring tail empty"
+        );
+        // The #841 case: nothing newer than the sealed segment, so that
+        // segment is the answer. There is no older segment to restore from.
+        assert_eq!(placeholder.default["text"], RESIZE_A);
+        assert_eq!(placeholder.whole["text"], RESIZE_A);
+        assert!(placeholder.plain_default.contains("TTY59_RESIZE_A"));
     }
+    assert_captures_follow_the_raw_ring(&placeholder);
+    assert!(
+        placeholder.plain_whole.contains("TTY59_RESIZE_A"),
+        "the output went missing from --scrollback: {:?}",
+        placeholder.plain_whole
+    );
+    let carried = placeholder.default["bytes"].as_u64().unwrap_or(0);
+    assert!(
+        carried > 0,
+        "the default form answered with nothing: {}",
+        placeholder.default
+    );
 
-    pane.resize(WinSize {
-        cols: 80,
+    pane.input(&[RESIZE_ACK]).expect("send the fixture's ack");
+    collect_pane_output_until(&mut pane, b"TTY59_RESIZE_B\r\n");
+
+    // After it: output in both segments, the newest holding the second.
+    let settled = capture_while_still(daemon, &address, pane_id, 80);
+    if cfg!(unix) {
+        assert_eq!(
+            settled.raw,
+            vec![
+                RawSegment {
+                    cols: Some(100),
+                    bytes: RESIZE_A.as_bytes().to_vec(),
+                },
+                RawSegment {
+                    cols: Some(80),
+                    bytes: RESIZE_B.as_bytes().to_vec(),
+                },
+            ]
+        );
+        let restored = format!("{RESIZE_MODES}{RESIZE_B}");
+        assert_eq!(
+            settled.default["text"], restored,
+            "the default form is the modes the older segment left on, then \
+             the newest segment"
+        );
+        assert_eq!(settled.default["bytes"], restored.len());
+        assert_eq!(
+            settled.whole["text"],
+            format!("{RESIZE_A}{RESIZE_B}"),
+            "--scrollback is every segment, unmodified"
+        );
+        assert!(!settled.plain_default.contains("TTY59_RESIZE_A"));
+    }
+    assert_captures_follow_the_raw_ring(&settled);
+    let newest = settled
+        .raw
+        .iter()
+        .rev()
+        .find(|segment| !segment.bytes.is_empty())
+        .expect("the ring holds the second segment");
+    assert!(
+        newest.bytes.ends_with(RESIZE_B.as_bytes()),
+        "the newest raw segment does not end with the child's second write: {:#?}",
+        settled.raw
+    );
+    let whole_text = settled.whole["text"].as_str().unwrap_or_default();
+    let default_text = settled.default["text"].as_str().unwrap_or_default();
+    assert!(whole_text.ends_with(RESIZE_B), "{whole_text:?}");
+    assert!(default_text.ends_with(RESIZE_B), "{default_text:?}");
+    assert!(settled.plain_whole.contains("TTY59_RESIZE_A"));
+    assert!(settled.plain_whole.contains("TTY59_RESIZE_B"));
+    assert!(settled.plain_default.contains("TTY59_RESIZE_B"));
+    let _ = pane.detach();
+}
+
+fn resize_fixture_size(cols: u16) -> WinSize {
+    WinSize {
+        cols,
         rows: 24,
         cell_w: 8,
         cell_h: 16,
-    })
-    .expect("resize the pane");
-
-    // Each capture below is its own call, so a pane still moving would have
-    // them disagree for reasons that are not the fix. Reading the whole ring on
-    // either side of the others and requiring the two readings to match is what
-    // says the pane held still while they were taken.
-    loop {
-        let before = daemon.run_json(&["capture", &address, "--scrollback"]);
-        let newest = daemon.run_json(&["capture", &address]);
-        let plain = daemon.run_ok(&["capture", &address, "--plain", "--scrollback"]);
-        let after = daemon.run_json(&["capture", &address, "--scrollback"]);
-
-        let whole = before["text"].as_str().unwrap_or_default();
-        let newest_text = newest["text"].as_str().unwrap_or_default();
-        let held_still = before["text"] == after["text"]
-            && whole.contains("tty59_e2e_resize_marker")
-            && plain.contains("tty59_e2e_resize_marker");
-        if held_still {
-            assert!(
-                !newest_text.is_empty(),
-                "the default form answered with the empty segment the resize \
-                 opened instead of the newest one holding output: {newest}"
-            );
-            assert!(
-                newest["bytes"].as_u64().is_some_and(|n| n > 0),
-                "a capture that carried text has to report the bytes it \
-                 carried: {newest}"
-            );
-            assert!(
-                whole.ends_with(newest_text),
-                "the newest segment has to be the end of the ring it came from, \
-                 or the default form is answering with some other segment:\n\
-                 newest: {newest_text:?}\nwhole: {whole:?}"
-            );
-            let _ = pane.detach();
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the pane never held still after the resize; last ring was:\n{whole}"
-        );
-        std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+fn wait_for_size_echo(session: &mut PaneSession, cols: u16) {
+    loop {
+        match session.recv() {
+            Ok(DaemonMsg::Size(size)) if size.cols == cols => return,
+            Ok(DaemonMsg::Exited { code }) => {
+                panic!("the pane exited ({code:?}) before the size echo for {cols} columns")
+            }
+            Ok(_) => {}
+            Err(error) => panic!("no size echo for {cols} columns arrived: {error}"),
+        }
+    }
+}
+
+/// One segment of a pane's replay ring as the daemon sent it. `cols` is `None`
+/// for bytes that arrived before any `Size`: the mode prelude the daemon puts
+/// ahead of the ring, which has no geometry of its own.
+#[derive(Debug, PartialEq, Eq)]
+struct RawSegment {
+    cols: Option<u16>,
+    bytes: Vec<u8>,
+}
+
+/// The pane's replay ring, read the way `capture` reads it but with nothing
+/// dropped, up to the segment at `last_cols`.
+///
+/// The daemon sends every segment as `Size` then `Snapshot`, empty ones
+/// included, and the newest segment is the one at the pane's current size, so
+/// that `Snapshot` is where the ring ends. Nothing waits for a quiet stream; the
+/// receive timeout only bounds a failure.
+fn raw_replay(daemon: &Daemon, pane: u64, last_cols: u16) -> Vec<RawSegment> {
+    let mut session = PaneClient::at(daemon.pane_endpoint())
+        .observe(pane, resize_fixture_size(last_cols))
+        .expect("observe the pane's raw replay");
+    session
+        .set_recv_timeout(Some(SETTLE_WITHIN))
+        .expect("bound the raw replay read");
+    let mut segments = Vec::new();
+    let mut cols = None;
+    loop {
+        match session.recv() {
+            Ok(DaemonMsg::Size(size)) => cols = Some(size.cols),
+            Ok(DaemonMsg::Snapshot(bytes)) => {
+                segments.push(RawSegment { cols, bytes });
+                if cols == Some(last_cols) {
+                    break;
+                }
+            }
+            Ok(DaemonMsg::Output(bytes)) => panic!(
+                "live output before the replay reached {last_cols} columns: \
+                 {bytes:?} after {segments:#?}"
+            ),
+            Ok(DaemonMsg::Exited { code }) => {
+                panic!("the pane exited ({code:?}) during its replay: {segments:#?}")
+            }
+            Ok(DaemonMsg::Error(message)) => {
+                panic!("the daemon refused the replay: {message}: {segments:#?}")
+            }
+            Ok(_) => {}
+            Err(error) => panic!("the replay never reached {last_cols} columns: {error}"),
+        }
+    }
+    let _ = session.detach();
+    segments
+}
+
+struct StillCaptures {
+    raw: Vec<RawSegment>,
+    default: serde_json::Value,
+    whole: serde_json::Value,
+    plain_default: String,
+    plain_whole: String,
+}
+
+/// Every form of `capture`, between two readings of the raw ring. The child is
+/// silent, so the pane has to hold still across them: the two readings differing
+/// is a failure, not a reason to take them again.
+fn capture_while_still(daemon: &Daemon, address: &str, pane: u64, cols: u16) -> StillCaptures {
+    let before = raw_replay(daemon, pane, cols);
+    let default = daemon.run_json(&["capture", address]);
+    let whole = daemon.run_json(&["capture", address, "--scrollback"]);
+    let plain_default = daemon.run_ok(&["capture", address, "--plain"]);
+    let plain_whole = daemon.run_ok(&["capture", address, "--plain", "--scrollback"]);
+    let after = raw_replay(daemon, pane, cols);
+    assert_eq!(
+        before, after,
+        "the pane's replay changed while it was being captured"
+    );
+    StillCaptures {
+        raw: before,
+        default,
+        whole,
+        plain_default,
+        plain_whole,
+    }
+}
+
+/// The modes the default form has to put ahead of its newest segment, given the
+/// byte-carrying segments before it.
+#[cfg(not(windows))]
+fn restored_modes(older: &[&[u8]]) -> Vec<u8> {
+    if older.is_empty() {
+        Vec::new()
+    } else {
+        RESIZE_MODES.as_bytes().to_vec()
+    }
+}
+
+#[cfg(windows)]
+fn restored_modes(older: &[&[u8]]) -> Vec<u8> {
+    let mut modes = tty59_core::core::term_modes::TerminalModes::new();
+    for segment in older {
+        modes.feed(segment);
+    }
+    modes.restore_bytes().unwrap_or_default()
+}
+
+/// What each form of `capture` has to be, given the raw ring it was taken from:
+/// `--scrollback` is every byte-carrying segment, and the default form is the
+/// modes the older ones left on followed by the newest, with the byte counts to
+/// match. The comparison is on the whole text, so nothing is trimmed and no
+/// byte the capture added or dropped can hide.
+fn assert_captures_follow_the_raw_ring(captures: &StillCaptures) {
+    assert!(
+        matches!(captures.raw.first(), Some(RawSegment { cols: Some(_), .. })),
+        "the replay opened with a mode prelude this test did not expect: {:#?}",
+        captures.raw
+    );
+    let segments: Vec<&RawSegment> = captures
+        .raw
+        .iter()
+        .filter(|segment| !segment.bytes.is_empty())
+        .collect();
+    let (newest, older) = segments
+        .split_last()
+        .expect("the pane's ring holds no bytes");
+    let older: Vec<&[u8]> = older
+        .iter()
+        .map(|segment| segment.bytes.as_slice())
+        .collect();
+
+    let whole: Vec<u8> = segments
+        .iter()
+        .flat_map(|segment| segment.bytes.iter().copied())
+        .collect();
+    let mut default = restored_modes(&older);
+    default.extend_from_slice(&newest.bytes);
+
+    assert_eq!(
+        captures.whole["text"],
+        &*String::from_utf8_lossy(&whole),
+        "--scrollback is not the raw ring"
+    );
+    assert_eq!(captures.whole["bytes"], whole.len());
+    assert_eq!(
+        captures.default["text"],
+        &*String::from_utf8_lossy(&default),
+        "the default form is not the restored modes followed by the raw newest segment"
+    );
+    assert_eq!(captures.default["bytes"], default.len());
+    assert!(
+        whole.ends_with(&newest.bytes),
+        "the raw newest segment is not the end of the ring"
+    );
 }
 
 /// `--tail` against a real pane, whose replay carries a shell prompt, escapes
