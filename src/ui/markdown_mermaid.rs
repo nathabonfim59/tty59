@@ -41,7 +41,7 @@ use gpui_component::text::{
 
 mod render;
 pub(crate) mod viewer;
-mod viewport;
+pub(crate) mod viewport;
 
 /// Stable node name registered with the text view.
 const MERMAID_NODE: &str = "mermaid";

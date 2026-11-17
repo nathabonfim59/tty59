@@ -10,8 +10,10 @@
 //! Sizes are in rems off a 16px base, written as the pixel sizes the design
 //! calls for, so the page still grows with the interface font.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use gpui::Focusable as _;
 use gpui::{
     AnyElement, App, BoxShadow, ClickEvent, Div, ElementId, FontWeight, Hsla, IntoElement,
     MouseButton, Pixels, Rems, SharedString, Stateful, Window, div, point, prelude::*, px, rems,
@@ -20,6 +22,7 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, h_flex, v_flex};
 
 use crate::ui::presets::{lift, settings_wash};
+use crate::ui::theme::{FocusRing, RingPlacement};
 
 /// A size from the design, in pixels at the default 16px interface font.
 pub(crate) fn fs(px_at_16: f32) -> Rems {
@@ -32,6 +35,411 @@ pub(crate) fn fs(px_at_16: f32) -> Rems {
 pub(crate) fn probe<E: gpui::Styled>(key: &'static str, mut element: E) -> E {
     crate::ui::paint_probe::note(key, &mut element);
     element
+}
+
+/// The key-context entry [`mark`] writes: its value is the control's own element
+/// id. Compiled only into tests.
+#[cfg(test)]
+pub(crate) const STOP_MARK: &str = "tty59-stop";
+
+/// Names a control to the keyboard tests: puts `id` on the element's key
+/// context under [`STOP_MARK`], so a test reads which control holds focus from
+/// `window.context_stack()` of the live focused path. It makes no handle and no
+/// tab stop and matches no binding; a production build never has it.
+#[cfg(test)]
+pub(crate) fn mark<E: gpui::InteractiveElement>(element: E, id: impl std::fmt::Display) -> E {
+    let mut context = gpui::KeyContext::default();
+    context.set(STOP_MARK, id.to_string());
+    element.key_context(context)
+}
+
+/// The focus handle of the control drawn under `key`, kept by the framework
+/// for exactly as long as the control is drawn: keyed state is scoped to the
+/// element-id path (the ids of the identified elements above it, plus the
+/// component name), so two same-id controls get a handle each only under
+/// parents that carry distinct ids (an anonymous div adds nothing to the
+/// path); callers keep their ids unique. A control that is no longer drawn
+/// takes its handle (and the focus on it) with it. No registry, nothing
+/// repaired while rendering.
+///
+/// The same keyed state also carries what a stop needs to bring itself into
+/// view when the keyboard reaches it (see [`reveal`]): where it was last
+/// painted, the scroll owners the current render named, and the focus-in
+/// subscription that acts on them. All of it lives and dies with the control.
+struct StopState {
+    handle: gpui::FocusHandle,
+    /// The control's bounds as the LAST frame's prepaint measured them; reset
+    /// to `None` by every render and set again only by that frame's prepaint,
+    /// so `Some` means painted by the frame that drew the current request.
+    painted: Rc<Cell<Option<gpui::Bounds<Pixels>>>>,
+    /// What this render asked for: the scrollers to bring the control into
+    /// view in, inner to outer. Overwritten every render, never kept from an
+    /// earlier request, so a closed and re-opened page cannot leave a stale
+    /// owner here.
+    request: Rc<RefCell<RevealRequest>>,
+    _focus_in: gpui::Subscription,
+}
+
+#[derive(Default)]
+struct RevealRequest {
+    scrolls: Vec<gpui::ScrollHandle>,
+    /// Whether the ring stands outside the control (its reach then belongs to
+    /// what must be visible); an inside ring stays within the control's box.
+    outside: bool,
+}
+
+type Painted = Rc<Cell<Option<gpui::Bounds<Pixels>>>>;
+
+fn stop_state(
+    key: &ElementId,
+    window: &mut Window,
+    cx: &mut App,
+) -> (gpui::FocusHandle, Painted, Rc<RefCell<RevealRequest>>) {
+    let state = window.use_keyed_state(key.clone(), cx, |window, cx| {
+        let handle = cx.focus_handle();
+        let painted: Painted = Rc::new(Cell::new(None));
+        let request = Rc::new(RefCell::new(RevealRequest::default()));
+        // Weak: the deferred redraw below checks the state is still mounted.
+        let alive = cx.weak_entity();
+        let focus_in = window.on_focus_in(&handle, cx, {
+            let (handle, painted, request) = (handle.clone(), painted.clone(), request.clone());
+            move |window, cx| reveal(window, cx, &handle, &painted, &request, &alive)
+        });
+        StopState {
+            handle,
+            painted,
+            request,
+            _focus_in: focus_in,
+        }
+    });
+    let state = state.read(cx);
+    (
+        state.handle.clone().tab_stop(true),
+        state.painted.clone(),
+        state.request.clone(),
+    )
+}
+
+/// The focus handle of a control that is not a [`Stop`] itself (it builds its own
+/// element, ring and handlers) but opts into the same keyboard reveal: the keyed
+/// handle (tab stop) under `key`, and, only when `scrolls` is not empty, the
+/// pinned measuring child to add to the control. `Stop` takes its handle the same
+/// way, so the state, subscription, request overwrite and measurement exist once.
+///
+/// This render's request replaces the last one whole and the control's measured
+/// bounds start again from "not painted yet". `outside`: the control's ring
+/// stands outside its box, so its reach is part of what must be visible. The
+/// control must be a positioned box (`relative`) for the child to lie over it.
+pub(crate) fn armed_focus(
+    key: &ElementId,
+    scrolls: Vec<gpui::ScrollHandle>,
+    outside: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> (gpui::FocusHandle, Option<AnyElement>) {
+    let (handle, painted, request) = stop_state(key, window, cx);
+    *request.borrow_mut() = RevealRequest {
+        scrolls: scrolls.clone(),
+        outside,
+    };
+    painted.set(None);
+    let measure = (!scrolls.is_empty()).then(|| {
+        // The same box as the ring layer (`ring_layer`): pinned to the control's
+        // origin and size, not left to the auto position a padded or flex
+        // control would give an absolute child.
+        gpui::canvas(
+            move |bounds, _, _| painted.set(Some(bounds)),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .into_any_element()
+    });
+    (handle, measure)
+}
+
+/// How far the content must move (positive = down) to bring `rect` into `view`
+/// by the least movement (a rect taller than the view aligns its top), already
+/// limited to what the scroller can actually do: its offset stays within
+/// `[-max, 0]`. The result is the movement that WILL happen, so the next,
+/// outer scroller is planned from where the rect really ends up.
+pub(crate) fn reveal_delta(
+    view: gpui::Bounds<Pixels>,
+    rect: gpui::Bounds<Pixels>,
+    offset_y: Pixels,
+    max_y: Pixels,
+) -> Pixels {
+    let want = if rect.size.height >= view.size.height || rect.top() < view.top() {
+        view.top() - rect.top()
+    } else if rect.bottom() > view.bottom() {
+        view.bottom() - rect.bottom()
+    } else {
+        return px(0.);
+    };
+    let target = (offset_y + want).max(-max_y).min(px(0.));
+    target - offset_y
+}
+
+/// One scroller in a reveal plan: its viewport, vertical offset and furthest
+/// scroll, as the last frame left them.
+#[derive(Clone, Copy)]
+pub(crate) struct Level {
+    pub(crate) view: gpui::Bounds<Pixels>,
+    pub(crate) offset_y: Pixels,
+    pub(crate) max_y: Pixels,
+}
+
+/// The effective movement of each level, inner to outer, for `rect` (already
+/// grown by whatever must also show). Each level moves by [`reveal_delta`] and
+/// the rect is carried by exactly that effective movement into the next.
+pub(crate) fn reveal_plan(mut rect: gpui::Bounds<Pixels>, levels: &[Level]) -> Vec<Pixels> {
+    levels
+        .iter()
+        .map(|level| {
+            if level.view.size.height <= px(0.) {
+                return px(0.);
+            }
+            let delta = reveal_delta(level.view, rect, level.offset_y, level.max_y);
+            rect.origin.y += delta;
+            delta
+        })
+        .collect()
+}
+
+/// The focus-in action of a stop that opted into scrolling. It runs once per
+/// focus arrival, after the draw that showed the focus, so `painted` is that
+/// draw's measurement; only for the keyboard (a click on a half-hidden control
+/// does not move the page under the pointer); vertical only, x kept. gpui
+/// ignores `refresh()` inside this phase, so the redraw is queued with
+/// `Window::defer` and runs only if the state is still mounted and the control
+/// still holds focus.
+fn reveal(
+    window: &mut Window,
+    cx: &mut App,
+    handle: &gpui::FocusHandle,
+    painted: &Painted,
+    request: &Rc<RefCell<RevealRequest>>,
+    alive: &gpui::WeakEntity<StopState>,
+) {
+    if !window.last_input_was_keyboard() {
+        return;
+    }
+    let Some(mut rect) = painted.get() else {
+        return;
+    };
+    let (scrolls, outside) = {
+        let request = request.borrow();
+        (request.scrolls.clone(), request.outside)
+    };
+    if scrolls.is_empty() {
+        return;
+    }
+    if outside {
+        let by = cx.theme().focus_ring_offset() + crate::ui::theme::COMMIT_RING_W;
+        rect = gpui::Bounds {
+            origin: point(rect.origin.x - by, rect.origin.y - by),
+            size: gpui::size(rect.size.width + by * 2.0, rect.size.height + by * 2.0),
+        };
+    }
+    let levels: Vec<Level> = scrolls
+        .iter()
+        .map(|scroll| Level {
+            view: scroll.bounds(),
+            offset_y: scroll.offset().y,
+            max_y: scroll.max_offset().y,
+        })
+        .collect();
+    let mut moved = false;
+    for (scroll, delta) in scrolls.iter().zip(reveal_plan(rect, &levels)) {
+        if delta != px(0.) {
+            let offset = scroll.offset();
+            scroll.set_offset(point(offset.x, offset.y + delta));
+            moved = true;
+        }
+    }
+    if moved {
+        let (alive, handle) = (alive.clone(), handle.clone());
+        window.defer(cx, move |window, _| {
+            if alive.upgrade().is_some() && handle.is_focused(window) {
+                window.refresh();
+            }
+        });
+    }
+}
+
+/// The one place the settings page names the shared keyboard ring. It is a
+/// decorative child of the control itself, not a box around it: an absolute
+/// layer over the control's own box, holding the shared ring, drawn outside
+/// the control's edge by the installed gap and only for keyboard focus (a click
+/// that focuses the control does not light it). The control stays the one item
+/// its parent lays out, so stretch, block fill, shrink, `flex_1`, anchors and
+/// absolute placement behave exactly as they did bare; an absolute child is
+/// out of flow, so the control's own gap, padding and children are untouched.
+/// Needs a positioned control (see [`Stop`]); has no id, listener or hitbox.
+///
+/// `keyboard_only`: a stop's ring lights for keyboard focus only (a click that
+/// focuses it does not); a text field's lights on any focus, as the field's own
+/// caret does. `tag` names the layer's ring `{tag}-ring` in tests and is never
+/// evaluated otherwise.
+fn ring_layer(
+    handle: &gpui::FocusHandle,
+    placement: RingPlacement,
+    radius: Pixels,
+    keyboard_only: bool,
+    tag: impl FnOnce() -> String,
+) -> AnyElement {
+    let ring = FocusRing::new(handle, placement, radius, div().flex_1())
+        .keyboard_only(keyboard_only)
+        .fill();
+    #[cfg(test)]
+    let ring = ring.tagged(format!("{}-ring", tag()));
+    #[cfg(not(test))]
+    let _ = tag;
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .flex()
+        .flex_col()
+        .child(ring)
+        .into_any_element()
+}
+
+/// A key pressed with no modifier held. The arrow and Home/End keys a stop
+/// answers to are answered only plain: a chord with Ctrl, Alt, Shift, Super or
+/// Fn is not the control's, is not consumed, and goes on to whatever binds it
+/// (the app's navigation chords, a window manager's).
+pub(crate) fn plain_key(ev: &gpui::KeyDownEvent) -> bool {
+    let m = &ev.keystroke.modifiers;
+    !(m.control || m.alt || m.shift || m.platform || m.function)
+}
+
+type KeyHandler = Rc<dyn Fn(&gpui::KeyDownEvent, &mut Window, &mut App)>;
+
+/// A keyboard tab stop on an existing control: the control (a stateful div
+/// that already carries its id and click handler) takes a keyed focus handle
+/// and a keyboard-only ring layer as a child, and nothing else; it remains the
+/// item its parent lays out. Enter and Space fire the control's own click, as
+/// gpui does for any focused element with one.
+///
+/// The control must be a positioned box (`relative`, or already `absolute`) so
+/// the ring layer lies over it, and must not clip its overflow, or the ring
+/// outside its edge would be clipped with it.
+#[derive(IntoElement)]
+pub(crate) struct Stop {
+    key: ElementId,
+    radius: Pixels,
+    child: Stateful<Div>,
+    live: bool,
+    placement: RingPlacement,
+    on_key: Option<KeyHandler>,
+    /// The scrollers to bring the control into view in when the keyboard
+    /// reaches it, inner to outer. Empty: it never scrolls anything.
+    scrolls: Vec<gpui::ScrollHandle>,
+}
+
+pub(crate) fn stop(key: impl Into<ElementId>, radius: Pixels, child: Stateful<Div>) -> Stop {
+    Stop {
+        key: key.into(),
+        radius,
+        child,
+        live: true,
+        placement: RingPlacement::Outside,
+        on_key: None,
+        scrolls: Vec::new(),
+    }
+}
+
+impl Stop {
+    /// Opts the control into scrolling: when the keyboard reaches it, `outer`
+    /// (the page's scroller) is moved the least that shows it. `None` (no
+    /// settings page, or a control outside any scroller) opts out. Explicit per
+    /// control: nothing infers which scroller holds a control.
+    pub(crate) fn in_scroll(mut self, outer: Option<gpui::ScrollHandle>) -> Self {
+        self.scrolls.extend(outer);
+        self
+    }
+
+    /// An inner scroller (a list inside the page) that holds the control: it is
+    /// moved first, then the outer ones, each by what it can actually move.
+    pub(crate) fn in_inner_scroll(mut self, inner: Option<gpui::ScrollHandle>) -> Self {
+        if let Some(inner) = inner {
+            self.scrolls.insert(0, inner);
+        }
+        self
+    }
+
+    fn scrolls(mut self, scrolls: Vec<gpui::ScrollHandle>) -> Self {
+        self.scrolls = scrolls;
+        self
+    }
+
+    /// Draws the shared ring INSIDE the control's edge by the installed gap
+    /// instead of outside it: for a control in a clipping container (a scrolling
+    /// list), where an outside ring would be cut off or run into its neighbour.
+    /// Same ring, radius and installed gap/stroke/ink; only the placement.
+    pub(crate) fn inside(mut self) -> Self {
+        self.placement = RingPlacement::Inside;
+        self
+    }
+
+    /// `false` leaves the control exactly as it was: no handle, no ring layer.
+    /// A disabled control, or one with nothing to do, is not a stop.
+    pub(crate) fn live(mut self, live: bool) -> Self {
+        self.live = live;
+        self
+    }
+    /// Keys the control answers to beyond Enter and Space (arrows).
+    pub(crate) fn on_key(
+        mut self,
+        f: impl Fn(&gpui::KeyDownEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_key = Some(Rc::new(f));
+        self
+    }
+}
+
+impl RenderOnce for Stop {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        if !self.live {
+            return self.child.into_any_element();
+        }
+        let (handle, measure) = armed_focus(
+            &self.key,
+            self.scrolls.clone(),
+            self.placement == RingPlacement::Outside,
+            window,
+            cx,
+        );
+        let child = self.child.track_focus(&handle);
+        #[cfg(test)]
+        let child = mark(child, &self.key);
+        // The callback is for the stop ITSELF: a key listener on this node also
+        // hears the keys that bubble up from a focusable descendant, and those
+        // are that descendant's, so only act while this very handle is focused.
+        let owner = handle.clone();
+        let child = match self.on_key {
+            Some(on_key) => child.on_key_down(move |ev, window, cx| {
+                if owner.is_focused(window) {
+                    on_key(ev, window, cx)
+                }
+            }),
+            None => child,
+        };
+        child
+            .children(measure)
+            .child(ring_layer(
+                &handle,
+                self.placement,
+                self.radius,
+                true,
+                || self.key.to_string(),
+            ))
+            .into_any_element()
+    }
 }
 
 /// The page's ink at the strengths the design uses, plus the few surfaces it
@@ -207,6 +615,8 @@ pub(crate) struct Switch {
     /// The name a screen reader gives the switch, where no settings row
     /// around it already says what it is.
     label: Option<SharedString>,
+    /// Scrollers to bring it into view in, inner to outer (see [`Stop`]).
+    scrolls: Vec<gpui::ScrollHandle>,
 }
 
 pub(crate) fn switch(id: impl Into<ElementId>) -> Switch {
@@ -217,10 +627,16 @@ pub(crate) fn switch(id: impl Into<ElementId>) -> Switch {
         small: false,
         handler: None,
         label: None,
+        scrolls: Vec::new(),
     }
 }
 
 impl Switch {
+    /// Opts into scrolling in `outer` when the keyboard reaches it.
+    pub(crate) fn in_scroll(mut self, outer: Option<gpui::ScrollHandle>) -> Self {
+        self.scrolls.extend(outer);
+        self
+    }
     pub(crate) fn checked(mut self, on: bool) -> Self {
         self.on = on;
         self
@@ -251,6 +667,11 @@ impl RenderOnce for Switch {
         } else {
             (30., 18., 14.)
         };
+        // A stop only where there is something to do: a handler-less or
+        // disabled switch (the nav's decorative one) stays as it was.
+        let key = self.id.clone();
+        let interactive = self.handler.is_some() && !self.disabled;
+        let scrolls = self.scrolls.clone();
         let on = self.on;
         let left = if on { w - knob - 2. } else { 2. };
         // Tests find a switch by the id the caller already gave it. Both the
@@ -298,8 +719,10 @@ impl RenderOnce for Switch {
             switch,
         );
         #[cfg(test)]
-        let switch = switch.debug_selector(move || debug_selector.clone());
-        switch
+        let switch = mark(switch, &debug_selector).debug_selector(move || debug_selector.clone());
+        stop(key, px(h / 2.), switch)
+            .live(interactive)
+            .scrolls(scrolls)
     }
 }
 
@@ -327,6 +750,8 @@ pub(crate) struct Btn {
     announced: bool,
     min_hit: bool,
     handler: Option<ClickHandler>,
+    /// Scrollers to bring it into view in, inner to outer (see [`Stop`]).
+    scrolls: Vec<gpui::ScrollHandle>,
 }
 
 /// The shortest a link may be to the pointer where it stands alone in a bar
@@ -349,10 +774,23 @@ pub(crate) fn button(
         announced: false,
         min_hit: false,
         handler: None,
+        scrolls: Vec::new(),
     }
 }
 
 impl Btn {
+    /// Opts into scrolling in `outer` when the keyboard reaches it.
+    pub(crate) fn in_scroll(mut self, outer: Option<gpui::ScrollHandle>) -> Self {
+        self.scrolls.extend(outer);
+        self
+    }
+    /// An inner scroller first, then the outer ones.
+    pub(crate) fn in_inner_scroll(mut self, inner: Option<gpui::ScrollHandle>) -> Self {
+        if let Some(inner) = inner {
+            self.scrolls.insert(0, inner);
+        }
+        self
+    }
     /// Report the button to assistive technology under its visible label. Off by
     /// default so buttons that have not been audited keep the tree they had.
     pub(crate) fn announced(mut self) -> Self {
@@ -396,6 +834,16 @@ impl RenderOnce for Btn {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let tk = Tk::of(cx);
         let kind = self.kind;
+        // A stop only where there is something to do: no handler, or disabled,
+        // and the button is drawn exactly as it was. A dimmed one still acts,
+        // so it is a stop.
+        let key = self.id.clone();
+        let interactive = self.handler.is_some() && !self.disabled;
+        let scrolls = self.scrolls.clone();
+        let radius = match kind {
+            BtnKind::Secondary | BtnKind::Primary => px(6.),
+            BtnKind::Link | BtnKind::Danger => px(4.),
+        };
         // A primary with nothing to do yet — disabled, or dimmed with nothing
         // to save — falls to the faint fill with secondary text, the way v4's
         // Commit button and the dialogs' Create do. Faded to half opacity it
@@ -458,6 +906,9 @@ impl RenderOnce for Btn {
         };
         let fades = kind != BtnKind::Primary;
         let button = el
+            // Positioned only where the ring layer lies over it: an inert
+            // button stays exactly the element it was.
+            .when(interactive, |b| b.relative())
             .when(self.min_hit, |b| b.min_h(LINK_HIT_HEIGHT))
             .when(self.announced, |b| {
                 b.role(gpui::Role::Button).aria_label(self.label.clone())
@@ -483,8 +934,8 @@ impl RenderOnce for Btn {
             button,
         );
         #[cfg(test)]
-        let button = button.debug_selector(move || debug_selector.clone());
-        button
+        let button = mark(button, &debug_selector).debug_selector(move || debug_selector.clone());
+        stop(key, radius, button).live(interactive).scrolls(scrolls)
     }
 }
 
@@ -612,7 +1063,12 @@ fn field_box(
     } else {
         tk.k15
     };
-    div()
+    // The field's keyboard focus indication is the shared ring too, drawn inside
+    // the box over the Input's own handle (no new tab stop), alongside the
+    // field's own inset ring, which stays.
+    let handle = input.read(cx).focus_handle(cx);
+    let field = div()
+        .relative()
         .h(px(26.))
         .px(px(10.))
         .flex()
@@ -639,6 +1095,23 @@ fn field_box(
                     .when(reveal, |i| i.mask_toggle()),
             ),
         )
+        .child(ring_layer(
+            &handle,
+            RingPlacement::Inside,
+            px(6.),
+            false,
+            || format!("settings-field-{}", input.entity_id().as_u64()),
+        ));
+    // Tests find one field among many by its Input entity: the box's measured
+    // bounds and its own painted shadow, observed after the shadow is applied.
+    #[cfg(test)]
+    let field = {
+        let id = input.entity_id().as_u64();
+        let mut field = field;
+        crate::ui::paint_probe::note(&format!("settings.field-{id}"), &mut field);
+        field.debug_selector(move || format!("settings-field-{id}"))
+    };
+    field
 }
 
 /// A group's heading and, when it has one, the sentence under it.
@@ -835,6 +1308,7 @@ pub(crate) fn stepper(
     tk: &Tk,
     on_dec: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     on_inc: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    scroll: Option<gpui::ScrollHandle>,
 ) -> AnyElement {
     let end = |suffix: &'static str, glyph: &'static str, enabled: bool| {
         div()
@@ -853,8 +1327,17 @@ pub(crate) fn stepper(
             .child(glyph)
     };
     let divider = || div().h(px(14.)).w(px(1.)).bg(tk.k15);
-    h_flex()
+    // One stop for the whole control, so one Tab stop and one ring concentric
+    // with the raised pill (a ring per end would meet at the divider with a
+    // half-square corner). The same handlers serve the mouse ends and the keys.
+    let (can_dec, can_inc) = (s.can_dec, s.can_inc);
+    let on_dec: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)> = Rc::new(on_dec);
+    let on_inc: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)> = Rc::new(on_inc);
+    let (key_dec, key_inc) = (on_dec.clone(), on_inc.clone());
+    let (end_dec, end_inc) = (on_dec, on_inc);
+    let control = h_flex()
         .id(id)
+        .relative()
         .h(px(26.))
         .items_center()
         .rounded(px(6.))
@@ -863,7 +1346,9 @@ pub(crate) fn stepper(
         .child(
             end("dec", "−", s.can_dec)
                 .rounded_l(px(6.))
-                .when(s.can_dec, |d| d.on_click(on_dec)),
+                .when(s.can_dec, |d| {
+                    d.on_click(move |ev, window, cx| end_dec(ev, window, cx))
+                }),
         )
         .child(divider())
         .child(
@@ -880,10 +1365,33 @@ pub(crate) fn stepper(
         .child(
             end("inc", "+", s.can_inc)
                 .rounded_r(px(6.))
-                .when(s.can_inc, |d| d.on_click(on_inc)),
-        )
+                .when(s.can_inc, |d| {
+                    d.on_click(move |ev, window, cx| end_inc(ev, window, cx))
+                }),
+        );
+    #[cfg(test)]
+    let control = control.debug_selector(|| id.to_string());
+    stop(id, px(6.), control)
+        .in_scroll(scroll)
+        .on_key(move |ev, window, cx| {
+            if !plain_key(ev) {
+                return;
+            }
+            // Left/Down step down, Right/Up step up, each only where its end is
+            // live, through the same handlers the ends call (a keyboard click).
+            let handler = match ev.keystroke.key.as_str() {
+                "left" | "down" if can_dec => &key_dec,
+                "right" | "up" if can_inc => &key_inc,
+                _ => return,
+            };
+            handler(&ClickEvent::default(), window, cx);
+            cx.stop_propagation();
+        })
         .into_any_element()
 }
+
+/// How far one arrow key moves a slider, as a fraction of its track.
+const SLIDER_KEY_STEP: f32 = 0.05;
 
 /// What a slider is being dragged by; the id tells two sliders apart.
 #[derive(Clone)]
@@ -905,6 +1413,7 @@ pub(crate) fn slider(
     tk: &Tk,
     on_set: Rc<dyn Fn(f32, &mut Window, &mut App)>,
     on_release: Rc<dyn Fn(&mut Window, &mut App)>,
+    scroll: Option<gpui::ScrollHandle>,
 ) -> AnyElement {
     let id: SharedString = id.into();
     let f = fraction.clamp(0., 1.);
@@ -917,85 +1426,116 @@ pub(crate) fn slider(
     let set_move = on_set;
     let drag_id = id.clone();
     let release_up = on_release.clone();
+    let key_set = set_down.clone();
+    let key_release = release_up.clone();
     let release_out = on_release;
     let bounds = Rc::new(std::cell::Cell::new(gpui::Bounds::<gpui::Pixels>::default()));
+    let track = div()
+        .id(ElementId::Name(id.clone()))
+        .relative()
+        .w(px(W))
+        .h(px(18.))
+        .cursor_pointer()
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(8.))
+                .h(px(2.))
+                .rounded(px(1.))
+                .bg(tk.k15),
+        )
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .top(px(8.))
+                .h(px(2.))
+                .w(px(W * f))
+                .rounded(px(1.))
+                .bg(tk.fg),
+        )
+        .child(
+            div()
+                .absolute()
+                .top(px(2.))
+                .left(px(W * f - 7.))
+                .size(px(14.))
+                .rounded_full()
+                .bg(tk.knob)
+                .shadow(vec![
+                    ring(gpui::black().opacity(0.18), 0.5, false),
+                    drop(gpui::black().opacity(0.18), 1., 3., 0.),
+                ]),
+        )
+        .child({
+            // The track's bounds for a click that never becomes a
+            // drag: a mouse-down event carries a position but not the
+            // box it landed in.
+            let bounds = bounds.clone();
+            gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
+                .absolute()
+                .size_full()
+        })
+        .on_mouse_down(MouseButton::Left, {
+            let bounds = bounds.clone();
+            move |ev: &gpui::MouseDownEvent, window, cx| {
+                set_down(frac_at(bounds.get(), ev.position.x), window, cx);
+            }
+        })
+        .on_drag(SliderDrag(drag_id), |drag, _, _, cx| {
+            cx.new(|_| drag.clone())
+        })
+        .on_drag_move({
+            let id = id.clone();
+            move |ev: &gpui::DragMoveEvent<SliderDrag>, window, cx| {
+                if ev.drag(cx).0 != id {
+                    return;
+                }
+                set_move(frac_at(ev.bounds, ev.event.position.x), window, cx);
+            }
+        })
+        .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+            release_up(window, cx)
+        })
+        .on_mouse_up_out(MouseButton::Left, move |_, window, cx| {
+            release_out(window, cx)
+        });
+    #[cfg(test)]
+    let track = track.debug_selector({
+        let selector = id.to_string();
+        move || selector
+    });
+    // The track is the stop (the readout beside it is not). A key press is one
+    // drag-and-release: Left/Right move the fraction by a fixed step, Home/End
+    // go to the ends; each press that changes the value calls `on_set` then
+    // `on_release` once, like a drag, and each caller keeps its own mapping. The
+    // knob overhangs the track by 7px at both ends, so the ring (outside the
+    // track box) crosses it there.
+    let track = stop(ElementId::Name(id.clone()), px(9.), track)
+        .in_scroll(scroll)
+        .on_key(move |ev, window, cx| {
+            if !plain_key(ev) {
+                return;
+            }
+            let next = match ev.keystroke.key.as_str() {
+                "left" => (f - SLIDER_KEY_STEP).max(0.),
+                "right" => (f + SLIDER_KEY_STEP).min(1.),
+                "home" => 0.,
+                "end" => 1.,
+                _ => return,
+            };
+            cx.stop_propagation();
+            if (next - f).abs() > f32::EPSILON {
+                key_set(next, window, cx);
+                key_release(window, cx);
+            }
+        });
     h_flex()
         .gap(px(8.))
         .items_center()
-        .child(
-            div()
-                .id(ElementId::Name(id.clone()))
-                .relative()
-                .w(px(W))
-                .h(px(18.))
-                .cursor_pointer()
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .top(px(8.))
-                        .h(px(2.))
-                        .rounded(px(1.))
-                        .bg(tk.k15),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(8.))
-                        .h(px(2.))
-                        .w(px(W * f))
-                        .rounded(px(1.))
-                        .bg(tk.fg),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(2.))
-                        .left(px(W * f - 7.))
-                        .size(px(14.))
-                        .rounded_full()
-                        .bg(tk.knob)
-                        .shadow(vec![
-                            ring(gpui::black().opacity(0.18), 0.5, false),
-                            drop(gpui::black().opacity(0.18), 1., 3., 0.),
-                        ]),
-                )
-                .child({
-                    // The track's bounds for a click that never becomes a
-                    // drag: a mouse-down event carries a position but not the
-                    // box it landed in.
-                    let bounds = bounds.clone();
-                    gpui::canvas(move |b, _, _| bounds.set(b), |_, _, _, _| {})
-                        .absolute()
-                        .size_full()
-                })
-                .on_mouse_down(MouseButton::Left, {
-                    let bounds = bounds.clone();
-                    move |ev: &gpui::MouseDownEvent, window, cx| {
-                        set_down(frac_at(bounds.get(), ev.position.x), window, cx);
-                    }
-                })
-                .on_drag(SliderDrag(drag_id), |drag, _, _, cx| {
-                    cx.new(|_| drag.clone())
-                })
-                .on_drag_move({
-                    let id = id.clone();
-                    move |ev: &gpui::DragMoveEvent<SliderDrag>, window, cx| {
-                        if ev.drag(cx).0 != id {
-                            return;
-                        }
-                        set_move(frac_at(ev.bounds, ev.event.position.x), window, cx);
-                    }
-                })
-                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
-                    release_up(window, cx)
-                })
-                .on_mouse_up_out(MouseButton::Left, move |_, window, cx| {
-                    release_out(window, cx)
-                }),
-        )
+        .child(track)
         .child(
             div()
                 .w(px(40.))

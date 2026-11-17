@@ -62,6 +62,13 @@ pub(crate) enum ScmFollowUp {
     Op(GitOp),
 }
 
+/// Run at the moment an operation is about to be dispatched, in the same update
+/// and immediately before it: when the user has approved it (the answer to the
+/// prompt), or at once for an operation that asks nothing. Dropped uncalled if
+/// the prompt is cancelled or dismissed.
+pub(crate) type OnApproved =
+    Box<dyn FnOnce(&mut Tty59App, &mut Window, &mut Context<Tty59App>) + 'static>;
+
 impl Tty59App {
     /// Fold the history section open or shut and remember it.
     pub(crate) fn scm_toggle_graph(&mut self, cx: &mut Context<Self>) {
@@ -122,10 +129,27 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.scm_op_approved(repo, op, then, None, window, cx);
+    }
+
+    /// [`scm_op_then`], with `approved` run at the moment the operation is about
+    /// to be dispatched (see [`OnApproved`]). The pointer paths never pass one.
+    pub(crate) fn scm_op_approved(
+        &mut self,
+        repo: RepoKey,
+        op: GitOp,
+        then: Option<ScmFollowUp>,
+        approved: Option<OnApproved>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(host) = HostRegistry::get(cx, repo.host) else {
             return;
         };
         let Some(loss) = op.destructive() else {
+            if let Some(approved) = approved {
+                approved(self, window, cx);
+            }
             self.run_git_op(host, repo.root, op, then, window, cx);
             return;
         };
@@ -145,6 +169,9 @@ impl Tty59App {
         cx.spawn_in(window, async move |app, cx| {
             let Ok(1) = answer.await else { return };
             let _ = app.update_in(cx, |app, window, cx| {
+                if let Some(approved) = approved {
+                    approved(app, window, cx);
+                }
                 app.run_git_op(host, repo.root, op, then, window, cx)
             });
         })
@@ -948,6 +975,9 @@ mod tests {
             .expect("a scratch directory");
         let root = std::fs::canonicalize(dir.path()).expect("it resolves");
         git(&root, &["init", "--quiet"]);
+        // Repository-local, so the code under test inherits it too: a Windows
+        // system `core.autocrlf=true` would turn the one-LF files into CRLF.
+        git(&root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         std::fs::write(root.join("s.txt"), "base\n").unwrap();
         git(&root, &["add", "a.txt", "s.txt"]);

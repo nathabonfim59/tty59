@@ -352,6 +352,7 @@ impl Tty59App {
             &tk,
             cx.listener(move |this, _, _w, cx| dec(this, -1., cx)),
             cx.listener(move |this, _, _w, cx| inc(this, 1., cx)),
+            self.settings_scroll(),
         ))
     }
 
@@ -634,6 +635,7 @@ impl Tty59App {
             Rc::new(move |_window, cx| {
                 let _ = release_app.update(cx, |this, cx| this.persist_settings_config(cx));
             }),
+            self.settings_scroll(),
         );
 
         // Windows exposes the native backdrop materials directly; macOS keeps
@@ -707,7 +709,7 @@ impl Tty59App {
                 .pt(px(4.))
                 .pb(px(8.))
                 .child(
-                    kit::button(
+                    self.page_button(
                         "follow-theme-window",
                         t(L10nKey::FollowTheme),
                         BtnKind::Link,
@@ -824,10 +826,13 @@ impl Tty59App {
         }
         let menu_id: SharedString = "shell-program-detected".into();
         let open = self.settings_menu_open(&menu_id);
+        let items = super::shell::menu_items(&entries);
         let picker = (!shells.is_empty()).then(|| {
             let toggle = menu_id.clone();
-            div()
+            let click_items = items.clone();
+            let chevron = div()
                 .id("shell-program-detected-trigger")
+                .relative()
                 .flex_shrink_0()
                 .ml(px(4.))
                 // Pulled into the field's 10px padding far enough that the
@@ -843,9 +848,12 @@ impl Tty59App {
                 .hover(move |s| s.bg(tk.k05))
                 .when(open, |d| d.bg(tk.k05))
                 .child(kit::chevron_down(&tk))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.toggle_settings_menu(toggle.clone(), 0, false, window, cx)
-                }))
+                .on_click(cx.listener(move |this, ev: &gpui::ClickEvent, window, cx| {
+                    this.activate_settings_menu(&toggle, ev, &click_items, 0, window, cx)
+                }));
+            kit::stop("shell-program-detected-trigger", px(4.), chevron)
+                .in_scroll(self.settings_scroll())
+                .on_key(self.settings_menu_key(menu_id.clone(), items.clone(), 0, cx))
         });
         let program_control = div()
             .relative()
@@ -1090,6 +1098,7 @@ impl Tty59App {
             Rc::new(move |_window, cx| {
                 let _ = release_app.update(cx, |this, cx| this.persist_settings_config(cx));
             }),
+            self.settings_scroll(),
         );
         let smooth = self.settings_switch(
             "term-smooth-scroll",
@@ -1200,13 +1209,13 @@ impl Tty59App {
             |this, on, _, cx| this.set_prompt_editor(on, cx),
         );
         let completion = inline_control(
-            kit::switch("term-tab-completion")
+            self.page_switch("term-tab-completion")
                 .checked(tab_completion)
                 .disabled(!prompt_editor)
                 .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_tab_completion(*on, cx))),
         );
         let history = inline_control(
-            kit::switch("term-history-search")
+            self.page_switch("term-history-search")
                 .checked(history_search)
                 .disabled(!prompt_editor)
                 .on_click(cx.listener(|this, on: &bool, _w, cx| this.set_history_search(*on, cx))),
@@ -1644,7 +1653,7 @@ impl Tty59App {
             .gap(px(8.))
             .when(transferring, |r| {
                 r.child(
-                    kit::button(
+                    self.page_button(
                         "cancel-update-download",
                         t(L10nKey::SettingsUpdateCancel),
                         BtnKind::Link,
@@ -1653,7 +1662,7 @@ impl Tty59App {
                 )
             })
             .child(
-                kit::button(
+                self.page_button(
                     "check-update-now",
                     if matches!(status.phase, UpdatePhase::Checking) {
                         t(L10nKey::SettingsUpdateChecking)
@@ -1676,7 +1685,7 @@ impl Tty59App {
             let control = h_flex()
                 .gap(px(12.))
                 .child(
-                    kit::button(
+                    self.page_button(
                         "update-dismiss",
                         t(L10nKey::SettingsUpdateDismiss),
                         BtnKind::Link,
@@ -1684,7 +1693,7 @@ impl Tty59App {
                     .on_click(cx.listener(|_, _, _w, cx| crate::core::update::dismiss_failure(cx))),
                 )
                 .child(
-                    kit::button(
+                    self.page_button(
                         "update-manual",
                         t(L10nKey::SettingsUpdateDownloadManually),
                         BtnKind::Link,
@@ -1694,7 +1703,7 @@ impl Tty59App {
                     ),
                 )
                 .child(
-                    kit::button(
+                    self.page_button(
                         "update-retry",
                         t(L10nKey::SettingsUpdateRetry),
                         BtnKind::Secondary,
@@ -1724,7 +1733,7 @@ impl Tty59App {
             let control = h_flex()
                 .gap(px(12.))
                 .child(
-                    kit::button(
+                    self.page_button(
                         "discard-ready",
                         t(L10nKey::SettingsUpdateDiscard),
                         BtnKind::Link,
@@ -1733,7 +1742,7 @@ impl Tty59App {
                     .on_click(cx.listener(|_, _, _w, cx| crate::core::update::discard_pending(cx))),
                 )
                 .child(
-                    kit::button(
+                    self.page_button(
                         "install-ready",
                         t(L10nKey::SettingsUpdateInstallNow),
                         BtnKind::Primary,
@@ -1770,7 +1779,8 @@ impl Tty59App {
             } else {
                 t(L10nKey::SettingsUpdateViewRelease)
             };
-            let control = kit::button("install-update", action, BtnKind::Primary)
+            let control = self
+                .page_button("install-update", action, BtnKind::Primary)
                 .disabled(busy)
                 .on_click(cx.listener(|_, _, _w, cx| crate::core::update::install_available(cx)))
                 .into_any_element();
@@ -1971,13 +1981,16 @@ mod tests {
         format!("{BASE} Copy Raw copies them as shown.")
     }
 
-    // The key names are spelled out here rather than read from `Kbd::format`:
-    // Windows and Linux write Alt+Win+C for the shipped `cmd-alt-c`, macOS ⌥⌘C.
+    // The key names are spelled out here rather than read from `Kbd::format`,
+    // one literal per platform: macOS ⌥⌘C (`cmd-alt-c`); Windows Ctrl+Alt+Insert
+    // (Insert avoids the tested Polish AltGr printable shapes); Linux Ctrl+Alt+C.
     fn shipped_chord() -> &'static str {
         if cfg!(target_os = "macos") {
             "⌥⌘C"
+        } else if cfg!(target_os = "windows") {
+            "Ctrl+Alt+Insert"
         } else {
-            "Alt+Win+C"
+            "Ctrl+Alt+C"
         }
     }
 

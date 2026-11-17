@@ -3914,7 +3914,7 @@ dependencies = [
 [[package]]
 name = "gpui-component"
 version = "0.5.2"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#f5d9ab30c31ebbd01dd3787d51499743e0d6043d"
+source = "git+https://github.com/nathabonfim59/gpui-component?rev=0280dc24e3981e97dce5134b784a2e5ba1302b4b#0280dc24e3981e97dce5134b784a2e5ba1302b4b"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -3997,7 +3997,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-assets"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#f5d9ab30c31ebbd01dd3787d51499743e0d6043d"
+source = "git+https://github.com/nathabonfim59/gpui-component?rev=0280dc24e3981e97dce5134b784a2e5ba1302b4b#0280dc24e3981e97dce5134b784a2e5ba1302b4b"
 dependencies = [
  "anyhow",
  "gpui",
@@ -4011,7 +4011,7 @@ dependencies = [
 [[package]]
 name = "gpui-component-macros"
 version = "0.5.1"
-source = "git+https://github.com/l0ng-ai/gpui-component?branch=tty7#f5d9ab30c31ebbd01dd3787d51499743e0d6043d"
+source = "git+https://github.com/nathabonfim59/gpui-component?rev=0280dc24e3981e97dce5134b784a2e5ba1302b4b#0280dc24e3981e97dce5134b784a2e5ba1302b4b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -11894,7 +11894,7 @@ dependencies = [
 
 [[package]]
 name = "tty59"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "anyhow",
  "async_zip 0.0.19",
@@ -11950,7 +11950,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-agent-detect"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "regex",
  "serde",
@@ -11959,7 +11959,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-cli"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -11974,7 +11974,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-core"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -12015,7 +12015,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-gateway"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -12041,7 +12041,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-mermaid"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "merman",
  "resvg",
@@ -12051,7 +12051,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-mobile-client"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "anyhow",
  "iroh",
@@ -12064,7 +12064,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-mobile-proto"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -12074,7 +12074,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-server"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "libc",
  "tempfile",
@@ -12083,7 +12083,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-vt"
-version = "26.15.0"
+version = "26.16.0"
 dependencies = [
  "bitflags 2.13.1",
  "log",
@@ -12096,7 +12096,7 @@ dependencies = [
 
 [[package]]
 name = "tty59-vt-sys"
-version = "26.15.0"
+version = "26.16.0"
 
 [[package]]
 name = "typeid"

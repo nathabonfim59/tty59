@@ -36,13 +36,14 @@
 
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use resvg::tiny_skia;
 use resvg::usvg;
 use resvg::usvg::fontdb;
 
-use crate::{MAX_PIXELS, MermaidError, Raster};
+use crate::{MAX_PIXELS, MermaidError, Raster, SvgDocument, SvgDocumentError};
 
 /// Preference order for the CSS `sans-serif` generic. Liberation Sans is
 /// metrically identical to Arial and both match merman's measurement
@@ -423,6 +424,100 @@ fn pinned_options() -> usvg::Options<'static> {
 fn parse_tree(svg: &str) -> Result<usvg::Tree, MermaidError> {
     usvg::Tree::from_str(svg, &pinned_options())
         .map_err(|e| MermaidError::Render(format!("SVG parse failed: {e}")))
+}
+
+/// [`pinned_options`] with its two href resolvers still refusing every
+/// resource but remembering that one was asked for. A viewer that silently
+/// drew a hole where a linked or embedded picture belongs would be wrong
+/// about what the file contains; the caller turns the flag into an error.
+fn document_options(refused: &Arc<AtomicBool>) -> usvg::Options<'static> {
+    let (on_data, on_string) = (refused.clone(), refused.clone());
+    usvg::Options {
+        image_href_resolver: usvg::ImageHrefResolver {
+            resolve_data: Box::new(
+                move |_: &str, _: Arc<Vec<u8>>, _: &usvg::Options| -> Option<usvg::ImageKind> {
+                    on_data.store(true, Ordering::SeqCst);
+                    None
+                },
+            ),
+            resolve_string: Box::new(
+                move |_: &str, _: &usvg::Options| -> Option<usvg::ImageKind> {
+                    on_string.store(true, Ordering::SeqCst);
+                    None
+                },
+            ),
+        },
+        ..pinned_options()
+    }
+}
+
+/// SVG document → [`SvgDocument`]. See [`crate::rasterize_document`]; this is
+/// its implementation, behind the same single panic boundary as [`rasterize`].
+pub(crate) fn rasterize_document(
+    svg: &str,
+    min_long_side: f32,
+    max_side: u32,
+) -> Result<SvgDocument, SvgDocumentError> {
+    if !min_long_side.is_finite() || min_long_side <= 0.0 || max_side == 0 {
+        return Err(SvgDocumentError::Render("invalid raster target".to_owned()));
+    }
+    catch_unwind(AssertUnwindSafe(|| {
+        draw_document(svg, min_long_side, max_side)
+    }))
+    .unwrap_or_else(|payload| {
+        Err(SvgDocumentError::Render(format!(
+            "rasterization panicked: {}",
+            panic_message(payload)
+        )))
+    })
+}
+
+fn draw_document(
+    svg: &str,
+    min_long_side: f32,
+    max_side: u32,
+) -> Result<SvgDocument, SvgDocumentError> {
+    let svg = svg.strip_prefix('\u{feff}').unwrap_or(svg);
+    let refused = Arc::new(AtomicBool::new(false));
+    let tree = usvg::Tree::from_str(svg, &document_options(&refused))
+        .map_err(|e| SvgDocumentError::Invalid(e.to_string()))?;
+    if refused.load(Ordering::SeqCst) {
+        return Err(SvgDocumentError::LinkedImages);
+    }
+
+    let size = tree.size();
+    let (vw, vh) = (f64::from(size.width()), f64::from(size.height()));
+    if !vw.is_finite() || !vh.is_finite() || vw <= 0.0 || vh <= 0.0 {
+        return Err(SvgDocumentError::Invalid(format!(
+            "no drawable size ({vw}x{vh})"
+        )));
+    }
+    // Natural size or larger: a small icon is drawn with enough pixels for
+    // the viewer to enlarge it, a big drawing is never drawn above the side
+    // the caller can hold, and the shared pixel budget still has the last
+    // word.
+    let long = vw.max(vh);
+    let wanted = (f64::from(min_long_side) / long).max(1.0);
+    let scale = wanted.min(f64::from(max_side) / long) as f32;
+    let (width, height, actual_scale) = bounded_size(vw, vh, scale);
+    let mut pixmap = tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
+        SvgDocumentError::Render(format!("pixel buffer {width}x{height} is too large"))
+    })?;
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(actual_scale, actual_scale),
+        &mut pixmap.as_mut(),
+    );
+    Ok(SvgDocument {
+        width: vw as f32,
+        height: vh as f32,
+        raster: Raster {
+            width,
+            height,
+            scale: actual_scale,
+            bgra: premultiplied_rgba_to_straight_bgra(pixmap.data()),
+        },
+    })
 }
 
 fn draw(svg: &str, scale: f32) -> Result<Raster, MermaidError> {
@@ -908,5 +1003,115 @@ mod tests {
             "device image was loaded and drawn"
         );
         worker.join().expect("worker panicked");
+    }
+
+    /// The document path: SVG files someone opened, drawn for viewing.
+    mod document {
+        use super::*;
+        use crate::{MAX_PIXELS, SvgDocumentError, rasterize_document};
+
+        #[test]
+        fn a_small_document_is_drawn_enlarged_and_keeps_its_logical_size() {
+            let doc = rasterize_document(&svg_with_size("32", "16"), 1024.0, 8192).unwrap();
+            assert_eq!((doc.width, doc.height), (32.0, 16.0));
+            assert_eq!((doc.raster.width, doc.raster.height), (1024, 512));
+            assert_eq!(doc.raster.scale, 32.0);
+            assert_eq!(pixel(&doc.raster, 3, 3), [0, 0, 255, 255], "red, as BGRA");
+        }
+
+        #[test]
+        fn a_large_document_is_drawn_at_natural_size_and_never_past_the_side() {
+            let natural = rasterize_document(&svg_with_size("2000", "10"), 1024.0, 8192).unwrap();
+            assert_eq!(natural.raster.width, 2000, "already past the minimum");
+            let capped = rasterize_document(&svg_with_size("10000", "10"), 1024.0, 8192).unwrap();
+            assert_eq!(capped.raster.width, 8192);
+            assert_eq!((capped.width, capped.height), (10000.0, 10.0));
+        }
+
+        #[test]
+        fn the_shared_pixel_budget_still_applies() {
+            let doc = rasterize_document(&svg_with_size("20000", "20000"), 1024.0, 8192).unwrap();
+            assert!(u64::from(doc.raster.width) * u64::from(doc.raster.height) <= MAX_PIXELS);
+        }
+
+        #[test]
+        fn a_byte_order_mark_is_not_part_of_the_document() {
+            let svg = format!("\u{feff}{}", svg_with_size("4", "4"));
+            assert!(rasterize_document(&svg, 16.0, 8192).is_ok());
+        }
+
+        #[test]
+        fn garbage_is_invalid_not_a_panic() {
+            for svg in [
+                "",
+                "not svg at all",
+                "<svg",
+                "<svg xmlns=\"http://www.w3.org/2000/svg\">",
+            ] {
+                assert!(
+                    matches!(
+                        rasterize_document(svg, 64.0, 8192),
+                        Err(SvgDocumentError::Invalid(_))
+                    ),
+                    "{svg:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_linked_or_embedded_image_is_refused_not_drawn_with_a_hole() {
+            for href in [
+                "/dev/zero",
+                "/etc/hostname",
+                "file:///etc/hostname",
+                "relative.png",
+                "https://example.invalid/x.png",
+                "data:image/png;base64,iVBORw0KGgo=",
+                // An SVG as the data: payload, percent-encoded so the
+                // attribute stays well-formed XML.
+                "data:image/svg+xml;utf8,%3Csvg%20xmlns%3D%27http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%27%2F%3E",
+            ] {
+                let svg = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><image href="{href}" width="8" height="8"/></svg>"#
+                );
+                assert_eq!(
+                    rasterize_document(&svg, 64.0, 8192).err(),
+                    Some(SvgDocumentError::LinkedImages),
+                    "{href}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_filter_image_resource_is_refused_the_same_way() {
+            for href in [
+                "/etc/hostname",
+                "file:///etc/hostname",
+                "data:image/png;base64,iVBORw0KGgo=",
+            ] {
+                let svg = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><filter id="f" x="0" y="0" width="1" height="1"><feImage href="{href}" width="8" height="8"/></filter><rect width="8" height="8" filter="url(#f)"/></svg>"#
+                );
+                assert_eq!(
+                    rasterize_document(&svg, 64.0, 8192).err(),
+                    Some(SvgDocumentError::LinkedImages),
+                    "{href}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_target_that_cannot_be_drawn_is_refused() {
+            let svg = svg_with_size("4", "4");
+            for (min, max) in [(0.0, 8192), (f32::NAN, 8192), (-1.0, 8192), (64.0, 0)] {
+                assert!(
+                    matches!(
+                        rasterize_document(&svg, min, max),
+                        Err(SvgDocumentError::Render(_))
+                    ),
+                    "{min} {max}"
+                );
+            }
+        }
     }
 }

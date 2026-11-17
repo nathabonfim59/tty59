@@ -221,6 +221,51 @@ pub fn rasterize(svg: &str, scale: f32) -> Result<Raster, MermaidError> {
     raster::rasterize(svg, scale)
 }
 
+/// An SVG file drawn for viewing: its logical size and enough pixels to look
+/// at it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SvgDocument {
+    /// The SVG's own size in user units, which is what a viewer calls 100 %.
+    pub width: f32,
+    pub height: f32,
+    /// The drawing, whose pixel size is the logical size times `raster.scale`.
+    pub raster: Raster,
+}
+
+/// Why an SVG document could not be shown.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SvgDocumentError {
+    /// Not an SVG, or not one that can be drawn (the parser's own reason).
+    #[error("{0}")]
+    Invalid(String),
+    /// Valid, but it links or embeds a picture (`<image>`, `feImage`), which
+    /// this viewer never loads. Refused up front rather than drawn with a
+    /// hole; a typed variant, so a caller words it in its own language.
+    #[error("the SVG links or embeds an image")]
+    LinkedImages,
+    /// Drawing failed or was refused (size, allocation, an upstream panic).
+    #[error("{0}")]
+    Render(String),
+}
+
+/// Draws an SVG *document* — a file someone opened, not a diagram this crate
+/// made — under the same hardening as [`rasterize`]: no file or network
+/// resource is ever read, the font database is the shared system one so text
+/// renders, and the pixel budget ([`MAX_PIXELS`]) applies. A document that
+/// links or embeds a raster or SVG image is reported as
+/// [`SvgDocumentError::LinkedImages`] instead of being drawn without it.
+///
+/// The raster is drawn at the SVG's natural size, enlarged until its long
+/// side reaches `min_long_side` pixels, and never past `max_side` pixels on
+/// the long side.
+pub fn rasterize_document(
+    svg: &str,
+    min_long_side: f32,
+    max_side: u32,
+) -> Result<SvgDocument, SvgDocumentError> {
+    raster::rasterize_document(svg, min_long_side, max_side)
+}
+
 /// [`render_svg`] then [`rasterize`].
 pub fn render(source: &str, theme: &MermaidTheme, scale: f32) -> Result<Raster, MermaidError> {
     rasterize(&render_svg(source, theme)?, scale)

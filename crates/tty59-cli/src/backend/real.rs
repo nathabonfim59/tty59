@@ -609,6 +609,55 @@ mod tests {
         assert!(text.contains('$'));
     }
 
+    fn joined(segments: &[CaptureSegment]) -> Vec<u8> {
+        segments
+            .iter()
+            .flat_map(|segment| segment.bytes.iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn the_newest_screen_is_the_modes_the_older_segments_left_on_then_the_newest_segment() {
+        // A shell prompt leaves bracketed paste on when the resize seals its
+        // segment, and the repaint that follows starts the newest one. The
+        // default form puts the modes back ahead of it, so what it returns is
+        // longer than the newest raw segment and is not the end of the ring.
+        let older = b"\x1b[?2004h\x1b[?1007hA\r\n";
+        let newest = b"\r\x1b[KB\r\n";
+        let replay = vec![seg(100, older), seg(80, newest)];
+
+        let default = what_was_asked_for(replay.clone(), false);
+        assert_eq!(
+            default,
+            vec![seg(80, b"\x1b[?2004h\x1b[?1007h\r\x1b[KB\r\n")],
+            "the modes go back in the order the program last set them"
+        );
+        let whole = what_was_asked_for(replay.clone(), true);
+        assert_eq!(whole, replay);
+
+        let (default, whole) = (joined(&default), joined(&whole));
+        assert!(default.ends_with(newest) && whole.ends_with(newest));
+        assert!(
+            !whole.ends_with(&default),
+            "the default form prepends the restored modes to the newest segment, \
+             so the full answer need not be the end of the ring"
+        );
+    }
+
+    #[test]
+    fn a_mode_the_older_segments_switched_off_is_not_restored() {
+        // The control for the test above: the prefix there is the modes that
+        // are on, not whatever escapes the older segments held.
+        let replay = vec![
+            seg(100, b"\x1b[?2004h$ x\r\n\x1b[?2004l"),
+            seg(80, b"\r\x1b[KB\r\n"),
+        ];
+        assert_eq!(
+            what_was_asked_for(replay, false),
+            vec![seg(80, b"\r\x1b[KB\r\n")]
+        );
+    }
+
     #[test]
     fn a_pane_that_never_printed_still_replays_as_nothing() {
         // The other half of the contract: a genuinely blank pane must keep

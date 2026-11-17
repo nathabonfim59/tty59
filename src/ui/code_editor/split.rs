@@ -311,12 +311,19 @@ impl Tty59App {
         if self.tab_code().and_then(TabCode::active_id) == Some(other) {
             return;
         }
-        let focused = self.buffer(other).is_some_and(|f| {
-            f.input
+        let focused = match self.buffer(other) {
+            Some(f) => f
+                .input
                 .read(cx)
                 .focus_handle(cx)
-                .contains_focused(window, cx)
-        });
+                .contains_focused(window, cx),
+            // A picture in the other group: its own view of that group.
+            None => self
+                .tabs
+                .get(self.active)
+                .map(|t| t.tree_id.get())
+                .is_some_and(|tab| self.view_has_focus(other, tab, window, cx)),
+        };
         if focused && let Some(code) = self.tab_code_mut() {
             code.swap_focus();
             cx.notify();
@@ -451,7 +458,7 @@ impl Tty59App {
         focus_left: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let name: SharedString = self.buffer(id).map(|f| f.label()).unwrap_or_default();
+        let name: SharedString = self.doc_label(id).unwrap_or_default();
         let theme = cx.theme();
         v_flex()
             .id("editor-group-same-file")

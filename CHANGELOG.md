@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.16.0] - 2026-11-17
+
+### Added
+
+- **Ctrl+click an image path to preview it in the editor**: image files open
+  in the built-in preview the same way text documents do, instead of going
+  to an outside viewer.
+- **File paths wrapped across rows are links again**: a long path that the
+  terminal wraps onto the next row is detected as one path, so Ctrl+click
+  opens the whole file rather than missing it or opening a fragment.
+- **New Agent Tab and Copy Raw on Windows and Linux**: New Agent Tab is
+  Ctrl+Alt+Shift+A on Linux and Ctrl+Alt+Shift+Insert on Windows, and Copy Raw
+  (the rows exactly as shown) is Cmd+Alt+C on macOS, Ctrl+Alt+C on Linux and
+  Ctrl+Alt+Insert on Windows. Windows uses Insert because AltGr arrives there
+  as Ctrl+Alt and would otherwise swallow letters such as Polish ć and Ą.
+
+### Changed
+
+- **Keyboard access and visible focus across the app**: panels, Settings and
+  the workspace switcher can be driven from the keyboard, with one shared
+  focus ring that stays visible in every theme, and Enter and Space work on
+  the controls that looked clickable but were mouse-only.
+- **Agent rows say which agent is which**: a split pane shows its own agent's
+  name with the pane marker (`pane 1/3`) beside it, rows stop repeating the
+  agent name and its status, and "Other agents" becomes a compact caption
+  with a count. Narrow cards wrap the marker below the name instead of
+  cutting the name off.
+- **The new-worktree form fills itself in sensibly**: Branch follows Name
+  until you edit it, the path preview keeps the part that tells worktrees
+  apart, and an empty Task field explains what it is for.
+- **Holding Alt no longer reshuffles the sidebar**: shortcut numbers appear in
+  the row's existing trailing space, so titles keep their width while Alt is
+  held and the row comes back exactly when it is released.
+- **Sidebar group headers are easier to hit and safer**: their buttons have
+  larger click targets, and the pin on a pinned folder or group is now only a
+  status mark, so a stray click on it no longer unpins the group and scatters
+  its tabs.
+
+### Fixed
+
+- The Source Control panel no longer misses the first working directory a
+  terminal reports, which could leave it showing a stale repository until
+  something else changed.
+- The Windows package keeps the Herdr licence notice inside its own folder,
+  which the package check requires.
+
 ## [26.15.0] - 2026-11-16
 
 ### Changed

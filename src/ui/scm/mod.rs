@@ -12,6 +12,30 @@ pub(crate) mod graph;
 pub(crate) mod panel;
 pub(crate) mod path;
 mod row_menu;
+#[cfg(test)]
+mod rows_guard_tests;
+#[cfg(test)]
+mod rows_info_tests;
+#[cfg(test)]
+mod rows_keys_tests;
+#[cfg(test)]
+mod rows_keyup_header_tests;
+#[cfg(test)]
+mod rows_keyup_tests;
+#[cfg(test)]
+mod rows_landing_fanout_tests;
+#[cfg(test)]
+mod rows_notarepo_fanout_tests;
+#[cfg(test)]
+mod rows_notarepo_tests;
+#[cfg(test)]
+mod rows_ownop_tests;
+#[cfg(test)]
+mod rows_ring_inside_tests;
+#[cfg(test)]
+mod rows_shared_tests;
+#[cfg(test)]
+mod rows_stale_tests;
 pub(crate) mod rows_window;
 #[cfg(test)]
 mod rows_window_tests;

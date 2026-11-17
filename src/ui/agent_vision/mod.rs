@@ -178,13 +178,39 @@ impl PaneSummary {
         }
     }
 
-    /// The tab's label, except that an exited agent's tab has reverted to the
-    /// shell's cwd: the agent's own name keeps the row identifiable.
+    /// The tab's label, except where it would not describe this pane: an
+    /// exited agent's tab has reverted to the shell's cwd, and a tab split
+    /// into several panes is labelled after just one of them (a given name or
+    /// a terminal title included). The agent's own name keeps those rows
+    /// identifiable; `pane_marker` tells the panes of one tab apart.
     pub fn title(&self) -> &str {
-        match self.state {
-            State::Exited => self.agent_name(),
+        match (self.state, self.pane_position) {
+            (State::Exited, _) | (_, Some(_)) => self.agent_name(),
             _ => &self.location.tab_title,
         }
+    }
+
+    /// The displayed title already names the agent (up to ASCII case), so a
+    /// row's meta line does not name it again. A custom title that merely
+    /// mentions it does not count.
+    pub fn title_supplies_agent(&self) -> bool {
+        self.title().trim().eq_ignore_ascii_case(self.agent_name())
+    }
+
+    /// The reason is nothing but the bare Working, Waiting or Done word. Idle
+    /// and Exited are never bare in this sense: their word (and age) stays.
+    pub fn reason_is_bare_state(&self) -> bool {
+        matches!(self.state, State::Working | State::Waiting | State::Done)
+            && self.reason_text() == self.state.label()
+    }
+
+    /// `line` is the reason again, up to the whitespace the terminal laid
+    /// out. Compared word by word, so nothing is allocated, and only whole
+    /// equality counts: a longer line that continues the reason, or a short
+    /// fragment of it, carries information of its own.
+    pub fn preview_repeats_reason(&self, line: &str) -> bool {
+        line.split_whitespace()
+            .eq(self.reason_text().split_whitespace())
     }
 
     /// [`title`](Self::title) plus the split marker, for Inbox and Kanban.
@@ -242,9 +268,16 @@ impl PaneSummary {
     }
 
     pub fn matches_search(&self, query: &str, project: &str) -> bool {
+        // A split tab's own label still finds its panes; an exited agent's
+        // reverted tab does not (it is no longer a description of the agent).
+        let tab_label = match self.state {
+            State::Exited => "",
+            _ => self.location.tab_title.as_str(),
+        };
         query.split_whitespace().all(|word| {
             [
                 self.title(),
+                tab_label,
                 self.agent_name(),
                 &self.kind,
                 project,

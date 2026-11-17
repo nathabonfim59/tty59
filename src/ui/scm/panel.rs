@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Context, Focusable as _, MouseButton, SharedString, Window, div, prelude::*, px,
-    relative, rems,
+    AnyElement, App, Bounds, ClickEvent, Context, Div, Focusable as _, KeyContext, KeyDownEvent,
+    MouseButton, Pixels, SharedString, Stateful, WeakEntity, Window, div, prelude::*, px, relative,
+    rems,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
@@ -28,24 +29,28 @@ use tty59_core::core::git::status::{
     WorkingTreeStatus,
 };
 
-use crate::terminal::git_data::{StatusRead, index_of, status_of, status_read_of};
+use crate::terminal::git_data::{Landed, StatusRead, index_of, status_of, status_read_of};
 use crate::terminal::git_diff::DiffSource;
 use crate::ui::app::{CONTENT_INSET, TILE_GLYPH_XS, TILE_SIZE_XS, Tty59App};
 use crate::ui::host_ops::{HostId, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt, t_plural};
 use crate::ui::right_panel::{
-    BADGE_W, DISCLOSURE_CHEVRON, META, META_MONO, PANEL_ACTION_GAP, PanelAction, ROW_INSET,
-    SEARCH_H, TEXT, TEXT_INSET, action_strip, action_strip_reserve, git_badge, info_chip,
+    BADGE_W, DISCLOSURE_CHEVRON, META, META_MONO, PANEL_ACTION_GAP, PanelAction, ROW_FILL_RADIUS,
+    ROW_INSET, SEARCH_H, TEXT, TEXT_INSET, action_strip, action_strip_reserve, git_badge,
+    info_chip,
 };
 use crate::ui::rounding::{HAIRLINE, ROW_RADIUS, RoundedCorners as _, segment_corners};
+use crate::ui::roving::{Pending, PendingKind};
 use crate::ui::scm::ScmIntent;
+use crate::ui::scm::actions::OnApproved;
 use crate::ui::scm::path::split_display_path;
 use crate::ui::scm::row_menu::{RowMenu, RowOwner};
-use crate::ui::scm::rows_window::RowsWindow;
-use crate::ui::scm::state::{RepoKey, ScmGroup};
+use crate::ui::scm::rows_window::{RowsWindow, head_probe, reveal_painted};
+use crate::ui::scm::state::{EntryCtx, NodeKind, Pos, RepoKey, RowId, ScmGroup};
 use crate::ui::scm::status::{status_color, status_glyph};
 use crate::ui::scm::tree::{TreeRow, normalize_query, path_matches, tree_rows};
 use crate::ui::text_elision::{ElidedLabel, Mode as ElideMode};
+use crate::ui::theme::{FocusRing, RingPlacement};
 
 /// Shared compact pitch for working-tree and commit-detail file rows.
 ///
@@ -1144,6 +1149,9 @@ impl Tty59App {
         let staged = status.staged().count();
         let muted = cx.theme().muted_foreground;
         let paint = commit_paint(live, cx);
+        // The label half's own radii, once: its `Button` and the ring wrapper
+        // around it take the same value.
+        let left = segment_corners(0, 2, COMMIT_RADIUS, HAIRLINE);
         h_flex()
             .flex_none()
             .items_center()
@@ -1197,7 +1205,10 @@ impl Tty59App {
                     .rounded(COMMIT_RADIUS)
                     .bg(paint.fill)
                     .hover(move |s| s.bg(paint.hover))
-                    .child(
+                    .child(CommitHalf::new(
+                        "scm-commit-ring",
+                        live.then_some(paint.ink),
+                        left,
                         // `xsmall` is the token that sets a `Button`'s label to
                         // `META`, and a control's label is what `META` is for:
                         // the branch trigger above is `.small()` because it
@@ -1216,7 +1227,7 @@ impl Tty59App {
                             .h_full()
                             .px(px(12.))
                             .font_weight(gpui::FontWeight::MEDIUM)
-                            .rounded_corners(segment_corners(0, 2, COMMIT_RADIUS, HAIRLINE))
+                            .rounded_corners(left)
                             // The ink is named here rather than left to the
                             // variant, so the disabled half greys out: it lands
                             // over the variant's own paint because
@@ -1230,6 +1241,8 @@ impl Tty59App {
                             // about where in the frame it ended up.
                             .when(cfg!(test), |b| b.debug_selector(|| "scm-commit".into()))
                             .on_click(cx.listener(move |this, _, window, cx| {
+                                #[cfg(test)]
+                                commit_ring_events::commit_clicked();
                                 this.scm_commit(
                                     repo_for_button.clone(),
                                     this.scm.amend,
@@ -1238,7 +1251,7 @@ impl Tty59App {
                                     cx,
                                 );
                             })),
-                    )
+                    ))
                     // The seam is a short rule in the label's own ink, inset
                     // from both edges so it reads as a divider inside one shape
                     // rather than a cut through it. A div rather than
@@ -1252,7 +1265,7 @@ impl Tty59App {
                             .h(px(COMMIT_H - 12.))
                             .bg(paint.seam),
                     )
-                    .child(self.scm_commit_menu(repo, paint.ink, cx)),
+                    .child(self.scm_commit_menu(repo, paint, cx)),
             )
             .into_any_element()
     }
@@ -1265,24 +1278,35 @@ impl Tty59App {
     fn scm_commit_menu(
         &self,
         repo: &RepoKey,
-        ink: gpui::Hsla,
+        paint: CommitPaint,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let amend = self.scm.amend;
-        Button::new("scm-commit-menu")
-            .custom(commit_half(ink, cx))
-            .icon(Icon::new(IconName::ChevronDown))
-            // `Button` sizes an icon off its own `Size`, so the glyph is asked
-            // for by way of the size that produces it — the same conversion
-            // `chrome_tile_sized` does.
-            .with_size(px(COMMIT_GLYPH / crate::ui::tab_strip::BUTTON_ICON_SCALE))
-            .w(px(COMMIT_CHEVRON_W))
-            .h_full()
-            .rounded_corners(segment_corners(1, 2, COMMIT_RADIUS, HAIRLINE))
-            .dropdown_menu_with_anchor(gpui::Anchor::TopRight, {
-                let app = cx.entity().downgrade();
-                let repo = repo.clone();
-                move |menu, _window, _cx| {
+        let right = segment_corners(1, 2, COMMIT_RADIUS, HAIRLINE);
+        let app = cx.entity().downgrade();
+        let repo = repo.clone();
+        CommitHalf::new(
+            "scm-commit-menu-ring",
+            paint.live.then_some(paint.ink),
+            right,
+            Button::new("scm-commit-menu")
+                .custom(commit_half(paint.ink, cx))
+                .icon(Icon::new(IconName::ChevronDown))
+                // `Button` sizes an icon off its own `Size`, so the glyph is asked
+                // for by way of the size that produces it — the same conversion
+                // `chrome_tile_sized` does.
+                .with_size(px(COMMIT_GLYPH / crate::ui::tab_strip::BUTTON_ICON_SCALE))
+                .w(px(COMMIT_CHEVRON_W))
+                .h_full()
+                .rounded_corners(right),
+        )
+        // The dropdown takes the button as its trigger, so it decorates it
+        // after `CommitHalf` has applied the focus-ring policy.
+        .with_trigger(move |button| {
+            button
+                .dropdown_menu_with_anchor(gpui::Anchor::TopRight, move |menu, _window, _cx| {
+                    #[cfg(test)]
+                    commit_ring_events::menu_opened();
                     let mut menu = menu.min_w(px(190.));
                     for (label, intent) in [
                         (L10nKey::ScmCommitButton, ScmIntent::Commit),
@@ -1323,9 +1347,10 @@ impl Tty59App {
                                 });
                             }
                         }))
-                }
-            })
-            .into_any_element()
+                })
+                .into_any_element()
+        })
+        .into_any_element()
     }
 
     /// Title over a scrolling body, with the panel's own scroll handle.
@@ -1456,7 +1481,32 @@ impl Tty59App {
                     .map(str::trim)
                     .filter(|l| !l.is_empty())
                     .map(|l| tty59_core::core::path_spelling::spelling_on_buf(id, l));
-                this.scm.roots.insert(key, (Instant::now(), root));
+                let resolved = root.clone();
+                this.scm.roots.insert(key.clone(), (Instant::now(), root));
+                // A keyboard entry waiting on this directory, with no explicit
+                // pick, can be judged now that its repository is known: not a
+                // repository, or a status that already landed with nothing to
+                // enter (a landing that came first could not say, the entry's
+                // repository was unknown), means nothing to enter, now or
+                // later. A status still loading keeps it waiting.
+                if this
+                    .scm
+                    .entry
+                    .as_ref()
+                    .is_some_and(|e| e.target == key && e.pick.is_none())
+                {
+                    let nothing = match &resolved {
+                        None => true,
+                        Some(root) => match status_read_of(cx, key.0, root) {
+                            StatusRead::Ready(status) => !this.scm_status_has_rows(&status, cx),
+                            StatusRead::Loading => false,
+                            StatusRead::Failed(_) => true,
+                        },
+                    };
+                    if nothing {
+                        this.scm_entry_clear();
+                    }
+                }
                 cx.notify();
             },
         );
@@ -1728,6 +1778,15 @@ impl Tty59App {
         // as two fills rather than one long one.
         let query = self.scm_filter_query(cx);
         let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        // Which node holds the keyboard this frame: the one the list says, or,
+        // while it has not chosen one, the first group's header. Decided once
+        // here, so no node is ever asked more than "is it this one".
+        self.scm.run_tops.begin();
+        let keyboard = match self.scm.row_at.as_ref() {
+            Some(id) if id.repo == *repo => Some(id.clone()),
+            _ => None,
+        };
+        let mut first_header = keyboard.is_none();
         let mut matched = 0;
         let mut list = v_flex()
             .px(px(CONTENT_INSET))
@@ -1738,41 +1797,66 @@ impl Tty59App {
             // and its stage/discard-all act on what is on screen — a
             // "discard all" that also reached the files the filter hid would
             // be the one surprise this panel cannot take back.
-            let entries: Vec<&StatusEntry> = status
-                .entries
-                .iter()
-                .filter(|e| in_group(e, group))
-                .filter(|e| {
-                    query
-                        .as_deref()
-                        .is_none_or(|q| path_matches(e.path.as_str(), q))
-                })
-                .collect();
+            let entries = scm_group_entries(status, group, query.as_deref());
             if entries.is_empty() {
                 continue;
             }
             matched += entries.len();
             let collapsed = self.scm.group_collapsed(group, entries.len());
-            let mut block = v_flex()
-                .gap(px(1.))
-                .child(self.scm_group_header(repo, group, &entries, collapsed, cx));
+            let header_stop = match keyboard.as_ref() {
+                Some(id) => id.is_header(repo, group),
+                None => std::mem::take(&mut first_header),
+            };
+            let mut block = v_flex().gap(px(1.)).child(self.scm_group_header(
+                repo,
+                group,
+                &entries,
+                collapsed,
+                self.scm_stop_of(header_stop, window),
+                cx,
+            ));
             if !collapsed {
                 let shown = entries.len().min(MAX_RENDERED_FILES);
                 // Only the rows the viewport reaches are built; see
                 // `rows_window`. Which rows exist is decided here as before.
                 let run = if tree {
-                    // A filter opens every directory: a match folded away
-                    // under a closed row is a match the filter failed to show.
                     let filtering = query.is_some();
-                    let folded = &self.scm.folded_dirs;
-                    let rows = tree_rows(entries[..shown].iter().map(|e| e.path.as_str()), |key| {
-                        !filtering && folded.contains(&(group, key.to_string()))
-                    });
+                    let rows = scm_tree_rows(&self.scm, group, &entries, shown, filtering);
                     let pin = rows.iter().position(|row| {
                         matches!(row, TreeRow::File { index, .. }
                             if self.scm_menu_row_is(group, entries[*index]))
                     });
-                    let run = self.scm_rows_window(group, rows.len(), window, cx).pin(pin);
+                    // The keyboard's row is found by identity. Its place is
+                    // remembered (`ScmPanelState::pos`) and checked against the
+                    // identity every frame, so a steady frame costs one lookup.
+                    let held = keyboard
+                        .as_ref()
+                        .filter(|id| id.group == group && id.node != NodeKind::Header);
+                    let focus_pin = held.and_then(|id| {
+                        self.scm_pinned_pos(
+                            group,
+                            true,
+                            |i| match rows.get(i) {
+                                Some(TreeRow::File { index, .. }) => {
+                                    id.is_file(repo, group, entries[*index].path.as_str())
+                                }
+                                Some(TreeRow::Dir { key, .. }) => id.is_dir(repo, group, key),
+                                None => false,
+                            },
+                            || {
+                                rows.iter().position(|row| match row {
+                                    TreeRow::File { index, .. } => {
+                                        id.is_file(repo, group, entries[*index].path.as_str())
+                                    }
+                                    TreeRow::Dir { key, .. } => id.is_dir(repo, group, key),
+                                })
+                            },
+                        )
+                    });
+                    let run = self
+                        .scm_rows_window(group, rows.len(), window, cx)
+                        .pin(pin)
+                        .pin(focus_pin);
                     let built = rows
                         .into_iter()
                         .enumerate()
@@ -1784,20 +1868,33 @@ impl Tty59App {
                                 depth,
                                 files,
                                 collapsed,
-                            } => self.scm_dir_row(
-                                group, key, label, depth, files, collapsed, !filtering, cx,
-                            ),
-                            TreeRow::File { index, depth } => self.scm_file_row(
-                                repo,
-                                group,
-                                entries[index],
-                                RowPos {
-                                    depth: Some(depth),
-                                    set: None,
-                                },
-                                window,
-                                cx,
-                            ),
+                            } => {
+                                let tracked = keyboard
+                                    .as_ref()
+                                    .is_some_and(|id| id.is_dir(repo, group, &key));
+                                let stop = self.scm_stop_of(tracked, window);
+                                self.scm_dir_row(
+                                    group, key, label, depth, files, collapsed, !filtering, stop,
+                                    cx,
+                                )
+                            }
+                            TreeRow::File { index, depth } => {
+                                let tracked = keyboard.as_ref().is_some_and(|id| {
+                                    id.is_file(repo, group, entries[index].path.as_str())
+                                });
+                                self.scm_file_row(
+                                    repo,
+                                    group,
+                                    entries[index],
+                                    RowPos {
+                                        depth: Some(depth),
+                                        set: None,
+                                        stop: self.scm_stop_of(tracked, window),
+                                    },
+                                    window,
+                                    cx,
+                                )
+                            }
                         })
                         .collect();
                     run.finish(built)
@@ -1805,10 +1902,31 @@ impl Tty59App {
                     let pin = entries[..shown]
                         .iter()
                         .position(|e| self.scm_menu_row_is(group, e));
-                    let run = self.scm_rows_window(group, shown, window, cx).pin(pin);
+                    let held = keyboard
+                        .as_ref()
+                        .filter(|id| id.group == group && id.node != NodeKind::Header);
+                    let focus_pin = held.and_then(|id| {
+                        self.scm_pinned_pos(
+                            group,
+                            false,
+                            |i| i < shown && id.is_file(repo, group, entries[i].path.as_str()),
+                            || {
+                                entries[..shown]
+                                    .iter()
+                                    .position(|e| id.is_file(repo, group, e.path.as_str()))
+                            },
+                        )
+                    });
+                    let run = self
+                        .scm_rows_window(group, shown, window, cx)
+                        .pin(pin)
+                        .pin(focus_pin);
                     let built = run
                         .indices()
                         .map(|i| {
+                            let tracked = keyboard.as_ref().is_some_and(|id| {
+                                id.is_file(repo, group, entries[i].path.as_str())
+                            });
                             self.scm_file_row(
                                 repo,
                                 group,
@@ -1816,6 +1934,7 @@ impl Tty59App {
                                 RowPos {
                                     depth: None,
                                     set: Some((i, shown)),
+                                    stop: self.scm_stop_of(tracked, window),
                                 },
                                 window,
                                 cx,
@@ -1870,8 +1989,11 @@ impl Tty59App {
                 // would never hear about the text typed into it.
                 self.scm.filter_sub =
                     Some(
-                        cx.subscribe_in(&input, window, |_this, _input, ev, _window, cx| {
+                        cx.subscribe_in(&input, window, |this, _input, ev, _window, cx| {
                             if matches!(ev, gpui_component::input::InputEvent::Change) {
+                                // The list's shape changed under whatever
+                                // remembers where a node sits in it.
+                                this.scm.layout_epoch += 1;
                                 cx.notify();
                             }
                         }),
@@ -1919,6 +2041,7 @@ impl Tty59App {
         files: usize,
         collapsed: bool,
         foldable: bool,
+        stop: Stop,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
@@ -1926,16 +2049,25 @@ impl Tty59App {
         let muted = cx.theme().muted_foreground;
         let id = SharedString::from(format!("scm-dir-{group:?}-{key}"));
         let selector = id.clone();
+        let stop_id = id.clone();
         #[cfg(test)]
         let chevron_selector = format!("scm-dir-chevron-{group:?}-{key}");
         let toggle = cx.listener({
             let key = key.clone();
-            move |this, _, _window, cx| {
+            move |this, event: &ClickEvent, _window, cx| {
+                if !row_click_is_pointer(event) {
+                    return;
+                }
                 this.scm.toggle_dir(group, key.clone());
+                // A fold that hides the node the keyboard is on moves it to
+                // the directory that folded.
+                if this.scm.folded_dirs.contains(&(group, key.clone())) {
+                    this.scm_keyboard_follows_fold(group, Some(key.as_str()));
+                }
                 cx.notify();
             }
         });
-        h_flex()
+        let row = h_flex()
             .id(id)
             .role(gpui::Role::TreeItem)
             .aria_label(SharedString::from(label.clone()))
@@ -1992,8 +2124,8 @@ impl Tty59App {
                     .font_family(mono)
                     .text_color(muted)
                     .child(files.to_string()),
-            )
-            .into_any_element()
+            );
+        self.scm_stop(row, &stop_id, stop.tracked, cx)
     }
 
     /// "…and 40 more", and the note about a status git had to truncate.
@@ -2016,14 +2148,19 @@ impl Tty59App {
         group: ScmGroup,
         entries: &[&StatusEntry],
         collapsed: bool,
+        stop: Stop,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let count = entries.len();
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let id = SharedString::from(format!("scm-group-{group:?}"));
-        let actions = self.scm_group_actions(&id, repo, group, entries, sf.hover, cx);
+        // Shown for a header the keyboard is on as well as for a hovered one.
+        let actions = self
+            .scm_group_actions(&id, repo, group, entries, sf.hover, cx)
+            .when(stop.revealed, |strip| strip.visible());
         let selector = id.clone();
-        h_flex()
+        let stop_id = id.clone();
+        let row = h_flex()
             .id(id.clone())
             .debug_selector(move || selector.to_string())
             .role(gpui::Role::Button)
@@ -2041,7 +2178,10 @@ impl Tty59App {
             .rounded(px(6.))
             .cursor_pointer()
             .hover(|s| s.bg(gpui::rgb(sf.hover)))
-            .on_click(cx.listener(move |this, _, _window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, _window, cx| {
+                if !row_click_is_pointer(event) {
+                    return;
+                }
                 this.scm_toggle_group(group, count, cx);
             }))
             // The chevron starts on the text column like the status letters
@@ -2090,7 +2230,10 @@ impl Tty59App {
                     .child(count.to_string()),
             )
             .child(actions)
-            .into_any_element()
+            // Measured whether or not it holds the keyboard: the keyboard can
+            // be sent to a header that is above the viewport.
+            .child(head_probe(group, &self.scm.run_tops, &self.scm.scroll));
+        self.scm_stop(row, &stop_id, stop.tracked, cx)
     }
 
     /// One changed file. `depth` is its level in the tree view, and `None` in
@@ -2109,7 +2252,7 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let RowPos { depth, set } = pos;
+        let RowPos { depth, set, stop } = pos;
         let sf = cx.global::<crate::ui::presets::Surfaces>().sidebar;
         let mono = cx.theme().mono_font_family.clone();
         let path = entry.path.as_str().to_string();
@@ -2119,16 +2262,20 @@ impl Tty59App {
         let selected =
             self.diff_overlay_focus(repo.host, &repo.root, &source) == Some(path.as_str());
         let id = SharedString::from(format!("scm-row-{group:?}-{path}"));
-        let actions = self.scm_row_actions(
-            &id,
-            repo,
-            group,
-            entry,
-            if selected { sf.selected } else { sf.hover },
-            cx,
-        );
+        // Shown for a row the keyboard is on as well as for a hovered one.
+        let actions = self
+            .scm_row_actions(
+                &id,
+                repo,
+                group,
+                entry,
+                if selected { sf.selected } else { sf.hover },
+                cx,
+            )
+            .when(stop.revealed, |strip| strip.visible());
 
         let selector = id.clone();
+        let stop_id = id.clone();
         let hover_group = id.clone();
         #[cfg(test)]
         let dir_selector = id.clone();
@@ -2144,7 +2291,7 @@ impl Tty59App {
             window,
             cx,
         );
-        h_flex()
+        let row = h_flex()
             .id(id.clone())
             // The whole path and which list it is on: the letter drawn beside
             // it is a glyph, and the directory may be elided or not drawn.
@@ -2176,7 +2323,10 @@ impl Tty59App {
             .on_click({
                 let repo = repo.clone();
                 let path = path.clone();
-                cx.listener(move |this, _, window, cx| {
+                cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if !row_click_is_pointer(event) {
+                        return;
+                    }
                     this.open_diff_overlay(
                         repo.host,
                         repo.root.clone(),
@@ -2268,16 +2418,20 @@ impl Tty59App {
                     // cell gives up the strip's width and the ellipsis lands
                     // before it, not under it. A margin rather than padding:
                     // the cell's own box is what narrows.
-                    .group_hover(hover_group, move |s| s.mr(px(strip_reserve)));
+                    .group_hover(hover_group, move |s| s.mr(px(strip_reserve)))
+                    // The strip shows on keyboard focus as well as hover, so
+                    // the cell gives up the same width in both.
+                    .when(stop.revealed, move |s| s.mr(px(strip_reserve)));
                 #[cfg(test)]
                 let cell = cell.debug_selector(move || format!("{dir_selector}-dir"));
                 this.child(cell.child(dir.to_string()))
             })
-            .child(actions)
-            .into_any_element()
+            .child(actions);
+        self.scm_stop(row, &stop_id, stop.tracked, cx)
     }
 
-    /// The buttons that appear over a hovered row.
+    /// The buttons that appear over a hovered row. The caller decides whether
+    /// they also show for a row the keyboard is on.
     fn scm_row_actions(
         &self,
         row: &SharedString,
@@ -2286,7 +2440,7 @@ impl Tty59App {
         entry: &StatusEntry,
         backing: u32,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui::Div {
         // A path git cannot be given is a path nothing can be done to. The
         // row stays readable and the buttons say why they are dead.
         let writable = entry.path.pathspec().is_some();
@@ -2305,7 +2459,7 @@ impl Tty59App {
                     })),
             );
         }
-        actions.into_any_element()
+        actions
     }
 
     fn scm_group_actions(
@@ -2316,7 +2470,7 @@ impl Tty59App {
         entries: &[&StatusEntry],
         backing: u32,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> gpui::Div {
         let paths = writable_paths(entries);
         let mut actions = action_strip(row, backing);
 
@@ -2341,7 +2495,7 @@ impl Tty59App {
                 })),
             );
         }
-        actions.into_any_element()
+        actions
     }
 
     /// A [`TILE_SIZE_XS`] tile. Smaller than `TILE_SIZE_SM`, because three of
@@ -2575,8 +2729,1009 @@ impl Tty59App {
     fn scm_toggle_group(&mut self, group: ScmGroup, count: usize, cx: &mut Context<Self>) {
         let collapsed = self.scm.group_collapsed(group, count);
         self.scm.set_group_collapsed(group, !collapsed);
+        // Folding a group hides the node the keyboard may be on: it moves to
+        // the header that folded.
+        if !collapsed {
+            self.scm_keyboard_follows_fold(group, None);
+        }
         cx.notify();
     }
+
+    /// Whether a node is the keyboard's stop in the frame being built, and
+    /// whether the handle really has the focus (a node that is only the stop
+    /// shows no ring and no revealed strip).
+    fn scm_stop_of(&self, tracked: bool, window: &Window) -> Stop {
+        Stop {
+            tracked,
+            revealed: tracked && self.scm_row_focus.handle.is_focused(window),
+        }
+    }
+
+    /// Where the keyboard's node sits in `group`'s run, for pinning it.
+    ///
+    /// The answer is remembered with the state of the list it was found in
+    /// (`ScmPanelState::pos`): while that has not changed, a frame asks only
+    /// whether the node at the remembered place still is the one (`holds`), and
+    /// a node that is known to be absent costs nothing. Only a changed list
+    /// pays for one `search` of the group, and the result is remembered again.
+    /// A place is never trusted without `holds` saying it is still the node, so
+    /// a stale answer can never pin another row.
+    fn scm_pinned_pos(
+        &self,
+        group: ScmGroup,
+        tree: bool,
+        holds: impl Fn(usize) -> bool,
+        search: impl FnOnce() -> Option<usize>,
+    ) -> Option<usize> {
+        let known = self.scm.pos.get();
+        if known.valid
+            && known.epoch == self.scm.layout_epoch
+            && known.tree == tree
+            && known.group == Some(group)
+        {
+            match known.at {
+                None => return None,
+                Some(i) if holds(i) => return Some(i),
+                Some(_) => {}
+            }
+        }
+        let at = search();
+        self.scm.pos.set(Pos {
+            valid: true,
+            epoch: self.scm.layout_epoch,
+            tree,
+            group: Some(group),
+            at,
+        });
+        at
+    }
+
+    /// Wrap the row that holds the keyboard this frame: it tracks the one
+    /// handle, names itself in the key context (`ScmRows`, `row = <its own
+    /// id>`), takes the keys, carries the shared focus ring and the probe that
+    /// publishes its mount. Any other row comes back as it is.
+    fn scm_stop(
+        &self,
+        row: Stateful<Div>,
+        id: &SharedString,
+        tracked: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !tracked {
+            return row.into_any_element();
+        }
+        let handle = self.scm_row_focus.handle.clone();
+        let mut context = KeyContext::default();
+        context.add("ScmRows");
+        context.set("row", id.clone());
+        let (this, view, scroll) = (cx.weak_entity(), cx.entity_id(), self.scm.scroll.clone());
+        let probe =
+            self.scm_row_focus
+                .probe(self.scm.nav_gen, move |pending, bounds, window, cx| {
+                    scm_settle(&this, view, &scroll, pending, bounds, window, cx)
+                });
+        let row = row
+            .relative()
+            .track_focus(&handle)
+            .key_context(context)
+            // A pointer press never moves the keyboard into the list. GPUI
+            // gives a tracked element the focus on mouse-down unless the event
+            // is default-prevented, and runs the element's own mouse-down
+            // listeners before that one (it registers its own first and runs
+            // bubble listeners last-registered first). The keyboard gets here
+            // by the entry action and Tab only. Clicks and the row menu's
+            // right-button listener are unaffected: they do not read this flag.
+            .on_any_mouse_down(|_, window, _| window.prevent_default())
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.scm_row_key(event, window, cx)
+            }))
+            .child(probe);
+        // Inside the row's edge: a reveal leaves the row flush with the
+        // scroller's top or bottom, where an outer ring would be clipped.
+        let ring = FocusRing::new(&handle, RingPlacement::Inside, ROW_FILL_RADIUS, row)
+            .keyboard_only(true);
+        // Only the one tracked row is wrapped, so the names cannot collide.
+        #[cfg(test)]
+        let ring = ring.tagged("scm-stop-ring");
+        ring.into_any_element()
+    }
+
+    /// A key at the node that holds the keyboard. Only while the handle itself
+    /// is focused: the same event also bubbles up from the strip's buttons and
+    /// from a row menu opened inside the row, and those own their keys.
+    fn scm_row_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.scm_row_focus.handle.is_focused(window) || self.scm.row_menu_open() {
+            return;
+        }
+        let stroke = &event.keystroke;
+        if stroke.modifiers.modified() {
+            return;
+        }
+        match stroke.key.as_str() {
+            // Same as the Info panel: Escape gives the keyboard back to the pane.
+            "escape" => {
+                cx.stop_propagation();
+                self.focus_active(window, cx);
+            }
+            key @ ("up" | "down" | "home" | "end" | "left" | "right") => {
+                cx.stop_propagation();
+                self.scm_nav(key, window, cx);
+            }
+            // The keys that act. Consumed always, but only a fresh press acts:
+            // a repeat (`is_held`) does nothing, so a held Space cannot stage
+            // row after row, nor a held Backspace queue prompts. The key-up
+            // click GPUI makes from these is rejected by the nodes
+            // (`row_click_is_pointer`), so each press acts once.
+            key @ ("enter" | "space" | "backspace") => {
+                cx.stop_propagation();
+                if !event.is_held {
+                    self.scm_row_act(key, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// What Enter, Space and Backspace do at the node that holds the keyboard.
+    ///
+    /// * Enter: a file opens its diff, a header folds its group, a directory
+    ///   folds (the same things a click does).
+    /// * Space: a file stages or unstages (the one verb its group offers), a
+    ///   header does the same to the group's writable entries as the filter
+    ///   shows them (the entries the header's own button acts on). A directory
+    ///   does nothing, and so does a conflicted file (resolving is a choice).
+    /// * Backspace: the group's Discard, through the one approval every discard
+    ///   goes through, over the file or the header's filtered writable entries.
+    ///   A directory and groups without Discard do nothing.
+    ///
+    /// Stage, unstage and discard pick the node the keyboard moves to BEFORE the
+    /// operation is dispatched (`scm_neighbour`): at once for stage and unstage,
+    /// and for a discard inside the approval's success, so a cancelled prompt
+    /// leaves the row and the focus exactly where they were.
+    fn scm_row_act(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self.scm.active_repo().cloned() else {
+            return;
+        };
+        let Some(status) = status_of(cx, repo.host, &repo.root) else {
+            return;
+        };
+        let query = self.scm_filter_query(cx);
+        let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        let layout = scm_layout(&self.scm, &status, query.as_deref(), tree);
+        let nodes = scm_nodes(&layout, tree);
+        let here = match self.scm.row_at.as_ref() {
+            Some(id) if id.repo == repo => match node_pos(&nodes, &repo, id) {
+                Some(i) => i,
+                None => return,
+            },
+            // No node chosen yet: the first header is where the keyboard is.
+            _ => 0,
+        };
+        let Some(&node) = nodes.get(here) else {
+            return;
+        };
+        let Some(group) = layout.iter().find(|g| g.group == node.group) else {
+            return;
+        };
+        match (key, node.kind) {
+            ("enter", NodeRef::File(path)) => {
+                let path = path.to_string();
+                self.open_diff_overlay(
+                    repo.host,
+                    repo.root.clone(),
+                    group_diff_source(node.group),
+                    Some(path),
+                    window,
+                    cx,
+                );
+            }
+            ("enter", NodeRef::Header) => {
+                let count = group.entries.len();
+                self.scm_toggle_group(node.group, count, cx);
+            }
+            ("enter", NodeRef::Dir(dir)) => {
+                let dir = dir.to_string();
+                self.scm.toggle_dir(node.group, dir.clone());
+                if self.scm.folded_dirs.contains(&(node.group, dir.clone())) {
+                    self.scm_keyboard_follows_fold(node.group, Some(dir.as_str()));
+                }
+                cx.notify();
+            }
+            (_, NodeRef::Dir(_)) => {}
+            ("space" | "backspace", kind) => {
+                let (verbs, paths) = match kind {
+                    NodeRef::File(path) => {
+                        let Some(entry) = group.entries.iter().find(|e| e.path.as_str() == path)
+                        else {
+                            return;
+                        };
+                        // A path git cannot be given is a path nothing can be
+                        // done to; its row says so.
+                        if entry.path.pathspec().is_none() {
+                            return;
+                        }
+                        (row_verbs(node.group), vec![entry.path.clone()])
+                    }
+                    NodeRef::Header => (group_verbs(node.group), writable_paths(&group.entries)),
+                    NodeRef::Dir(_) => return,
+                };
+                let discard = key == "backspace";
+                let verb = verbs.iter().map(|(verb, _)| *verb).find(|verb| {
+                    if discard {
+                        *verb == RowVerb::Discard
+                    } else {
+                        matches!(verb, RowVerb::Stage | RowVerb::Unstage)
+                    }
+                });
+                let Some(op) = verb.and_then(|verb| verb_op(verb, node.group, paths)) else {
+                    return;
+                };
+                let to = scm_neighbour(
+                    &nodes,
+                    here,
+                    matches!(kind, NodeRef::Header),
+                    group.entries.len() == 1,
+                )
+                .map(|n| n.id(&repo));
+                let (from, ticket, for_repo) =
+                    (self.scm.row_at.clone(), self.scm.nav_gen, repo.clone());
+                let approved: OnApproved = Box::new(move |app, window, cx| {
+                    // Only if the keyboard is still exactly where the key was
+                    // pressed: same node, same generation, same repository AND
+                    // the handle itself still focused. A user who moved on
+                    // while the prompt was up is not moved back.
+                    if let Some(to) = to
+                        && app.scm.nav_gen == ticket
+                        && app.scm.row_at == from
+                        && app.scm.active_repo() == Some(&for_repo)
+                        && app.scm_row_focus.handle.is_focused(window)
+                    {
+                        app.scm_set_row(to);
+                        app.scm_row_focus.bump(&mut app.scm.nav_gen);
+                        cx.notify();
+                    }
+                });
+                self.scm_op_approved(repo, op, None, Some(approved), window, cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Move the keyboard (or fold what it is on) for an arrow, Home or End.
+    /// Reads the same list the render draws, so rows that were never built are
+    /// walked like any other; the target is scrolled into view from where the
+    /// run was measured and its row pitch, and built by its pin.
+    fn scm_nav(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = self.scm.active_repo().cloned() else {
+            return;
+        };
+        let Some(status) = status_of(cx, repo.host, &repo.root) else {
+            return;
+        };
+        let query = self.scm_filter_query(cx);
+        let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        let layout = scm_layout(&self.scm, &status, query.as_deref(), tree);
+        let nodes = scm_nodes(&layout, tree);
+        let here = match self.scm.row_at.as_ref() {
+            Some(id) if id.repo == repo => match node_pos(&nodes, &repo, id) {
+                Some(i) => i,
+                None => return,
+            },
+            // No node chosen yet: the first header is where the keyboard is.
+            _ => 0,
+        };
+        let Some(step) = scm_step(key, here, &nodes, &layout) else {
+            return;
+        };
+        match step {
+            Step::Fold(group, dir, collapse) => {
+                if self.scm.row_at.is_none() {
+                    self.scm_set_row(nodes[here].id(&repo));
+                }
+                match dir {
+                    None => self.scm.set_group_collapsed(group, collapse),
+                    Some(dir) => self.scm.toggle_dir(group, dir),
+                }
+                cx.notify();
+            }
+            Step::Move(to) => {
+                let node = nodes[to];
+                let id = node.id(&repo);
+                if self.scm.row_at.as_ref() == Some(&id) {
+                    return;
+                }
+                self.scm_set_row(id);
+                let ticket = self.scm_row_focus.bump(&mut self.scm.nav_gen);
+                // Placed now from where the run was measured, so a target that
+                // was never built lands near the viewport and is built by its
+                // pin; checked once more against its painted bounds by the
+                // frame that mounts it.
+                self.scm_row_focus.request(Pending {
+                    ticket,
+                    window: window.window_handle(),
+                    origin: None,
+                    kind: PendingKind::Reveal,
+                });
+                let rem = window.rem_size();
+                let row_h = rems(ROW_H / 16.).to_pixels(rem).as_f32();
+                let head_h = rems(GROUP_HEADER_H / 16.).to_pixels(rem).as_f32();
+                let tops = &self.scm.run_tops;
+                let _ = match node.at {
+                    Some(at) => tops.reveal_row(node.group, at, row_h, &self.scm.scroll),
+                    None => tops.reveal_head(node.group, head_h, &self.scm.scroll),
+                };
+                cx.notify();
+            }
+        }
+    }
+
+    /// The keyboard's node becomes `id`. Every write of it goes through here,
+    /// so the remembered place of the node (`pos`) never outlives it.
+    fn scm_set_row(&mut self, id: RowId) {
+        self.scm.row_at = Some(id);
+        self.scm.layout_epoch += 1;
+    }
+
+    /// A fold of `group` (or of its directory `dir`) hides the node the
+    /// keyboard may be on: it moves to the group or directory that folded,
+    /// where it stays visible.
+    fn scm_keyboard_follows_fold(&mut self, group: ScmGroup, dir: Option<&str>) {
+        let Some(id) = self.scm.row_at.as_ref().filter(|id| id.group == group) else {
+            return;
+        };
+        let under = |path: &str| match dir {
+            None => true,
+            Some(d) => {
+                path.len() > d.len() && path.starts_with(d) && path.as_bytes()[d.len()] == b'/'
+            }
+        };
+        let hidden = match &id.node {
+            NodeKind::Header => false,
+            NodeKind::Dir(key) => under(key),
+            NodeKind::File(path) => under(path),
+        };
+        if !hidden {
+            return;
+        }
+        let node = match dir {
+            None => NodeKind::Header,
+            Some(d) => NodeKind::Dir(d.to_string()),
+        };
+        let moved = RowId {
+            repo: id.repo.clone(),
+            group,
+            node,
+        };
+        self.scm_set_row(moved);
+        self.scm_row_focus.bump(&mut self.scm.nav_gen);
+    }
+
+    /// Drop a keyboard entry that is waiting, and what it was asked in.
+    pub(crate) fn scm_entry_clear(&mut self) {
+        self.scm_row_focus.cancel();
+        self.scm.entry = None;
+    }
+
+    /// The keyboard asked to go into the Changes list (the Changes action and
+    /// the palette). Pointer reveal of the tab never comes here.
+    ///
+    /// Nothing is focused now: the row that will hold the keyboard may not be
+    /// built, or the status may not have been read. The request waits in
+    /// `Roving` and is settled by the prepaint of the first frame that mounts
+    /// that row (`Roving::probe`), whenever that is. With nothing to enter (no
+    /// directory, not a repository, a clean or fully filtered list, a failed
+    /// read) there is no request at all.
+    pub(crate) fn scm_request_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A newer request replaces whatever was waiting.
+        self.scm_entry_clear();
+        let Some((host, cwd)) = self.scm_pane_target(window, cx) else {
+            return;
+        };
+        let host_id = host.id();
+        let target = (host_id, cwd);
+        let repo = match self.scm.repo_override.clone() {
+            Some(pick) => Some(pick),
+            None => match self.scm.roots.get(&target) {
+                Some((_, Some(root))) => Some(RepoKey {
+                    host: host_id,
+                    root: root.clone(),
+                }),
+                Some((at, None)) if at.elapsed() < NOT_A_REPO_RETRY => return,
+                // Not asked yet, or due to be asked again: it parks.
+                _ => None,
+            },
+        };
+        if let Some(repo) = &repo {
+            match status_read_of(cx, repo.host, &repo.root) {
+                StatusRead::Ready(status) => {
+                    let query = self.scm_filter_query(cx);
+                    let any = ScmGroup::ORDER
+                        .iter()
+                        .any(|g| !scm_group_entries(&status, *g, query.as_deref()).is_empty());
+                    if !any {
+                        return;
+                    }
+                    self.scm_drop_orphan(repo, &status, cx);
+                }
+                StatusRead::Loading => {}
+                StatusRead::Failed(_) => return,
+            }
+        }
+        let ticket = self.scm_row_focus.bump(&mut self.scm.nav_gen);
+        self.scm_row_focus.request(Pending {
+            ticket,
+            window: window.window_handle(),
+            origin: window.focused(cx),
+            kind: PendingKind::Entry,
+        });
+        self.scm.entry = Some(EntryCtx {
+            ticket,
+            target,
+            pick: self.scm.repo_override.clone(),
+        });
+        cx.notify();
+    }
+
+    /// Answer a keyboard entry once the row it is for is mounted: called after
+    /// the frame that mounted it (`scm_settle`), with the app unleased. The
+    /// request was taken by that prepaint, so it is consumed here whatever the
+    /// answer: nothing retries it. Everything is read from live state; any
+    /// check failing means the keyboard stays where the user has it.
+    pub(crate) fn scm_entry_complete(
+        &mut self,
+        pending: Pending,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ticket = pending.ticket;
+        // Only the entry this completion belongs to is consumed. A completion
+        // for an older request that arrives after a newer one was made must
+        // leave the newer entry where it is, for the frame that mounts its row.
+        let Some(ctx) = self.scm.entry.take_if(|c| c.ticket == ticket) else {
+            return;
+        };
+        if self.scm.nav_gen != ticket
+            || !(self.right_panel_visible
+                && self.right_panel_tab == tty59_core::core::config::RightPanelTab::Scm)
+        {
+            return;
+        }
+        // Still looking at the directory, and the repository pick, it was
+        // asked about.
+        let Some((host, cwd)) = self.scm_pane_target(window, cx) else {
+            return;
+        };
+        if ctx.target != (host.id(), cwd) || ctx.pick != self.scm.repo_override {
+            return;
+        }
+        let Some(repo) = self.scm.active_repo().cloned() else {
+            return;
+        };
+        let Some(status) = status_of(cx, repo.host, &repo.root) else {
+            return;
+        };
+        // The node it is for exists now, in the list as the render draws it.
+        let query = self.scm_filter_query(cx);
+        let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        let layout = scm_layout(&self.scm, &status, query.as_deref(), tree);
+        let nodes = scm_nodes(&layout, tree);
+        let chosen = self.scm.row_at.as_ref().filter(|id| id.repo == repo);
+        let first = nodes.first().map(|n| n.id(&repo));
+        let present = match chosen {
+            Some(id) => node_pos(&nodes, &repo, id).is_some(),
+            None => first.is_some(),
+        };
+        if !present {
+            return;
+        }
+        // It was mounted by a frame of this very request, and nothing else has
+        // taken the keyboard since the request was made.
+        if self.scm_row_focus.mounted(ticket).is_none() || window.focused(cx) != pending.origin {
+            return;
+        }
+        if chosen.is_none() {
+            self.scm.row_at = first;
+        }
+        let handle = self.scm_row_focus.handle.clone();
+        window.focus(&handle, cx);
+    }
+
+    /// Forget a keyboard position that no longer names a node of the list, so
+    /// the first header is the list's stop again. Only called from events.
+    fn scm_drop_orphan(&mut self, repo: &RepoKey, status: &WorkingTreeStatus, cx: &gpui::App) {
+        let Some(id) = self.scm.row_at.as_ref().filter(|id| id.repo == *repo) else {
+            return;
+        };
+        let query = self.scm_filter_query(cx);
+        let tree = cx.global::<crate::core::config::Config>().scm_changes_tree;
+        let layout = scm_layout(&self.scm, status, query.as_deref(), tree);
+        let nodes = scm_nodes(&layout, tree);
+        if node_pos(&nodes, repo, id).is_none() {
+            self.scm.row_at = None;
+            self.scm.layout_epoch += 1;
+        }
+    }
+
+    /// [`Tty59App::scm_drop_orphan`] for the repository on screen, when the
+    /// tab is chosen.
+    pub(crate) fn scm_drop_orphan_stop(&mut self, cx: &mut Context<Self>) {
+        let Some(repo) = self.scm.active_repo().cloned() else {
+            return;
+        };
+        let Some(status) = status_of(cx, repo.host, &repo.root) else {
+            return;
+        };
+        self.scm_drop_orphan(&repo, &status, cx);
+    }
+
+    /// A status read for `root` has landed, delivered to every window
+    /// (`scm_landed_in_all_windows_with`), not only the one that started it.
+    /// Each window judges it for itself, against its own list and filter.
+    /// `landed` says what the read found: it is carried, never inferred from
+    /// the data, because "no repository here" and "not read yet" both leave no
+    /// status.
+    ///
+    /// Only a window looking at the repository that landed has a list that
+    /// moved, so only it has its remembered positions invalidated. A keyboard
+    /// entry waiting on a list with nothing to enter is dropped, so it cannot
+    /// resurface when something later puts a row there, but only if it is the
+    /// entry of THAT repository, taken from its own stored pick or resolved
+    /// lookup, resolved BEFORE anything is forgotten: an entry whose repository
+    /// is not known yet, or is another one, is left alone. For a status (or an
+    /// unreachable host) a clean tree or a failed read has nothing to enter and
+    /// a status still loading stays parked; a list that has rows needs nothing
+    /// here, the frame it triggers mounts the row and settles the request. For
+    /// "not a repository" the matching entry is dropped because the read said
+    /// so, and then every window forgets the directories it had resolved to
+    /// that root (only those), so each re-asks. Runs without a window and never
+    /// touches the focus.
+    pub(crate) fn scm_landed(
+        &mut self,
+        host: HostId,
+        root: &Path,
+        changed: bool,
+        landed: Landed,
+        cx: &mut Context<Self>,
+    ) {
+        let own = self
+            .scm
+            .active_repo()
+            .is_some_and(|repo| repo.host == host && repo.root.as_path() == root);
+        if own && changed {
+            self.scm.layout_epoch += 1;
+        }
+        let matches = self
+            .scm_entry_repo()
+            .is_some_and(|waiting| waiting.host == host && waiting.root.as_path() == root);
+        if matches {
+            let nothing = match landed {
+                Landed::NotARepo => true,
+                Landed::Status | Landed::Unreachable => match status_read_of(cx, host, root) {
+                    StatusRead::Ready(status) => !self.scm_status_has_rows(&status, cx),
+                    StatusRead::Loading => false,
+                    StatusRead::Failed(_) => true,
+                },
+            };
+            if nothing {
+                self.scm_entry_clear();
+            }
+        }
+        if landed == Landed::NotARepo {
+            self.scm.forget_root(host, root);
+        }
+    }
+
+    /// The repository the waiting keyboard entry is for: its stored explicit
+    /// pick, else the root the lookup of its directory resolved to. `None` when
+    /// there is no entry or the lookup has not answered. Never guessed from
+    /// paths.
+    fn scm_entry_repo(&self) -> Option<RepoKey> {
+        let entry = self.scm.entry.as_ref()?;
+        match &entry.pick {
+            Some(pick) => Some(pick.clone()),
+            None => match self.scm.roots.get(&entry.target) {
+                Some((_, Some(root))) => Some(RepoKey {
+                    host: entry.target.0,
+                    root: root.clone(),
+                }),
+                _ => None,
+            },
+        }
+    }
+
+    /// Whether `status` has anything in it that this window's filter lets
+    /// through.
+    fn scm_status_has_rows(&self, status: &WorkingTreeStatus, cx: &App) -> bool {
+        let query = self.scm_filter_query(cx);
+        ScmGroup::ORDER
+            .iter()
+            .any(|g| !scm_group_entries(status, *g, query.as_deref()).is_empty())
+    }
+}
+
+/// Deliver a landed status read to every live app window, so each can
+/// invalidate what it remembered about the list and drop an entry that has
+/// nothing to enter. Windows are enumerated from the app (`App::windows`), not
+/// from a registry of our own: a window is the app inside a `Root`, and one
+/// that is closed, is mid-update, or is not an app window (a prompt, settings)
+/// is skipped. The loop runs at the top level of the landing, where no app
+/// entity is being updated, and never nests one window's update in another's.
+pub(crate) fn scm_landed_in_all_windows_with(
+    cx: &mut App,
+    host: HostId,
+    root: &Path,
+    changed: bool,
+    landed: Landed,
+) {
+    for handle in cx.windows() {
+        let app = handle
+            .downcast::<gpui_component::Root>()
+            .and_then(|window| window.read(cx).ok().map(|shell| shell.view().clone()))
+            .and_then(|view| view.downcast::<Tty59App>().ok());
+        let Some(app) = app else {
+            continue;
+        };
+        app.update(cx, |app, cx| {
+            app.scm_landed(host, root, changed, landed, cx)
+        });
+    }
+}
+
+/// [`scm_landed_in_all_windows_with`] for a read that found a status, the
+/// answer the fixtures that call this directly mean. The landing itself always
+/// says what it found, so only tests use this.
+#[cfg(test)]
+pub(crate) fn scm_landed_in_all_windows(cx: &mut App, host: HostId, root: &Path, changed: bool) {
+    scm_landed_in_all_windows_with(cx, host, root, changed, Landed::Status);
+}
+
+/// The entries of `group` that the filter lets through, in the order the list
+/// shows them. The one place that order comes from: the render and the
+/// keyboard both read it, so the keys can never walk a different list from the
+/// one on screen.
+pub(crate) fn scm_group_entries<'a>(
+    status: &'a WorkingTreeStatus,
+    group: ScmGroup,
+    query: Option<&str>,
+) -> Vec<&'a StatusEntry> {
+    status
+        .entries
+        .iter()
+        .filter(|e| in_group(e, group))
+        .filter(|e| query.is_none_or(|q| path_matches(e.path.as_str(), q)))
+        .collect()
+}
+
+/// The rows the tree view draws for the first `shown` of a group's `entries`.
+/// A filter opens every directory: a match folded away under a closed row is a
+/// match the filter failed to show.
+fn scm_tree_rows(
+    scm: &crate::ui::scm::state::ScmPanelState,
+    group: ScmGroup,
+    entries: &[&StatusEntry],
+    shown: usize,
+    filtering: bool,
+) -> Vec<TreeRow> {
+    let folded = &scm.folded_dirs;
+    tree_rows(entries[..shown].iter().map(|e| e.path.as_str()), |key| {
+        !filtering && folded.contains(&(group, key.to_string()))
+    })
+}
+
+/// One non-empty group of the list, as the keyboard reads it.
+struct GroupLayout<'a> {
+    group: ScmGroup,
+    entries: Vec<&'a StatusEntry>,
+    collapsed: bool,
+    shown: usize,
+    /// The tree view's rows of the group's run; empty in the flat list, where
+    /// the run is `entries[..shown]` as it is, and nothing is built per entry.
+    rows: Vec<TreeRow>,
+}
+
+/// The list the keyboard walks, from the same status, filter, folds and
+/// list/tree switch the render uses. Built when a key arrives, never per frame.
+fn scm_layout<'a>(
+    scm: &crate::ui::scm::state::ScmPanelState,
+    status: &'a WorkingTreeStatus,
+    query: Option<&str>,
+    tree: bool,
+) -> Vec<GroupLayout<'a>> {
+    let mut out = Vec::new();
+    for group in ScmGroup::ORDER {
+        let entries = scm_group_entries(status, group, query);
+        if entries.is_empty() {
+            continue;
+        }
+        let collapsed = scm.group_collapsed(group, entries.len());
+        let shown = entries.len().min(MAX_RENDERED_FILES);
+        let rows = if tree && !collapsed {
+            scm_tree_rows(scm, group, &entries, shown, query.is_some())
+        } else {
+            Vec::new()
+        };
+        out.push(GroupLayout {
+            group,
+            entries,
+            collapsed,
+            shown,
+            rows,
+        });
+    }
+    out
+}
+
+/// What a node is, borrowed from the layout it is in.
+#[derive(Clone, Copy)]
+enum NodeRef<'a> {
+    Header,
+    Dir(&'a str),
+    File(&'a str),
+}
+
+/// One node of the list in the order it is drawn: every group's header, then,
+/// unless the group is folded, its rows.
+#[derive(Clone, Copy)]
+struct Node<'a> {
+    group: ScmGroup,
+    kind: NodeRef<'a>,
+    /// Its index in the group's run: the row number the run's spacers and pins
+    /// count in. `None` for a header, which is not part of a run.
+    at: Option<usize>,
+}
+
+impl Node<'_> {
+    fn id(&self, repo: &RepoKey) -> RowId {
+        RowId {
+            repo: repo.clone(),
+            group: self.group,
+            node: match self.kind {
+                NodeRef::Header => NodeKind::Header,
+                NodeRef::Dir(key) => NodeKind::Dir(key.to_string()),
+                NodeRef::File(path) => NodeKind::File(path.to_string()),
+            },
+        }
+    }
+}
+
+fn scm_nodes<'l>(layout: &'l [GroupLayout<'_>], tree: bool) -> Vec<Node<'l>> {
+    let mut out = Vec::new();
+    for g in layout {
+        out.push(Node {
+            group: g.group,
+            kind: NodeRef::Header,
+            at: None,
+        });
+        if g.collapsed {
+            continue;
+        }
+        if tree {
+            for (i, row) in g.rows.iter().enumerate() {
+                let kind = match row {
+                    TreeRow::Dir { key, .. } => NodeRef::Dir(key.as_str()),
+                    TreeRow::File { index, .. } => NodeRef::File(g.entries[*index].path.as_str()),
+                };
+                out.push(Node {
+                    group: g.group,
+                    kind,
+                    at: Some(i),
+                });
+            }
+        } else {
+            for (i, entry) in g.entries[..g.shown].iter().enumerate() {
+                out.push(Node {
+                    group: g.group,
+                    kind: NodeRef::File(entry.path.as_str()),
+                    at: Some(i),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Whether `path` is under the directory `dir` of a tree.
+fn path_under(path: &str, dir: &str) -> bool {
+    path.len() > dir.len() && path.starts_with(dir) && path.as_bytes()[dir.len()] == b'/'
+}
+
+/// The node the keyboard goes to when the node at `here` leaves the list (a
+/// file staged, unstaged or discarded), or, for a header (`whole_group`), when
+/// its whole group does: the next node that stays, else the previous one. What
+/// leaves with a file is the file, its group's header when it is the group's
+/// only entry (`sole_entry`), and a tree directory with no other file shown
+/// under it. `None` when nothing stays.
+fn scm_neighbour<'a>(
+    nodes: &[Node<'a>],
+    here: usize,
+    whole_group: bool,
+    sole_entry: bool,
+) -> Option<Node<'a>> {
+    let group = nodes[here].group;
+    let file = match nodes[here].kind {
+        NodeRef::File(path) => Some(path),
+        _ => None,
+    };
+    let leaves = |i: usize| -> bool {
+        if whole_group {
+            return nodes[i].group == group;
+        }
+        if i == here {
+            return true;
+        }
+        match nodes[i].kind {
+            NodeRef::Header => sole_entry && nodes[i].group == group,
+            NodeRef::Dir(dir) => file.is_some_and(|path| {
+                nodes[i].group == group
+                    && path_under(path, dir)
+                    && !nodes.iter().enumerate().any(|(j, n)| {
+                        j != here
+                            && n.group == group
+                            && matches!(n.kind, NodeRef::File(other) if path_under(other, dir))
+                    })
+            }),
+            NodeRef::File(_) => false,
+        }
+    };
+    (here + 1..nodes.len())
+        .find(|&i| !leaves(i))
+        .or_else(|| (0..here).rev().find(|&i| !leaves(i)))
+        .map(|i| nodes[i])
+}
+
+/// Where `id` is in `nodes`, by identity. `None` if it is not there: not in
+/// this repository, folded away, filtered out or gone.
+fn node_pos(nodes: &[Node<'_>], repo: &RepoKey, id: &RowId) -> Option<usize> {
+    if id.repo != *repo {
+        return None;
+    }
+    nodes.iter().position(|n| {
+        n.group == id.group
+            && match (&id.node, n.kind) {
+                (NodeKind::Header, NodeRef::Header) => true,
+                (NodeKind::Dir(key), NodeRef::Dir(dir)) => key.as_str() == dir,
+                (NodeKind::File(path), NodeRef::File(file)) => path.as_str() == file,
+                _ => false,
+            }
+    })
+}
+
+/// The node a Left from `at` goes to: the nearest directory above it that its
+/// path is under, else its group's header.
+fn parent_pos(nodes: &[Node<'_>], at: usize) -> usize {
+    let (group, path) = match nodes[at].kind {
+        NodeRef::Header => return at,
+        NodeRef::Dir(p) | NodeRef::File(p) => (nodes[at].group, p),
+    };
+    for j in (0..at).rev() {
+        if nodes[j].group != group {
+            break;
+        }
+        match nodes[j].kind {
+            NodeRef::Header => return j,
+            NodeRef::Dir(dir)
+                if path.len() > dir.len()
+                    && path.starts_with(dir)
+                    && path.as_bytes()[dir.len()] == b'/' =>
+            {
+                return j;
+            }
+            _ => {}
+        }
+    }
+    at
+}
+
+/// What a key does to the keyboard's position.
+enum Step {
+    /// Go to the node at this index.
+    Move(usize),
+    /// Fold (`true`) or open the group, or the directory `Some(key)` of it.
+    Fold(ScmGroup, Option<String>, bool),
+}
+
+/// The keyboard's next move from node `here`. `None` when the key changes
+/// nothing there.
+fn scm_step(
+    key: &str,
+    here: usize,
+    nodes: &[Node<'_>],
+    layout: &[GroupLayout<'_>],
+) -> Option<Step> {
+    let last = nodes.len().checked_sub(1)?;
+    let node = nodes[here];
+    let group = layout.iter().find(|g| g.group == node.group)?;
+    let dir_folded = |at: usize| {
+        matches!(
+            group.rows.get(at),
+            Some(TreeRow::Dir {
+                collapsed: true,
+                ..
+            })
+        )
+    };
+    match key {
+        "down" => Some(Step::Move((here + 1).min(last))),
+        "up" => Some(Step::Move(here.saturating_sub(1))),
+        "home" => Some(Step::Move(0)),
+        "end" => Some(Step::Move(last)),
+        "left" => match node.kind {
+            NodeRef::Header if !group.collapsed => Some(Step::Fold(node.group, None, true)),
+            NodeRef::Header => None,
+            NodeRef::Dir(dir) if node.at.is_some_and(|at| !dir_folded(at)) => {
+                Some(Step::Fold(node.group, Some(dir.to_string()), true))
+            }
+            NodeRef::Dir(_) | NodeRef::File(_) => Some(Step::Move(parent_pos(nodes, here))),
+        },
+        "right" => match node.kind {
+            NodeRef::Header if group.collapsed => Some(Step::Fold(node.group, None, false)),
+            NodeRef::Header => Some(Step::Move((here + 1).min(last))),
+            NodeRef::Dir(dir) if node.at.is_some_and(dir_folded) => {
+                Some(Step::Fold(node.group, Some(dir.to_string()), false))
+            }
+            NodeRef::Dir(_) => Some(Step::Move((here + 1).min(last))),
+            NodeRef::File(_) => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether a click on a list row or header is one it should act on: a click
+/// from a mouse button. A click GPUI makes from the keyboard is not. GPUI turns
+/// Enter and Space on the focused element into a click on the KEY-UP, but on
+/// these nodes the keys act on the KEY-DOWN (`scm_row_key`: Enter opens or
+/// folds once, Space and Backspace stage and discard, none of them repeating
+/// while held), and a key-up carries no `is_held`, so its release must not act
+/// a second time. Every pointer event is unchanged.
+fn row_click_is_pointer(event: &ClickEvent) -> bool {
+    match event {
+        ClickEvent::Mouse(_) => true,
+        ClickEvent::Keyboard(_) => false,
+    }
+}
+
+/// Settle a request that a tracked row's prepaint just took. Runs in prepaint,
+/// so it only schedules work or touches the scroll offset, never the app.
+fn scm_settle(
+    this: &WeakEntity<Tty59App>,
+    view: gpui::EntityId,
+    scroll: &gpui::ScrollHandle,
+    pending: Pending,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    match pending.kind {
+        PendingKind::Entry => {
+            let this = this.clone();
+            let handle = window.window_handle();
+            // After the draw, with the app unleased: the row that settled this
+            // is mounted and published (`Roving::probe`), and the answer is
+            // given from live state.
+            cx.defer(move |cx| {
+                let _ = handle.update(cx, |_, window, cx| {
+                    let _ = this.update(cx, |app, cx| app.scm_entry_complete(pending, window, cx));
+                });
+            });
+        }
+        PendingKind::Reveal => {
+            if reveal_painted(scroll, bounds) {
+                cx.defer(move |cx| cx.notify(view));
+            }
+        }
+    }
+}
+
+/// Whether a node of the list is the one the keyboard is on, for the frame
+/// being built.
+#[derive(Clone, Copy)]
+struct Stop {
+    /// It is the node the list says holds the keyboard: it tracks the one
+    /// handle and carries the ring, the key context and the key handler.
+    tracked: bool,
+    /// It is tracked and the handle really has the focus: its action strip
+    /// shows, as it does under the pointer.
+    revealed: bool,
 }
 
 /// Where a changed-file row sits: what `scm_file_row` is told besides the file.
@@ -2587,6 +3742,8 @@ struct RowPos {
     /// The row's index in the flat list and the list's length, for a screen
     /// reader; `None` in the tree.
     set: Option<(usize, usize)>,
+    /// Whether the keyboard is on this row.
+    stop: Stop,
 }
 
 /// The Changes tab's number, before it is worded.
@@ -2904,6 +4061,10 @@ struct CommitPaint {
     hover: gpui::Hsla,
     ink: gpui::Hsla,
     seam: gpui::Hsla,
+    /// Whether the frame is inverted, i.e. committable. Only then is the
+    /// frame filled with the panel's ink, which is what the inset focus ring
+    /// (drawn in the panel's own colour) is read against.
+    live: bool,
 }
 
 /// Committable: an inverted neutral — the panel's ink as the fill and its own
@@ -2925,6 +4086,7 @@ fn commit_paint(live: bool, cx: &gpui::App) -> CommitPaint {
                 hover: fg.blend(ink.opacity(0.14)),
                 ink,
                 seam: ink.opacity(0.24),
+                live: true,
             }
         }
         false => CommitPaint {
@@ -2932,7 +4094,175 @@ fn commit_paint(live: bool, cx: &gpui::App) -> CommitPaint {
             hover: gpui::rgb(sf.hover).into(),
             ink: fg,
             seam: fg.opacity(0.18),
+            live: false,
         },
+    }
+}
+
+// The stroke of the inset focus ring on the inverted commit frame is the shared
+// `crate::ui::theme::COMMIT_RING_W`. The toolkit's outer ring is 1.5px (its
+// private `RING_BORDER_WIDTH`); the same stroke keeps the two states reading
+// as one ring. Not assumed: the commit ring tests measure both painted widths
+// and require them equal.
+use crate::ui::theme::COMMIT_RING_W;
+
+/// Read-only counters of what the commit pill dispatched, for the pill's own
+/// tests. Compiled out of every build but the test one; nothing reads them at
+/// runtime and nothing here replaces a result or changes behaviour.
+#[cfg(test)]
+mod commit_ring_events {
+    use std::cell::Cell;
+
+    thread_local! {
+        static CLICKS: Cell<usize> = const { Cell::new(0) };
+        static MENU_OPENS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// The label half's click callback ran.
+    pub(super) fn commit_clicked() {
+        CLICKS.with(|n| n.set(n.get() + 1));
+    }
+
+    /// The chevron's menu factory ran, i.e. the menu was built to open.
+    pub(super) fn menu_opened() {
+        MENU_OPENS.with(|n| n.set(n.get() + 1));
+    }
+
+    pub(super) fn commit_clicks() -> usize {
+        CLICKS.with(Cell::get)
+    }
+
+    pub(super) fn menu_opens() -> usize {
+        MENU_OPENS.with(Cell::get)
+    }
+
+    /// Zero both; called after a fixture is set up, so setup is never counted.
+    pub(super) fn reset() {
+        CLICKS.with(|n| n.set(0));
+        MENU_OPENS.with(|n| n.set(0));
+    }
+}
+
+/// One half of the split commit control, with the focus ring it shows.
+///
+/// Committable, the frame is filled with the panel's ink, so the toolkit's
+/// outer gap ring (the surface colour around the control) would sit half on
+/// the page and half on that fill; this takes `no_focus_ring` for the half
+/// (it owns the `Button`, so the policy is in one place for the panel and for
+/// the painted tests) and draws the ring just inside the half in the panel's
+/// own colour instead, which sits only on the frame fill. Not committable,
+/// `inset` is `None`, the half keeps the ordinary outer ring, and this is a
+/// bare container.
+///
+/// A trigger decorator (`with_trigger`) turns the opted-out button into
+/// whatever wraps it, as the chevron's dropdown does; it runs after the
+/// opt-out. It is a generic `FnOnce`, so it costs no allocation.
+///
+/// Always mounted, committable or not, as an anonymous (id-less) ancestor
+/// that is never a tab stop: the element-id stack and the half's own focus
+/// handle never change when the frame flips state, so a focused half keeps
+/// its focus through the flip, and `contains_focused` (which reads the last
+/// rendered tree) already sees the ancestor on the first committable frame.
+///
+/// The ring is decorative: no listeners, no `occlude`, no id, so it takes no
+/// hit and the pointer reaches the half underneath.
+#[derive(gpui::IntoElement)]
+struct CommitHalf<D: FnOnce(Button) -> AnyElement + 'static = fn(Button) -> AnyElement> {
+    id: &'static str,
+    inset: Option<gpui::Hsla>,
+    corners: gpui::Corners<gpui::Pixels>,
+    button: Button,
+    decorate: D,
+}
+
+/// The default decorator: the button as it is.
+fn bare_half(button: Button) -> AnyElement {
+    button.into_any_element()
+}
+
+impl CommitHalf {
+    /// `inset` is the panel's colour while the frame is inverted, else `None`;
+    /// `corners` are the half's own radii, the value its `Button` was given.
+    fn new(
+        id: &'static str,
+        inset: Option<gpui::Hsla>,
+        corners: gpui::Corners<gpui::Pixels>,
+        button: Button,
+    ) -> Self {
+        Self {
+            id,
+            inset,
+            corners,
+            button,
+            decorate: bare_half,
+        }
+    }
+
+    /// Wrap the (already opted-out) button in whatever hosts it, e.g. a dropdown.
+    fn with_trigger<E: FnOnce(Button) -> AnyElement + 'static>(self, decorate: E) -> CommitHalf<E> {
+        CommitHalf {
+            id: self.id,
+            inset: self.inset,
+            corners: self.corners,
+            button: self.button,
+            decorate,
+        }
+    }
+}
+
+impl<D: FnOnce(Button) -> AnyElement + 'static> RenderOnce for CommitHalf<D> {
+    fn render(self, window: &mut Window, cx: &mut gpui::App) -> impl IntoElement {
+        // The whole focus-ring policy: committable (an inset ring is given),
+        // the toolkit's outer ring is off for this half, before anything
+        // decorates the button.
+        let button = self
+            .button
+            .when(self.inset.is_some(), |b| b.no_focus_ring());
+        let half = (self.decorate)(button);
+        let handle = window
+            .use_keyed_state(self.id, cx, |_, cx| cx.focus_handle())
+            .read(cx)
+            .clone()
+            .tab_stop(false);
+        let ring = self.inset.filter(|_| handle.contains_focused(window, cx));
+        let corners = self.corners;
+        #[cfg(test)]
+        let id = self.id;
+        div()
+            .relative()
+            .flex()
+            .flex_none()
+            .h_full()
+            .track_focus(&handle)
+            .child(half)
+            .when_some(ring, move |d, colour| {
+                let overlay = div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .border(COMMIT_RING_W)
+                    .border_color(colour)
+                    .rounded_corners(corners);
+                // Read-only record of the overlay's builder styles, for the
+                // panel tests. The shadow below exists only in test builds,
+                // so the shipping overlay stays immutable.
+                #[cfg(test)]
+                let overlay = {
+                    let mut overlay = overlay;
+                    crate::ui::paint_probe::note(
+                        if id == "scm-commit-ring" {
+                            "scm-commit-ring.inset"
+                        } else {
+                            "scm-commit-menu-ring.inset"
+                        },
+                        &mut overlay,
+                    );
+                    overlay
+                };
+                d.child(overlay)
+            })
     }
 }
 
@@ -4142,26 +5472,31 @@ mod render_idle_gpui_tests {
         let dir = std::env::temp_dir().join(format!("tty59-scm-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::canonicalize(&dir).unwrap()
+        // `canonicalize` answers `\\?\C:\…` on Windows, which is not the
+        // spelling the panel keys a repository root by: the plain local one.
+        tty59_core::core::path_spelling::local_spelling_buf(std::fs::canonicalize(&dir).unwrap())
     }
 
     fn git(root: &Path, args: &[&str]) {
-        let out = std::process::Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .expect("git runs");
-        assert!(out.status.success(), "git {args:?} failed");
+        git_out(root, args);
     }
 
-    /// `git` for the answers, not the side effects: what `rev-parse` says.
+    /// `git` for the answers, not the side effects: what `rev-parse` says. A
+    /// failure says everything git said.
     fn git_out(root: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .args(args)
             .current_dir(root)
             .output()
             .expect("git runs");
-        assert!(out.status.success(), "git {args:?} failed");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed in {}: {}\nstdout: {}\nstderr: {}",
+            root.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -4678,8 +6013,13 @@ mod render_idle_gpui_tests {
         frames(&app, &mut vcx);
         let copied = vcx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
         let copied = copied.expect("Copy path wrote the clipboard");
-        assert!(
-            copied.ends_with("b.rs") && copied.contains(&root.display().to_string()),
+        // The whole path, in this platform's local spelling: the fixture root is
+        // canonicalized (a verbatim `\\?\` path on Windows) while the row's path
+        // comes from git, so compare both through the same rule.
+        let expected = root.join("b.rs");
+        assert_eq!(
+            tty59_core::core::path_spelling::local_spelling(std::path::Path::new(&copied)),
+            tty59_core::core::path_spelling::local_spelling(&expected),
             "the path of the row's file, got {copied}"
         );
         assert_eq!(open_menu(&app, &mut vcx), None, "running an item closes it");
@@ -5078,22 +6418,19 @@ mod render_idle_gpui_tests {
         render_probe::draws()
     }
 
-    /// The only test in this module that waits on `repo.root`, and so the only
-    /// one Windows cannot run: since #796 that root is keyed by one spelling
-    /// and carries a `Disk` prefix, while the pane's cwd came out of `scratch`
-    /// above — `std::fs::canonicalize`, so `\\?\C:\Users\—` and a
-    /// `VerbatimDisk` prefix — and the equality below never holds between the
-    /// two. The slashes are the red herring; `Path` compares by component, so
-    /// `C:/x` and `C:\x` are equal. Spelling `scratch`'s answer the way
-    /// `tty59_core::core::path_spelling` does should lift this, in a change
-    /// that can show it green. Its sibling keys off the pane's cwd instead,
-    /// and runs everywhere.
-    #[cfg(unix)]
+    /// The only test in this module that waits on `repo.root`. The panel keys
+    /// that root by one spelling (the plain local one, with a `Disk` prefix on
+    /// Windows), so the equality below holds only if the pane's cwd is spelled
+    /// the same way. `scratch` hands out that plain spelling (see its
+    /// `local_spelling_buf`), so the test runs on every platform. Its sibling
+    /// keys off the pane's cwd instead.
     #[gpui::test]
     fn a_settled_source_control_panel_reaches_render_idle(cx: &mut TestAppContext) {
         let _serial = serial();
         let root = scratch("settled");
         git(&root, &["init", "--quiet"]);
+        git(&root, &["config", "core.longpaths", "true"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
         std::fs::write(root.join("a.rs"), "fn main() {}\n").unwrap();
         git(&root, &["add", "a.rs"]);
         std::fs::write(root.join("b.rs"), "// untracked\n").unwrap();
@@ -5737,6 +7074,8 @@ mod render_idle_gpui_tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    mod commit_ring_tests;
 }
 
 /// Is the repository's full status (`ScmData`, what `status_of` reads) there
@@ -7017,7 +8356,7 @@ mod changes_count_gpui_tests {
 /// Changes render, and a folder that is not a repository must offer
 /// Initialize repository through its real body. Each fails on c700 because the
 /// button is absent, not because an API is.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod status_lifecycle_witness_gpui_tests {
     use super::*;
     use crate::daemon::protocol::DaemonMsg;
@@ -7054,7 +8393,12 @@ mod status_lifecycle_witness_gpui_tests {
             .prefix(prefix)
             .tempdir()
             .expect("a scratch directory");
-        let root = std::fs::canonicalize(dir.path()).expect("it resolves");
+        let canonical = std::fs::canonicalize(dir.path()).expect("it resolves");
+        // The panel keys its watcher and status cache by the root git reports,
+        // which production re-spells with `local_spelling`. On Windows
+        // `canonicalize` returns the `\\?\C:\` form, a different `Path` key from
+        // `C:\`, so the fixture must hand out the spelling the panel stores.
+        let root = tty59_core::core::path_spelling::local_spelling_buf(canonical);
         (dir, root)
     }
 
@@ -7284,6 +8628,84 @@ mod status_lifecycle_witness_gpui_tests {
         assert!(
             drawn_unprompted(&mut vcx, RETRY, 20),
             "the probe failed and the panel stayed on Loading until something else repainted"
+        );
+    }
+
+    /// The live detail pane's own idea of where it is, read without notifying
+    /// or drawing anything: an `update_in` that never calls `cx.notify()`.
+    fn pane_cwd_probe(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<PathBuf> {
+        app.update_in(vcx, |app, window, cx| {
+            let leaf = app.tabs.get(app.active)?.detail_pane(window, cx)?;
+            leaf.read(cx).effective_cwd()
+        })
+    }
+
+    /// The Changes tab is open and drawn with the pane in NO directory (frame 1
+    /// sees none), then the Cwd is delivered and this waits, on the real clock,
+    /// with no notify, no draw, no clock advance, until the pane itself reports
+    /// it. After it returns only the code under test can repaint.
+    fn late_cwd_setup(
+        cx: &mut TestAppContext,
+        root: &Path,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        crate::daemon::transport::Stream,
+    ) {
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        vcx.update(|_, cx| {
+            cx.default_global::<ScmData>()
+                .hold_watch_closed(HostId::LOCAL, root)
+        });
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Scm;
+            cx.notify();
+        });
+        // Frame 1 was drawn by the update above. It saw no directory, so the
+        // panel has asked nothing yet.
+        vcx.run_until_parked();
+        assert!(
+            pane_cwd_probe(&app, &mut vcx).is_none(),
+            "setup: the pane already had a cwd before the Cwd message"
+        );
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app.scm.root_lookups.is_empty()
+                && app.scm.roots.is_empty()),
+            "setup: the first frame already asked for a repository root"
+        );
+        DaemonMsg::Cwd(root.to_path_buf())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while pane_cwd_probe(&app, &mut vcx).as_deref() != Some(root) {
+            assert!(
+                Instant::now() < deadline,
+                "setup: the pane never reported the cwd it was sent"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (app, vcx, pane)
+    }
+
+    /// A pane's first directory can arrive after the frame that drew the
+    /// panel. The Cwd message itself has to ask for the next frame: nothing
+    /// else does until the pane's 300ms poll, and no test notify, draw, input
+    /// or clock advance stands in for it here.
+    #[gpui::test]
+    fn a_first_cwd_after_the_first_frame_repaints_by_itself(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository_with_a_broken_index();
+        let (app, mut vcx, _pane) = late_cwd_setup(cx, &root);
+        let seen = drawn_unprompted(&mut vcx, RETRY, 5);
+        let asked = app.update_in(&mut vcx, |app, _, _| {
+            (app.scm.root_lookups.len(), app.scm.roots.len())
+        });
+        assert!(
+            seen,
+            "the panel stayed on 'No working directory' although the pane knows its cwd \
+             (root_lookups, roots) = {asked:?}"
         );
     }
 
@@ -7677,7 +9099,9 @@ mod status_lifecycle_witness_gpui_tests {
             .expect("and says where the repository is");
         assert!(dir.join(".git").is_dir());
         assert_eq!(
-            std::fs::canonicalize(&root).expect("the root exists"),
+            tty59_core::core::path_spelling::local_spelling_buf(
+                std::fs::canonicalize(&root).expect("the root exists")
+            ),
             dir,
             "the repository is the folder itself, not one above it"
         );
@@ -7695,7 +9119,12 @@ mod status_lifecycle_witness_gpui_tests {
         let root = init_repo(&*host, &inner)
             .expect("an existing repository is not an error")
             .expect("it names the repository that holds the folder");
-        assert_eq!(std::fs::canonicalize(&root).expect("it exists"), outer);
+        assert_eq!(
+            tty59_core::core::path_spelling::local_spelling_buf(
+                std::fs::canonicalize(&root).expect("it exists")
+            ),
+            outer
+        );
         assert!(
             !inner.join(".git").exists(),
             "a repository was nested inside another"

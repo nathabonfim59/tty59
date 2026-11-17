@@ -428,6 +428,54 @@ fn per_platform(mac: &'static str, other: &'static str) -> &'static str {
     }
 }
 
+/// The three desktops a default can differ on. Only two defaults tell Windows
+/// from Linux — see [`new_agent_tab_default`] and [`copy_raw_default`] — so
+/// `per_platform` stays the two-way switch everything else uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Os {
+    Mac,
+    Windows,
+    Linux,
+}
+
+const CURRENT_OS: Os = if cfg!(target_os = "macos") {
+    Os::Mac
+} else if cfg!(target_os = "windows") {
+    Os::Windows
+} else {
+    Os::Linux
+};
+
+fn for_os(os: Os, mac: &'static str, windows: &'static str, linux: &'static str) -> &'static str {
+    match os {
+        Os::Mac => mac,
+        Os::Windows => windows,
+        Os::Linux => linux,
+    }
+}
+
+/// On Windows, AltGr is delivered as Ctrl+Alt with the character the layout
+/// assigns to the key, and the window prefers that character over a binding. A
+/// chord on a letter key under Ctrl+Alt is therefore not invoked on a layout
+/// whose AltGr assigns a character to that letter (Polish AltGr+C is ć,
+/// AltGr+Shift+A is Ą). Insert carries no character in the delivered event
+/// (the pinned `process_key` yields none for it), so the Windows defaults sit
+/// on it. Linux keeps the letters: for the xkb layouts checked (de, fr, pl,
+/// us-intl; see the evidence log in the PR) AltGr is a level shift, not Ctrl or
+/// Alt.
+fn new_agent_tab_default(os: Os) -> &'static str {
+    for_os(
+        os,
+        "secondary-shift-a",
+        "ctrl-alt-shift-insert",
+        "ctrl-alt-shift-a",
+    )
+}
+
+fn copy_raw_default(os: Os) -> &'static str {
+    for_os(os, "cmd-alt-c", "ctrl-alt-insert", "ctrl-alt-c")
+}
+
 pub(crate) fn default_bindings() -> Vec<(&'static str, &'static str)> {
     let mut bindings = shipped_bindings();
     // One slot per agent, unbound: the palette's `Agent: …` rows are what these
@@ -484,10 +532,17 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ForkAgentSessionUp", ""),
         ("CopyAgentSessionId", ""),
         // ⌘⇧A for "agent" on macOS, where nothing else in the table or the
-        // terminal holds it. Off macOS Ctrl+Shift+A is select-all in every
-        // Linux terminal and in this prompt editor's Ctrl+A family, so it ships
-        // unbound there rather than on a chord nobody would guess.
-        ("NewAgentTab", per_platform("secondary-shift-a", "")),
+        // terminal holds it. Off macOS Ctrl+Shift+A is the toolkit text
+        // input's select-to-start-of-line chord, so the plain Ctrl+Shift chord
+        // stays out of reach: Linux takes Alt as well (Ctrl+Alt+Shift+A), and
+        // Windows, where AltGr+Shift+A is a printable Ą on a Polish layout,
+        // moves to Ctrl+Alt+Shift+Insert (see `new_agent_tab_default`). Neither
+        // carries a C0 byte, and the conformance gate in this file finds no
+        // other binding in the keymap tty59 installs on either chord. That is
+        // not a survey of what a desktop environment or another program may
+        // claim. They are the least guessable chords in the table, which is why
+        // the palette row and the Keybindings page show the effective one.
+        ("NewAgentTab", new_agent_tab_default(CURRENT_OS)),
         // U for "up next": the agent that has waited on you longest. Free in
         // the table on both sides, and a letter under Ctrl+Shift off macOS,
         // where window actions live. GNOME's IBus claims Ctrl+Shift+U for
@@ -691,7 +746,12 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
             per_platform("secondary-i", "secondary-shift-i"),
         ),
         ("CopyText", per_platform("", "ctrl-shift-c")),
-        ("CopyRaw", "cmd-alt-c"),
+        // Copy the rows as shown, without the join `copy_join_wrapped` does.
+        // ⌘⌥C on macOS and Ctrl+Alt+C on Linux; it was Win+Alt+C off macOS.
+        // Windows takes Ctrl+Alt+Insert, because Ctrl+Alt+C is AltGr+C there (see
+        // `copy_raw_default`). With nothing selected the listener propagates,
+        // so the key reaches the shell as it would unbound.
+        ("CopyRaw", copy_raw_default(CURRENT_OS)),
         ("PasteText", paste_text_default()),
         ("AlternatePaste", alternate_paste_default()),
         ("OpenSettings", "secondary-,"),
@@ -1799,6 +1859,7 @@ fn key_glyph(key: &str) -> String {
         "space" => "Space".into(),
         "escape" | "esc" => "⎋".into(),
         "backspace" => "⌫".into(),
+        "insert" => "Insert".into(),
         "up" => "↑".into(),
         "down" => "↓".into(),
         "left" => "←".into(),
@@ -2912,16 +2973,21 @@ mod tests {
             .find(|(action, _)| action == "NewAgentTab")
             .map(|(_, key)| key.clone())
             .expect("NewAgentTab has to be listed or it cannot be bound");
-        if cfg!(target_os = "macos") {
-            assert_eq!(default, "secondary-shift-a");
-            assert_eq!(
-                dispatched(&effective, &default, "Terminal"),
-                vec![NewAgentTab::name_for_type()],
-                "{default} must reach NewAgentTab, and nothing else may answer it"
-            );
+        // Typed out rather than read back from the selector, so restoring the
+        // old default (unbound off macOS) fails here.
+        let expected = if cfg!(target_os = "macos") {
+            "secondary-shift-a"
+        } else if cfg!(target_os = "windows") {
+            "ctrl-alt-shift-insert"
         } else {
-            assert_eq!(default, "", "Ctrl+Shift+A is select-all off macOS");
-        }
+            "ctrl-alt-shift-a"
+        };
+        assert_eq!(default, expected);
+        assert_eq!(
+            dispatched(&effective, &default, "Terminal"),
+            vec![NewAgentTab::name_for_type()],
+            "{default} must reach NewAgentTab, and nothing else may answer it"
+        );
 
         // Each agent's own launch is a slot of its own, and a key bound to it
         // dispatches that agent.
@@ -2943,6 +3009,155 @@ mod tests {
             agent: tty59_core::core::cli_agent::CLIAgent::Codex,
         }));
         assert_eq!(action_entry(name).0, CommandGroup::Agents);
+    }
+
+    /// The effective table with one action's chord replaced.
+    fn with_chord(action: &str, chord: &str) -> Vec<(String, String)> {
+        default_bindings()
+            .into_iter()
+            .map(|(a, k)| {
+                let key = if a == action { chord } else { k };
+                (a.to_string(), key.to_string())
+            })
+            .collect()
+    }
+
+    fn shipped(action: &str) -> String {
+        default_bindings()
+            .into_iter()
+            .find(|(a, _)| *a == action)
+            .map(|(_, k)| k.to_string())
+            .unwrap_or_else(|| panic!("{action} is not in the default table"))
+    }
+
+    #[test]
+    fn copy_raw_ships_a_terminal_scoped_chord_and_follows_a_rebind() {
+        // Typed out, so restoring the old default fails here.
+        let expected = if cfg!(target_os = "macos") {
+            "cmd-alt-c"
+        } else if cfg!(target_os = "windows") {
+            "ctrl-alt-insert"
+        } else {
+            "ctrl-alt-c"
+        };
+        let default = shipped("CopyRaw");
+        assert_eq!(default, expected);
+
+        let table = with_chord("CopyRaw", &default);
+        assert_eq!(
+            dispatched(&table, &default, "Terminal"),
+            vec![CopyRaw::name_for_type()],
+            "the chord reaches Copy Raw in a terminal, and nothing else answers it"
+        );
+        // The negative: outside a terminal the same chord is not Copy Raw. The
+        // positive just above is what proves this lookup is live.
+        assert!(dispatched(&table, &default, "Workspace").is_empty());
+
+        let moved = with_chord("CopyRaw", "ctrl-alt-y");
+        assert_eq!(
+            dispatched(&moved, "ctrl-alt-y", "Terminal"),
+            vec![CopyRaw::name_for_type()]
+        );
+        assert!(dispatched(&moved, &default, "Terminal").is_empty());
+
+        let none = with_chord("CopyRaw", "");
+        assert!(dispatched(&none, &default, "Terminal").is_empty());
+    }
+
+    #[test]
+    fn the_hints_spell_the_shipped_chords() {
+        // What the palette row, the menus and the Keybindings page draw comes
+        // from the effective chord through `key_tokens`.
+        let tokens = |action: &str| key_tokens(&shipped(action));
+        if cfg!(target_os = "macos") {
+            assert_eq!(tokens("NewAgentTab"), ["⇧", "⌘", "A"]);
+            assert_eq!(tokens("CopyRaw"), ["⌥", "⌘", "C"]);
+        } else if cfg!(target_os = "windows") {
+            assert_eq!(tokens("NewAgentTab"), ["Ctrl", "Alt", "Shift", "Insert"]);
+            assert_eq!(tokens("CopyRaw"), ["Ctrl", "Alt", "Insert"]);
+        } else {
+            assert_eq!(tokens("NewAgentTab"), ["Ctrl", "Alt", "Shift", "A"]);
+            assert_eq!(tokens("CopyRaw"), ["Ctrl", "Alt", "C"]);
+        }
+    }
+
+    /// The selection logic for all three desktops, typed out. Only the current
+    /// one is a native run; the other two are the selector evaluated for them,
+    /// which is what a Windows or macOS build would ship.
+    #[test]
+    fn defaults_per_os_are_pinned() {
+        for (os, new_agent_tab, copy_raw) in [
+            (Os::Mac, "secondary-shift-a", "cmd-alt-c"),
+            (Os::Windows, "ctrl-alt-shift-insert", "ctrl-alt-insert"),
+            (Os::Linux, "ctrl-alt-shift-a", "ctrl-alt-c"),
+        ] {
+            assert_eq!(
+                new_agent_tab_default(os),
+                new_agent_tab,
+                "{os:?} NewAgentTab"
+            );
+            assert_eq!(copy_raw_default(os), copy_raw, "{os:?} CopyRaw");
+        }
+        assert_eq!(
+            CURRENT_OS,
+            if cfg!(target_os = "macos") {
+                Os::Mac
+            } else if cfg!(target_os = "windows") {
+                Os::Windows
+            } else {
+                Os::Linux
+            }
+        );
+        // Each platform's shipped chord is the selector's answer for it.
+        assert_eq!(shipped("NewAgentTab"), new_agent_tab_default(CURRENT_OS));
+        assert_eq!(shipped("CopyRaw"), copy_raw_default(CURRENT_OS));
+    }
+
+    /// SIMULATED Windows defaults on any host: the selector's answer for
+    /// `Os::Windows` goes through the same binding builder and keymap lookup a
+    /// Windows build uses (only these two defaults, not a whole Windows table). They reach their own action, in
+    /// their own context, and the printable-letter chords no longer do.
+    #[test]
+    fn simulated_windows_insert_defaults_dispatch_to_their_actions() {
+        let new_agent_tab = new_agent_tab_default(Os::Windows);
+        let copy_raw = copy_raw_default(Os::Windows);
+        let table: Vec<(String, String)> = default_bindings()
+            .into_iter()
+            .map(|(a, k)| {
+                let key = match a {
+                    "NewAgentTab" => new_agent_tab,
+                    "CopyRaw" => copy_raw,
+                    _ => k,
+                };
+                (a.to_string(), key.to_string())
+            })
+            .collect();
+        assert_eq!(
+            dispatched(&table, new_agent_tab, "Terminal"),
+            vec![NewAgentTab::name_for_type()]
+        );
+        assert_eq!(
+            dispatched(&table, copy_raw, "Terminal"),
+            vec![CopyRaw::name_for_type()]
+        );
+        assert!(
+            dispatched(&table, copy_raw, "Workspace").is_empty(),
+            "Copy Raw is Terminal-only"
+        );
+        for letter_chord in ["ctrl-alt-shift-a", "ctrl-alt-c"] {
+            assert!(
+                dispatched(&table, letter_chord, "Terminal").is_empty(),
+                "{letter_chord} is a printable AltGr chord and is not a Windows default"
+            );
+        }
+        // And what the hint draws for each is the key's own name.
+        if cfg!(not(target_os = "macos")) {
+            assert_eq!(
+                key_tokens(new_agent_tab),
+                ["Ctrl", "Alt", "Shift", "Insert"]
+            );
+            assert_eq!(key_tokens(copy_raw), ["Ctrl", "Alt", "Insert"]);
+        }
     }
 }
 
@@ -3039,7 +3254,7 @@ mod gpui_tests {
     /// An app whose `config.json` reads `json`, keymap and all. Parsed from
     /// text rather than built in Rust, because the file is the surface #868 is
     /// about: what a hand-written line means is the thing under test.
-    fn running_on_json(cx: &mut gpui::App, json: &str) {
+    pub(super) fn running_on_json(cx: &mut gpui::App, json: &str) {
         gpui_component::init(cx);
         cx.set_global(Config(
             serde_json::from_str(json).expect("the config parses"),
@@ -3678,5 +3893,1029 @@ mod gpui_tests {
             });
             app.update_in(&mut vcx, |app, window, cx| app.close_switcher(window, cx));
         }
+    }
+
+    // ---- New Agent Tab through the real keymap and the real handler ------
+    //
+    // The config offers no coding agent (every launch override points at a
+    // program that does not exist), so the real `new_agent_tab` ends in its
+    // one visible effect: the "no agent found" notice. Two things are read per
+    // press, and neither is a probe listener standing in for the handler:
+    //
+    // * the invocation count: the window reports a keystroke to its observers
+    //   with the resolved action only when that action's handler stopped
+    //   propagation, so `runs` is how many presses resolved to New Agent Tab
+    //   and were consumed by the app's real handler;
+    // * the effect: whether the notice list grew. Notices can replace one
+    //   another by id, so the effect shows the handler's work happened at all,
+    //   and does not by itself count runs.
+
+    /// What the config ships for New Agent Tab, typed out here on purpose.
+    fn shipped_new_agent_tab_chord() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "secondary-shift-a"
+        } else if cfg!(target_os = "windows") {
+            "ctrl-alt-shift-insert"
+        } else {
+            "ctrl-alt-shift-a"
+        }
+    }
+
+    fn agentless_app(
+        cx: &mut TestAppContext,
+        keybindings: serde_json::Value,
+    ) -> (
+        gpui::Entity<crate::ui::app::Tty59App>,
+        gpui::VisualTestContext,
+        Vec<crate::daemon::transport::Stream>,
+        std::rc::Rc<std::cell::Cell<usize>>,
+    ) {
+        use gpui::Action as _;
+        let (app, mut vcx, streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, move |config| {
+                config.keybindings =
+                    serde_json::from_value(keybindings).expect("the keybindings load");
+                for agent in tty59_core::core::cli_agent::CLIAgent::ALL {
+                    config.agent_launch.insert(
+                        agent.slug().to_string(),
+                        "/nonexistent/tty59-no-such-agent".to_string(),
+                    );
+                }
+            });
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let runs = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = runs.clone();
+        vcx.update(|_, cx| {
+            cx.observe_keystrokes(move |event, _, _| {
+                if event
+                    .action
+                    .as_ref()
+                    .is_some_and(|a| a.name() == NewAgentTab::name_for_type())
+                {
+                    seen.set(seen.get() + 1);
+                }
+            })
+            .detach();
+        });
+        (app, vcx, streams, runs)
+    }
+
+    fn notices(vcx: &mut gpui::VisualTestContext) -> usize {
+        use gpui_component::WindowExt as _;
+        vcx.update(|window, cx| window.notifications(cx).len())
+    }
+
+    #[gpui::test]
+    fn new_agent_tab_default_chord_resolves_once_and_shows_its_effect(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams, runs) = agentless_app(cx, serde_json::json!({}));
+        let before = notices(&mut vcx);
+        vcx.simulate_keystrokes(shipped_new_agent_tab_chord());
+        assert_eq!(
+            runs.get(),
+            1,
+            "{} resolves to New Agent Tab once and its handler consumes the press",
+            shipped_new_agent_tab_chord()
+        );
+        assert_eq!(
+            notices(&mut vcx) - before,
+            1,
+            "{} leaves the launcher's notice",
+            shipped_new_agent_tab_chord()
+        );
+    }
+
+    #[gpui::test]
+    fn new_agent_tab_rebound_answers_only_the_new_chord(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams, runs) =
+            agentless_app(cx, serde_json::json!({ "NewAgentTab": ["ctrl-alt-n"] }));
+        let before = notices(&mut vcx);
+        vcx.simulate_keystrokes(shipped_new_agent_tab_chord());
+        assert_eq!(runs.get(), 0, "the shipped chord is released by the rebind");
+        assert_eq!(notices(&mut vcx) - before, 0);
+        vcx.simulate_keystrokes("ctrl-alt-n");
+        assert_eq!(
+            runs.get(),
+            1,
+            "the new chord, in the same fixture, resolves to New Agent Tab once"
+        );
+        assert_eq!(notices(&mut vcx) - before, 1);
+    }
+
+    #[gpui::test]
+    fn new_agent_tab_unbound_does_nothing_and_the_fixture_is_live(cx: &mut TestAppContext) {
+        let (_app, mut vcx, _streams, runs) =
+            agentless_app(cx, serde_json::json!({ "NewAgentTab": "" }));
+        let before = notices(&mut vcx);
+        vcx.simulate_keystrokes(shipped_new_agent_tab_chord());
+        assert_eq!(runs.get(), 0, "unbound means no resolved action");
+        assert_eq!(notices(&mut vcx) - before, 0, "unbound means no launcher");
+        // Positive control for the effect channel: dispatching the action
+        // directly reaches the same real handler and the notice appears. (A
+        // direct dispatch is not a key press, so `runs` does not move.)
+        vcx.dispatch_action(NewAgentTab);
+        assert_eq!(notices(&mut vcx) - before, 1);
+        assert_eq!(runs.get(), 0);
+    }
+
+    /// SIMULATED Windows, real window dispatch, a focused and painted terminal
+    /// pane. The table is the Linux toolkit/app table with the Windows default
+    /// listed for the action as an override: it is not claimed equivalent to a
+    /// native Windows table, whose other cfg-dependent bindings are not
+    /// audited here. A Polish AltGr+Shift+A arrives as Ctrl+Alt+Shift, key `a`,
+    /// `key_char` `Ą`, `prefer_character_input` (see `windows_altgr_event` in
+    /// the terminal view's tests for the shape and its source). That printable
+    /// shape does not invoke New Agent Tab; the Windows default,
+    /// Ctrl+Alt+Shift+Insert, is delivered with no character and invokes it
+    /// once. What the pane does with the AltGr press itself is not asserted.
+    #[cfg(not(target_os = "macos"))]
+    #[gpui::test]
+    fn simulated_windows_polish_altgr_shift_a_does_not_invoke_new_agent_tab_but_insert_does(
+        cx: &mut TestAppContext,
+    ) {
+        let chord = new_agent_tab_default(Os::Windows);
+        let (_app, mut vcx, _streams, runs) =
+            agentless_app(cx, serde_json::json!({ "NewAgentTab": [chord] }));
+        let before = notices(&mut vcx);
+        vcx.simulate_event(altgr_event(true, "a", Some("Ą"), true));
+        assert_eq!(
+            runs.get(),
+            0,
+            "the printable Polish AltGr+Shift+A shape does not invoke New Agent Tab"
+        );
+        assert_eq!(notices(&mut vcx) - before, 0);
+        vcx.simulate_event(altgr_event(true, "insert", None, false));
+        assert_eq!(
+            runs.get(),
+            1,
+            "Ctrl+Alt+Shift+Insert resolves to New Agent Tab once and its handler consumes the press"
+        );
+        assert_eq!(
+            notices(&mut vcx) - before,
+            1,
+            "and leaves the launcher's notice"
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn altgr_event(
+        shift: bool,
+        key: &str,
+        typed: Option<&str>,
+        prefer_character_input: bool,
+    ) -> gpui::KeyDownEvent {
+        gpui::KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Modifiers {
+                    control: true,
+                    alt: true,
+                    shift,
+                    platform: false,
+                    function: false,
+                },
+                key: key.to_string(),
+                key_char: typed.map(str::to_string),
+            },
+            is_held: false,
+            prefer_character_input,
+        }
+    }
+
+    // ---- Shift+F10 in a focused terminal reaches the shell -----------------
+    //
+    // The switcher takes Shift+F10 for itself only while it is open. With a
+    // terminal focused the key is the shell's: it must come out of the pane as
+    // the bytes terminfo gives it, through the real keymap and window dispatch,
+    // once, with no switcher and no menu opened on the way. This is the
+    // dispatch claim; the encoder's own table and a closed switcher opening no
+    // menu are covered elsewhere and prove nothing about what reached the PTY.
+
+    /// The first thing the pane sent its daemon, if it sent anything within a
+    /// quarter of a second.
+    fn pane_input(daemon: &mut crate::daemon::transport::Stream) -> Option<Vec<u8>> {
+        use crate::daemon::protocol::ClientMsg;
+        use std::io::ErrorKind;
+
+        daemon
+            .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+            .expect("the pane socket takes a read timeout");
+        loop {
+            match ClientMsg::read(daemon) {
+                Ok(ClientMsg::Input(bytes)) => return Some(bytes),
+                Ok(_) => continue,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    return None;
+                }
+                Err(e) => panic!("pane socket failed: {e}"),
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn shift_f10_in_a_focused_terminal_reaches_the_pty_once(cx: &mut TestAppContext) {
+        let (app, mut vcx, mut streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |_| {});
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let daemon = &mut streams[0];
+        let popup_menu = |vcx: &mut gpui::VisualTestContext| {
+            vcx.update(|window, _| {
+                window
+                    .context_stack()
+                    .iter()
+                    .any(|context| context.contains("PopupMenu"))
+            })
+        };
+        assert!(
+            app.update(&mut vcx, |app, _| app.switcher.is_none()),
+            "setup: no switcher is open"
+        );
+        assert!(!popup_menu(&mut vcx), "setup: no menu is open");
+
+        // Control: a typed key reaches this pane's daemon, so the reads below
+        // can see what the pane sends.
+        vcx.simulate_keystrokes("q");
+        vcx.run_until_parked();
+        assert_eq!(pane_input(daemon).as_deref(), Some(&b"q"[..]), "control");
+        assert_eq!(pane_input(daemon), None, "control: one write, then quiet");
+
+        // Plain F10 is kf10, Shift+F10 is kf22 with xterm's modifier 2: two
+        // different sequences, so a handler that ate the Shift or swapped one
+        // for the other shows.
+        for (keys, sequence) in [("f10", &b"\x1b[21~"[..]), ("shift-f10", &b"\x1b[21;2~"[..])] {
+            vcx.simulate_keystrokes(keys);
+            vcx.run_until_parked();
+            assert_eq!(
+                pane_input(daemon).as_deref(),
+                Some(sequence),
+                "{keys} reaches the PTY as {sequence:?}"
+            );
+            assert_eq!(
+                pane_input(daemon),
+                None,
+                "{keys} sent exactly one write, nothing after it"
+            );
+        }
+
+        assert!(
+            app.update(&mut vcx, |app, _| app.switcher.is_none()),
+            "Shift+F10 opened no switcher"
+        );
+        assert!(!popup_menu(&mut vcx), "Shift+F10 opened no menu");
+    }
+}
+
+/// The conformance gate over the keymap gpui really holds: what the toolkit
+/// installed, what `action_bindings` laid down, and the fixed table, in the
+/// order `rebuild_keymap` adds them.
+///
+/// A binding is reduced to (origin, canonical chord, context predicate,
+/// action). Two bindings that share a chord *and* a context and name different
+/// actions are a clash — which one fires is decided only by insertion order —
+/// whichever table each came from, unless that exact pair is listed in
+/// [`intentional_same_context`]: earlier action, later action, chord and
+/// context together, with the reason. The same chord under different contexts
+/// is not a clash: gpui resolves it by depth, which is how an `Input` or
+/// `CodeEditor` binding outranks a window one. The same action on a chord
+/// twice (a shift-fold alias) is one binding, not a clash.
+///
+/// Consumers (panel actions, the switcher menu chord) report an action, chord
+/// and context; [`assert_installed_for`] checks that the live table holds that
+/// binding (membership, not a count) and [`owners_of`] lists what else shares
+/// the chord. How many times a key press runs its action is a dispatch
+/// question, answered by pressing the key, not by this table.
+#[cfg(test)]
+mod conformance {
+    use super::*;
+    use gpui::Action as _;
+    use gpui::TestAppContext;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Origin {
+        Toolkit,
+        Actions,
+        Fixed,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(super) struct Installed {
+        pub(super) origin: Origin,
+        pub(super) chord: String,
+        pub(super) context: String,
+        pub(super) action: String,
+    }
+
+    /// A same-chord, same-context shadowing that is on purpose, named by the
+    /// whole pair — the earlier action, the later action, the chord and the
+    /// context — and why. Nothing else may hide behind it.
+    pub(super) struct Intentional {
+        pub(super) earlier: String,
+        pub(super) later: String,
+        pub(super) chord: &'static str,
+        pub(super) context: &'static str,
+        pub(super) reason: &'static str,
+    }
+
+    pub(super) fn intentional_same_context() -> Vec<Intentional> {
+        vec![Intentional {
+            earlier: InsertNewline::name_for_type().to_string(),
+            later: InsertNewlineFallback::name_for_type().to_string(),
+            chord: "shift-enter",
+            context: "Terminal",
+            reason: "the fallback runs when InsertNewline hands the key back, so a pane \
+                     that cannot take a newline still gets the Enter",
+        }]
+    }
+
+    /// `spec` as the live keymap would spell it: each chord through the same
+    /// parse and fold the installed bindings went through.
+    pub(super) fn canonical(spec: &str) -> String {
+        spec.split_whitespace()
+            .map(|chord| {
+                let written = Keystroke::parse(chord)
+                    .ok()
+                    .and_then(|ks| spec_from_keystroke(&ks))
+                    .unwrap_or_else(|| chord.to_string());
+                folded_spec(&written).unwrap_or(written)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// The live table, tagged by origin. Fails if the three tables no longer
+    /// add up to what gpui holds, which is what makes the tags honest.
+    pub(super) fn installed(cx: &gpui::App) -> Vec<Installed> {
+        let toolkit = cx.global::<BaseBindings>().0.len();
+        let actions = action_bindings(&effective_bindings(cx)).len();
+        let fixed = fixed_bindings().len();
+        let keymap = cx.key_bindings();
+        let keymap = keymap.borrow();
+        let all: Vec<&KeyBinding> = keymap.bindings().collect();
+        assert_eq!(
+            all.len(),
+            toolkit + actions + fixed,
+            "the live keymap is the toolkit's bindings, then the action table, then the fixed table"
+        );
+        all.iter()
+            .enumerate()
+            .map(|(i, binding)| Installed {
+                origin: if i < toolkit {
+                    Origin::Toolkit
+                } else if i < toolkit + actions {
+                    Origin::Actions
+                } else {
+                    Origin::Fixed
+                },
+                chord: binding
+                    .keystrokes()
+                    .iter()
+                    .map(|ks| {
+                        let ks = ks.inner();
+                        let written = spec_from_keystroke(ks).unwrap_or_else(|| ks.unparse());
+                        folded_spec(&written).unwrap_or(written)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                context: binding
+                    .predicate()
+                    .map(|p| p.to_string())
+                    .unwrap_or_default(),
+                action: binding.action().name().to_string(),
+            })
+            .collect()
+    }
+
+    /// Every unlisted same-chord, same-context pair of different actions,
+    /// whichever table each side came from.
+    pub(super) fn same_context_conflicts(
+        table: &[Installed],
+        allowed: &[Intentional],
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        for (j, later) in table.iter().enumerate() {
+            for earlier in &table[..j] {
+                if earlier.chord != later.chord
+                    || earlier.context != later.context
+                    || earlier.action == later.action
+                {
+                    continue;
+                }
+                if allowed.iter().any(|a| {
+                    a.earlier == earlier.action
+                        && a.later == later.action
+                        && a.chord == later.chord
+                        && a.context == later.context
+                }) {
+                    continue;
+                }
+                out.push(format!(
+                    "{} ({:?}) shadows {} ({:?}) on {} in the same context {:?}; \
+                     if that is deliberate, list the pair in \
+                     intentional_same_context() with the reason",
+                    later.action,
+                    later.origin,
+                    earlier.action,
+                    earlier.origin,
+                    later.chord,
+                    later.context
+                ));
+            }
+        }
+        out
+    }
+
+    /// The distinct (action, context) pairs that answer `chord` anywhere in
+    /// the table, whatever the context.
+    pub(super) fn owners_of(table: &[Installed], chord: &str) -> Vec<(String, String)> {
+        let chord = canonical(chord);
+        let mut owners: Vec<(String, String)> = Vec::new();
+        for b in table.iter().filter(|b| b.chord == chord) {
+            let owner = (b.action.clone(), b.context.clone());
+            if !owners.contains(&owner) {
+                owners.push(owner);
+            }
+        }
+        owners
+    }
+
+    /// The consumer contract, membership only: the live table holds `action`
+    /// on `chord` in `context`. It says nothing about how many bindings or
+    /// presses there are.
+    pub(super) fn assert_installed_for(
+        table: &[Installed],
+        action: &str,
+        chord: &str,
+        context: &str,
+    ) {
+        let owners = owners_of(table, chord);
+        assert!(
+            owners.iter().any(|(a, c)| a == action && c == context),
+            "{action} is not installed on {chord} in context {context:?}; owners: {owners:?}"
+        );
+    }
+
+    fn row(origin: Origin, chord: &str, context: &str, action: &str) -> Installed {
+        Installed {
+            origin,
+            chord: chord.to_string(),
+            context: context.to_string(),
+            action: action.to_string(),
+        }
+    }
+
+    #[test]
+    fn the_checker_flags_a_same_context_clash_and_passes_a_contextual_overlap() {
+        // Every exception carries its reason and names both of its actions.
+        for exception in intentional_same_context() {
+            assert!(
+                !exception.reason.is_empty(),
+                "{} over {} on {} in {:?} is listed without a reason",
+                exception.later,
+                exception.earlier,
+                exception.chord,
+                exception.context
+            );
+        }
+
+        // Contextual overlap: one chord, two contexts, two actions. Legitimate.
+        let mut table = vec![
+            row(Origin::Actions, "ctrl-alt-q", "", "A"),
+            row(Origin::Fixed, "ctrl-alt-q", "Input", "B"),
+        ];
+        assert!(same_context_conflicts(&table, &[]).is_empty());
+
+        // The same action twice (a folded alias) is one binding, not two.
+        table.push(row(Origin::Actions, "ctrl-alt-q", "", "A"));
+        assert!(same_context_conflicts(&table, &[]).is_empty());
+
+        // A third action on the first one's chord *and* context is the clash.
+        table.push(row(Origin::Actions, "ctrl-alt-q", "", "C"));
+        let found = same_context_conflicts(&table, &[]);
+        assert_eq!(found.len(), 2, "C shadows both A rows: {found:?}");
+        assert!(
+            found.iter().all(
+                |m| m.contains("C (Actions) shadows A (Actions)") && m.contains("same context")
+            ),
+            "{found:?}"
+        );
+
+        // An exception is the whole pair. Naming the later action alone, or
+        // the later one with another earlier one, lets nothing through.
+        let pair = |earlier: &str, later: &str, context: &'static str| {
+            vec![Intentional {
+                earlier: earlier.to_string(),
+                later: later.to_string(),
+                chord: "ctrl-alt-q",
+                context,
+                reason: "test",
+            }]
+        };
+        assert!(same_context_conflicts(&table, &pair("A", "C", "")).is_empty());
+        assert_eq!(
+            same_context_conflicts(&table, &pair("Z", "C", "")).len(),
+            2,
+            "another earlier action does not match"
+        );
+        assert_eq!(
+            same_context_conflicts(&table, &pair("A", "C", "Input")).len(),
+            2,
+            "another context does not match"
+        );
+        // The exception for A under C does not hide D under C either.
+        table.push(row(Origin::Fixed, "ctrl-alt-q", "", "D"));
+        let found = same_context_conflicts(&table, &pair("A", "C", ""));
+        assert!(
+            found.iter().all(|m| m.contains("D (Fixed) shadows")),
+            "only the D rows remain: {found:?}"
+        );
+        assert!(!found.is_empty());
+
+        // Two toolkit rows are judged like any others.
+        let toolkit = vec![
+            row(Origin::Toolkit, "enter", "List", "X"),
+            row(Origin::Toolkit, "enter", "List", "Y"),
+        ];
+        assert_eq!(same_context_conflicts(&toolkit, &[]).len(), 1);
+    }
+
+    #[test]
+    fn canonical_chords_meet_across_spellings() {
+        assert_eq!(
+            canonical("secondary-shift-]"),
+            canonical("secondary-}"),
+            "the two spellings of one keystroke are one chord"
+        );
+        // The platform's secondary modifier is spelled `secondary-`: Ctrl off
+        // macOS, Cmd on it. A real Ctrl on macOS is a different chord.
+        assert_eq!(canonical("secondary-b c"), "secondary-b c");
+        if cfg!(target_os = "macos") {
+            assert_eq!(canonical("ctrl-b c"), "ctrl-b c");
+            assert_ne!(canonical("ctrl-b c"), canonical("secondary-b c"));
+        } else {
+            assert_eq!(canonical("ctrl-b c"), "secondary-b c");
+        }
+        assert_ne!(canonical("ctrl-alt-c"), canonical("ctrl-alt-shift-c"));
+    }
+
+    /// The chord the two override fixtures give `ToggleSwitcher` while the
+    /// tab-group shortcuts are on. It has to fold to a chord no tab-group
+    /// default owns on ANY platform: `secondary-shift-9` folds to
+    /// `secondary-(`, which is macOS's `ActivateTabGroup9`.
+    const SWITCHER_FIXTURE_CHORD: &str = "secondary-alt-shift-9";
+
+    /// The tab-group chords of every platform, spelled out here and not read
+    /// from `shipped_bindings`, which answers for the host only. macOS takes
+    /// `secondary-shift-N`, every other platform `alt-shift-N`.
+    fn tab_group_chords_on_every_platform() -> Vec<(String, String)> {
+        (1..=9)
+            .flat_map(|n| {
+                [
+                    (
+                        format!("ActivateTabGroup{n} on macOS"),
+                        format!("secondary-shift-{n}"),
+                    ),
+                    (
+                        format!("ActivateTabGroup{n} off macOS"),
+                        format!("alt-shift-{n}"),
+                    ),
+                ]
+            })
+            .collect()
+    }
+
+    /// Every tab-group default, on any platform, that `chord` meets once both
+    /// are folded the way the live keymap folds them.
+    fn tab_group_chords_meeting(chord: &str) -> Vec<String> {
+        tab_group_chords_on_every_platform()
+            .into_iter()
+            .filter(|(_, group)| same_chord(chord, group) || canonical(chord) == canonical(group))
+            .map(|(what, group)| format!("{what} ({group})"))
+            .collect()
+    }
+
+    /// Host-independent: the fixture chord is judged against the macOS and the
+    /// Windows/Linux tab-group chords on whatever machine this runs, so a
+    /// Linux run sees the clash the macOS keymap would hold.
+    #[test]
+    fn the_switcher_fixture_chord_meets_no_tab_group_chord_on_any_platform() {
+        let met = tab_group_chords_meeting(SWITCHER_FIXTURE_CHORD);
+        assert!(
+            met.is_empty(),
+            "{SWITCHER_FIXTURE_CHORD} (canonical {}) meets {met:?}: with the group shortcuts \
+             on, the same-context clash gate fails on that platform",
+            canonical(SWITCHER_FIXTURE_CHORD)
+        );
+    }
+
+    /// Positive controls for the one above and for the gate it protects: the
+    /// read finds the collision a macOS table would hold, by spelling and by
+    /// fold, and the clash detector reports that very pair.
+    #[test]
+    fn the_tab_group_control_and_the_clash_detector_see_the_macos_collision() {
+        assert_eq!(
+            tab_group_chords_meeting("secondary-shift-9"),
+            vec!["ActivateTabGroup9 on macOS (secondary-shift-9)".to_string()],
+            "the control finds macOS's ActivateTabGroup9 on its own spelling"
+        );
+        assert_eq!(
+            tab_group_chords_meeting("secondary-("),
+            vec!["ActivateTabGroup9 on macOS (secondary-shift-9)".to_string()],
+            "and on the folded spelling the table holds"
+        );
+        assert!(
+            tab_group_chords_meeting("secondary-alt-shift-9").is_empty(),
+            "a chord on another modifier set meets nothing"
+        );
+
+        let folded = canonical("secondary-shift-9");
+        assert_eq!(
+            folded,
+            canonical("secondary-("),
+            "the two spellings fold to one"
+        );
+        let table = vec![
+            row(
+                Origin::Actions,
+                &folded,
+                "",
+                ActivateTabGroup9::name_for_type(),
+            ),
+            row(
+                Origin::Actions,
+                &folded,
+                "",
+                ToggleSwitcher::name_for_type(),
+            ),
+        ];
+        let found = same_context_conflicts(&table, &intentional_same_context());
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains(ActivateTabGroup9::name_for_type())
+                && found[0].contains(ToggleSwitcher::name_for_type())
+                && found[0].contains(&folded),
+            "{found:?}"
+        );
+    }
+
+    /// Runs the gate over the installed keymap for one config and returns the
+    /// table so the caller can add its own claims.
+    fn gate(cx: &gpui::App, label: &str) -> Vec<Installed> {
+        let table = installed(cx);
+        // A positive control: the table is the live one, not an empty read.
+        assert!(
+            table
+                .iter()
+                .any(|b| b.action == TogglePalette::name_for_type()),
+            "{label}: the live keymap has no TogglePalette binding; the read is empty or wrong"
+        );
+        let found = same_context_conflicts(&table, &intentional_same_context());
+        assert!(
+            found.is_empty(),
+            "{label}: {} unlisted same-context clash(es):\n{}",
+            found.len(),
+            found.join("\n")
+        );
+        table
+    }
+
+    #[gpui::test]
+    fn the_installed_keymap_has_no_unlisted_same_context_clash(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            super::gpui_tests::running_on_json(cx, "{}");
+            let table = gate(cx, "default config");
+
+            // The two defaults this gate was written for: each chord is
+            // answered by its own action in its own context and by nothing
+            // else anywhere in the table — toolkit, window or terminal.
+            let new_agent_tab = if cfg!(target_os = "macos") {
+                "secondary-shift-a"
+            } else if cfg!(target_os = "windows") {
+                "ctrl-alt-shift-insert"
+            } else {
+                "ctrl-alt-shift-a"
+            };
+            assert_eq!(
+                owners_of(&table, new_agent_tab),
+                vec![(NewAgentTab::name_for_type().to_string(), String::new())]
+            );
+            let copy_raw = if cfg!(target_os = "macos") {
+                "cmd-alt-c"
+            } else if cfg!(target_os = "windows") {
+                "ctrl-alt-insert"
+            } else {
+                "ctrl-alt-c"
+            };
+            assert_eq!(
+                owners_of(&table, copy_raw),
+                vec![(CopyRaw::name_for_type().to_string(), "Terminal".to_string())]
+            );
+            assert_installed_for(&table, NewAgentTab::name_for_type(), new_agent_tab, "");
+            assert_installed_for(&table, CopyRaw::name_for_type(), copy_raw, "Terminal");
+
+            // The tmux preset swaps whole chords for sequences.
+            cx.global_mut::<Config>().keybinding_preset = "tmux".to_string();
+            rebind(cx);
+            gate(cx, "tmux preset");
+
+            // Overrides: a rebound action, an unbound one, a chord that only
+            // exists through the shift fold, and the group shortcuts on.
+            cx.global_mut::<Config>().keybinding_preset = "default".to_string();
+            cx.global_mut::<Config>().tab_group_shortcuts = true;
+            cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
+                "NewAgentTab": ["ctrl-alt-n"],
+                "CopyRaw": "",
+                "ToggleSwitcher": [SWITCHER_FIXTURE_CHORD],
+            }))
+            .expect("the overrides load");
+            rebind(cx);
+            let table = gate(cx, "overridden config");
+            assert_installed_for(&table, NewAgentTab::name_for_type(), "ctrl-alt-n", "");
+            assert!(
+                owners_of(&table, new_agent_tab).is_empty(),
+                "a rebound NewAgentTab releases its shipped chord"
+            );
+            assert!(
+                owners_of(&table, copy_raw).is_empty(),
+                "an unbound CopyRaw releases its shipped chord"
+            );
+            assert_eq!(
+                owners_of(&table, SWITCHER_FIXTURE_CHORD),
+                vec![(ToggleSwitcher::name_for_type().to_string(), String::new())],
+                "both spellings of the folded chord are installed, for the one action"
+            );
+
+            // SIMULATED Windows defaults: the selector's Windows answer for each
+            // action is listed as an override on this Linux toolkit/app table
+            // (a list replaces the shipped chord). That checks the two Windows
+            // chords against this table; it does not claim the result equals a
+            // native Windows table, whose other cfg-dependent bindings are not
+            // audited. The chords are typed out in the assertions, so a
+            // selector that drifts back to a letter fails.
+            cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
+                "NewAgentTab": [new_agent_tab_default(Os::Windows)],
+                "CopyRaw": [copy_raw_default(Os::Windows)],
+            }))
+            .expect("the Windows defaults load");
+            rebind(cx);
+            let table = gate(cx, "simulated Windows defaults");
+            assert_eq!(
+                owners_of(&table, "ctrl-alt-shift-insert"),
+                vec![(NewAgentTab::name_for_type().to_string(), String::new())]
+            );
+            assert_eq!(
+                owners_of(&table, "ctrl-alt-insert"),
+                vec![(CopyRaw::name_for_type().to_string(), "Terminal".to_string())]
+            );
+            assert_installed_for(
+                &table,
+                NewAgentTab::name_for_type(),
+                "ctrl-alt-shift-insert",
+                "",
+            );
+            assert_installed_for(
+                &table,
+                CopyRaw::name_for_type(),
+                "ctrl-alt-insert",
+                "Terminal",
+            );
+        });
+    }
+
+    /// A user who points two actions at one chord gets what they asked for —
+    /// that is product behaviour, and this change leaves it alone. The gate
+    /// must see it, so it is a detection case here and not a clean config.
+    #[gpui::test]
+    fn two_actions_a_user_puts_on_one_chord_are_detected(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // `ctrl-tab` is NextTab's default; NewTab is pointed at it too.
+            super::gpui_tests::running_on_json(cx, r#"{"keybindings": {"NewTab": "ctrl-tab"}}"#);
+            let table = installed(cx);
+            // The table spells chords canonically (`secondary-tab` for Ctrl+Tab
+            // off macOS), so the expectation goes through the same spelling.
+            let chord = canonical("ctrl-tab");
+            assert!(
+                table
+                    .iter()
+                    .any(|b| b.action == NewTab::name_for_type() && b.chord == chord),
+                "the fixture put NewTab on ctrl-tab ({chord})"
+            );
+            let found = same_context_conflicts(&table, &intentional_same_context());
+            assert!(
+                !found.is_empty(),
+                "the conflicting override went unreported"
+            );
+            assert!(
+                found.iter().any(|m| m.contains(NewTab::name_for_type())
+                    && m.contains(NextTab::name_for_type())
+                    && m.contains(&chord)),
+                "{found:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn an_injected_clash_reaches_the_assertion_and_a_contextual_overlap_does_not(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| {
+            super::gpui_tests::running_on_json(cx, "{}");
+            let mut table = gate(cx, "default config");
+            let chord = canonical(&effective_key("NewTab", cx).expect("NewTab ships a chord"));
+
+            // Same chord in another context: nothing new to report.
+            table.push(row(Origin::Fixed, &chord, "Input", "Injected"));
+            assert!(
+                same_context_conflicts(&table, &intentional_same_context()).is_empty(),
+                "a binding on a deeper context is a legitimate overlap"
+            );
+
+            // Same chord, same (empty) context: the injected binding clashes
+            // with NewTab, and the message names both.
+            table.push(row(Origin::Fixed, &chord, "", "Injected"));
+            let found = same_context_conflicts(&table, &intentional_same_context());
+            assert!(!found.is_empty(), "the injected clash went unreported");
+            assert!(
+                found
+                    .iter()
+                    .all(|m| m.contains("Injected") && m.contains(NewTab::name_for_type())),
+                "{found:?}"
+            );
+        });
+    }
+
+    // ---- Shift+F10: the switcher's raw key, which no binding may take ------
+    //
+    // The switcher opens the picked row's menu from its own key handler
+    // (`on_switcher_key`), not from an action. gpui matches bindings before a
+    // key handler runs, so a binding on Shift+F10 anywhere on the way — the
+    // toolkit's, the app's or the fixed table, in any context — would take the
+    // key from the switcher while it is open and from the shell while a
+    // terminal has focus. Two claims, kept apart: who OWNS the chord in the
+    // installed table (global), and what gpui DISPATCHES for it in the stacks a
+    // real window holds (live).
+
+    /// Every installed binding on `chord`, whatever the context, for the
+    /// shapes of config that change the table.
+    #[gpui::test]
+    fn no_installed_binding_owns_shift_f10_in_any_context(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // The spelling the table uses is the spelling the claim is made in.
+            assert_eq!(canonical("shift-f10"), "shift-f10");
+
+            super::gpui_tests::running_on_json(cx, "{}");
+            let table = gate(cx, "default config");
+            assert!(
+                owners_of(&table, "shift-f10").is_empty(),
+                "shift-f10 is owned by {:?}: a binding on it takes the key from the \
+                 switcher's own handler and from the terminal",
+                owners_of(&table, "shift-f10")
+            );
+
+            // Positive controls: the same read finds a chord that is bound ...
+            // `effective_key` takes the config's action id; the table holds the
+            // installed action's name, which is what the ownership read returns.
+            let palette = effective_key("TogglePalette", cx).expect("TogglePalette ships a chord");
+            assert!(
+                owners_of(&table, &palette)
+                    .iter()
+                    .any(|(a, _)| a == TogglePalette::name_for_type()),
+                "the read finds TogglePalette on {palette}"
+            );
+            // ... the nearest bound function-key chord, where there is one ...
+            if !cfg!(target_os = "macos") {
+                assert!(
+                    owners_of(&table, "shift-f3")
+                        .iter()
+                        .any(|(a, _)| a == FindPrevious::name_for_type()),
+                    "the read finds FindPrevious on shift-f3: {:?}",
+                    owners_of(&table, "shift-f3")
+                );
+            }
+            // ... and a binding that WERE on shift-f10 is reported, in any
+            // context.
+            for context in ["", "Terminal", "Switcher", "Input"] {
+                let mut injected = table.clone();
+                injected.push(row(Origin::Fixed, "shift-f10", context, "Injected"));
+                assert_eq!(
+                    owners_of(&injected, "shift-f10"),
+                    vec![("Injected".to_string(), context.to_string())],
+                    "an injected binding in {context:?} is seen"
+                );
+            }
+
+            // The tmux preset swaps whole chords for sequences.
+            cx.global_mut::<Config>().keybinding_preset = "tmux".to_string();
+            rebind(cx);
+            let table = gate(cx, "tmux preset");
+            assert!(owners_of(&table, "shift-f10").is_empty(), "tmux preset");
+
+            // A config that moves actions around, the group shortcuts on, and
+            // the Windows defaults listed as overrides.
+            cx.global_mut::<Config>().keybinding_preset = "default".to_string();
+            cx.global_mut::<Config>().tab_group_shortcuts = true;
+            cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
+                "NewAgentTab": [new_agent_tab_default(Os::Windows)],
+                "CopyRaw": [copy_raw_default(Os::Windows)],
+                "ToggleSwitcher": [SWITCHER_FIXTURE_CHORD],
+            }))
+            .expect("the overrides load");
+            rebind(cx);
+            let table = gate(cx, "overridden config");
+            assert!(owners_of(&table, "shift-f10").is_empty(), "overridden");
+        });
+    }
+
+    /// What gpui dispatches for Shift+F10 in the context stacks a real window
+    /// holds: the focused terminal's, and the open switcher's with its search
+    /// box focused. The stacks are read off the live window, not spelled out
+    /// here, so a context the switcher or the toolkit adds is covered.
+    #[gpui::test]
+    fn gpui_dispatches_no_action_for_shift_f10_in_the_terminal_or_the_open_switcher(
+        cx: &mut TestAppContext,
+    ) {
+        let (app, mut vcx, _streams) =
+            crate::ui::app::test_window::harness_with_tabs_configured(cx, 1, |_| {});
+        let draw = |vcx: &mut gpui::VisualTestContext| {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        };
+        let hits = |vcx: &mut gpui::VisualTestContext,
+                    stack: &[gpui::KeyContext],
+                    keys: &str|
+         -> Vec<&'static str> {
+            let input: Vec<Keystroke> = keys
+                .split(' ')
+                .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))
+                .collect();
+            vcx.update(|_, cx| {
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, stack)
+                    .0
+                    .iter()
+                    .map(|b| b.action().name())
+                    .collect()
+            })
+        };
+        let palette = vcx
+            .update(|_, cx| effective_key("TogglePalette", cx))
+            .expect("TogglePalette ships a chord");
+
+        // The focused terminal.
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        draw(&mut vcx);
+        assert!(
+            app.update(&mut vcx, |app, _| app.switcher.is_none()),
+            "setup: no switcher is open over the terminal"
+        );
+        let terminal = vcx.update(|window, _| window.context_stack());
+        assert!(
+            terminal.iter().any(|c| c.contains("Terminal")),
+            "setup: the live stack is the focused terminal's: {terminal:?}"
+        );
+        assert_eq!(
+            hits(&mut vcx, &terminal, "shift-f10"),
+            Vec::<&str>::new(),
+            "no action answers Shift+F10 from the focused terminal"
+        );
+        assert!(
+            hits(&mut vcx, &terminal, &palette).contains(&TogglePalette::name_for_type()),
+            "control: the same stack dispatches {palette} to TogglePalette"
+        );
+
+        // The open switcher, search box focused.
+        app.update_in(&mut vcx, |app, window, cx| app.open_switcher(window, cx));
+        draw(&mut vcx);
+        assert!(
+            app.update(&mut vcx, |app, _| app.switcher.is_some()),
+            "setup: the switcher is open"
+        );
+        let switcher = vcx.update(|window, _| window.context_stack());
+        assert!(
+            switcher.iter().any(|c| c.contains("Switcher")),
+            "setup: the live stack is the open switcher's: {switcher:?}"
+        );
+        assert_ne!(
+            switcher, terminal,
+            "setup: the switcher's stack is not the terminal's"
+        );
+        assert_eq!(
+            hits(&mut vcx, &switcher, "shift-f10"),
+            Vec::<&str>::new(),
+            "no action answers Shift+F10 inside the open switcher"
+        );
+        assert!(
+            hits(&mut vcx, &switcher, &palette).contains(&TogglePalette::name_for_type()),
+            "control: the switcher's stack dispatches {palette} to TogglePalette"
+        );
     }
 }

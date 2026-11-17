@@ -1790,6 +1790,7 @@ l10n_keys! {
     WorktreePromptAgent,
     WorktreePromptShell,
     WorktreePromptTask,
+    WorktreePromptTaskPlaceholder,
     WorktreePromptSetup,
     WorktreePromptSetupHint,
     AppWorktreeSetupTitle,
@@ -1996,6 +1997,22 @@ l10n_keys! {
     MermaidViewerFit,
     MermaidViewerExit,
     MermaidRenderError,
+    // Image preview: a picture opened in the editor's own place.
+    ImagePreviewFit,
+    ImagePreviewActualSize,
+    ImagePreviewAnimated,
+    ImagePreviewFirstFrame,
+    ImagePreviewReduced,
+    ImagePreviewCantShow,
+    ImagePreviewTooLarge,
+    ImagePreviewTooLargeUnknown,
+    ImagePreviewTooManyPixels,
+    ImagePreviewOverBudget,
+    ImagePreviewCorrupt,
+    ImagePreviewUnsupportedFormat,
+    ImagePreviewUnsupportedFeature,
+    ImagePreviewSvgImages,
+    ImagePreviewNotAnImage,
     // B3-E: editor status, empty hint and gutter peek.
     LspMissingBody,
     LspErrorCount,
@@ -2018,6 +2035,9 @@ l10n_keys! {
     SftpSymlinkAria,
     SshPromptPassphrasePlaceholder,
     SshPromptSaveToKeychain,
+    // A2-H: a pinned group's header mark is status only.
+    SidebarPinnedFolderMark,
+    SidebarPinnedGroupMark,
 }
 
 /// The source control strings that are translated but not yet displayed.

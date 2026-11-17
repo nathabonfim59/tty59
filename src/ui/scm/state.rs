@@ -52,6 +52,78 @@ impl ScmGroup {
     ];
 }
 
+/// What kind of node of the Changes list holds the keyboard.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) enum NodeKind {
+    /// A group's header row.
+    Header,
+    /// A tree directory row, by the full repo-relative path of the (possibly
+    /// compacted) row, the key `folded_dirs` uses.
+    Dir(String),
+    /// A changed file row, by its full repo-relative path.
+    File(String),
+}
+
+/// A node of the Changes list by identity, never by position: the repository
+/// (host and root), the group it is listed under, its kind and its full path.
+/// The same path staged and edited again is two nodes, one per group. A row
+/// number is only ever a lookup in one frame's list and is never kept.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct RowId {
+    pub(crate) repo: RepoKey,
+    pub(crate) group: ScmGroup,
+    pub(crate) node: NodeKind,
+}
+
+impl RowId {
+    /// Whether this is the header of `group` in `repo`.
+    pub(crate) fn is_header(&self, repo: &RepoKey, group: ScmGroup) -> bool {
+        self.group == group && self.node == NodeKind::Header && self.repo == *repo
+    }
+
+    /// Whether this is the directory `key` of `group` in `repo`. Compared
+    /// without building an id, so a frame can ask it of every built row.
+    pub(crate) fn is_dir(&self, repo: &RepoKey, group: ScmGroup, key: &str) -> bool {
+        self.group == group
+            && matches!(&self.node, NodeKind::Dir(k) if k == key)
+            && self.repo == *repo
+    }
+
+    /// Whether this is the file `path` of `group` in `repo`.
+    pub(crate) fn is_file(&self, repo: &RepoKey, group: ScmGroup, path: &str) -> bool {
+        self.group == group
+            && matches!(&self.node, NodeKind::File(p) if p == path)
+            && self.repo == *repo
+    }
+}
+
+/// What a keyboard entry into the Changes list was asked in, kept beside the
+/// request waiting in `Roving` so that it is answered only where it was asked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EntryCtx {
+    /// The generation of the request (`ScmPanelState::nav_gen` when it was made).
+    pub(crate) ticket: u64,
+    /// The host and directory of the pane the panel was looking at.
+    pub(crate) target: (HostId, PathBuf),
+    /// The explicit repository pick in force, if any.
+    pub(crate) pick: Option<RepoKey>,
+}
+
+/// Where the keyboard's node sat in its group's run the last time it was
+/// looked for, and the state of the list that answer was for. A cache of a
+/// pure function of (status, filter, folds, list or tree): a row is pinned
+/// only after the node found at `at` is checked against the identity in the
+/// frame that pins it, so a stale answer can never pin another row.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Pos {
+    pub(crate) valid: bool,
+    pub(crate) epoch: u64,
+    pub(crate) tree: bool,
+    pub(crate) group: Option<ScmGroup>,
+    /// `None`: looked for and not there.
+    pub(crate) at: Option<usize>,
+}
+
 #[derive(Default)]
 pub(crate) struct ScmPanelState {
     /// Which repository the panel is showing. Follows the active pane unless
@@ -157,6 +229,20 @@ pub(crate) struct ScmPanelState {
     /// reads it when it is asked (never while painting) to learn the focus from
     /// before the first menu, not the first menu's own handle.
     pub(crate) menu_origin: Option<MenuOrigin>,
+    /// The node of the Changes list that holds the keyboard, or last held it:
+    /// the one source of keyboard position. `None` means no node has been
+    /// chosen, and the first group header is the list's stop.
+    pub(crate) row_at: Option<RowId>,
+    /// Bumped by every write to `row_at` and by every keyboard entry request,
+    /// so a request or a measurement made in an earlier generation can never
+    /// act on a later one.
+    pub(crate) nav_gen: u64,
+    /// Bumped whenever the list's shape may have changed under `pos`: a new
+    /// status, the filter, a fold, the list/tree switch.
+    pub(crate) layout_epoch: u64,
+    pub(crate) pos: std::cell::Cell<Pos>,
+    /// What the keyboard entry waiting in `Roving` was asked in.
+    pub(crate) entry: Option<EntryCtx>,
     /// What the last frame drew for a repository — Ready, Loading or Failed —
     /// with the cache key. The watcher compares against it
     /// (`StatusRead::same_identity`) so a global write that changed nothing
@@ -243,9 +329,11 @@ impl ScmPanelState {
         if !self.folded_dirs.remove(&entry) {
             self.folded_dirs.insert(entry);
         }
+        self.layout_epoch += 1;
     }
 
     pub(crate) fn set_group_collapsed(&mut self, group: ScmGroup, collapsed: bool) {
+        self.layout_epoch += 1;
         self.toggled.insert(group);
         if collapsed {
             self.collapsed.insert(group);

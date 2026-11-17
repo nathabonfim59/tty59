@@ -349,6 +349,20 @@ enum ProbeLanding {
     Unreachable(FailureFact),
 }
 
+/// What a landed read found, handed to every window with the repository it was
+/// for. A window cannot tell a "not a repository" answer from a status that has
+/// not arrived by looking at the data (both leave no status), so the answer is
+/// carried rather than inferred.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Landed {
+    /// A status was read (and cached).
+    Status,
+    /// There is no repository at that root: a definitive answer, with no status.
+    NotARepo,
+    /// The host could not be asked; whatever is cached stands.
+    Unreachable,
+}
+
 /// The last probe that could not reach git: when, so `is_stale` can rest, and
 /// what went wrong, so a panel with nothing cached can say so. The fact, not a
 /// sentence: the words are made where they are shown, in the language then.
@@ -508,6 +522,14 @@ impl ScmData {
     #[cfg(test)]
     pub fn hold_watch_closed(&mut self, host: HostId, root: &Path) {
         self.watch_mut(host, root).retry_at = Some(Instant::now() + Duration::from_secs(3600));
+    }
+
+    /// Whether a read of this repository is running right now: begun by
+    /// `scm_refresh` and not yet landed. A fixture's way to see that its own
+    /// call is the one that started a read, without reading how it came out.
+    #[cfg(test)]
+    pub fn read_in_flight(&self, host: HostId, root: &Path) -> bool {
+        self.probes.is_pending(&(host, root.to_path_buf()))
     }
 
     pub fn epoch(&self, host: HostId, root: &Path) -> u64 {
@@ -817,12 +839,11 @@ impl Tty59App {
                     data.failed_at.remove(id, root.as_path());
                     data.read_at.insert(id, root.clone(), at);
                 }
-                if not_a_repo {
-                    // Every cwd that resolved to this root must re-ask, or the
-                    // panel keeps drawing the Loading state of a repository
-                    // that is gone (`rm -rf .git` being the honest test).
-                    let _ = this.update(cx, |app, _| app.scm.forget_root(id, &root));
-                }
+                let landed = match (not_a_repo, definitive) {
+                    (true, _) => Landed::NotARepo,
+                    (false, true) => Landed::Status,
+                    (false, false) => Landed::Unreachable,
+                };
                 // `run_detached` lands with an `App` and no view, and writing
                 // a global marks nothing dirty, so without this the panel and
                 // the decorations wait for the next unrelated repaint.
@@ -836,6 +857,18 @@ impl Tty59App {
                 if changed {
                     cx.refresh_windows();
                 }
+                // The Changes list's shape may have moved, and a keyboard
+                // entry that was waiting on a list with nothing to enter ends
+                // here. Told to every window, not only the one that started
+                // this read: the status is shared and each window keeps its
+                // own list state. A "not a repository" answer also makes every
+                // window forget the directories it had resolved to this root,
+                // so each re-asks (`rm -rf .git` being the honest test): that
+                // used to be done for the starting window only. Never touches
+                // the focus.
+                crate::ui::scm::panel::scm_landed_in_all_windows_with(
+                    cx, id, &root, changed, landed,
+                );
                 if superseded {
                     // Through the debounce, not straight back into a probe:
                     // during sustained churn on a repository whose status read
