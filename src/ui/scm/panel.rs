@@ -8631,6 +8631,84 @@ mod status_lifecycle_witness_gpui_tests {
         );
     }
 
+    /// The live detail pane's own idea of where it is, read without notifying
+    /// or drawing anything: an `update_in` that never calls `cx.notify()`.
+    fn pane_cwd_probe(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Option<PathBuf> {
+        app.update_in(vcx, |app, window, cx| {
+            let leaf = app.tabs.get(app.active)?.detail_pane(window, cx)?;
+            leaf.read(cx).effective_cwd()
+        })
+    }
+
+    /// The Changes tab is open and drawn with the pane in NO directory (frame 1
+    /// sees none), then the Cwd is delivered and this waits, on the real clock,
+    /// with no notify, no draw, no clock advance, until the pane itself reports
+    /// it. After it returns only the code under test can repaint.
+    fn late_cwd_setup(
+        cx: &mut TestAppContext,
+        root: &Path,
+    ) -> (
+        Entity<Tty59App>,
+        VisualTestContext,
+        crate::daemon::transport::Stream,
+    ) {
+        let (app, mut vcx, mut pane) = test_window::harness_with_pane(cx);
+        vcx.update(|_, cx| {
+            cx.default_global::<ScmData>()
+                .hold_watch_closed(HostId::LOCAL, root)
+        });
+        app.update_in(&mut vcx, |app, _, cx| {
+            app.right_panel_visible = true;
+            app.right_panel_tab = RightPanelTab::Scm;
+            cx.notify();
+        });
+        // Frame 1 was drawn by the update above. It saw no directory, so the
+        // panel has asked nothing yet.
+        vcx.run_until_parked();
+        assert!(
+            pane_cwd_probe(&app, &mut vcx).is_none(),
+            "setup: the pane already had a cwd before the Cwd message"
+        );
+        assert!(
+            app.update_in(&mut vcx, |app, _, _| app.scm.root_lookups.is_empty()
+                && app.scm.roots.is_empty()),
+            "setup: the first frame already asked for a repository root"
+        );
+        DaemonMsg::Cwd(root.to_path_buf())
+            .encode(&mut pane)
+            .expect("the pane's socket takes the cwd");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while pane_cwd_probe(&app, &mut vcx).as_deref() != Some(root) {
+            assert!(
+                Instant::now() < deadline,
+                "setup: the pane never reported the cwd it was sent"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (app, vcx, pane)
+    }
+
+    /// A pane's first directory can arrive after the frame that drew the
+    /// panel. The Cwd message itself has to ask for the next frame: nothing
+    /// else does until the pane's 300ms poll, and no test notify, draw, input
+    /// or clock advance stands in for it here.
+    #[gpui::test]
+    fn a_first_cwd_after_the_first_frame_repaints_by_itself(cx: &mut TestAppContext) {
+        let _serial = serial();
+        crate::core::config::pin_test_config_dir();
+        let (_dir, root) = repository_with_a_broken_index();
+        let (app, mut vcx, _pane) = late_cwd_setup(cx, &root);
+        let seen = drawn_unprompted(&mut vcx, RETRY, 5);
+        let asked = app.update_in(&mut vcx, |app, _, _| {
+            (app.scm.root_lookups.len(), app.scm.roots.len())
+        });
+        assert!(
+            seen,
+            "the panel stayed on 'No working directory' although the pane knows its cwd \
+             (root_lookups, roots) = {asked:?}"
+        );
+    }
+
     /// Copy error puts the reason the host or git gave on the clipboard, as
     /// one line, and nothing synthetic: not a status code made up for it.
     #[gpui::test]

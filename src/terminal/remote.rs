@@ -1812,8 +1812,22 @@ impl RemoteTerminal {
                             }
                             DaemonMsg::Cwd(path) => {
                                 flush_batch!();
-                                if let Ok(mut guard) = cwd.lock() {
-                                    *guard = Some(path);
+                                // Stored, then announced: the Changes panel
+                                // reads this on its next frame and nothing
+                                // else asks for one until the pane's poll. A
+                                // directory that did not move says nothing,
+                                // and the guard is gone before the send.
+                                let moved = cwd
+                                    .lock()
+                                    .ok()
+                                    .map(|mut guard| {
+                                        let moved = guard.as_ref() != Some(&path);
+                                        *guard = Some(path);
+                                        moved
+                                    })
+                                    .unwrap_or(false);
+                                if moved {
+                                    proxy.send_event(VtEvent::Wakeup);
                                 }
                             }
                             DaemonMsg::Prompt {
@@ -4164,6 +4178,74 @@ mod replay_tests {
             cell_w: 8,
             cell_h: 17,
         }
+    }
+
+    /// A directory that has just moved is something the window has to hear
+    /// about: the Changes panel reads it from the pane on its next frame, and
+    /// nothing else asks for one until the pane's 300ms poll. A Cwd that says
+    /// nothing new asks for nothing.
+    ///
+    /// The order is the proof, not a timeout. The reader handles frames one at a
+    /// time and `Exited` is the last thing it ever does. Its teardown first
+    /// exits the engine, which sends the first `Exit` at once, and only then
+    /// sends its own `Wakeup` and a second `Exit`. That first `Exit` is the
+    /// barrier: every Cwd frame before it has been acted on, and the test stops
+    /// reading there, so the teardown's `Wakeup` is not part of what is counted.
+    /// Exactly two events precede it: first A (None -> A) wakes, the repeated A
+    /// is silent, B (A -> B) wakes.
+    #[test]
+    fn a_cwd_that_moved_wakes_the_view_and_a_repeat_does_not() {
+        use std::io::Write as _;
+        crate::core::config::pin_test_config_dir();
+        let (client_side, mut daemon_side) = socket_pair();
+        let term = RemoteTerminal::from_stream(client_side, TermSize::new(80, 24)).unwrap();
+        let a = PathBuf::from("/tmp/cwd-a");
+        let b = PathBuf::from("/tmp/cwd-b");
+        for msg in [
+            DaemonMsg::Cwd(a.clone()),
+            DaemonMsg::Cwd(a),
+            DaemonMsg::Cwd(b.clone()),
+            DaemonMsg::Exited { code: Some(0) },
+        ] {
+            msg.encode(&mut daemon_side).unwrap();
+        }
+        daemon_side.flush().unwrap();
+
+        let mut events = Vec::new();
+        let mut exited = false;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !exited {
+            while let Ok(event) = term.events.try_recv() {
+                exited = matches!(event, VtEvent::Exit);
+                events.push(event);
+                if exited {
+                    break;
+                }
+            }
+            assert!(
+                exited || std::time::Instant::now() < deadline,
+                "the reader never reached the Exited frame; events so far: {events:?}"
+            );
+            if !exited {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        let shape: Vec<&str> = events
+            .iter()
+            .map(|event| match event {
+                VtEvent::Wakeup => "Wakeup",
+                VtEvent::Exit => "Exit",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            ["Wakeup", "Wakeup", "Exit"],
+            "one Wakeup for each of the two Cwd frames that moved and none for the repeat, \
+             then the engine's Exit; events: {events:?}"
+        );
+        assert_eq!(term.foreground_cwd(), Some(b));
     }
 
     /// Everything the grid holds, scrollback included, one row per line.
