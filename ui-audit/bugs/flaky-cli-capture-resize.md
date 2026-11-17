@@ -112,3 +112,5 @@ cargo --config 'build.rustflags=["-D","warnings"]' test --locked --no-fail-fast
 ```
 
 The exact panic is again at line 992, with the same suffix message. The captured newest string begins with prompt-redraw control sequences; the whole ring carries the marker and prompt output, but does not end with that raw newest string. The failed gate is retained, not counted green. Its stream hashes to `a15e2c86daf8fd49fb697a8596495b39ad6a3f506dfd6985a995253321836737`. Raw evidence is under `.tty59/worktrees/fx-e/.pr-assets/A2/ci-followup/`, with the source/mode checks and process cleanup. The orchestrator confirmed this is the previously observed site and authorized one unchanged retry of the default-member run only; no name filter, skip, allow or CLI edit was used for that retry.
+
+The single authorized retry also failed at line 992 with the identical suffix message and prompt-redraw shape, at 2026-11-17 03:37 UTC. No other target failed. Its stream SHA-256 is `2936d0a1923c472b63b762cfe6586ec1823b0b8e558b101f32f22593837e5dd2`. Both failures match the cause above.

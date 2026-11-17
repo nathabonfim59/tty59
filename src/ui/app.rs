@@ -1044,6 +1044,18 @@ pub struct Tty59App {
     pub(crate) mod_hint_gen: u64,
     pub(crate) record_gen: u64,
     pub(crate) home_focus: gpui::FocusHandle,
+    /// The Info tab's root, the place the keyboard lands when the Info tab is
+    /// asked for (`show_right_panel_tab`). Made here, with the window's other
+    /// handles, so it is the same handle for as long as the app lives.
+    pub(crate) info_focus: gpui::FocusHandle,
+    /// The Changes list's one keyboard stop: the row the list says holds the
+    /// keyboard tracks this handle, and a keyboard entry waits beside it until
+    /// that row is mounted. Made here for the same reason as `info_focus`.
+    pub(crate) scm_row_focus: crate::ui::roving::Roving,
+    /// The Info rows' keyboard stop and what guards its entry: the same
+    /// `Roving` the Changes list uses, one more instance, made here for the
+    /// same reason as `info_focus`.
+    pub(crate) info_kb: crate::ui::right_panel::InfoKeyboard,
     /// Whether the home page's cursor block is on this half-second.
     ///
     /// A `bool` a timer flips, not a per-frame animation — the same shape the
@@ -1778,6 +1790,9 @@ impl Tty59App {
             mod_hint_gen: 0,
             record_gen: 0,
             home_focus: cx.focus_handle(),
+            info_focus: cx.focus_handle(),
+            scm_row_focus: crate::ui::roving::Roving::new(cx),
+            info_kb: crate::ui::right_panel::InfoKeyboard::new(cx),
             home_cursor_on: true,
             working_dot_on: true,
             shells: ShellInventory::default(),
@@ -1957,6 +1972,7 @@ impl Tty59App {
             true
         });
 
+        app.info_kb.watch_tab(window, cx);
         app.focus_active(window, cx);
         if app.agent_mode_active() {
             window.focus(&app.agent_vision.list_focus, cx);
@@ -3746,6 +3762,9 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Read-only: records that an edit was asked for, never what came of it.
+        #[cfg(test)]
+        crate::ui::forwards::edit_requests::note(forward.pane_id, forward.id);
         self.loopback_panel.mf_kind = forward.kind;
         self.loopback_panel.form_pane_id = Some(forward.pane_id);
         self.loopback_panel.mf_error = None;
@@ -3808,6 +3827,9 @@ impl Tty59App {
         forward_id: u64,
         cx: &mut Context<Self>,
     ) {
+        // Read-only: records that a removal was asked for, never what came of it.
+        #[cfg(test)]
+        crate::ui::forwards::remove_requests::note(pane_id, forward_id);
         // Only what the far side actually answered with. A request that never
         // got a reply knows nothing about the remaining forwards, and writing
         // its empty list into the panel would blank a list that is still there.
@@ -7259,7 +7281,7 @@ impl Tty59App {
             ToggleTabSidebar => self.toggle_tab_sidebar(cx),
             ToggleLeftPanel => self.toggle_left_panel(cx),
             ToggleRightPanel => self.toggle_right_panel(cx),
-            ShowRightPanel(tab) => self.set_right_panel_tab(tab, cx),
+            ShowRightPanel(tab) => self.show_right_panel_tab(tab, window, cx),
             ResetFontSize => self.reset_font_size(cx),
             FindInTerminal => {
                 if let Some(leaf) = self.focused_leaf(window, cx) {
@@ -8003,6 +8025,8 @@ impl Tty59App {
             menu: None,
             menu_query,
             menu_hi: 0,
+            menu_keyboard: false,
+            menu_watch: None,
             menu_scroll: gpui::ScrollHandle::new(),
             focused: std::cell::RefCell::new(None),
             kb_conflict: None,
@@ -10517,11 +10541,11 @@ impl Render for Tty59App {
                 .on_action(cx.listener(|this, _: &ToggleRightPanel, _window, cx| {
                     this.toggle_right_panel(cx)
                 }))
-                .on_action(cx.listener(|this, _: &ShowRightPanelInfo, _window, cx| {
-                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Info, cx)
+                .on_action(cx.listener(|this, _: &ShowRightPanelInfo, window, cx| {
+                    this.show_right_panel_tab(crate::core::config::RightPanelTab::Info, window, cx)
                 }))
-                .on_action(cx.listener(|this, _: &ShowRightPanelChanges, _window, cx| {
-                    this.set_right_panel_tab(crate::core::config::RightPanelTab::Scm, cx)
+                .on_action(cx.listener(|this, _: &ShowRightPanelChanges, window, cx| {
+                    this.show_right_panel_tab(crate::core::config::RightPanelTab::Scm, window, cx)
                 }))
                 .on_action(cx.listener(|this, _: &ShowRightPanelFiles, _window, cx| {
                     this.set_right_panel_tab(crate::core::config::RightPanelTab::Files, cx)
@@ -11927,6 +11951,12 @@ fn apply_ssh_o_option(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod settings_window_lifecycle_tests;
+
+#[cfg(test)]
+mod settings_window_reveal_tests;
 
 #[cfg(test)]
 mod window_drag_tests {

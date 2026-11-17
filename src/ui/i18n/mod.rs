@@ -2034,6 +2034,9 @@ l10n_keys! {
     SftpSymlinkAria,
     SshPromptPassphrasePlaceholder,
     SshPromptSaveToKeychain,
+    // A2-H: a pinned group's header mark is status only.
+    SidebarPinnedFolderMark,
+    SidebarPinnedGroupMark,
 }
 
 /// The source control strings that are translated but not yet displayed.

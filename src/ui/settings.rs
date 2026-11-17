@@ -43,6 +43,22 @@ mod theme_picker;
 
 #[cfg(test)]
 mod a33_tests;
+#[cfg(test)]
+mod cell_reveal_tests;
+#[cfg(test)]
+mod field_ring_tests;
+#[cfg(test)]
+mod keyboard_tests;
+#[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
+mod real_page_tests;
+#[cfg(test)]
+mod reveal_tests;
+#[cfg(test)]
+mod reviewer_tests;
+#[cfg(test)]
+mod stop_tests;
 
 /// The settings nav, and the page's padding either side of its column.
 const NAV_W: f32 = 220.;
@@ -1374,6 +1390,16 @@ pub(crate) struct SettingsState {
     /// keys have reached in it.
     pub(crate) menu_query: Entity<InputState>,
     pub(crate) menu_hi: usize,
+    /// Whether the row `menu_hi` names is the keyboard's choice, and so drawn
+    /// highlighted in a plain dropdown's menu. A menu the pointer opens shows no
+    /// highlight, as before; a key (or a keyboard click opening it) sets this.
+    pub(crate) menu_keyboard: bool,
+    /// What closes the open PLAIN menu when its trigger loses focus (Tab, a
+    /// click elsewhere, the trigger leaving the page, the window deactivating).
+    /// Owned here rather than by the trigger, so it outlives the trigger.
+    /// `None` for no menu and for the menus whose trigger hands focus to a query
+    /// box on purpose.
+    pub(crate) menu_watch: Option<MenuWatch>,
     pub(crate) menu_scroll: gpui::ScrollHandle,
     /// Whatever held keyboard focus when the page was last drawn, so a text
     /// field can draw its focus ring from a builder that has no `Window`.
@@ -1720,6 +1746,15 @@ impl ForwardRuleForm {
             enabled: self.enabled,
         })
     }
+}
+
+/// The focus-out watch on one OPEN plain menu's trigger. Dropping it ends the
+/// watch. `token` is that open's identity: a close that was queued for it holds
+/// only a weak reference, and acts only while the token is still the current
+/// watch's, so a late close can never reach a menu opened since, same id or not.
+pub(crate) struct MenuWatch {
+    pub(crate) token: std::rc::Rc<()>,
+    pub(crate) _focus_out: Subscription,
 }
 
 pub(crate) struct Recording {
@@ -2313,6 +2348,8 @@ impl Tty59App {
             state.reveal_first_hit.set(setting.is_some());
             state.content_scroll.set_offset(gpui::point(px(0.), px(0.)));
             state.menu = None;
+            state.menu_keyboard = false;
+            state.menu_watch = None;
         }
         self.select_settings_section(target, cx);
     }

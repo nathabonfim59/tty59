@@ -345,14 +345,20 @@ impl Tty59App {
         if !self.agent_vision.list_focus.contains_focused(window, cx) {
             return;
         }
-        if self
+        let terminal_focused = self
             .agent_vision
             .state
             .selected()
             .and_then(|key| self.agent_terminal(key, cx))
-            .is_some_and(|terminal| terminal.focus_handle(cx).contains_focused(window, cx))
-        {
+            .is_some_and(|terminal| terminal.focus_handle(cx).contains_focused(window, cx));
+        if terminal_focused {
             self.agent_vision.state.focus = FocusZone::Terminal;
+        }
+        // Enter on a focused control inside the list (the Other toggle) belongs
+        // to that control: its key-up click runs its own callback. Only the
+        // list root and the reader terminal hand Enter to the agent.
+        if key == "enter" && !terminal_focused && !self.agent_vision.list_focus.is_focused(window) {
+            return;
         }
         if self.agent_vision.state.focus() == FocusZone::Terminal && key == "enter" {
             // The key continues into the real terminal. Handling is local read

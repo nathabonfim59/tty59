@@ -23,12 +23,14 @@
 //! for one more frame. Otherwise it asks for nothing, so a parked panel stays
 //! idle.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
-use gpui::{AnyElement, App, Bounds, Pixels, ScrollHandle, Window, canvas, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Bounds, Pixels, ScrollHandle, Window, canvas, div, point, prelude::*, px,
+};
 
 use crate::ui::scm::state::ScmGroup;
 
@@ -42,17 +44,199 @@ pub(crate) const OVERSCAN_ROWS: usize = 12;
 /// Where each group's run started in the scroller's content, as the last
 /// frame laid it out. Shared with the measuring canvas, which runs in
 /// prepaint, after render has handed the elements over.
+///
+/// Every measurement also carries the token of the frame that wrote it
+/// (`begin` hands one out per render of the list). A measurement is trusted for
+/// a reveal only if it was written by the latest frame that measured anything:
+/// a group that was collapsed, filtered out, or left behind by another
+/// repository has no canvas in that frame, keeps an older token, and reads as
+/// unmeasured instead of as wherever it last was.
 #[derive(Clone, Default)]
-pub(crate) struct RunTops(Rc<RefCell<HashMap<ScmGroup, f32>>>);
+pub(crate) struct RunTops(Rc<Tops>);
+
+#[derive(Default)]
+struct Tops {
+    runs: RefCell<HashMap<ScmGroup, f32>>,
+    /// The same measurements with the token of the frame that took them.
+    stamped_runs: RefCell<HashMap<ScmGroup, (u64, f32)>>,
+    stamped_heads: RefCell<HashMap<ScmGroup, (u64, f32)>>,
+    /// The latest token any canvas wrote under.
+    painted: Cell<u64>,
+    next: Cell<u64>,
+}
+
+/// What a reveal found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reveal {
+    /// Already fully in view.
+    Visible,
+    /// The scroll offset was set; the caller asks for the frame.
+    Scrolled,
+    /// No trustworthy measurement of where the target is.
+    Unmeasured,
+}
 
 impl RunTops {
     fn get(&self, group: ScmGroup) -> Option<f32> {
-        self.0.borrow().get(&group).copied()
+        self.0.runs.borrow().get(&group).copied()
     }
 
     fn set(&self, group: ScmGroup, top: f32) {
-        self.0.borrow_mut().insert(group, top);
+        self.0.runs.borrow_mut().insert(group, top);
     }
+
+    /// The token the next frame's measurements are written under. Called once
+    /// at the top of the list's render.
+    pub(crate) fn begin(&self) -> u64 {
+        let token = self.0.next.get() + 1;
+        self.0.next.set(token);
+        token
+    }
+
+    /// The token of the frame being rendered, for the elements that will
+    /// measure in prepaint.
+    fn token(&self) -> u64 {
+        self.0.next.get()
+    }
+
+    fn stamp(&self, token: u64) {
+        if token > self.0.painted.get() {
+            self.0.painted.set(token);
+        }
+    }
+
+    fn set_run(&self, token: u64, group: ScmGroup, top: f32) {
+        self.set(group, top);
+        self.0.stamped_runs.borrow_mut().insert(group, (token, top));
+        self.stamp(token);
+    }
+
+    fn set_head(&self, token: u64, group: ScmGroup, top: f32) {
+        self.0
+            .stamped_heads
+            .borrow_mut()
+            .insert(group, (token, top));
+        self.stamp(token);
+    }
+
+    fn fresh(&self, entry: Option<(u64, f32)>) -> Option<f32> {
+        entry
+            .filter(|(token, _)| *token == self.0.painted.get())
+            .map(|(_, top)| top)
+    }
+
+    /// Scroll row `index` of `group`'s run fully into view, from where the last
+    /// frame measured the run, the row pitch and the scroller's own bounds.
+    /// Never `ScrollHandle::scroll_to_item`: that indexes the scroller's direct
+    /// children, and a logical row is not one.
+    pub(crate) fn reveal_row(
+        &self,
+        group: ScmGroup,
+        index: usize,
+        row_h: f32,
+        scroll: &ScrollHandle,
+    ) -> Reveal {
+        let run = self
+            .fresh(self.0.stamped_runs.borrow().get(&group).copied())
+            .map(|top| top + index as f32 * (row_h + ROW_GAP));
+        reveal_at(run, row_h, scroll)
+    }
+
+    /// Scroll `group`'s header, `head_h` tall, fully into view.
+    pub(crate) fn reveal_head(
+        &self,
+        group: ScmGroup,
+        head_h: f32,
+        scroll: &ScrollHandle,
+    ) -> Reveal {
+        let top = self.fresh(self.0.stamped_heads.borrow().get(&group).copied());
+        reveal_at(top, head_h, scroll)
+    }
+}
+
+fn reveal_at(top: Option<f32>, h: f32, scroll: &ScrollHandle) -> Reveal {
+    let Some(top) = top else {
+        return Reveal::Unmeasured;
+    };
+    let offset = scroll.offset();
+    let view_h = scroll.bounds().size.height.as_f32();
+    let max = scroll.max_offset().y.as_f32();
+    match reveal_offset(top, h, -offset.y.as_f32(), view_h, max) {
+        Some(to) => {
+            scroll.set_offset(point(offset.x, px(-to)));
+            Reveal::Scrolled
+        }
+        None => Reveal::Visible,
+    }
+}
+
+/// The scroll offset (distance scrolled down, `0..=max_scroll`) that brings the
+/// span `top..top + h` fully into the view `scroll_top..scroll_top + view_h`
+/// with the least movement, or `None` if it is already in view. A span taller
+/// than the view lines up with its top edge.
+pub(crate) fn reveal_offset(
+    top: f32,
+    h: f32,
+    scroll_top: f32,
+    view_h: f32,
+    max_scroll: f32,
+) -> Option<f32> {
+    if view_h <= 0. {
+        return None;
+    }
+    let want = if h >= view_h || top < scroll_top {
+        top
+    } else if top + h > scroll_top + view_h {
+        top + h - view_h
+    } else {
+        return None;
+    };
+    let want = want.clamp(0., max_scroll.max(0.));
+    ((want - scroll_top).abs() > 0.01).then_some(want)
+}
+
+/// Scroll a row that is mounted, at `row` in window space, fully into the
+/// scroller's view, from its own painted bounds. Whether it moved the scroll
+/// offset.
+pub(crate) fn reveal_painted(scroll: &ScrollHandle, row: Bounds<Pixels>) -> bool {
+    let view = scroll.bounds();
+    let offset = scroll.offset();
+    let top = row.top().as_f32() - view.top().as_f32() - offset.y.as_f32();
+    match reveal_offset(
+        top,
+        row.size.height.as_f32(),
+        -offset.y.as_f32(),
+        view.size.height.as_f32(),
+        scroll.max_offset().y.as_f32(),
+    ) {
+        Some(to) => {
+            scroll.set_offset(point(offset.x, px(-to)));
+            true
+        }
+        None => false,
+    }
+}
+
+/// The header of `group`, measured: a zero-size canvas whose prepaint records
+/// where the header sits in the scroller's content under this frame's token.
+/// Only headers that are built have one, so a hidden group can never overwrite
+/// a measurement.
+pub(crate) fn head_probe(group: ScmGroup, tops: &RunTops, scroll: &ScrollHandle) -> AnyElement {
+    let (tops, scroll, token) = (tops.clone(), scroll.clone(), tops.token());
+    canvas(
+        move |bounds: Bounds<Pixels>, _window: &mut Window, _cx: &mut App| {
+            let top = bounds.origin.y.as_f32()
+                - scroll.bounds().origin.y.as_f32()
+                - scroll.offset().y.as_f32();
+            tops.set_head(token, group, top);
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_0()
+    .into_any_element()
 }
 
 /// The rows of a run of `len` that reach `[scroll_top, scroll_top + view_h)`,
@@ -106,10 +290,13 @@ pub(crate) struct RowsWindow {
     len: usize,
     row: f32,
     range: Range<usize>,
-    /// A row built wherever the viewport is: the one an open context menu
-    /// hangs off. The menu lives in that row's element state, and a row that
-    /// stops being built takes its menu down with it.
-    pin: Option<usize>,
+    /// Rows built wherever the viewport is: at most the one an open context
+    /// menu hangs off (the menu lives in that row's element state, and a row
+    /// that stops being built takes its menu down with it) and the one the
+    /// keyboard is on (a focused row that stops being built loses the focus).
+    pins: [Option<usize>; 2],
+    /// The token the run's measurement is written under; see `RunTops::begin`.
+    token: u64,
     tops: RunTops,
     scroll: ScrollHandle,
     view: gpui::EntityId,
@@ -145,43 +332,55 @@ impl RowsWindow {
             len,
             row: row_h,
             range,
-            pin: None,
+            pins: [None; 2],
+            token: tops.token(),
             tops: tops.clone(),
             scroll: scroll.clone(),
             view,
         }
     }
 
-    /// Also build row `pin`, wherever the viewport is.
+    /// Also build row `pin`, wherever the viewport is. Two rows can be pinned
+    /// (the menu's and the keyboard's, in either order); a third is ignored.
     pub(crate) fn pin(mut self, pin: Option<usize>) -> Self {
-        self.pin = pin.filter(|&i| i < self.len);
+        let Some(pin) = pin.filter(|&i| i < self.len) else {
+            return self;
+        };
+        if self.pins.contains(&Some(pin)) {
+            return self;
+        }
+        if let Some(slot) = self.pins.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(pin);
+        }
         self
     }
 
-    /// The runs of consecutive rows that are built, in order.
+    /// The runs of consecutive rows that are built, in order: the range and
+    /// the pins outside it, with any that touch joined.
     fn segments(&self) -> Vec<Range<usize>> {
-        let range = self.range.clone();
-        match self.pin {
-            Some(p) if !range.contains(&p) => {
-                let pin = p..p + 1;
-                let mut out: Vec<Range<usize>> =
-                    [range, pin].into_iter().filter(|r| !r.is_empty()).collect();
-                out.sort_by_key(|r| r.start);
-                // A pin right against the range joins it.
-                if out.len() == 2 && out[0].end == out[1].start {
-                    out[0].end = out[1].end;
-                    out.truncate(1);
-                }
-                out
-            }
-            _ if range.is_empty() => Vec::new(),
-            _ => vec![range],
+        let mut out: Vec<Range<usize>> = Vec::with_capacity(3);
+        if !self.range.is_empty() {
+            out.push(self.range.clone());
         }
+        for &p in self.pins.iter().flatten() {
+            if !self.range.contains(&p) {
+                out.push(p..p + 1);
+            }
+        }
+        out.sort_by_key(|r| r.start);
+        let mut joined: Vec<Range<usize>> = Vec::with_capacity(out.len());
+        for r in out {
+            match joined.last_mut() {
+                Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
+                _ => joined.push(r),
+            }
+        }
+        joined
     }
 
     /// Whether row `i` of the run has to be built.
     pub(crate) fn builds(&self, i: usize) -> bool {
-        self.range.contains(&i) || self.pin == Some(i)
+        self.range.contains(&i) || self.pins.contains(&Some(i))
     }
 
     /// The rows the caller has to build, by index into the run, in order.
@@ -200,6 +399,7 @@ impl RowsWindow {
             len,
             row,
             range,
+            token,
             tops,
             scroll,
             view,
@@ -211,7 +411,7 @@ impl RowsWindow {
                 let port = scroll.bounds();
                 let offset = scroll.offset().y.as_f32();
                 let top = bounds.origin.y.as_f32() - port.origin.y.as_f32() - offset;
-                tops.set(group, top);
+                tops.set_run(token, group, top);
                 let need = visible_range(
                     len,
                     row + ROW_GAP,
@@ -304,12 +504,110 @@ mod tests {
             len,
             row: 26.,
             range,
-            pin: None,
+            pins: [None; 2],
+            token: 0,
             tops: RunTops::default(),
             scroll: ScrollHandle::new(),
             view: gpui::EntityId::from(1u64),
         }
         .pin(pin)
+    }
+
+    // The tests below are post-implementation controls for the two-pin and
+    // reveal code: they were written after it, not before.
+
+    #[test]
+    fn two_pins_are_both_built_and_a_third_is_ignored() {
+        let two = |a, b| run(300, 10..40, Some(a)).pin(Some(b));
+        assert_eq!(two(250, 3).segments(), vec![3..4, 10..40, 250..251]);
+        assert_eq!(two(40, 9).segments(), vec![9..41]);
+        assert_eq!(two(41, 9).segments(), vec![9..40, 41..42]);
+        assert_eq!(two(250, 251).segments(), vec![10..40, 250..252]);
+        // The same row pinned twice is one pin, and so leaves a slot free.
+        assert_eq!(
+            two(250, 250).pin(Some(5)).segments(),
+            vec![5..6, 10..40, 250..251]
+        );
+        // A third distinct pin has no slot.
+        assert_eq!(
+            two(250, 3).pin(Some(100)).segments(),
+            vec![3..4, 10..40, 250..251]
+        );
+        let r = two(250, 3);
+        assert!(r.builds(250) && r.builds(3) && r.builds(10) && !r.builds(100));
+        assert_eq!(
+            r.indices().collect::<Vec<_>>().len(),
+            1 + 30 + 1,
+            "viewport range plus the two pins and nothing else"
+        );
+    }
+
+    #[test]
+    fn a_reveal_scrolls_the_least_that_puts_the_span_in_view() {
+        // View is 200px tall and scrolled 100px down; content is 1000px.
+        let at = |top, h| reveal_offset(top, h, 100., 200., 800.);
+        assert_eq!(at(150., 26.), None, "already in view");
+        assert_eq!(at(100., 26.), None, "flush with the top edge");
+        assert_eq!(at(274., 26.), None, "flush with the bottom edge");
+        assert_eq!(at(40., 26.), Some(40.), "above: its top lines up");
+        assert_eq!(at(400., 26.), Some(226.), "below: its bottom lines up");
+        assert_eq!(at(275., 26.), Some(101.), "one pixel past the bottom");
+        assert_eq!(
+            at(500., 300.),
+            Some(500.),
+            "taller than the view: top lines up"
+        );
+        assert_eq!(
+            reveal_offset(990., 26., 100., 200., 800.),
+            Some(800.),
+            "clamped to the end of the content"
+        );
+        assert_eq!(reveal_offset(0., 26., 0., 200., 800.), None);
+        assert_eq!(
+            reveal_offset(5., 26., 0., 0., 800.),
+            None,
+            "no view, no move"
+        );
+    }
+
+    #[test]
+    fn a_measurement_is_trusted_only_from_the_latest_painted_frame() {
+        let tops = RunTops::default();
+        let first = tops.begin();
+        tops.set_run(first, ScmGroup::Staged, 100.);
+        tops.set_run(first, ScmGroup::Changes, 900.);
+        assert_eq!(
+            tops.fresh(tops.0.stamped_runs.borrow().get(&ScmGroup::Staged).copied()),
+            Some(100.)
+        );
+        // The next frame measures Changes only: Staged was collapsed away.
+        let second = tops.begin();
+        tops.set_run(second, ScmGroup::Changes, 300.);
+        assert_eq!(
+            tops.fresh(tops.0.stamped_runs.borrow().get(&ScmGroup::Staged).copied()),
+            None,
+            "a group the latest frame did not measure reads as unmeasured"
+        );
+        assert_eq!(
+            tops.fresh(
+                tops.0
+                    .stamped_runs
+                    .borrow()
+                    .get(&ScmGroup::Changes)
+                    .copied()
+            ),
+            Some(300.)
+        );
+        // Unmeasured is an answer a reveal can act on: it does nothing.
+        let scroll = ScrollHandle::new();
+        assert_eq!(
+            tops.reveal_row(ScmGroup::Staged, 3, 26., &scroll),
+            Reveal::Unmeasured
+        );
+        assert_eq!(
+            tops.reveal_head(ScmGroup::Staged, 22., &scroll),
+            Reveal::Unmeasured
+        );
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use tty59_gateway::state::{State, Status};
 
-use super::kit::{self, BtnKind, Tk, fs};
+use super::kit::{BtnKind, Tk, fs};
 use super::shell::inline_control;
 use super::*;
 
@@ -304,7 +304,7 @@ impl Tty59App {
         let serving = state.as_ref().is_some_and(State::serving);
 
         let switch = inline_control(
-            kit::switch("mobile-access")
+            self.page_switch("mobile-access")
                 .checked(matches!(access, Access::On | Access::Starting))
                 .disabled(matches!(access, Access::Starting))
                 .on_click(cx.listener(|this, on: &bool, window, cx| {
@@ -393,8 +393,8 @@ impl Tty59App {
                 .into_iter()
                 .map(|device| {
                     let id = device.id.clone();
-                    let unpair =
-                        kit::button(
+                    let unpair = self
+                        .page_button(
                             SharedString::from(format!("mobile-unpair-{}", device.id)),
                             t(L10nKey::SettingsMobileUnpair),
                             BtnKind::Danger,
@@ -427,17 +427,18 @@ impl Tty59App {
     ) -> AnyElement {
         let copied = self.active_settings().is_some_and(|s| s.mobile_copied);
         let code = pairing.code.clone();
-        let close = kit::button(
-            "mobile-pair-cancel",
-            t(if pairing.spent.is_some() {
-                L10nKey::Close
-            } else {
-                L10nKey::Cancel
-            }),
-            BtnKind::Link,
-        )
-        .on_click(cx.listener(|this, _, _w, cx| this.close_mobile_pairing(cx)))
-        .into_any_element();
+        let close = self
+            .page_button(
+                "mobile-pair-cancel",
+                t(if pairing.spent.is_some() {
+                    L10nKey::Close
+                } else {
+                    L10nKey::Cancel
+                }),
+                BtnKind::Link,
+            )
+            .on_click(cx.listener(|this, _, _w, cx| this.close_mobile_pairing(cx)))
+            .into_any_element();
 
         let qr = match &pairing.qr {
             Some(image) => gpui::img(image.clone())
@@ -449,13 +450,14 @@ impl Tty59App {
         let side = match pairing.spent {
             // What happened, and the one way on from it.
             Some(spent) => {
-                let renew = kit::button(
-                    "mobile-pair-renew",
-                    t(L10nKey::SettingsMobileNewCode),
-                    BtnKind::Primary,
-                )
-                .on_click(cx.listener(|this, _, _w, cx| this.start_mobile_pairing(cx)))
-                .into_any_element();
+                let renew = self
+                    .page_button(
+                        "mobile-pair-renew",
+                        t(L10nKey::SettingsMobileNewCode),
+                        BtnKind::Primary,
+                    )
+                    .on_click(cx.listener(|this, _, _w, cx| this.start_mobile_pairing(cx)))
+                    .into_any_element();
                 side.child(
                     div()
                         .text_size(fs(13.))
@@ -475,33 +477,34 @@ impl Tty59App {
                 )
             }
             None => {
-                let copy = kit::button(
-                    "mobile-copy-code",
-                    if copied {
-                        t(L10nKey::SettingsCopied)
-                    } else {
-                        t(L10nKey::SettingsMobileCopyCode)
-                    },
-                    BtnKind::Secondary,
-                )
-                .on_click(cx.listener(move |this, _, _w, cx| {
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
-                    if let Some(s) = this.active_settings_mut() {
-                        s.mobile_copied = true;
-                    }
-                    cx.notify();
-                    cx.spawn(async move |this, cx| {
-                        smol::Timer::after(Duration::from_millis(1500)).await;
-                        let _ = this.update(cx, |this, cx| {
-                            if let Some(s) = this.active_settings_mut() {
-                                s.mobile_copied = false;
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .detach();
-                }))
-                .into_any_element();
+                let copy = self
+                    .page_button(
+                        "mobile-copy-code",
+                        if copied {
+                            t(L10nKey::SettingsCopied)
+                        } else {
+                            t(L10nKey::SettingsMobileCopyCode)
+                        },
+                        BtnKind::Secondary,
+                    )
+                    .on_click(cx.listener(move |this, _, _w, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(code.clone()));
+                        if let Some(s) = this.active_settings_mut() {
+                            s.mobile_copied = true;
+                        }
+                        cx.notify();
+                        cx.spawn(async move |this, cx| {
+                            smol::Timer::after(Duration::from_millis(1500)).await;
+                            let _ = this.update(cx, |this, cx| {
+                                if let Some(s) = this.active_settings_mut() {
+                                    s.mobile_copied = false;
+                                    cx.notify();
+                                }
+                            });
+                        })
+                        .detach();
+                    }))
+                    .into_any_element();
                 let left = pairing.until.saturating_duration_since(Instant::now());
                 side.child(
                     div()

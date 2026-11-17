@@ -2403,6 +2403,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SftpSymlinkAria => "{name}，符号链接",
         L10nKey::SshPromptPassphrasePlaceholder => "口令",
         L10nKey::SshPromptSaveToKeychain => "保存到钥匙串",
+        // A2-H: a pinned group's header mark is status only.
+        L10nKey::SidebarPinnedFolderMark => "已固定的文件夹",
+        L10nKey::SidebarPinnedGroupMark => "已固定的分组",
     })
 }
 

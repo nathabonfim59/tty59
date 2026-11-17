@@ -13,6 +13,8 @@ pub mod editor_session;
 pub mod editor_text;
 pub mod file_copy;
 pub mod file_tree;
+#[cfg(test)]
+mod focus_ring_tests;
 pub mod forwards;
 pub mod github;
 pub mod hints;
@@ -49,6 +51,7 @@ pub mod remote_workspace;
 pub mod reorder;
 pub mod right_panel;
 pub mod rounding;
+pub(crate) mod roving;
 pub mod scm;
 pub mod scrollbar;
 pub mod search;
