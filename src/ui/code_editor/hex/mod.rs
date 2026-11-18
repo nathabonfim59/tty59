@@ -22,6 +22,8 @@ use crate::ui::image_preview::view::{ErrorCard, error_card};
 pub(super) mod data;
 pub(super) mod io;
 pub(super) mod model;
+#[cfg(test)]
+mod test_support;
 pub(super) mod view;
 
 /// Bytes read from the start of a file too large for the text editor to decide what it is,
