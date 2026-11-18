@@ -64,7 +64,7 @@ pub(crate) fn png_of_first_frame(image: &RenderImage) -> Option<Vec<u8>> {
     let width = u32::try_from(i32::from(size.width)).ok()?;
     let height = u32::try_from(i32::from(size.height)).ok()?;
     let mut rgba = image.as_bytes(0)?.to_vec();
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     let buffer = image::RgbaImage::from_raw(width, height, rgba)?;
