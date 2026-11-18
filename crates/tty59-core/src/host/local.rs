@@ -938,7 +938,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
     }
 
-    fn expecting(host: &LocalHost, path: &Path) -> Expect {
+    fn expecting(host: &dyn Host, path: &Path) -> Expect {
         let meta = host.stat(path).unwrap();
         Expect {
             len: meta.len,
@@ -953,7 +953,7 @@ mod tests {
         let path = dir.path().join("sixteen.bin");
         std::fs::write(&path, [0u8; 16]).unwrap();
 
-        let expect = expecting(&host, &path);
+        let expect = expecting(&*host, &path);
         let meta = host
             .write_ranges(&path, &[(2, vec![1, 2]), (15, vec![9])], expect)
             .unwrap();
@@ -973,7 +973,7 @@ mod tests {
         let host = LocalHost::new();
         let path = dir.path().join("a.bin");
         std::fs::write(&path, [0u8; 8]).unwrap();
-        let good = expecting(&host, &path);
+        let good = expecting(&*host, &path);
 
         let wrong_len = Expect {
             len: good.len + 1,
@@ -1002,7 +1002,7 @@ mod tests {
         let host = LocalHost::new();
         let path = dir.path().join("a.bin");
         std::fs::write(&path, [0u8; 8]).unwrap();
-        let expect = expecting(&host, &path);
+        let expect = expecting(&*host, &path);
 
         for bad in [(7u64, vec![1u8, 2]), (8, vec![1]), (u64::MAX, vec![1, 2])] {
             // The first run is fine; the second must stop it from landing.

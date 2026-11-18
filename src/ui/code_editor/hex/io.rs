@@ -581,7 +581,10 @@ mod tests {
 
         // And through a paged path the decision read is skipped: a size over
         // the limit answers without any full read.
-        assert!(!paged_opens_as_text(&host, &path, MAX_FILE_BYTES + 1).unwrap());
+        assert!(matches!(
+            paged_opens_as_text(&host, &path, MAX_FILE_BYTES + 1),
+            Ok(false)
+        ));
         assert_eq!(host.full_reads.load(Ordering::SeqCst), 0);
         assert!(paged_opens_as_text(&host, &path, MAX_FILE_BYTES).is_ok());
         assert_eq!(host.full_reads.load(Ordering::SeqCst), 1);
