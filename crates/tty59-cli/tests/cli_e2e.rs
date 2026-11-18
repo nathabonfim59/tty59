@@ -1007,7 +1007,10 @@ fn capture_still_answers_after_a_resize(daemon: &Daemon) {
     pane.resize(narrower).expect("resize the pane");
     // The daemon echoes the new size in stream order, after sealing the ring's
     // segment under the state lock: once it arrives the boundary exists.
+    #[cfg(unix)]
     wait_for_size_echo(&mut pane, 80);
+    #[cfg(windows)]
+    wait_for_size_echo_and_repaint(&mut pane, 80);
 
     // Before the fixture's second segment: the ring is the output sealed at
     // the old width, then the empty placeholder at the new one.
@@ -1117,6 +1120,7 @@ fn resize_fixture_size(cols: u16) -> WinSize {
     }
 }
 
+#[cfg(unix)]
 fn wait_for_size_echo(session: &mut PaneSession, cols: u16) {
     loop {
         match session.recv() {
@@ -1126,6 +1130,45 @@ fn wait_for_size_echo(session: &mut PaneSession, cols: u16) {
             }
             Ok(_) => {}
             Err(error) => panic!("no size echo for {cols} columns arrived: {error}"),
+        }
+    }
+}
+
+/// `wait_for_size_echo` for ConPTY, which is not silent after a resize: it
+/// repaints the screen on its own, and the child being quiet does not make the
+/// pane still until that frame is whole. The repaint can reach the daemon's
+/// reader either side of the moment it seals the segment, so its bytes can come
+/// before the `Size` echo or after it; this reads until it has both, in either
+/// order, accumulating the output from the resize on.
+///
+/// The frame's end is the marker below: the cursor homed to row 3, then shown.
+/// That is the end of this fixture's two-line repaint (`RESIZE_A` and the ready
+/// line), so it is tied to those being two lines.
+#[cfg(windows)]
+fn wait_for_size_echo_and_repaint(session: &mut PaneSession, cols: u16) {
+    const REPAINT_END: &[u8] = b"\x1b[3;1H\x1b[?25h";
+    let mut echoed = false;
+    let mut seen = Vec::new();
+    loop {
+        let repainted = seen
+            .windows(REPAINT_END.len())
+            .any(|window| window == REPAINT_END);
+        if echoed && repainted {
+            return;
+        }
+        match session.recv() {
+            Ok(DaemonMsg::Size(size)) if size.cols == cols => echoed = true,
+            Ok(DaemonMsg::Output(bytes)) => seen.extend_from_slice(&bytes),
+            Ok(DaemonMsg::Exited { code }) => panic!(
+                "the pane exited ({code:?}) before the size echo for {cols} columns \
+                 and the repaint; saw {:?}",
+                String::from_utf8_lossy(&seen)
+            ),
+            Ok(_) => {}
+            Err(error) => panic!(
+                "no size echo for {cols} columns and repaint arrived: {error}; saw {:?}",
+                String::from_utf8_lossy(&seen)
+            ),
         }
     }
 }
