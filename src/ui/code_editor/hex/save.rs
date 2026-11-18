@@ -82,7 +82,7 @@ impl HexData {
 
 impl Tty59App {
     /// Whether `id` is a document with edits that are not on disk, of any kind.
-    pub(super) fn doc_dirty(&self, id: BufferId, cx: &gpui::App) -> bool {
+    pub(in crate::ui::code_editor) fn doc_dirty(&self, id: BufferId, cx: &gpui::App) -> bool {
         match self.buffer(id) {
             Some(f) => f.dirty,
             None => self.hex_dirty(id, cx),
@@ -164,7 +164,7 @@ impl Tty59App {
     ///
     /// A paged document whose file was deleted is not recreated: it never held all the bytes,
     /// so the write fails with NotFound and the Deleted banner already says the file is gone.
-    pub(super) fn hex_save(
+    pub(in crate::ui::code_editor) fn hex_save(
         &mut self,
         id: BufferId,
         then_close: bool,
@@ -283,7 +283,7 @@ impl Tty59App {
     }
 
     /// What a change seen on disk means for the hex document `id`.
-    pub(super) fn hex_apply_external_change(
+    pub(in crate::ui::code_editor) fn hex_apply_external_change(
         &mut self,
         id: BufferId,
         observed: Observed,
@@ -328,7 +328,7 @@ impl Tty59App {
 
     /// Reads the file again and replaces the document with it, edits and all: a clean
     /// document that changed on disk, or the banner's Reload.
-    pub(super) fn hex_reload_from_disk(
+    pub(in crate::ui::code_editor) fn hex_reload_from_disk(
         &mut self,
         id: BufferId,
         window: &mut Window,
@@ -386,7 +386,7 @@ impl Tty59App {
     }
 
     /// Keep mine: the file as it is on disk is the one a save may replace.
-    pub(super) fn hex_keep_mine(
+    pub(in crate::ui::code_editor) fn hex_keep_mine(
         &mut self,
         id: BufferId,
         observed: Option<MTime>,
@@ -405,7 +405,7 @@ impl Tty59App {
 
     /// A file or folder was deleted through tty59: hex documents at or under it say so rather
     /// than waiting for the watcher.
-    pub(super) fn hex_path_removed(&mut self, host: HostId, path: &Path, cx: &mut Context<Self>) {
+    pub(in crate::ui::code_editor) fn hex_path_removed(&mut self, host: HostId, path: &Path, cx: &mut Context<Self>) {
         for doc in &self.editor.hex.docs {
             if doc.host.id() == host && doc.path.starts_with(path) {
                 doc.data.update(cx, |d, cx| {

@@ -40,7 +40,7 @@ pub(crate) struct HexData {
     in_flight: BTreeSet<(u64, u64)>,
     /// A save is on its way. Like a text buffer's: a second save waits for it, and an external
     /// change seen meanwhile is the save's own.
-    pub(super) saving: bool,
+    pub(in crate::ui::code_editor) saving: bool,
     pub(super) save_pending: bool,
     pub(super) save_then_close: bool,
     /// Why the document and the file no longer agree, for the banner.
