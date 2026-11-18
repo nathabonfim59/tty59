@@ -1334,7 +1334,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorWrapOn => "Wrap: on",
         L10nKey::EditorWrapOff => "Wrap: off",
         L10nKey::EditorFileTooLarge => "\"{path}\" is too large for the editor ({size} MB)",
-        L10nKey::EditorBinaryFile => "\"{path}\" looks like a binary file",
         L10nKey::EditorUntitled => "Untitled-{n}",
         L10nKey::EditorUnsavedChangesMany => "{count} files have unsaved changes",
         L10nKey::EditorSaveAll => "Save All",
@@ -2572,6 +2571,14 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ImageCopy => "Copy Image",
         L10nKey::CmdImageCopy => "Copy Image",
         L10nKey::CmdImageDownload => "Download Image",
+        L10nKey::CmdOpenAsHex => "Open as Hex",
+        L10nKey::CmdOpenAsText => "Open as Text",
+        L10nKey::HexStatusOffset => "Offset {hex} ({dec})",
+        L10nKey::HexStatusSelection => "Sel {count}",
+        L10nKey::HexStatusSize => "Size {size}",
+        L10nKey::HexTooLarge => {
+            "\"{name}\" is {size} MiB, over the {limit} MiB that can be opened over a connection"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} could not be started. tty59 looks on PATH for: {programs}. Make sure {name} is installed and can run."

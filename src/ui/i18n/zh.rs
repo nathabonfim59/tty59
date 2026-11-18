@@ -1250,7 +1250,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorWrapOn => "自动换行：开",
         L10nKey::EditorWrapOff => "自动换行：关",
         L10nKey::EditorFileTooLarge => "“{path}”太大，无法在编辑器中打开（{size} MB）",
-        L10nKey::EditorBinaryFile => "“{path}”看起来是二进制文件",
         L10nKey::EditorUntitled => "未命名-{n}",
         L10nKey::EditorUnsavedChangesMany => "{count} 个文件有未保存的更改",
         L10nKey::EditorSaveAll => "全部保存",
@@ -2388,6 +2387,12 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopy => "复制图片",
         L10nKey::CmdImageCopy => "复制图片",
         L10nKey::CmdImageDownload => "下载图片",
+        L10nKey::CmdOpenAsHex => "以十六进制打开",
+        L10nKey::CmdOpenAsText => "以文本打开",
+        L10nKey::HexStatusOffset => "偏移 {hex}（{dec}）",
+        L10nKey::HexStatusSelection => "已选 {count}",
+        L10nKey::HexStatusSize => "大小 {size}",
+        L10nKey::HexTooLarge => "“{name}”大小为 {size} MiB，超过通过连接可打开的上限 {limit} MiB",
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "无法启动 {name}。tty59 会在 PATH 中查找：{programs}。请确认 {name} 已安装且可以运行。"

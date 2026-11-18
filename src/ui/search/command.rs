@@ -140,6 +140,9 @@ pub enum CommandKind {
     /// The picture in front of the editor, from the palette.
     EditorCopyImage,
     EditorDownloadImage,
+    /// The saved file in front of the editor, as bytes (and back as text).
+    EditorOpenAsHex,
+    EditorOpenAsText,
     /// A Go to Symbol row: this 0-based place in the file in front.
     GoToSymbol {
         line: u32,
@@ -303,6 +306,8 @@ impl CommandKind {
             EditorSplitRight => "editor-split-right",
             EditorCopyImage => "editor-copy-image",
             EditorDownloadImage => "editor-download-image",
+            EditorOpenAsHex => "editor-open-as-hex",
+            EditorOpenAsText => "editor-open-as-text",
             RestartSshSession => "ssh-reconnect",
             ScmCommit => "git-commit",
             ScmStageAll => "git-stage-all",
@@ -454,6 +459,8 @@ impl CommandKind {
             EditorSplitRight => "EditorSplitRight",
             EditorCopyImage => "EditorCopyImage",
             EditorDownloadImage => "EditorDownloadImage",
+            EditorOpenAsHex => "EditorOpenAsHex",
+            EditorOpenAsText => "EditorOpenAsText",
             RestartSshSession => "RestartSshSession",
             OpenSshProfiles => "OpenSshProfiles",
             ScmCommit => "ScmCommit",

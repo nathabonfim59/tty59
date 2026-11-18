@@ -2741,6 +2741,18 @@ impl Tty59App {
                     }
                 }),
             );
+            // The same file as bytes, in a tab of its own, whatever it is.
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::CmdOpenAsHex)).on_click({
+                let app = app.clone();
+                let p = p.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        if let Some(host) = this.active_host(cx) {
+                            this.editor_open_path_as_hex(host, p.clone(), window, cx);
+                        }
+                    });
+                }
+            }));
         }
         if is_dir {
             menu = menu.item(

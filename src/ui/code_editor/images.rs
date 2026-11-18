@@ -102,7 +102,10 @@ impl Tty59App {
     pub(super) fn doc_label(&self, id: BufferId) -> Option<SharedString> {
         match self.buffer(id) {
             Some(f) => Some(f.label()),
-            None => self.image(id).map(|d| d.name.clone()),
+            None => self
+                .image(id)
+                .map(|d| d.name.clone())
+                .or_else(|| self.hex(id).map(|d| d.name.clone())),
         }
     }
 
@@ -114,7 +117,9 @@ impl Tty59App {
                 .is_none()
                 .then(|| (f.host.id(), f.path.as_path()));
         }
-        self.image(id).map(|d| (d.host.id(), d.path.as_path()))
+        self.image(id)
+            .map(|d| (d.host.id(), d.path.as_path()))
+            .or_else(|| self.hex(id).map(|d| (d.host.id(), d.path.as_path())))
     }
 
     /// Whether the document in front of the active tab's editor is any kind
@@ -122,7 +127,9 @@ impl Tty59App {
     pub(super) fn active_doc_present(&self) -> bool {
         self.tab_code()
             .and_then(TabCode::active_id)
-            .is_some_and(|id| self.buffer(id).is_some() || self.image(id).is_some())
+            .is_some_and(|id| {
+                self.buffer(id).is_some() || self.image(id).is_some() || self.hex(id).is_some()
+            })
     }
 
     /// The view of `id` for this tab and group, made when it is first asked
@@ -270,6 +277,7 @@ impl Tty59App {
             .iter()
             .filter(|((view_id, view_tab, _), _)| *view_id == id && *view_tab == tab)
             .any(|(_, view)| view.read(cx).focus.contains_focused(window, cx))
+            || self.hex_view_has_focus(id, tab, window, cx)
     }
 
     /// Shows `id` in `tab`, and only in `tab`: `false` when the tab is gone.
@@ -342,6 +350,7 @@ impl Tty59App {
     /// Forgets what tab `tab` was waiting for: it closed, or so did its editor.
     pub(super) fn image_requests_cancel(&mut self, tab: TabId) {
         self.editor.images.requests.retain(|_, r| r.tab != tab);
+        self.editor.hex.requests.retain(|_, r| r.tab != tab);
     }
 
     /// The reader closed `tab`'s editor panel (or the tab itself went): what
@@ -1024,7 +1033,8 @@ mod tests {
             [
                 CommandKind::EditorSearchOpenFiles,
                 CommandKind::EditorCopyImage,
-                CommandKind::EditorDownloadImage
+                CommandKind::EditorDownloadImage,
+                CommandKind::EditorOpenAsHex
             ],
             "a picture in front: the open-files search, then the picture's rows"
         );
@@ -1045,7 +1055,8 @@ mod tests {
             palette_kinds(&app, &mut vcx),
             [
                 CommandKind::EditorSearchOpenFiles,
-                CommandKind::EditorDownloadImage
+                CommandKind::EditorDownloadImage,
+                CommandKind::EditorOpenAsHex
             ],
             "a failed picture has nothing to copy, but its file can be had"
         );
@@ -1418,6 +1429,7 @@ mod tests {
             active: 0,
             visible,
             split: None,
+            hex: Vec::new(),
         }
     }
 
@@ -1431,7 +1443,8 @@ mod tests {
         files: &[PathBuf],
         epoch: u64,
     ) {
-        let requested: Vec<PathBuf> = files.iter().map(|p| p.to_path_buf()).collect();
+        let requested: Vec<(PathBuf, bool)> =
+            files.iter().map(|p| (p.to_path_buf(), false)).collect();
         let loaded: Vec<Option<Opened>> = files
             .iter()
             .map(|p| Some(opened_image(p, 40, 20)))

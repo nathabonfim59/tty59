@@ -525,15 +525,20 @@ impl Tty59App {
             .filter_map(|id| {
                 let Some(f) = self.buffer(id) else {
                     // A picture: its file's name and folder, never unsaved.
-                    let image = self.image(id)?;
-                    let local = image.host.id() == local_host;
-                    let dir =
-                        super::nav::path_crumbs(&image.path, if local { roots } else { &[] }).0;
+                    let (host, path, name) = match self.image(id) {
+                        Some(image) => (image.host.id(), &image.path, image.name.clone()),
+                        None => {
+                            let hex = self.hex(id)?;
+                            (hex.host.id(), &hex.path, hex.name.clone())
+                        }
+                    };
+                    let local = host == local_host;
+                    let dir = super::nav::path_crumbs(path, if local { roots } else { &[] }).0;
                     return Some(PickerRow {
                         id,
-                        name: image.name.clone(),
+                        name,
                         dir: dir.into(),
-                        dirty: false,
+                        dirty: self.hex_dirty(id, cx),
                         front: Some(id) == front,
                     });
                 };
@@ -1777,7 +1782,9 @@ mod gpui_tests {
                 files: paths[5..].to_vec(),
                 active: 3,
                 focused: true,
+                hex: Vec::new(),
             }),
+            hex: Vec::new(),
         };
         let tab = app.read_with(&vcx, |app, _| app.tabs[1].tree_id.get());
         vcx.update(|_, cx| editor_session::put(cx, tab, state));

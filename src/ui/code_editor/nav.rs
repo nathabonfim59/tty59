@@ -719,6 +719,22 @@ impl Tty59App {
                     .map(|(_, key, kind)| Item::localized(key, kind).in_group(CommandGroup::View)),
             );
         }
+        // Any saved document can be shown as bytes, and a hex tab of a text file as text:
+        // gated here too, for the same reason.
+        if let Some(id) = self.tab_code().and_then(TabCode::active_id) {
+            let row = match self.hex_offer(id, cx) {
+                Some(super::hex::HexOffer::AsHex) => {
+                    Some((L10nKey::CmdOpenAsHex, CommandKind::EditorOpenAsHex))
+                }
+                Some(super::hex::HexOffer::AsText) => {
+                    Some((L10nKey::CmdOpenAsText, CommandKind::EditorOpenAsText))
+                }
+                None => None,
+            };
+            items.extend(
+                row.map(|(key, kind)| Item::localized(key, kind).in_group(CommandGroup::View)),
+            );
+        }
         if self.active_buffer().is_none() {
             return items;
         }
@@ -1843,6 +1859,7 @@ pub(super) mod gpui_tests {
             kinds,
             [
                 CommandKind::EditorSearchOpenFiles,
+                CommandKind::EditorOpenAsHex,
                 CommandKind::EditorGoToSymbol,
                 CommandKind::EditorNavigateBack,
                 CommandKind::EditorNavigateForward,

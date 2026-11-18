@@ -8,32 +8,25 @@
 //! while a file the host cannot read in parts is read whole, once, up to what
 //! the connection can carry.
 
-// The pieces below are used by the document and view code that lands after
-// them; until then only their tests do.
-#![allow(dead_code)]
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tty59_core::host::{Changed, Expect, Host, MTime};
 
+use super::model::PAGE;
 use crate::ui::code_editor::{EditorOpenError, MAX_FILE_BYTES, SaveOutcome};
 use crate::ui::editor_text;
 use crate::ui::file_copy::REMOTE_FILE_MAX;
 use crate::ui::i18n::{L10nKey, t_fmt};
 use crate::ui::image_preview::decode as image_decode;
 
-/// Bytes in one page. Mirrors the page size of the model's byte store; the
-/// two are one constant once the model is integrated.
-pub(super) const PAGE: usize = 64 * 1024;
-
 /// [`PAGE`] as a file offset.
 const PAGE_BYTES: u64 = PAGE as u64;
 
 /// Where a document's bytes come from, in plain data: the model's own `Source`
 /// is built from this where the two meet.
-pub(super) enum HexSource {
+pub(in crate::ui::code_editor) enum HexSource {
     /// A host that reads in parts: the size, and the first page so the view
     /// has something to draw before any further read answers.
     Paged { len: u64, first_page: Vec<u8> },
@@ -42,18 +35,19 @@ pub(super) enum HexSource {
 }
 
 /// A file read for the hex view.
-pub(super) struct HexFile {
-    pub(super) path: PathBuf,
-    pub(super) source: HexSource,
-    pub(super) mtime: Option<MTime>,
-    pub(super) len: u64,
+pub(in crate::ui::code_editor) struct HexFile {
+    pub(in crate::ui::code_editor) path: PathBuf,
+    pub(in crate::ui::code_editor) source: HexSource,
+    pub(in crate::ui::code_editor) mtime: Option<MTime>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
+    pub(in crate::ui::code_editor) len: u64,
     /// Whether the text editor would have taken this file, which decides
     /// whether the tab offers "Open as Text".
-    pub(super) opens_as_text: bool,
+    pub(in crate::ui::code_editor) opens_as_text: bool,
 }
 
 /// What loading a file for the hex view came to.
-pub(super) enum HexLoaded {
+pub(in crate::ui::code_editor) enum HexLoaded {
     File(HexFile),
     /// A file a host that cannot read in parts has no way to bring over: the
     /// tab says so and names `limit`, rather than showing nothing.
@@ -113,7 +107,10 @@ fn paged_opens_as_text(h: &dyn Host, path: &Path, len: u64) -> Result<bool, Edit
 /// `Unsupported` to a ranged read, is read whole in a single request, so what
 /// the connection can carry bounds it: over [`REMOTE_FILE_MAX`], by its size
 /// or by the read itself refusing, is [`HexLoaded::TooLarge`].
-pub(super) fn load_hex(h: &dyn Host, requested: PathBuf) -> Result<HexLoaded, EditorOpenError> {
+pub(in crate::ui::code_editor) fn load_hex(
+    h: &dyn Host,
+    requested: PathBuf,
+) -> Result<HexLoaded, EditorOpenError> {
     let path = h.canonicalize(&requested).unwrap_or(requested);
     let meta = h.stat(&path).map_err(|e| cant_open(&path, &e))?;
 
@@ -170,7 +167,7 @@ pub(super) fn load_hex(h: &dyn Host, requested: PathBuf) -> Result<HexLoaded, Ed
 /// The bytes are whatever `load_document` read, which is the whole file up to
 /// its own limit: a larger file never gets this far and comes through
 /// [`load_hex`].
-pub(super) fn hex_from_not_text(
+pub(in crate::ui::code_editor) fn hex_from_not_text(
     local: bool,
     path: PathBuf,
     bytes: Vec<u8>,
@@ -215,6 +212,7 @@ pub(super) fn read_pages(
 }
 
 /// What a save writes.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 pub(super) enum HexWrite {
     /// The edited runs of a paged document, written in place.
     Patches(Vec<(u64, Vec<u8>)>),
@@ -232,6 +230,7 @@ pub(super) enum HexWrite {
 /// is not that file; that refuses with `InvalidData` and nothing is written.
 /// A whole-file write replaces the file outright, so there is nothing for it
 /// to be wrong about.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 pub(super) fn save_hex(
     h: &dyn Host,
     path: &Path,
