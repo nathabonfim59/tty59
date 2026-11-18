@@ -611,7 +611,7 @@ fn confirm_destructive(
         };
 
         if live == Some(0) && verb == "Stop" {
-            let _ = cx.update(|cx| act(cx, workspace));
+            cx.update(|cx| act(cx, workspace));
             return;
         }
 
@@ -639,7 +639,7 @@ fn confirm_destructive(
         };
 
         if let Ok(0) = answer.await {
-            let _ = cx.update(|cx| act(cx, workspace));
+            cx.update(|cx| act(cx, workspace));
         }
     })
     .detach();
@@ -975,8 +975,10 @@ mod tests {
         // gpui's default asks Wayland for a server-side frame on top of it.
         cx.update(|cx| {
             WindowRegistry::init(cx);
-            let mut config = Config::default();
-            config.remember_window_size = false;
+            let config = Config(crate::core::config::CoreConfig {
+                remember_window_size: false,
+                ..Default::default()
+            });
             cx.set_global(config);
 
             let options = window_options(cx, None);
@@ -1337,7 +1339,7 @@ mod tests {
 
         // `WorkspaceStore::remove` saves; a test has no business writing the
         // real views.
-        let _ = tty59_core::core::config::set_config_dir(
+        tty59_core::core::config::set_config_dir(
             std::env::temp_dir().join(format!("tty59-windows-test-{}", std::process::id())),
         );
         cx.update(|cx| {

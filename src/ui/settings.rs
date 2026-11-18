@@ -172,7 +172,7 @@ fn group_thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.char_indices() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -2413,10 +2413,10 @@ impl Tty59App {
     }
 
     fn toggle_ssh_group(&mut self, key: String, cx: &mut Context<Self>) {
-        if let Some(s) = self.active_settings_mut() {
-            if !s.ssh_collapsed_groups.remove(&key) {
-                s.ssh_collapsed_groups.insert(key);
-            }
+        if let Some(s) = self.active_settings_mut()
+            && !s.ssh_collapsed_groups.remove(&key)
+        {
+            s.ssh_collapsed_groups.insert(key);
         }
         // Collapsing the list never discards the profile being edited.
         cx.notify();
@@ -3300,8 +3300,10 @@ mod tests {
         }
         crate::ui::i18n::set_locale("en");
 
-        let mut cfg = Config::default();
-        cfg.auto_hide_titlebar_buttons = true;
+        let cfg = Config(crate::core::config::CoreConfig {
+            auto_hide_titlebar_buttons: true,
+            ..Default::default()
+        });
         let changed = settings_search_entries()
             .iter()
             .filter(|e| e.modified(&cfg, ThemeView::default()))
@@ -3367,9 +3369,11 @@ mod tests {
         assert!(!activation.description().is_empty());
         assert!(!activation.modified(&Config::default(), ThemeView::default()));
 
-        let mut cfg = Config::default();
-        cfg.tab_group_shortcuts = true;
-        cfg.tab_group_activation = TabGroupActivation::First;
+        let cfg = Config(crate::core::config::CoreConfig {
+            tab_group_shortcuts: true,
+            tab_group_activation: TabGroupActivation::First,
+            ..Default::default()
+        });
         let changed = settings_search_entries()
             .iter()
             .filter(|e| e.modified(&cfg, ThemeView::default()))
@@ -3527,7 +3531,7 @@ mod tests {
             Some(real.to_string_lossy().to_string())
         );
         assert_eq!(
-            first_readable_key_in(&[missing.clone()], "example.com", "ada"),
+            first_readable_key_in(std::slice::from_ref(&missing), "example.com", "ada"),
             None
         );
         // An empty field falls back to the defaults the handshake offers —
@@ -3538,7 +3542,12 @@ mod tests {
             Some(real.to_string_lossy().to_string())
         );
         assert_eq!(
-            first_readable_key_or(&[missing.clone()], "example.com", "ada", defaults),
+            first_readable_key_or(
+                std::slice::from_ref(&missing),
+                "example.com",
+                "ada",
+                defaults
+            ),
             None
         );
         assert_eq!(
@@ -3701,8 +3710,10 @@ mod tests {
 
     #[test]
     fn synced_windows_backdrop_is_only_a_local_override_on_windows() {
-        let mut config = Config::default();
-        config.window_backdrop = WindowBackdrop::MicaAlt;
+        let config = Config(crate::core::config::CoreConfig {
+            window_backdrop: WindowBackdrop::MicaAlt,
+            ..Default::default()
+        });
 
         assert!(window_overrides_active(&config, true));
         assert!(!window_overrides_active(&config, false));
@@ -3710,12 +3721,16 @@ mod tests {
 
     #[test]
     fn opacity_and_blur_are_local_overrides_on_every_platform() {
-        let mut opacity = Config::default();
-        opacity.window_opacity = Some(0.8);
-        opacity.window_backdrop = WindowBackdrop::Mica;
-        let mut blur = Config::default();
-        blur.window_blur = Some(true);
-        blur.window_backdrop = WindowBackdrop::Acrylic;
+        let opacity = Config(crate::core::config::CoreConfig {
+            window_opacity: Some(0.8),
+            window_backdrop: WindowBackdrop::Mica,
+            ..Default::default()
+        });
+        let blur = Config(crate::core::config::CoreConfig {
+            window_blur: Some(true),
+            window_backdrop: WindowBackdrop::Acrylic,
+            ..Default::default()
+        });
 
         assert!(window_overrides_active(&opacity, false));
         assert!(window_overrides_active(&blur, false));
@@ -4014,7 +4029,7 @@ mod tests {
             jump: "bastion".to_string(),
             ..draft_with_host()
         };
-        let (profile, errors) = validate_ssh_draft(draft, &[bastion.clone()]);
+        let (profile, errors) = validate_ssh_draft(draft, std::slice::from_ref(&bastion));
         assert_eq!(profile.jump_host, Some(bastion.id));
         assert!(errors.is_empty());
     }
@@ -4286,7 +4301,7 @@ mod gpui_tests {
         let (inner, outer) = app.update_in(&mut vcx, |app, window, cx| {
             cx.global_mut::<Config>().ssh_profiles = (0..40)
                 .map(|i| {
-                    let mut p = crate::core::ssh_profile::SshProfile::new(&format!("host-{i:02}"));
+                    let mut p = crate::core::ssh_profile::SshProfile::new(format!("host-{i:02}"));
                     p.host = format!("h{i}.example");
                     p
                 })

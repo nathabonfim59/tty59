@@ -2699,7 +2699,7 @@ impl SummaryLexicon {
                 })
                 .collect()
         };
-        let templates: Vec<Vec<Tok>> = templates.iter().map(|t| split(*t)).collect();
+        let templates: Vec<Vec<Tok>> = templates.iter().map(|t| split(t)).collect();
         // The plan holds the words of two templates on the stack: a template
         // with more words than half of it is a translation the header cannot
         // plan, and is refused here, where the language changes, rather than
@@ -3031,7 +3031,7 @@ impl DiffNeed {
                 fixed += t.min;
             }
         }
-        (kids > 0).then(|| LineNeed {
+        (kids > 0).then_some(LineNeed {
             fixed: fixed + self.gap * (kids as f32 - 1.),
             flex,
         })
@@ -3428,7 +3428,7 @@ fn features_of<R>(cx: &gpui::App, pick: impl FnOnce(&DiffFeatures) -> R) -> R {
         Some(resolved) => pick(resolved),
         None => {
             static OFF: LazyLock<DiffFeatures> = LazyLock::new(|| DiffFeatures::resolve(None));
-            pick(&*OFF)
+            pick(&OFF)
         }
     }
 }

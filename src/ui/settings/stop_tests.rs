@@ -8,6 +8,7 @@
 //! * ring: the keyboard ring is the control grown by the installed gap and the
 //!   shared stroke, is absent for pointer focus and when focus leaves, and wraps
 //!   the control (not a stretched row) where the parent stretches.
+//!
 //! Post-implementation controls: they cannot run before `Stop` exists.
 
 use std::cell::{Cell, RefCell};
@@ -949,7 +950,7 @@ fn m1_a_modified_chord_never_steps_a_stepper_and_still_reaches_the_parent(cx: &m
         // Linux, where the test types `cmd-`): compare the parsed chord.
         let want = gpui::Keystroke::parse(chord).expect("a chord").unparse();
         assert!(
-            seen.iter().any(|k| *k == want),
+            seen.contains(&want),
             "{chord} ({want}) was consumed by the stepper: the parent saw {seen:?}"
         );
     }
@@ -981,7 +982,7 @@ fn m2_a_modified_chord_never_moves_a_slider_and_still_reaches_the_parent(cx: &mu
     for chord in &chords {
         let want = gpui::Keystroke::parse(chord).expect("a chord").unparse();
         assert!(
-            seen.iter().any(|k| *k == want),
+            seen.contains(&want),
             "{chord} ({want}) was consumed by the slider: the parent saw {seen:?}"
         );
     }

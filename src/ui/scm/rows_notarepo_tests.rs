@@ -89,7 +89,6 @@ fn second_window(cx: &mut TestAppContext) -> (Entity<Tty59App>, VisualTestContex
             root.view()
                 .clone()
                 .downcast::<Tty59App>()
-                .ok()
                 .expect("window root wraps a Tty59App")
         })
         .unwrap();

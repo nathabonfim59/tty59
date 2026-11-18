@@ -1314,7 +1314,7 @@ impl Tty59App {
                                 // per call instead of being moved out.
                                 let info = info.clone();
                                 gpui_component::tooltip::Tooltip::element(move |_window, _cx| {
-                                    let card = v_flex()
+                                    v_flex()
                                         .gap_1()
                                         // The card is the one place that
                                         // promised the whole string, so a long
@@ -1387,8 +1387,7 @@ impl Tty59App {
                                                     )
                                                     .child(div().truncate().child(host)),
                                             )
-                                        });
-                                    card
+                                        })
                                 })
                                 .build(window, cx)
                             })
@@ -4646,8 +4645,8 @@ mod fold_tests {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
         let r = AutoKey::Repo(PathBuf::from("/w/r"));
         app.update(&mut vcx, |app, cx| {
-            for i in 0..2 {
-                *app.tabs[i].auto_group.borrow_mut() = Some(r.clone());
+            for tab in &app.tabs[..2] {
+                *tab.auto_group.borrow_mut() = Some(r.clone());
             }
             *app.tabs[2].auto_group.borrow_mut() = Some(AutoKey::Repo(PathBuf::from("/w/s")));
             cx.notify();
@@ -4664,8 +4663,8 @@ mod fold_tests {
                 panic!("exactly one pinned group: {:?}", app.sidebar_groups.pinned);
             };
             assert_eq!(group.folder.as_deref(), Some("/w/r"));
-            for i in 0..3 {
-                assert_eq!(app.tabs[i].group.get(), Some(group.id), "tab {i}");
+            for (i, tab) in app.tabs[..3].iter().enumerate() {
+                assert_eq!(tab.group.get(), Some(group.id), "tab {i}");
             }
             let keys = app.sidebar_group_keys(cx);
             assert!(
@@ -4690,8 +4689,8 @@ mod fold_tests {
         app.update(&mut vcx, |app, cx| {
             app.sidebar_groups.pinned.push(kept);
             app.tabs[0].group.set(Some(id));
-            for i in 0..2 {
-                *app.tabs[i].auto_group.borrow_mut() = Some(r.clone());
+            for tab in &app.tabs[..2] {
+                *tab.auto_group.borrow_mut() = Some(r.clone());
             }
             *app.tabs[2].auto_group.borrow_mut() = Some(AutoKey::Repo(PathBuf::from("/w/s")));
             cx.notify();
@@ -4712,8 +4711,8 @@ mod fold_tests {
                 panic!("still one pinned group: {:?}", app.sidebar_groups.pinned);
             };
             assert_eq!(group.id, id);
-            for i in 0..3 {
-                assert_eq!(app.tabs[i].group.get(), Some(id), "tab {i}");
+            for (i, tab) in app.tabs[..3].iter().enumerate() {
+                assert_eq!(tab.group.get(), Some(id), "tab {i}");
             }
         });
     }
@@ -4816,8 +4815,8 @@ mod fold_tests {
         let alpha = AutoKey::Repo(PathBuf::from("/w/alpha"));
 
         app.update(&mut vcx, |app, cx| {
-            for i in 0..2 {
-                *app.tabs[i].auto_group.borrow_mut() = Some(alpha.clone());
+            for tab in &app.tabs[..2] {
+                *tab.auto_group.borrow_mut() = Some(alpha.clone());
             }
             app.toggle_sidebar_group(Some(&GroupKey::Auto(alpha.clone())), cx);
         });
@@ -4855,8 +4854,8 @@ mod fold_tests {
         let alpha = GroupKey::Auto(AutoKey::Repo(PathBuf::from("/w/alpha")));
 
         app.update(&mut vcx, |app, cx| {
-            for i in 0..2 {
-                *app.tabs[i].auto_group.borrow_mut() = alpha.auto().cloned();
+            for tab in &app.tabs[..2] {
+                *tab.auto_group.borrow_mut() = alpha.auto().cloned();
             }
             app.active = 0;
             app.toggle_sidebar_group(Some(&alpha), cx);
@@ -5079,17 +5078,17 @@ mod fold_tests {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
 
         app.update(&mut vcx, |app, cx| {
-            for i in 0..2 {
-                let pane = std::mem::replace(&mut app.tabs[i].pane, crate::ui::pane::Pane::Empty);
+            for tab in &mut app.tabs[..2] {
+                let pane = std::mem::replace(&mut tab.pane, crate::ui::pane::Pane::Empty);
                 let tree = tty59_core::core::machine::Tab {
-                    id: app.tabs[i].tree_id.get(),
+                    id: tab.tree_id.get(),
                     name: None,
                     group: None,
                     last_auto: Some(AutoKey::Repo(PathBuf::from("/w/alpha"))),
                     root: tty59_core::core::machine::PaneNode::Leaf { pane: 1 },
                     hibernated: false,
                 };
-                app.tabs[i] = crate::ui::app::Tab::from_tree(&tree, pane);
+                *tab = crate::ui::app::Tab::from_tree(&tree, pane);
             }
             let work = label(app, "work", cx);
             app.tabs[1].group.set(Some(work));

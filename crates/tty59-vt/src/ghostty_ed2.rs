@@ -204,7 +204,7 @@ impl Ed2Rewriter {
                             self.paired_1049 = false;
                         } else {
                             let tail = buf[j..].to_vec();
-                            buf.splice(params_start.., [b'?', b'4', b'7']);
+                            buf.splice(params_start.., *b"?47");
                             buf.extend_from_slice(&tail);
                             // The final byte (and everything after it) kept
                             // its shape; the sequence is now three bytes

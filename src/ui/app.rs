@@ -1545,7 +1545,7 @@ impl Tty59App {
                 let _ = this.update_in(cx, |this, _window, cx| this.restart_daemon_confirmed(cx));
             }
             Ok(_) => {
-                let _ = cx.update(|cx| cx.quit());
+                cx.update(|cx| cx.quit());
             }
             // Dismissed without an answer: the window went away before the
             // question was settled. Arm it again so the next window asks, rather
@@ -2056,7 +2056,7 @@ impl Tty59App {
                 cx.global::<Config>().show_tray_icon && crate::ui::tray::icon_is_up();
             if !retire_to_tray {
                 cx.spawn(async move |cx| {
-                    let _ = cx.update(|cx| cx.quit());
+                    cx.update(|cx| cx.quit());
                 })
                 .detach();
             }
@@ -2330,6 +2330,8 @@ impl Tty59App {
     /// asks the daemon for the one it names: attached if it is somehow still
     /// running, otherwise a fresh shell in its cwd opening on its last screen.
     /// Hands the tab back when no pane in it would start.
+    // Boxing the `SessionTab` error would change every caller; out of scope for the lint pass.
+    #[allow(clippy::result_large_err)]
     fn put_back_closed_tab(
         &mut self,
         st: SessionTab,
@@ -2374,10 +2376,7 @@ impl Tty59App {
                 folder_watch: std::cell::Cell::new(crate::core::group_key::EntryWatch::fresh()),
                 // A tab the machine kept comes back under its own id; one from
                 // this window's list never had one the machine still knows.
-                tree_id: std::cell::Cell::new(
-                    st.tree_id
-                        .unwrap_or_else(tty59_core::core::machine::TabId::new),
-                ),
+                tree_id: std::cell::Cell::new(st.tree_id.unwrap_or_default()),
                 last_used: std::cell::Cell::new(0),
                 focus_origin: Default::default(),
                 asleep: None,
@@ -2608,7 +2607,7 @@ impl Tty59App {
             }
             cx.background_spawn(async { crate::daemon::spawn::stop() })
                 .await;
-            let _ = cx.update(|cx| cx.quit());
+            cx.update(|cx| cx.quit());
         })
         .detach();
     }
@@ -2810,7 +2809,7 @@ impl Tty59App {
         // exec — a daemon that never started listening again is gone, and the
         // client we still hold points at its socket, which `is_connected` keeps
         // calling good until its reader sees the EOF.
-        let _ = cx.update(crate::ui::tree_sync::resync_after_local_daemon_change);
+        cx.update(crate::ui::tree_sync::resync_after_local_daemon_change);
 
         let _ = this.update_in(cx, |this, window, cx| {
             this.focus_active(window, cx);
@@ -3332,21 +3331,20 @@ impl Tty59App {
             prompt: None,
         });
         cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await {
-                if let Some(path) = paths.into_iter().next() {
-                    let _ = this.update_in(cx, |this, window, cx| {
-                        this.mutate_active_theme(
-                            |theme| {
-                                let opacity =
-                                    theme.image.as_ref().map(|i| i.opacity).unwrap_or(0.3);
-                                theme.image = Some(crate::ui::presets::Image { path, opacity });
-                            },
-                            window,
-                            cx,
-                        );
-                        this.rebuild_theme_editor(window, cx);
-                    });
-                }
+            if let Ok(Ok(Some(paths))) = rx.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.mutate_active_theme(
+                        |theme| {
+                            let opacity = theme.image.as_ref().map(|i| i.opacity).unwrap_or(0.3);
+                            theme.image = Some(crate::ui::presets::Image { path, opacity });
+                        },
+                        window,
+                        cx,
+                    );
+                    this.rebuild_theme_editor(window, cx);
+                });
             }
         })
         .detach();
@@ -4368,10 +4366,10 @@ impl Tty59App {
     /// answer at all.
     pub(crate) fn remember_active_pane(&mut self, window: &Window, cx: &App) {
         let active = self.active;
-        if let Some(tab) = self.tabs.get_mut(active) {
-            if let Some(leaf) = tab.pane.focused_leaf(window, cx) {
-                tab.last_focused = Some(leaf.entity_id());
-            }
+        if let Some(tab) = self.tabs.get_mut(active)
+            && let Some(leaf) = tab.pane.focused_leaf(window, cx)
+        {
+            tab.last_focused = Some(leaf.entity_id());
         }
     }
 
@@ -5089,12 +5087,12 @@ impl Tty59App {
         } else {
             (from + len - 1) % len
         };
-        if let Some(tab) = self.tabs.get_mut(self.active) {
-            if tab.pane.swap_leaf_indices(from, to) {
-                self.maximized = None;
-                self.save_session(cx);
-                cx.notify();
-            }
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.pane.swap_leaf_indices(from, to)
+        {
+            self.maximized = None;
+            self.save_session(cx);
+            cx.notify();
         }
     }
 
@@ -6475,27 +6473,27 @@ impl Tty59App {
         };
         let name = agent.display_name();
         if agent.fork_label().is_none() {
-            window.push_notification(t_fmt(L10nKey::AppForkNoCommand, &[("name", &name)]), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkNoCommand, &[("name", name)]), cx);
             return None;
         }
         if remote.is_some() {
-            window.push_notification(t_fmt(L10nKey::AppForkLocalOnly, &[("name", &name)]), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkLocalOnly, &[("name", name)]), cx);
             return None;
         }
         let session = session.unwrap_or_default();
         let Some(id) = session.session_id.as_deref() else {
-            window.push_notification(t_fmt(L10nKey::AppForkNoSessionId, &[("name", &name)]), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkNoSessionId, &[("name", name)]), cx);
             return None;
         };
         let Some(cmd) = agent.fork_command(id, session.launch_argv.as_deref()) else {
             window.push_notification(
-                t_fmt(L10nKey::AppForkSessionIdNotToken, &[("name", &name)]),
+                t_fmt(L10nKey::AppForkSessionIdNotToken, &[("name", name)]),
                 cx,
             );
             return None;
         };
         if session.status == AgentStatus::Working {
-            window.push_notification(t_fmt(L10nKey::AppForkMidTurn, &[("name", &name)]), cx);
+            window.push_notification(t_fmt(L10nKey::AppForkMidTurn, &[("name", name)]), cx);
         }
         Some(cmd)
     }
@@ -11370,15 +11368,15 @@ fn session_to_pane(
                         && (ssh_spec.is_none() || native_ssh_pane_alive(alive, *id))
                 }),
             };
-            if restore.is_none() {
-                if let Some(spec) = ssh_spec.clone() {
-                    let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
-                    // A native SSH leaf's recorded cwd is the far shell's own
-                    // report, so it is where the redialled shell starts.
-                    match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
-                        Ok(view) => return Some(Pane::leaf(PaneSlot::Ready(view))),
-                        Err(e) => log::error!("restoring native SSH pane failed: {e}"),
-                    }
+            if restore.is_none()
+                && let Some(spec) = ssh_spec.clone()
+            {
+                let resolved = crate::ui::ssh_connect::resolve_persisted_ssh_spec(spec, cx);
+                // A native SSH leaf's recorded cwd is the far shell's own
+                // report, so it is where the redialled shell starts.
+                match new_terminal_native(font_size, cwd.clone(), resolved, window, cx) {
+                    Ok(view) => return Some(Pane::leaf(PaneSlot::Ready(view))),
+                    Err(e) => log::error!("restoring native SSH pane failed: {e}"),
                 }
             }
             // Past here the leaf comes back as a shell on the window's own
@@ -13157,7 +13155,6 @@ pub(crate) mod test_window {
                 root.view()
                     .clone()
                     .downcast::<Tty59App>()
-                    .ok()
                     .expect("window root wraps a Tty59App")
             })
             .unwrap();
@@ -13897,7 +13894,6 @@ mod restart_server_gpui_tests {
                 root.view()
                     .clone()
                     .downcast::<Tty59App>()
-                    .ok()
                     .expect("window root wraps a Tty59App")
             })
             .unwrap();
@@ -13948,7 +13944,6 @@ mod shell_menu_gpui_tests {
                 root.view()
                     .clone()
                     .downcast::<Tty59App>()
-                    .ok()
                     .expect("window root wraps a Tty59App")
             })
             .unwrap();
@@ -14272,11 +14267,11 @@ mod zoom_gpui_tests {
             // A zoom only hides something where there is a sibling to hide, so
             // tabs 0 and 1 get a second pane and tab 2 stays single.
             let mut held = Vec::new();
-            for tab in 0..2 {
-                let (view, stream) = quiet_test_pane(90 + tab as u64, window, cx);
+            for (i, tab) in app.tabs[..2].iter_mut().enumerate() {
+                let (view, stream) = quiet_test_pane(90 + i as u64, window, cx);
                 held.push(stream);
-                let first = app.tabs[tab].pane.first_leaf().expect("tab has a pane");
-                app.tabs[tab].pane = Pane::split_node(
+                let first = tab.pane.first_leaf().expect("tab has a pane");
+                tab.pane = Pane::split_node(
                     gpui::Axis::Horizontal,
                     0.5,
                     Pane::leaf(first),
@@ -14567,7 +14562,6 @@ mod new_window_action_tests {
                 root.view()
                     .clone()
                     .downcast::<Tty59App>()
-                    .ok()
                     .expect("window root wraps a Tty59App")
             })
             .unwrap();
@@ -14824,7 +14818,6 @@ mod close_window_action_tests {
                 root.view()
                     .clone()
                     .downcast::<Tty59App>()
-                    .ok()
                     .expect("window root wraps a Tty59App")
             })
             .unwrap();

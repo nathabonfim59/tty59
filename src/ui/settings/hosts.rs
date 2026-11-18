@@ -17,6 +17,8 @@ const HOST_FILTER_MIN_W: f32 = 160.;
 const HOST_TOOLBAR_WRAP_BELOW: f32 = 560.;
 
 /// A list line: a group's heading, or a host.
+// reason: one transient value per rendered line; boxing `SshProfile` is out of scope here.
+#[allow(clippy::large_enum_variant)]
 enum HostLine {
     Head {
         key: String,
@@ -177,10 +179,10 @@ impl Tty59App {
                             (Some(i), "down") => (i + 1).min(visible.len() - 1),
                             (Some(i), _) => i.saturating_sub(1),
                         };
-                        if this.active_settings().is_some_and(|s| s.ssh_form.is_none()) {
-                            if let Some(s) = this.active_settings_mut() {
-                                s.ssh_open = Some(visible[next]);
-                            }
+                        if this.active_settings().is_some_and(|s| s.ssh_form.is_none())
+                            && let Some(s) = this.active_settings_mut()
+                        {
+                            s.ssh_open = Some(visible[next]);
                         }
                         cx.stop_propagation();
                         cx.notify();
@@ -621,12 +623,9 @@ impl Tty59App {
         let tk = Tk::of(cx);
         let id = p.id;
         let cfg = cx.global::<Config>();
-        let jump = p.jump_host.and_then(|j| {
-            cfg.ssh_profiles
-                .iter()
-                .find(|q| q.id == j)
-                .map(|q| host_title(q))
-        });
+        let jump = p
+            .jump_host
+            .and_then(|j| cfg.ssh_profiles.iter().find(|q| q.id == j).map(host_title));
         let fields: Vec<(&str, String)> = [
             (t(L10nKey::SettingsHost), Some(p.host.clone())),
             (

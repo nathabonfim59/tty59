@@ -928,8 +928,7 @@ fn is_program(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return std::fs::metadata(path)
-            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+        std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     }
     #[cfg(not(unix))]
     {
@@ -4616,7 +4615,7 @@ impl Tty59App {
             (Some(LspStatus::Missing(name)), true) => content
                 .lead
                 .clone()
-                .map(|label| crate::ui::lsp::editor::render_lsp_missing(*name, label, cx)),
+                .map(|label| crate::ui::lsp::editor::render_lsp_missing(name, label, cx)),
             _ => None,
         };
         let lsp_tail = match (&lsp_status, kept.has(Readout::Problems)) {

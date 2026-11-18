@@ -893,7 +893,11 @@ impl Tty59App {
             .iter()
             .filter(|(_, row)| row.interactive())
             .map(|(key, _)| *key);
-        let Some(key) = (if last { stops.last() } else { stops.next() }) else {
+        let Some(key) = (if last {
+            stops.next_back()
+        } else {
+            stops.next()
+        }) else {
             return;
         };
         cx.stop_propagation();

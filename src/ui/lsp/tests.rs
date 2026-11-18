@@ -34,6 +34,8 @@ fn file_uris_round_trip_including_spaces_and_non_ascii() {
 
 #[test]
 fn a_workspace_edit_is_grouped_by_file_from_either_shape() {
+    // reason: `WorkspaceEdit::changes` is a `HashMap<Uri, _>` by the LSP types' definition.
+    #[allow(clippy::mutable_key_type)]
     let mut changes = HashMap::new();
     changes.insert(uri("/b.rs"), vec![edit(1, "b")]);
     changes.insert(uri("/a.rs"), vec![edit(0, "a")]);
@@ -459,6 +461,8 @@ fn an_edit_is_stale_when_a_file_it_touches_changed_opened_or_closed() {
 fn a_workspace_edit_for_a_changed_buffer_is_not_applied(cx: &mut gpui::TestAppContext) {
     let s = harness::setup(cx);
     let rename = |cx: &mut gpui::App, baseline| {
+        // reason: `WorkspaceEdit::changes` is a `HashMap<Uri, _>` by the LSP types' definition.
+        #[allow(clippy::mutable_key_type)]
         let mut changes = HashMap::new();
         changes.insert(
             path_to_uri(&s.path).unwrap(),

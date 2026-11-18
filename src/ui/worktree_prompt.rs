@@ -135,7 +135,7 @@ impl Tty59App {
         let name = p.name.read(cx).value().to_string();
         if !p.branch_manual {
             // Writing resets the caret, so leave an already equal box alone.
-            if p.branch.read(cx).value().to_string() != name {
+            if p.branch.read(cx).value() != name {
                 p.branch
                     .update(cx, |branch, cx| branch.set_value(name, window, cx));
             }

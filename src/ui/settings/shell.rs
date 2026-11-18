@@ -862,17 +862,15 @@ impl Tty59App {
             );
         #[cfg(test)]
         let row = row.debug_selector(move || row_debug_id.clone());
-        if capture {
-            if let Some(entry) = entry {
-                self.active_settings()
-                    .unwrap()
-                    .search_rows
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .push((entry.title, row.into_any_element()));
-                return div().id("captured-setting");
-            }
+        if capture && let Some(entry) = entry {
+            self.active_settings()
+                .unwrap()
+                .search_rows
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .push((entry.title, row.into_any_element()));
+            return div().id("captured-setting");
         }
         row
     }
@@ -2330,7 +2328,7 @@ mod tests {
         open(&app, &mut vcx, SettingsSection::Ssh, &|_, _, cx| {
             cx.global_mut::<Config>().ssh_profiles = (0..3)
                 .map(|i| {
-                    let mut p = crate::core::ssh_profile::SshProfile::new(&format!("host-{i}"));
+                    let mut p = crate::core::ssh_profile::SshProfile::new(format!("host-{i}"));
                     p.host = format!("h{i}.example");
                     p
                 })

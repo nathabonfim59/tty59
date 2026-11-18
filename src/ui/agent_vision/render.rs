@@ -1562,7 +1562,7 @@ mod tests {
                 break;
             }
         }
-        cx.update(|cx| crate::ui::presets::load_registry(cx));
+        cx.update(crate::ui::presets::load_registry);
         let loaded: Vec<_> = cx
             .update(|cx| crate::ui::presets::all(cx))
             .into_iter()

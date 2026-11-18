@@ -1048,7 +1048,7 @@ mod tests {
     fn mounted_rings(vcx: &mut VisualTestContext, selectors: &Selectors) -> Vec<String> {
         selectors
             .iter()
-            .filter(|(_, _, ring)| vcx.debug_bounds(*ring).is_some())
+            .filter(|(_, _, ring)| vcx.debug_bounds(ring).is_some())
             .map(|(action, _, _)| action.clone())
             .collect()
     }
@@ -1060,7 +1060,7 @@ mod tests {
     ) -> Vec<(String, gpui::Bounds<gpui::Pixels>)> {
         selectors
             .iter()
-            .filter_map(|(action, cell, _)| vcx.debug_bounds(*cell).map(|b| (action.clone(), b)))
+            .filter_map(|(action, cell, _)| vcx.debug_bounds(cell).map(|b| (action.clone(), b)))
             .collect()
     }
 
@@ -1232,7 +1232,7 @@ mod tests {
 
         assert_eq!(
             mounted_rings(&mut vcx, &selectors),
-            [next.clone()],
+            std::slice::from_ref(&next),
             "the ring is on {next} and nowhere else after Tab"
         );
 

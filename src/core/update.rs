@@ -2175,7 +2175,7 @@ fn package_for_current_install(version: &str) -> Result<PackageOffer, UpdateInst
         let can_self_update = appimage.as_deref().is_some_and(|appimage| {
             is_appimage_update_writable(appimage) && bundled_updater().is_some()
         });
-        return linux_package_for(version, arch, appimage.is_some(), can_self_update);
+        linux_package_for(version, arch, appimage.is_some(), can_self_update)
     }
     #[cfg(target_os = "windows")]
     {
@@ -2271,7 +2271,7 @@ fn prepare_update(
     }
     #[cfg(target_os = "linux")]
     {
-        return prepare_linux_update(version, &asset.name, &archive, &checksums);
+        prepare_linux_update(version, &asset.name, &archive, &checksums)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     anyhow::bail!("automatic installation is not supported on this platform")

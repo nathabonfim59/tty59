@@ -3145,11 +3145,12 @@ impl TerminalView {
         // prompt. So it takes the same route an unknown Ctrl chord takes:
         // hand the line over first, then send the key, with every modifier
         // combination going the same way (Alt+F7 is ClearHistory).
-        if super::input::is_function_key(key) && !m.platform {
-            if let Some(bytes) = super::input::keystroke_to_bytes(ks, self.key_flags()) {
-                self.handoff_line_to_shell(&bytes, cx);
-                return;
-            }
+        if super::input::is_function_key(key)
+            && !m.platform
+            && let Some(bytes) = super::input::keystroke_to_bytes(ks, self.key_flags())
+        {
+            self.handoff_line_to_shell(&bytes, cx);
+            return;
         }
 
         if m.control && !m.platform && !m.alt {
@@ -3262,12 +3263,13 @@ impl TerminalView {
             }
             "left" => self.editor_move_h(false, m.shift, m.alt),
             "right" => {
-                if !m.shift && self.cmd.selection().is_none() {
-                    if let Some(full) = self.ghost_suggestion() {
-                        self.cmd.set(&full);
-                        cx.notify();
-                        return;
-                    }
+                if !m.shift
+                    && self.cmd.selection().is_none()
+                    && let Some(full) = self.ghost_suggestion()
+                {
+                    self.cmd.set(&full);
+                    cx.notify();
+                    return;
                 }
                 self.editor_move_h(true, m.shift, m.alt);
             }
@@ -3296,13 +3298,15 @@ impl TerminalView {
                 return;
             }
             _ => {
-                if !m.control && !m.platform && !m.alt {
-                    if let Some(ch) = ks.key_char.as_deref() {
-                        if !ch.is_empty() && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}') {
-                            self.commit_text(ch, cx);
-                            return;
-                        }
-                    }
+                if !m.control
+                    && !m.platform
+                    && !m.alt
+                    && let Some(ch) = ks.key_char.as_deref()
+                    && !ch.is_empty()
+                    && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}')
+                {
+                    self.commit_text(ch, cx);
+                    return;
                 }
                 if m.alt && !m.control && !m.platform && key.chars().count() == 1 {
                     let bytes = super::input::keystroke_to_bytes(ks, self.key_flags())
@@ -3859,15 +3863,15 @@ impl TerminalView {
         raw: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.input_active() {
-            if let Some(text) = self.cmd.selected_text() {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                if clear_on_copy {
-                    self.cmd.clear_selection();
-                    cx.notify();
-                }
-                return true;
+        if self.input_active()
+            && let Some(text) = self.cmd.selected_text()
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            if clear_on_copy {
+                self.cmd.clear_selection();
+                cx.notify();
             }
+            return true;
         }
         if self.has_selection() {
             self.copy_selection(raw, cx);
@@ -5702,16 +5706,18 @@ impl TerminalView {
 
     fn handle_reverse_search_key(&mut self, ks: &gpui::Keystroke, cx: &mut Context<Self>) {
         let m = &ks.modifiers;
-        if !m.control && !m.platform && !m.alt {
-            if let Some(ch) = ks.key_char.as_deref() {
-                if !ch.is_empty() && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}') {
-                    if let Some(rs) = self.reverse_search.as_mut() {
-                        rs.push_query(ch, &self.history, &self.history_frecency);
-                    }
-                    cx.notify();
-                    return;
-                }
+        if !m.control
+            && !m.platform
+            && !m.alt
+            && let Some(ch) = ks.key_char.as_deref()
+            && !ch.is_empty()
+            && ch.chars().all(|c| c >= '\u{20}' && c != '\u{7f}')
+        {
+            if let Some(rs) = self.reverse_search.as_mut() {
+                rs.push_query(ch, &self.history, &self.history_frecency);
             }
+            cx.notify();
+            return;
         }
         let Some(rs) = self.reverse_search.as_mut() else {
             return;
@@ -9094,15 +9100,15 @@ fn wrapped_click_index(
             return Some(i);
         }
     }
-    if let Some(fi) = positions.iter().position(|&(pr, _, _)| pr == target) {
-        if col < positions[fi].1 {
-            return Some(fi);
-        }
+    if let Some(fi) = positions.iter().position(|&(pr, _, _)| pr == target)
+        && col < positions[fi].1
+    {
+        return Some(fi);
     }
-    if let Some(last) = positions.iter().rposition(|&(pr, _, _)| pr == target) {
-        if chars[last] == '\n' {
-            return Some(last);
-        }
+    if let Some(last) = positions.iter().rposition(|&(pr, _, _)| pr == target)
+        && chars[last] == '\n'
+    {
+        return Some(last);
     }
     match positions.iter().position(|&(pr, _, _)| pr > target) {
         Some(ni) => Some(ni),
@@ -10803,8 +10809,12 @@ mod tests {
                     cell.width
                 };
                 assert_eq!(positions[cell.start].2, drawn, "{text:?} at {}", cell.start);
-                for i in cell.start + 1..cell.end {
-                    assert_eq!(positions[i].2, 0, "{text:?} at {i}");
+                for (i, position) in positions[..cell.end]
+                    .iter()
+                    .enumerate()
+                    .skip(cell.start + 1)
+                {
+                    assert_eq!(position.2, 0, "{text:?} at {i}");
                 }
             }
         }
@@ -14499,7 +14509,7 @@ mod gpui_tests {
     fn shift_enter_reaches_a_foreground_tui_with_kitty_encoding(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness_on(cx, PtySource::LocalConpty);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         DaemonMsg::Output(b"\x1b[>1u".to_vec())
             .encode(&mut daemon)
             .unwrap();
@@ -14540,7 +14550,7 @@ mod gpui_tests {
     fn shift_enter_reaches_a_foreground_tui_as_lf_without_kitty(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness_on(cx, PtySource::Raw);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         window
             .update(cx, |view, window, cx| {
                 assert!(!view.input_active(), "the foreground TUI owns input");
@@ -14561,7 +14571,7 @@ mod gpui_tests {
     #[gpui::test]
     fn newline_chords_reach_conpty_as_ctrl_j_without_kitty(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness_on(cx, PtySource::LocalConpty);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         window
             .update(cx, |view, window, cx| {
                 assert!(!view.input_active());
@@ -14585,7 +14595,7 @@ mod gpui_tests {
     fn alt_enter_keeps_its_legacy_encoding_in_a_foreground_tui(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         window
             .update(cx, |view, window, cx| {
                 assert!(!view.input_active(), "the foreground TUI owns input");
@@ -14620,7 +14630,7 @@ mod gpui_tests {
     #[gpui::test]
     fn the_keymap_routes_both_newline_chords_to_the_action(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         prompt_ready(&window, cx, &mut daemon);
         window
             .update(cx, |view, window, cx| {
@@ -14643,7 +14653,7 @@ mod gpui_tests {
             })
             .unwrap();
 
-        cx.update(|cx| crate::ui::keymap::rebind(cx));
+        cx.update(crate::ui::keymap::rebind);
         vcx.simulate_keystrokes("shift-enter");
         window
             .update(cx, |view, _, _| {
@@ -14667,7 +14677,7 @@ mod gpui_tests {
     #[gpui::test]
     fn an_unused_find_binding_gives_f3_back_to_the_shell(cx: &mut TestAppContext) {
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         prompt_ready(&window, cx, &mut daemon);
         window
             .update(cx, |view, window, cx| {
@@ -15227,11 +15237,11 @@ mod gpui_tests {
             .unwrap();
     }
 
-    /// The pure halves of the wheel-zoom decision — which modifier zooms,
-    /// how many steps a detent or a flick is worth — moved to
-    /// `crate::ui::zoom` when the code editor began zooming the same way;
-    /// their tests moved with them. What stays here is the terminal's own
-    /// behaviour: the gesture latch and the routes to the actions.
+    // The pure halves of the wheel-zoom decision — which modifier zooms,
+    // how many steps a detent or a flick is worth — moved to
+    // `crate::ui::zoom` when the code editor began zooming the same way;
+    // their tests moved with them. What stays here is the terminal's own
+    // behaviour: the gesture latch and the routes to the actions.
 
     /// The point of turning it off: the modifier goes back to being an
     /// ordinary scroll, rather than eating the wheel.
@@ -15941,7 +15951,7 @@ mod gpui_tests {
     ) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         DaemonMsg::Prompt {
             active: true,
             at_prompt: true,
@@ -17767,7 +17777,7 @@ mod gpui_tests {
     fn ctrl_v_pastes_at_a_prompt(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
         window
             .update(cx, |view, window, cx| {
@@ -17791,7 +17801,7 @@ mod gpui_tests {
     fn ctrl_v_reaches_a_full_screen_program_as_syn(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("echo hi".into())));
         alt_screen_ready(&window, cx, &mut daemon);
         window
@@ -17845,7 +17855,7 @@ mod gpui_tests {
     fn ctrl_6_reaches_the_pty_as_rs(cx: &mut TestAppContext) {
         crate::core::config::pin_test_config_dir();
         let (window, mut daemon) = harness(cx);
-        cx.update(|cx| crate::ui::keymap::init(cx));
+        cx.update(crate::ui::keymap::init);
         window
             .update(cx, |view, window, cx| {
                 window.activate_window();

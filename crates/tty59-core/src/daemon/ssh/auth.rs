@@ -658,6 +658,8 @@ impl KeyRound {
 /// a cached one that turned out to be wrong (#486), which for an explicit key
 /// reopens the prompt but here would mean a sheet per stale `~/.ssh` entry on
 /// every connection.
+// The PrivateKey variant is short-lived and one per identity; boxing is out of scope for a lint fix.
+#[allow(clippy::large_enum_variant)]
 enum IdentityLoad {
     Ready(russh::keys::PrivateKey),
     /// Not worth an offer: a `.pub`, an undecodable file, or a discovered
@@ -1156,13 +1158,14 @@ async fn collect_ki_answers(
     let all_password_type = prompts
         .iter()
         .all(|p| !p.echo && p.prompt.to_lowercase().contains("password"));
-    if all_password_type && allow_stored {
-        if let Some(pw) = &spec.password {
-            return Some(KiRound {
-                answers: prompts.iter().map(|_| pw.clone()).collect(),
-                source: KiAnswerSource::Stored,
-            });
-        }
+    if all_password_type
+        && allow_stored
+        && let Some(pw) = &spec.password
+    {
+        return Some(KiRound {
+            answers: prompts.iter().map(|_| pw.clone()).collect(),
+            source: KiAnswerSource::Stored,
+        });
     }
 
     let ki_prompts: Vec<KiPrompt> = prompts
@@ -1724,8 +1727,10 @@ mod tests {
 
         // An agent that answered but held nothing is "checked", not
         // "unavailable".
-        let mut round = KeyRound::default();
-        round.agent_available = true;
+        let round = KeyRound {
+            agent_available: true,
+            ..KeyRound::default()
+        };
         let msg = round.reason(SshAuthMode::Auto, false);
         assert!(msg.contains("the SSH agent"), "{msg}");
         assert!(!msg.contains("unavailable"), "{msg}");
@@ -1752,8 +1757,10 @@ mod tests {
 
     #[test]
     fn reason_falls_back_to_the_transport_error_after_an_offer() {
-        let mut round = KeyRound::default();
-        round.offered_files = vec!["/home/me/.ssh/id_ed25519".to_string()];
+        let mut round = KeyRound {
+            offered_files: vec!["/home/me/.ssh/id_ed25519".to_string()],
+            ..KeyRound::default()
+        };
         round.errors.push(
             "public-key auth error with /home/me/.ssh/id_ed25519: connection lost".to_string(),
         );

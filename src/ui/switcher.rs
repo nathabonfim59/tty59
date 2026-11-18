@@ -1472,10 +1472,10 @@ impl Tty59App {
             {
                 group.error = Some(error.clone());
             }
-            if group.error.is_none() {
-                if let Some(error) = self.remote_host_errors.get(&target.to_string()) {
-                    group.error = Some(error.clone());
-                }
+            if group.error.is_none()
+                && let Some(error) = self.remote_host_errors.get(&target.to_string())
+            {
+                group.error = Some(error.clone());
             }
             // The supervisor's own attempts never touch this window's `connect`,
             // so without this last fallback the route it could not build, and

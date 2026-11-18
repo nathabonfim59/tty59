@@ -814,10 +814,11 @@ impl Tty59App {
         page: &Arc<CommitPage>,
         query: Option<&str>,
     ) -> Arc<Vec<usize>> {
-        if let Some((held_query, held_page, rows)) = &self.scm.graph.filter_cache {
-            if held_page.ptr_eq(&Arc::downgrade(page)) && held_query.as_deref() == query {
-                return rows.clone();
-            }
+        if let Some((held_query, held_page, rows)) = &self.scm.graph.filter_cache
+            && held_page.ptr_eq(&Arc::downgrade(page))
+            && held_query.as_deref() == query
+        {
+            return rows.clone();
         }
         let rows: Arc<Vec<usize>> = Arc::new(match query {
             None => (0..page.commits.len()).collect(),
@@ -2005,7 +2006,7 @@ mod tests {
             "dragged all the way shut the section shows {floor} commits, which \
              is not enough of a graph to be one"
         );
-        assert!(GRAPH_H_MIN < GRAPH_H_DEFAULT);
+        const { assert!(GRAPH_H_MIN < GRAPH_H_DEFAULT) };
         // The ceiling is a share of the window, and the floor has to survive a
         // window short enough that the share falls under it.
         assert_eq!((100f32 * GRAPH_H_MAX_RATIO).max(GRAPH_H_MIN), GRAPH_H_MIN);
@@ -2026,13 +2027,13 @@ mod tests {
         assert!(widest + GRAPH_LINE_W / 2. < GRAPH_LANE_W);
         // And a hollow node keeps a hole: a stroke that eats the radius is a
         // filled dot wearing a ring's name.
-        assert!(GRAPH_DOT_R - GRAPH_LINE_W >= 1.);
+        const { assert!(GRAPH_DOT_R - GRAPH_LINE_W >= 1.) };
         // The node also has to be worth the row it sits in: a 6px dot in a 24px
         // row is a quarter of it, and a bead much smaller than that stops
         // reading as one on a string. This is the floor, and the row is
         // currently sitting on it — a taller row wants a larger dot, not the
         // same one with more air around it.
-        assert!(GRAPH_DOT_R * 2. >= GRAPH_ROW_H * 0.25);
+        const { assert!(GRAPH_DOT_R * 2. >= GRAPH_ROW_H * 0.25) };
     }
 
     #[test]

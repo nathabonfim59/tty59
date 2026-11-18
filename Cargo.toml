@@ -369,6 +369,9 @@ simple-dns = { path = "vendor/simple-dns" }
 dbg_macro = "deny"
 todo = "deny"
 type_complexity = "allow"
+# Several render and daemon entry points take their whole context as arguments;
+# bundling them into structs is a refactor, not a lint fix.
+too_many_arguments = "allow"
 
 [profile.dev]
 codegen-units = 16

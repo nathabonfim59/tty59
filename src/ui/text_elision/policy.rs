@@ -619,7 +619,7 @@ pub(crate) fn elide_to<'a, M: FnMut(&str) -> f32>(
             max_chars,
         };
         let out = elide_text(text, mode, &mut fit);
-        return (!hides(&out)).then(|| Suffixed {
+        return (!hides(&out)).then_some(Suffixed {
             head: out.text,
             tail: Cow::Borrowed(""),
         });

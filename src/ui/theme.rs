@@ -651,6 +651,9 @@ struct StockUiFont(gpui::SharedString);
 
 impl gpui::Global for StockUiFont {}
 
+// `window` is used again by the macOS-only traffic-light call at the end; elsewhere that call is
+// compiled out and clippy reads the reborrow below as needless.
+#[cfg_attr(not(target_os = "macos"), allow(clippy::needless_option_as_deref))]
 pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let follow = cx.global::<Config>().theme_follow_system;
     if follow {
@@ -973,7 +976,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     // it would wash out that panel. The workspace sidebar/right-panel
     // surfaces get their translucent variant at render time instead —
     // see `workspace_surface_color`.
-    t.sidebar = sidebar_bg.into();
+    t.sidebar = sidebar_bg;
     t.tokens.sidebar = sidebar_bg.into();
     // The lighter tier: every `sidebar_border` site is a pane meeting another
     // pane, and both already carry their own fill. See `Neutrals`.
@@ -1420,6 +1423,195 @@ fn sync_native_appearance(dark: Option<bool>) {
 
 #[cfg(not(target_os = "macos"))]
 fn sync_native_appearance(_dark: Option<bool>) {}
+
+/// The text view's style for rendered Markdown, wherever tty59 shows it.
+///
+/// Inline `code` gets a faint neutral fill. The text view's own default is the
+/// theme's `accent`, which tty59 also paints selection with, so every code span
+/// read as selected text.
+pub(crate) fn markdown_style(cx: &gpui::App) -> gpui_component::text::TextViewStyle {
+    gpui_component::text::TextViewStyle::default()
+        .inline_code_background(cx.theme().foreground.opacity(0.08))
+}
+
+/// [`markdown_style`] at the editor's zoom `zoom` (1.0 = 100 %).
+///
+/// The text view takes its sizes from three sources, and the rem one — body
+/// text, lists, the paragraph gap — is handled outside the style, by laying
+/// the view out against a scoped rem ([`crate::ui::rem_scope::RemScope`]).
+/// What the style carries are the other two: headings grow with
+/// `heading_base_font_size` (absolute `px(14)` by default, every level a
+/// multiple of the base), and code blocks grow through their refinement,
+/// which lands after the text view's own absolute `mono_font_size` and so
+/// overrides it. At `zoom == 1.0` the style is byte-for-byte
+/// [`markdown_style`], so 100 % renders exactly as the unzoomed preview
+/// always did.
+pub(crate) fn markdown_style_at(cx: &gpui::App, zoom: f32) -> gpui_component::text::TextViewStyle {
+    if zoom == 1.0 {
+        return markdown_style(cx);
+    }
+    let mut style = markdown_style(cx);
+    style.heading_base_font_size = gpui::px(
+        f32::from(gpui_component::text::TextViewStyle::default().heading_base_font_size) * zoom,
+    );
+    let mut code_block = gpui::StyleRefinement::default();
+    code_block.text.font_size = Some(gpui::px(f32::from(cx.theme().mono_font_size) * zoom).into());
+    style.code_block(code_block)
+}
+
+/// The palette handed to the mermaid renderer for the active theme.
+///
+/// Diagrams draw on the preview's own background and use the theme's body ink,
+/// neutral fills and borders: `primary`/`secondary`/`tertiary` are neutral
+/// surfaces and every border comes from the theme's one border colour.
+/// Per-shape accent colours live in `accents`, derived from the active ANSI
+/// inks by [`mermaid_accents`] and switched by the `editor_mermaid_colors`
+/// setting; the base fields stay neutral so the accent-less look is exactly
+/// the one diagrams had before accents existed.
+/// `error` is the theme's danger ink, which is the readable red rather than
+/// the danger *fill* (that fill's foreground is meant for text on top of it).
+pub(crate) fn mermaid_theme(cx: &gpui::App) -> tty59_mermaid::MermaidTheme {
+    let theme = cx.theme();
+
+    tty59_mermaid::MermaidTheme {
+        dark_mode: theme.is_dark(),
+        // merman lays diagrams out against a deterministic Arial-like
+        // measurement profile; this fixed stack is metric-matched to it.
+        // The UI font must not go here: labels would draw in a face whose
+        // metrics disagree with the layout, clipping or overlapping their
+        // boxes. The frozen contract carries the stack on `light()`.
+        font_family: tty59_mermaid::MermaidTheme::light().font_family,
+        background: mermaid_rgba(theme.background),
+        text: mermaid_rgba(theme.foreground),
+        primary: mermaid_rgba(theme.muted),
+        primary_text: mermaid_rgba(theme.foreground),
+        primary_border: mermaid_rgba(theme.border),
+        secondary: mermaid_rgba(theme.secondary),
+        tertiary: mermaid_rgba(theme.secondary_hover),
+        line: mermaid_rgba(theme.muted_foreground),
+        edge_label_background: mermaid_rgba(theme.background),
+        cluster_background: mermaid_rgba(theme.muted),
+        cluster_border: mermaid_rgba(theme.border),
+        note_background: mermaid_rgba(theme.secondary),
+        note_border: mermaid_rgba(theme.border),
+        actor_background: mermaid_rgba(theme.secondary),
+        actor_border: mermaid_rgba(theme.border),
+        error: mermaid_rgba(theme.danger),
+        accents: if mermaid_colors(cx) {
+            mermaid_accents(theme)
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+/// The contrast every accent's label must keep on its fill: WCAG's text
+/// floor, the same 4.5:1 tty59 holds its own text to.
+const MERMAID_ACCENT_FLOOR: f32 = 4.5;
+
+/// How much of each ANSI ink is blended into the background for an accent
+/// fill, and the steps the blend walks down when the theme's own
+/// foreground cannot read on the first one: 20 %, then 15 %, then 10 %.
+/// Less ink means more background, and the background is what the
+/// foreground was chosen to read on, so each step down walks the fill back
+/// toward legibility without ever touching the text colour.
+const MERMAID_ACCENT_MIX_STEPS: [f32; 3] = [0.20, 0.15, 0.10];
+
+/// Whether diagrams get per-shape accent colours: the
+/// `editor_mermaid_colors` setting. Defaulting to on when no `Config`
+/// global is installed (standalone theme tests, previews the settings
+/// never reached) is deliberate: colored diagrams are the shipped look,
+/// and absence of configuration must not silently turn them off.
+fn mermaid_colors(cx: &App) -> bool {
+    cx.try_global::<Config>()
+        .is_none_or(|config| config.editor_mermaid_colors)
+}
+
+/// The per-shape accent palette for the active theme: one accent per ANSI
+/// ink, in red/green/yellow/blue/magenta/cyan order.
+///
+/// Each accent keeps the theme legible rather than re-authoring it: the
+/// border is the ink itself, the text is the theme's own foreground —
+/// never black or white, whatever the fill — and the fill is the ink
+/// blended into the background, stepping down
+/// [`MERMAID_ACCENT_MIX_STEPS`] until the foreground clears
+/// [`MERMAID_ACCENT_FLOOR`] on it. An ink no step rescues falls back to
+/// the neutral node look (`primary` fill, `primary_border` border) with
+/// the foreground as its text; each accent walks the ladder alone, so one
+/// unlucky ink never recolors its siblings. In a theme whose own
+/// foreground is already unreadable that fallback can be unreadable too —
+/// the accepted price of never swapping the text colour, because an
+/// unreadable theme is fixed in its palette, not in the diagram renderer.
+fn mermaid_accents(theme: &Theme) -> Vec<tty59_mermaid::Accent> {
+    let foreground = theme.foreground;
+    let background = theme.background;
+    let text = mermaid_rgba(foreground);
+    let neutral_fill = mermaid_rgba(theme.muted);
+    let neutral_border = mermaid_rgba(theme.border);
+
+    [
+        theme.red,
+        theme.green,
+        theme.yellow,
+        theme.blue,
+        theme.magenta,
+        theme.cyan,
+    ]
+    .into_iter()
+    .map(|ink| {
+        let fill = MERMAID_ACCENT_MIX_STEPS
+            .iter()
+            .copied()
+            .map(|amount| presets::mix(hsla24(background), hsla24(ink), amount))
+            .find(|fill| presets::contrast(hsla24(foreground), *fill) >= MERMAID_ACCENT_FLOOR);
+        match fill {
+            Some(fill) => tty59_mermaid::Accent {
+                fill: mermaid_rgb(fill),
+                border: mermaid_rgba(ink),
+                text,
+            },
+            None => tty59_mermaid::Accent {
+                fill: neutral_fill,
+                border: neutral_border,
+                text,
+            },
+        }
+    })
+    .collect()
+}
+
+/// `Hsla` → packed `0xRRGGBB`, the form [`presets::mix`] and
+/// [`presets::contrast`] work in. Alpha is dropped: mixes build opaque
+/// fills and contrast is defined on RGB alone.
+fn hsla24(color: Hsla) -> u32 {
+    let rgb = crate::terminal::palette::hsla_to_rgb(color);
+    (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32
+}
+
+/// Packed `0xRRGGBB` → the renderer's opaque straight-alpha colour.
+fn mermaid_rgb(color: u32) -> tty59_mermaid::Rgba {
+    tty59_mermaid::Rgba {
+        r: (color >> 16) as u8,
+        g: (color >> 8) as u8,
+        b: color as u8,
+        a: 255,
+    }
+}
+
+/// gpui's float colours (0..=1) → the renderer's straight 8-bit sRGB.
+fn mermaid_rgba(color: Hsla) -> tty59_mermaid::Rgba {
+    let color = gpui::Rgba::from(color);
+    tty59_mermaid::Rgba {
+        r: to_byte(color.r),
+        g: to_byte(color.g),
+        b: to_byte(color.b),
+        a: to_byte(color.a),
+    }
+}
+
+fn to_byte(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
+}
 
 #[cfg(test)]
 mod tests {
@@ -2411,7 +2603,7 @@ mod tests {
         cx: &mut TestAppContext,
         keyboard_only: Option<bool>,
     ) -> (gpui::VisualTestContext, gpui::FocusHandle) {
-        cx.update(|cx| gpui_component::init(cx));
+        cx.update(gpui_component::init);
         let window = cx.add_window(|_, cx| RingProbe {
             handle: cx.focus_handle(),
             keyboard_only,
@@ -2544,193 +2736,4 @@ mod tests {
             "and the ring goes when the mouse is the last input"
         );
     }
-}
-
-/// The text view's style for rendered Markdown, wherever tty59 shows it.
-///
-/// Inline `code` gets a faint neutral fill. The text view's own default is the
-/// theme's `accent`, which tty59 also paints selection with, so every code span
-/// read as selected text.
-pub(crate) fn markdown_style(cx: &gpui::App) -> gpui_component::text::TextViewStyle {
-    gpui_component::text::TextViewStyle::default()
-        .inline_code_background(cx.theme().foreground.opacity(0.08))
-}
-
-/// [`markdown_style`] at the editor's zoom `zoom` (1.0 = 100 %).
-///
-/// The text view takes its sizes from three sources, and the rem one — body
-/// text, lists, the paragraph gap — is handled outside the style, by laying
-/// the view out against a scoped rem ([`crate::ui::rem_scope::RemScope`]).
-/// What the style carries are the other two: headings grow with
-/// `heading_base_font_size` (absolute `px(14)` by default, every level a
-/// multiple of the base), and code blocks grow through their refinement,
-/// which lands after the text view's own absolute `mono_font_size` and so
-/// overrides it. At `zoom == 1.0` the style is byte-for-byte
-/// [`markdown_style`], so 100 % renders exactly as the unzoomed preview
-/// always did.
-pub(crate) fn markdown_style_at(cx: &gpui::App, zoom: f32) -> gpui_component::text::TextViewStyle {
-    if zoom == 1.0 {
-        return markdown_style(cx);
-    }
-    let mut style = markdown_style(cx);
-    style.heading_base_font_size = gpui::px(
-        f32::from(gpui_component::text::TextViewStyle::default().heading_base_font_size) * zoom,
-    );
-    let mut code_block = gpui::StyleRefinement::default();
-    code_block.text.font_size = Some(gpui::px(f32::from(cx.theme().mono_font_size) * zoom).into());
-    style.code_block(code_block)
-}
-
-/// The palette handed to the mermaid renderer for the active theme.
-///
-/// Diagrams draw on the preview's own background and use the theme's body ink,
-/// neutral fills and borders: `primary`/`secondary`/`tertiary` are neutral
-/// surfaces and every border comes from the theme's one border colour.
-/// Per-shape accent colours live in `accents`, derived from the active ANSI
-/// inks by [`mermaid_accents`] and switched by the `editor_mermaid_colors`
-/// setting; the base fields stay neutral so the accent-less look is exactly
-/// the one diagrams had before accents existed.
-/// `error` is the theme's danger ink, which is the readable red rather than
-/// the danger *fill* (that fill's foreground is meant for text on top of it).
-pub(crate) fn mermaid_theme(cx: &gpui::App) -> tty59_mermaid::MermaidTheme {
-    let theme = cx.theme();
-
-    tty59_mermaid::MermaidTheme {
-        dark_mode: theme.is_dark(),
-        // merman lays diagrams out against a deterministic Arial-like
-        // measurement profile; this fixed stack is metric-matched to it.
-        // The UI font must not go here: labels would draw in a face whose
-        // metrics disagree with the layout, clipping or overlapping their
-        // boxes. The frozen contract carries the stack on `light()`.
-        font_family: tty59_mermaid::MermaidTheme::light().font_family,
-        background: mermaid_rgba(theme.background),
-        text: mermaid_rgba(theme.foreground),
-        primary: mermaid_rgba(theme.muted),
-        primary_text: mermaid_rgba(theme.foreground),
-        primary_border: mermaid_rgba(theme.border),
-        secondary: mermaid_rgba(theme.secondary),
-        tertiary: mermaid_rgba(theme.secondary_hover),
-        line: mermaid_rgba(theme.muted_foreground),
-        edge_label_background: mermaid_rgba(theme.background),
-        cluster_background: mermaid_rgba(theme.muted),
-        cluster_border: mermaid_rgba(theme.border),
-        note_background: mermaid_rgba(theme.secondary),
-        note_border: mermaid_rgba(theme.border),
-        actor_background: mermaid_rgba(theme.secondary),
-        actor_border: mermaid_rgba(theme.border),
-        error: mermaid_rgba(theme.danger),
-        accents: if mermaid_colors(cx) {
-            mermaid_accents(theme)
-        } else {
-            Vec::new()
-        },
-    }
-}
-
-/// The contrast every accent's label must keep on its fill: WCAG's text
-/// floor, the same 4.5:1 tty59 holds its own text to.
-const MERMAID_ACCENT_FLOOR: f32 = 4.5;
-
-/// How much of each ANSI ink is blended into the background for an accent
-/// fill, and the steps the blend walks down when the theme's own
-/// foreground cannot read on the first one: 20 %, then 15 %, then 10 %.
-/// Less ink means more background, and the background is what the
-/// foreground was chosen to read on, so each step down walks the fill back
-/// toward legibility without ever touching the text colour.
-const MERMAID_ACCENT_MIX_STEPS: [f32; 3] = [0.20, 0.15, 0.10];
-
-/// Whether diagrams get per-shape accent colours: the
-/// `editor_mermaid_colors` setting. Defaulting to on when no `Config`
-/// global is installed (standalone theme tests, previews the settings
-/// never reached) is deliberate: colored diagrams are the shipped look,
-/// and absence of configuration must not silently turn them off.
-fn mermaid_colors(cx: &App) -> bool {
-    cx.try_global::<Config>()
-        .is_none_or(|config| config.editor_mermaid_colors)
-}
-
-/// The per-shape accent palette for the active theme: one accent per ANSI
-/// ink, in red/green/yellow/blue/magenta/cyan order.
-///
-/// Each accent keeps the theme legible rather than re-authoring it: the
-/// border is the ink itself, the text is the theme's own foreground —
-/// never black or white, whatever the fill — and the fill is the ink
-/// blended into the background, stepping down
-/// [`MERMAID_ACCENT_MIX_STEPS`] until the foreground clears
-/// [`MERMAID_ACCENT_FLOOR`] on it. An ink no step rescues falls back to
-/// the neutral node look (`primary` fill, `primary_border` border) with
-/// the foreground as its text; each accent walks the ladder alone, so one
-/// unlucky ink never recolors its siblings. In a theme whose own
-/// foreground is already unreadable that fallback can be unreadable too —
-/// the accepted price of never swapping the text colour, because an
-/// unreadable theme is fixed in its palette, not in the diagram renderer.
-fn mermaid_accents(theme: &Theme) -> Vec<tty59_mermaid::Accent> {
-    let foreground = theme.foreground;
-    let background = theme.background;
-    let text = mermaid_rgba(foreground);
-    let neutral_fill = mermaid_rgba(theme.muted);
-    let neutral_border = mermaid_rgba(theme.border);
-
-    [
-        theme.red,
-        theme.green,
-        theme.yellow,
-        theme.blue,
-        theme.magenta,
-        theme.cyan,
-    ]
-    .into_iter()
-    .map(|ink| {
-        let fill = MERMAID_ACCENT_MIX_STEPS
-            .iter()
-            .copied()
-            .map(|amount| presets::mix(hsla24(background), hsla24(ink), amount))
-            .find(|fill| presets::contrast(hsla24(foreground), *fill) >= MERMAID_ACCENT_FLOOR);
-        match fill {
-            Some(fill) => tty59_mermaid::Accent {
-                fill: mermaid_rgb(fill),
-                border: mermaid_rgba(ink),
-                text,
-            },
-            None => tty59_mermaid::Accent {
-                fill: neutral_fill,
-                border: neutral_border,
-                text,
-            },
-        }
-    })
-    .collect()
-}
-
-/// `Hsla` → packed `0xRRGGBB`, the form [`presets::mix`] and
-/// [`presets::contrast`] work in. Alpha is dropped: mixes build opaque
-/// fills and contrast is defined on RGB alone.
-fn hsla24(color: Hsla) -> u32 {
-    let rgb = crate::terminal::palette::hsla_to_rgb(color);
-    (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32
-}
-
-/// Packed `0xRRGGBB` → the renderer's opaque straight-alpha colour.
-fn mermaid_rgb(color: u32) -> tty59_mermaid::Rgba {
-    tty59_mermaid::Rgba {
-        r: (color >> 16) as u8,
-        g: (color >> 8) as u8,
-        b: color as u8,
-        a: 255,
-    }
-}
-
-/// gpui's float colours (0..=1) → the renderer's straight 8-bit sRGB.
-fn mermaid_rgba(color: Hsla) -> tty59_mermaid::Rgba {
-    let color = gpui::Rgba::from(color);
-    tty59_mermaid::Rgba {
-        r: to_byte(color.r),
-        g: to_byte(color.g),
-        b: to_byte(color.b),
-        a: to_byte(color.a),
-    }
-}
-
-fn to_byte(channel: f32) -> u8 {
-    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
 }

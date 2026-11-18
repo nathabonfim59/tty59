@@ -967,8 +967,10 @@ mod tests {
         // "Never upscaled" means never past the diagram's own size *at this
         // zoom*, so 200×100 in a wide column is the intrinsic size now.
         vcx.update(|_, cx| {
-            let mut cfg = crate::core::config::Config::default();
-            cfg.editor_zoom = 2.0;
+            let cfg = crate::core::config::Config(crate::core::config::CoreConfig {
+                editor_zoom: 2.0,
+                ..Default::default()
+            });
             cx.set_global(cfg);
         });
         // First zoomed draw is pending (the zoomed key is new); let it land.
@@ -1124,8 +1126,10 @@ mod tests {
         // the pending display is the last-good image drawn at 200×100 — not
         // the placeholder, which would span the full 400px column.
         vcx.update(|_, cx| {
-            let mut cfg = crate::core::config::Config::default();
-            cfg.editor_zoom = 2.0;
+            let cfg = crate::core::config::Config(crate::core::config::CoreConfig {
+                editor_zoom: 2.0,
+                ..Default::default()
+            });
             cx.set_global(cfg);
         });
         let zoomed = {
@@ -1323,7 +1327,7 @@ mod tests {
     /// provides. The source is deliberately not valid mermaid.
     #[gpui::test]
     fn invalid_source_failure_renders_the_fallback(cx: &mut TestAppContext) {
-        cx.update(|cx| gpui_component::init(cx));
+        cx.update(gpui_component::init);
         let source = "definitely not a diagram: ((( ]][";
         let recorded: Arc<Mutex<Option<Bounds<Pixels>>>> = Arc::new(Mutex::new(None));
         let (_, vcx) = cx.add_window_view(|_, _| BlockHost {
@@ -2228,12 +2232,17 @@ mod tests {
                     size.width.0 as usize * size.height.0 as usize * 4,
                     "{name}: BGRA byte count"
                 );
-                let drawn = bytes.chunks_exact(4).filter(|pixel| pixel[3] != 0).count();
+                let drawn = bytes
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .filter(|pixel| pixel[3] != 0)
+                    .count();
                 assert!(drawn > 0, "{name}: the production renderer drew no pixels");
                 // A blank opaque background has nonzero alpha everywhere but
                 // a single RGB value; real diagrams use several ink colors.
                 let mut colors = std::collections::HashSet::new();
-                for pixel in bytes.chunks_exact(4) {
+                for pixel in bytes.as_chunks::<4>().0 {
                     if pixel[3] != 0 {
                         colors.insert((pixel[0], pixel[1], pixel[2]));
                     }

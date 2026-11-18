@@ -224,7 +224,7 @@ impl LspStore {
         if cx.try_global::<LspStore>().is_some() {
             return;
         }
-        let quit = cx.on_app_quit(|cx| LspStore::on_quit(cx));
+        let quit = cx.on_app_quit(LspStore::on_quit);
         let config = cx.observe_global::<crate::core::config::Config>(|cx| {
             let enabled = cx.global::<crate::core::config::Config>().editor_lsp;
             if cx.try_global::<LspStore>().is_none() {

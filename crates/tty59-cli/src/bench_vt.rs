@@ -119,7 +119,7 @@ fn workload_tui() -> Vec<u8> {
                 )
                 .as_bytes(),
             );
-            out.extend(std::iter::repeat(b' ').take(COLS - 12));
+            out.extend(std::iter::repeat_n(b' ', COLS - 12));
             out.extend_from_slice(format!("f{:06}", frame).as_bytes());
             out.extend_from_slice(b"\x1b[0m");
         }

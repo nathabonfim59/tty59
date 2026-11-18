@@ -210,7 +210,7 @@ pub(super) fn render_argb(attention: bool) -> Option<(Vec<u8>, u32)> {
     let img = render(attention)?;
     debug_assert_eq!(img.width, img.height);
     let mut argb = Vec::with_capacity(img.data.len());
-    for px in img.data.chunks_exact(4) {
+    for px in img.data.as_chunks::<4>().0 {
         argb.extend_from_slice(&[px[3], px[0], px[1], px[2]]);
     }
     Some((argb, img.width))
@@ -267,7 +267,13 @@ mod tests {
         let img = render().unwrap();
         assert_eq!((img.width, img.height), (SIZE, SIZE));
         assert_eq!(img.data.len(), (SIZE * SIZE * 4) as usize);
-        let covered = img.data.chunks_exact(4).filter(|p| p[3] > 0).count();
+        let covered = img
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 0)
+            .count();
         assert!(covered > 0, "icon rendered fully transparent");
     }
 
@@ -279,7 +285,13 @@ mod tests {
         for img in [&normal, &attention] {
             assert_eq!((img.width, img.height), (SIZE, SIZE));
             assert_eq!(img.data.len(), (SIZE * SIZE * 4) as usize);
-            let covered = img.data.chunks_exact(4).filter(|p| p[3] > 0).count();
+            let covered = img
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] > 0)
+                .count();
             assert!(covered > 0, "icon rendered fully transparent");
         }
         assert_ne!(normal.data, attention.data);
@@ -347,8 +359,13 @@ mod tests {
         let (argb, size) = render_argb(false).unwrap();
         assert_eq!(size, rgba.width);
         assert_eq!(argb.len(), rgba.data.len());
-        for (a4, r4) in argb.chunks_exact(4).zip(rgba.data.chunks_exact(4)) {
-            assert_eq!(a4, [r4[3], r4[0], r4[1], r4[2]]);
+        for (a4, r4) in argb
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(rgba.data.as_chunks::<4>().0)
+        {
+            assert_eq!(*a4, [r4[3], r4[0], r4[1], r4[2]]);
         }
     }
 }

@@ -1321,10 +1321,8 @@ impl Tty59App {
                 app.on_git_op_done(result, window, cx);
                 // The second half of a compound verb starts only now, against
                 // the repository this operation produced — never alongside it.
-                if ok {
-                    if let Some(follow) = then {
-                        app.scm_follow_up(id, root, follow, window, cx);
-                    }
+                if ok && let Some(follow) = then {
+                    app.scm_follow_up(id, root, follow, window, cx);
                 }
             },
         );

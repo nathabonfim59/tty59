@@ -1347,7 +1347,7 @@ impl GraphicsParser {
 /// Expand tightly packed RGB into RGBA with an opaque alpha channel.
 fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rgb.len() / 3 * 4);
-    for px in rgb.chunks_exact(3) {
+    for px in rgb.as_chunks::<3>().0 {
         out.extend_from_slice(px);
         out.push(0xff);
     }
@@ -1801,7 +1801,7 @@ mod tests {
             "{decoded_max} + {HEADER_LEN} must fit in {}",
             crate::daemon::protocol::MAX_FRAME
         );
-        assert!(MAX_IMAGE_BYTES + HEADER_LEN <= crate::daemon::protocol::MAX_FRAME);
+        const { assert!(MAX_IMAGE_BYTES + HEADER_LEN <= crate::daemon::protocol::MAX_FRAME) };
     }
 
     #[test]
