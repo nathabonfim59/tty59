@@ -8,10 +8,6 @@
 //! while a file the host cannot read in parts is read whole, once, up to what
 //! the connection can carry.
 
-// The pieces below are used by the document and view code that lands after
-// them; until then only their tests do.
-#![allow(dead_code)]
-
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,6 +39,7 @@ pub(in crate::ui::code_editor) struct HexFile {
     pub(in crate::ui::code_editor) path: PathBuf,
     pub(in crate::ui::code_editor) source: HexSource,
     pub(in crate::ui::code_editor) mtime: Option<MTime>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(in crate::ui::code_editor) len: u64,
     /// Whether the text editor would have taken this file, which decides
     /// whether the tab offers "Open as Text".
@@ -215,6 +212,7 @@ pub(super) fn read_pages(
 }
 
 /// What a save writes.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 pub(super) enum HexWrite {
     /// The edited runs of a paged document, written in place.
     Patches(Vec<(u64, Vec<u8>)>),
@@ -232,6 +230,7 @@ pub(super) enum HexWrite {
 /// is not that file; that refuses with `InvalidData` and nothing is written.
 /// A whole-file write replaces the file outright, so there is nothing for it
 /// to be wrong about.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 pub(super) fn save_hex(
     h: &dyn Host,
     path: &Path,

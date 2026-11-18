@@ -2,9 +2,6 @@
 //! The entity is the document; what is shown of it, and where the caret is looking, belongs to
 //! a [`super::view::HexView`], so a file open in two groups shares its pages and its edits.
 
-// Used once the editor opens hex tabs (WP2.1); removed then.
-#![allow(dead_code)]
-
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::PathBuf;
@@ -35,6 +32,10 @@ pub(crate) struct HexData {
     // through the methods below.
     pub(super) content: HexContent,
     /// The disk mtime the model was read at.
+    #[expect(
+        dead_code,
+        reason = "used by M3 save, which checks the file is still the one read"
+    )]
     pub(crate) mtime: Option<MTime>,
     pub(crate) opens_as_text: bool,
     /// Pages being read, with the generation they were requested under: a reload makes the

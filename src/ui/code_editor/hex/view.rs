@@ -12,9 +12,6 @@
 //! measured layout into a shared cell; when what the viewport shows changed since the last
 //! request, prepaint defers a call that asks the document for the pages (see `request_visible`).
 
-// Used once the editor opens hex tabs (WP2.1); removed then.
-#![allow(dead_code)]
-
 use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::rc::Rc;

@@ -3,9 +3,6 @@
 //! parsers, chunked find, the value inspector and allocation-free row formatting. No gpui and
 //! no IO: the host reads pages and the view paints rows from here.
 
-// Used from M2 on; removed then.
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::ops::Range;
@@ -19,6 +16,7 @@ pub(super) const ROW: u64 = 16;
 /// Pages kept in the cache (16 MiB) before the least recently used go.
 pub(super) const PAGE_CACHE_CAP: usize = 256;
 /// Bytes read per step while searching.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 const FIND_CHUNK: usize = 1024 * 1024;
 
 const PAGE_U64: u64 = PAGE as u64;
@@ -52,6 +50,7 @@ pub(super) enum Byte {
 
 /// Why an edit did not happen. The UI localizes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 pub(super) enum EditRefusal {
     /// The file is empty, so there is no byte to edit.
     NothingToEdit,
@@ -108,6 +107,10 @@ impl ByteStore {
         !self.overlay.is_empty()
     }
 
+    #[expect(
+        dead_code,
+        reason = "used by M4 find, which searches the bytes with the edits applied"
+    )]
     pub(super) fn overlay(&self) -> &BTreeMap<u64, u8> {
         &self.overlay
     }
@@ -119,6 +122,7 @@ impl ByteStore {
 
     /// Drops every cached page and invalidates reads still in flight. Called when the file
     /// changed on disk. The overlay is untouched: the caller decides whether to keep it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn bump_generation(&mut self) {
         self.generation += 1;
         self.saving_pages.clear();
@@ -127,6 +131,7 @@ impl ByteStore {
     }
 
     /// A reload with new contents: new generation, no pages, no edits.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn set_source(&mut self, source: Source) {
         self.source = source;
         self.overlay.clear();
@@ -264,6 +269,7 @@ impl ByteStore {
     }
 
     /// Sets the edited value of one byte; the original value removes the edit.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn set(&mut self, off: u64, value: u8) -> Result<(), EditRefusal> {
         let disk = self.disk_byte(off).ok_or(EditRefusal::NotLoaded)?;
         if value == disk {
@@ -275,6 +281,7 @@ impl ByteStore {
     }
 
     /// Restores a byte to a recorded overlay state: `None` is "not edited".
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn set_state(&mut self, off: u64, state: Option<u8>) -> Result<(), EditRefusal> {
         match state {
             Some(value) => self.set(off, value),
@@ -285,6 +292,7 @@ impl ByteStore {
         }
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn page_missing(&self, idx: u64) -> bool {
         matches!(self.source, Source::Paged { .. }) && !self.pages.contains_key(&idx)
     }
@@ -293,6 +301,7 @@ impl ByteStore {
     /// or `end_save`: a save is asynchronous, and by the time it lands the user may have
     /// reverted a byte (dropping its overlay entry and so its page's pin), yet the fold needs
     /// the old disk byte to keep that revert.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     fn begin_save(&mut self) -> SaveSnapshot {
         let written = self.overlay.clone();
         self.saving_pages = written.keys().map(|off| off / PAGE_U64).collect();
@@ -317,6 +326,7 @@ impl ByteStore {
     }
 
     /// The save failed or was abandoned: the pages need no more protection.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     fn end_save(&mut self) {
         self.saving_pages.clear();
     }
@@ -328,6 +338,7 @@ impl ByteStore {
     /// the meantime (no overlay entry) becomes an edit again, since the disk no longer has it.
     /// Offsets that were not written are untouched. Bytes whose page is not cached are skipped;
     /// `begin_save` keeps those pages, so that does not happen through the normal paths.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     fn fold_written(&mut self, written: &BTreeMap<u64, u8>) -> BTreeMap<u64, u8> {
         let mut old = BTreeMap::new();
         if let Source::Whole(buf) = &mut self.source {
@@ -376,6 +387,7 @@ impl ByteStore {
     }
 
     /// The overlay as contiguous runs, ascending.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn patches(&self) -> Vec<(u64, Vec<u8>)> {
         runs(&self.overlay)
     }
@@ -383,6 +395,7 @@ impl ByteStore {
 
 /// What a save writes: the edits as they were when it started. `apply_saved` folds exactly
 /// these, so edits made while the save is in flight are not mistaken for saved ones.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 pub(super) struct SaveSnapshot {
     written: BTreeMap<u64, u8>,
     /// For a whole-buffer source: the bytes with the edits applied, to write as the file.
@@ -393,11 +406,13 @@ pub(super) struct SaveSnapshot {
 
 impl SaveSnapshot {
     /// The written bytes as contiguous runs, ascending, for a paged save.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn patches(&self) -> Vec<(u64, Vec<u8>)> {
         runs(&self.written)
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 fn runs(bytes: &BTreeMap<u64, u8>) -> Vec<(u64, Vec<u8>)> {
     let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
     for (&off, &value) in bytes {
@@ -521,6 +536,7 @@ impl Caret {
 
 /// What a paste did: how many bytes it wrote and whether the rest ran past the end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 pub(super) struct PasteResult {
     pub(super) written: usize,
     pub(super) truncated: bool,
@@ -528,6 +544,7 @@ pub(super) struct PasteResult {
 
 /// Caret position that decides whether typing continues the open undo step.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 struct Pos {
     offset: u64,
     low_nibble: bool,
@@ -535,6 +552,7 @@ struct Pos {
 }
 
 impl Pos {
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn of(caret: &Caret) -> Self {
         Self {
             offset: caret.offset,
@@ -546,6 +564,7 @@ impl Pos {
 
 /// One undo step: the overlay state of a run of bytes before and after. Overlay state, not
 /// byte values, so undo returns a byte to "not edited" exactly (`None`).
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 struct Step {
     offset: u64,
     before: Vec<Option<u8>>,
@@ -555,12 +574,14 @@ struct Step {
 }
 
 impl Step {
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn end(&self) -> u64 {
         self.offset + wide(self.before.len())
     }
 
     /// Folds a run that starts inside or right after this step into it, keeping the first
     /// `before` of every byte. False when the run is not adjacent.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn try_merge(
         &mut self,
         start: u64,
@@ -589,6 +610,7 @@ impl Step {
 }
 
 #[derive(Default)]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 struct History {
     undo: Vec<Step>,
     redo: Vec<Step>,
@@ -613,6 +635,7 @@ impl HexModel {
     }
 
     /// The file changed on disk: new contents, no edits, no history, caret kept in range.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn reload(&mut self, source: Source) {
         self.store.set_source(source);
         self.history = History::default();
@@ -645,6 +668,7 @@ impl HexModel {
 
     /// Types one hex digit given as its ASCII character: the high nibble first, then the low
     /// one, after which the caret advances (and stays on the last byte at the end).
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn type_hex(&mut self, digit: u8) -> Result<(), EditRefusal> {
         let value = hex_value(digit).ok_or(EditRefusal::NotHexDigit)?;
         let len = self.store.len();
@@ -668,6 +692,7 @@ impl HexModel {
     }
 
     /// Types one printable ASCII character over the caret's byte and advances.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn type_ascii(&mut self, ch: char) -> Result<(), EditRefusal> {
         let byte = u8::try_from(ch)
             .ok()
@@ -721,6 +746,7 @@ impl HexModel {
 
     /// Writes `new` from `start`, records it for undo and moves the caret. All target bytes must
     /// be loaded; nothing is changed otherwise. `coalesce` lets typing extend the open step.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn commit(
         &mut self,
         start: u64,
@@ -771,6 +797,7 @@ impl HexModel {
 
     /// Pages the next undo needs and does not have: restoring an edited value is checked
     /// against the disk byte, so its page must be cached.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn undo_missing_pages(&self) -> Vec<u64> {
         self.history
             .undo
@@ -779,6 +806,7 @@ impl HexModel {
     }
 
     /// Same for the next redo.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn redo_missing_pages(&self) -> Vec<u64> {
         self.history
             .redo
@@ -809,6 +837,7 @@ impl HexModel {
 
     /// Undoes the last step. `Ok(false)` when there is none; `NotLoaded` (nothing changed) when
     /// a page must be read first, see `undo_missing_pages`.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn undo(&mut self) -> Result<bool, EditRefusal> {
         let Some(step) = self.history.undo.pop() else {
             return Ok(false);
@@ -823,6 +852,7 @@ impl HexModel {
         Ok(true)
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn redo(&mut self) -> Result<bool, EditRefusal> {
         let Some(step) = self.history.redo.pop() else {
             return Ok(false);
@@ -837,6 +867,7 @@ impl HexModel {
         Ok(true)
     }
 
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn patches(&self) -> Vec<(u64, Vec<u8>)> {
         self.store.patches()
     }
@@ -844,11 +875,13 @@ impl HexModel {
     /// Freezes the edits for a save: patches for a paged file, the edited buffer for a whole
     /// one. Edits made afterwards are not part of it; hand it back to `apply_saved` when the
     /// write succeeded or to `abort_save` when it did not.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn save_snapshot(&mut self) -> SaveSnapshot {
         self.store.begin_save()
     }
 
     /// The save failed or was dropped; the edits stay as they are.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn abort_save(&mut self) {
         self.store.end_save();
     }
@@ -861,6 +894,7 @@ impl HexModel {
     /// would now mean the *saved* byte; so every `None` at an offset that was just written is
     /// rewritten to the byte the disk held before, an absolute value. Undoing then marks the
     /// byte edited again (dirty), and redoing back to the saved value clears the edit.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn apply_saved(&mut self, snapshot: &SaveSnapshot) {
         if snapshot.generation != self.store.generation() {
             return;
@@ -882,6 +916,7 @@ impl HexModel {
     }
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 fn hex_value(digit: u8) -> Option<u8> {
     char::from(digit)
         .to_digit(16)
@@ -892,6 +927,7 @@ fn hex_value(digit: u8) -> Option<u8> {
 // Parsers
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) enum OffsetError {
     Empty,
     Invalid,
@@ -900,12 +936,14 @@ pub(super) enum OffsetError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) enum PatternError {
     Empty,
     OddDigits,
     InvalidDigit,
 }
 
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 fn parse_number(text: &str) -> Result<u64, OffsetError> {
     let (digits, radix) = if let Some(rest) = text.strip_prefix("0x").or(text.strip_prefix("0X")) {
         (rest, 16)
@@ -928,6 +966,7 @@ fn parse_number(text: &str) -> Result<u64, OffsetError> {
 
 /// Go-to input: `0x1F`, `1Fh`, `31`, or `+16` / `-16` relative to the caret; surrounding
 /// whitespace and `_` between digits are ignored. The result must be inside the file.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) fn parse_offset(input: &str, caret: u64, len: u64) -> Result<u64, OffsetError> {
     let text = input.trim();
     if text.is_empty() {
@@ -952,6 +991,7 @@ pub(super) fn parse_offset(input: &str, caret: u64, len: u64) -> Result<u64, Off
 
 /// Find input: hex bytes separated by spaces or `:`, or run together; `0x` prefixes allowed.
 /// Every group must hold whole bytes.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) fn parse_hex_pattern(input: &str) -> Result<Vec<u8>, PatternError> {
     let mut out = Vec::new();
     let mut any = false;
@@ -991,6 +1031,7 @@ pub(super) fn parse_hex_pattern(input: &str) -> Result<Vec<u8>, PatternError> {
 // Find
 
 /// Random-access bytes for searching: a slice, or the host's file.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) trait ByteSource {
     fn len(&self) -> u64;
     /// Reads at `off` into `buf`; fewer bytes than asked only at the end (0 at or past it).
@@ -1026,6 +1067,7 @@ impl ByteSource for Vec<u8> {
 }
 
 /// A source with the unsaved edits applied, so find sees what the view shows.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) struct Overlaid<'a, S: ByteSource + ?Sized> {
     pub(super) src: &'a S,
     pub(super) overlay: &'a BTreeMap<u64, u8>,
@@ -1064,6 +1106,7 @@ fn read_full(src: &dyn ByteSource, off: u64, buf: &mut [u8]) -> io::Result<usize
 
 /// The first match starting in `lo..hi`. Chunks overlap by `pat.len() - 1` so a match across a
 /// chunk boundary is seen. A cancelled search reports no match.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 fn scan_forward(
     src: &dyn ByteSource,
     pat: &[u8],
@@ -1095,6 +1138,7 @@ fn scan_forward(
 }
 
 /// The last match starting in `lo..hi`, scanning chunks from the end.
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 fn scan_backward(
     src: &dyn ByteSource,
     pat: &[u8],
@@ -1132,6 +1176,7 @@ fn scan_backward(
 /// Finds `pat` starting at `from` (itself included) going forward or backward, optionally
 /// wrapping around the end. Reads 1 MiB at a time and checks `cancel` before each chunk; a
 /// cancelled search returns `Ok(None)`, so the caller looks at the flag to tell it from "none".
+#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) fn find(
     src: &dyn ByteSource,
     pat: &[u8],
