@@ -544,7 +544,6 @@ pub(super) struct PasteResult {
 
 /// Caret position that decides whether typing continues the open undo step.
 #[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 struct Pos {
     offset: u64,
     low_nibble: bool,
@@ -714,6 +713,7 @@ impl HexModel {
     /// Overwrites from the selection start (or the caret) without growing the file; what does
     /// not fit is cut and reported. One undo step. Refused whole when a target page is not
     /// loaded yet.
+    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn paste(&mut self, bytes: &[u8]) -> Result<PasteResult, EditRefusal> {
         let len = self.store.len();
         if len == 0 {

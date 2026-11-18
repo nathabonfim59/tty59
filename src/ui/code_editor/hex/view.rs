@@ -84,10 +84,6 @@ impl Grid {
         self.hex_start() + HEX_CHARS + COLUMN_GAP
     }
 
-    fn total(&self) -> u32 {
-        self.ascii_start() + ROW_BYTES + MARGIN
-    }
-
     /// The byte (0..16) and column under `x`, in characters from the row's left edge.
     fn hit(&self, x: f32) -> Option<(u32, Side)> {
         let hex = self.hex_start() as f32;
