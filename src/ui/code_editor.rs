@@ -715,7 +715,11 @@ enum EditorOpenError {
     /// already read comes along, so a hex view of it needs no second read.
     NotText {
         path: PathBuf,
+        // Read by the default hex route (M2); the allow goes with it.
+        #[allow(dead_code)]
         bytes: Vec<u8>,
+        // Read by the default hex route (M2); the allow goes with it.
+        #[allow(dead_code)]
         mtime: Option<MTime>,
     },
     /// Something already worded for the user.
