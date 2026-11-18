@@ -651,6 +651,9 @@ struct StockUiFont(gpui::SharedString);
 
 impl gpui::Global for StockUiFont {}
 
+// `window` is used again by the macOS-only traffic-light call at the end; elsewhere that call is
+// compiled out and clippy reads the reborrow below as needless.
+#[cfg_attr(not(target_os = "macos"), allow(clippy::needless_option_as_deref))]
 pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
     let follow = cx.global::<Config>().theme_follow_system;
     if follow {
@@ -710,7 +713,7 @@ pub(crate) fn apply_theme(mut window: Option<&mut Window>, cx: &mut App) {
         }
     }
 
-    Theme::change(mode, window, cx);
+    Theme::change(mode, window.as_deref_mut(), cx);
     cx.set_global(active);
     cx.set_global(presets::ActiveBackground {
         fill: theme.background.clone(),
