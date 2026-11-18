@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.18.0] - 2026-11-18
+
+### Added
+
+- **Search open files from the editor's tab strip**: a chevron at the end of
+  the strip opens a filterable list of every open file, even when nothing
+  overflows. Ctrl+Shift+A (Cmd+Shift+A on macOS) opens it while the editor,
+  the Markdown preview or an image has focus, and the palette offers it as
+  "Search Open Files". Elsewhere the chord keeps doing what it did, and it can
+  be rebound or cleared on the Keybindings page.
+- **Download and Show in File Tree from a file's tab**: right-click a tab, the
+  editor or an image to copy the file into Downloads, local or remote, or to
+  root the file tree at that file's project with the file selected. The tree
+  goes back to following the terminal as soon as a terminal is focused again.
+  Local files in the file tree can be downloaded too.
+- **Copy Image and Download Image in the image viewer**: right-click a picture
+  or use the palette to put it on the clipboard as a PNG or save it to
+  Downloads. On Linux the copy also goes through `wl-copy` or `xclip` when one
+  is installed, so the image pastes into other applications. Both actions can
+  be bound on the Keybindings page.
+
 ## [26.17.0] - 2026-11-17
 
 ### Changed
