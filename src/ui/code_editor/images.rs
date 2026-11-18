@@ -1178,9 +1178,34 @@ mod tests {
         assert_eq!(notices(&mut vcx), before, "a text file downloads nothing");
     }
 
-    /// A right-click on the picture opens the menu: the focus moves into it.
-    #[gpui::test]
-    fn a_right_click_on_the_picture_opens_a_menu(cx: &mut TestAppContext) {
+    /// A right-click on the picture opens the menu, and its first row, Copy
+    /// Image, puts the picture on the clipboard. A fresh menu has nothing
+    /// selected, so Down lands on the first row and Enter runs it.
+    ///
+    /// A plain `#[test]` with a context it never tears down, for the same
+    /// reason as `tab_sidebar`'s header menu test: an open `ContextMenu`
+    /// trips `#[gpui::test]`'s leak detector through a known toolkit cycle
+    /// (`ui-audit/bugs/gpui-component-contextmenu-leak.md`). That is a limit
+    /// of this harness, not proof that this menu releases its state.
+    #[test]
+    fn a_right_click_on_the_picture_opens_a_menu_that_copies_it() {
+        let mut cx = TestAppContext::build(gpui::TestDispatcher::new(0), None);
+        // Forgotten on every path, a failed assertion included: dropping the
+        // context after a panic would run the leak teardown a second time and
+        // abort, which would hide the assertion that actually failed.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            copy_from_the_picture_menu(&mut cx)
+        }));
+        if outcome.is_ok() {
+            cx.run_until_parked();
+        }
+        std::mem::forget(cx);
+        if let Err(failure) = outcome {
+            std::panic::resume_unwind(failure);
+        }
+    }
+
+    fn copy_from_the_picture_menu(cx: &mut TestAppContext) {
         use gpui::{Modifiers, MouseButton, MouseDownEvent, MouseUpEvent};
 
         cx.executor().allow_parking();
@@ -1189,11 +1214,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let png = real_dir(&dir).join("shot.png");
         write_png(&png, 300, 200);
+        #[cfg(target_os = "linux")]
+        standin::Standin::new(true, false).install(&app, &mut vcx);
         open(&app, &mut vcx, &png, 1);
         let at = painted(&mut vcx, "image-preview-body").center();
         click_at(&mut vcx, at);
         settle(&mut vcx);
         let before = vcx.update(|window, cx| window.focused(cx));
+        assert!(clipboard_png(&mut vcx).is_none(), "nothing copied yet");
 
         vcx.simulate_event(MouseDownEvent {
             button: MouseButton::Right,
@@ -1215,12 +1243,12 @@ mod tests {
             "the right click opened a menu"
         );
 
-        // Close it: an open menu is a handle still alive at exit.
-        vcx.simulate_keystrokes("escape");
-        settle(&mut vcx);
-        let after = vcx.update(|window, cx| window.focused(cx));
-        assert_ne!(after, open, "the menu is closed");
-        assert!(after.is_some(), "the focus went back out of the menu");
+        vcx.simulate_keystrokes("down enter");
+        wait(&mut vcx, |vcx| clipboard_png(vcx).is_some());
+        assert!(
+            clipboard_png(&mut vcx).is_some(),
+            "the menu's first row copied the picture"
+        );
     }
 
     fn click_at(vcx: &mut VisualTestContext, at: gpui::Point<Pixels>) {
