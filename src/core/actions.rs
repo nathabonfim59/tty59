@@ -196,7 +196,7 @@ pub struct LaunchAgent {
 // Fixed bindings of the hex view, not on the Keybindings page: they only mean something while
 // the view has the focus. See the matching block in `ui::keymap`.
 
-actions!(tty59, [HexToggleSide]);
+actions!(tty59, [HexToggleSide, HexUndo, HexRedo, HexCopy, HexPaste]);
 
 /// Where a hex caret goes. The model's own moves, one per motion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

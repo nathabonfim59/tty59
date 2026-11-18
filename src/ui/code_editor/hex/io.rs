@@ -212,7 +212,6 @@ pub(super) fn read_pages(
 }
 
 /// What a save writes.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 pub(super) enum HexWrite {
     /// The edited runs of a paged document, written in place.
     Patches(Vec<(u64, Vec<u8>)>),
@@ -230,7 +229,6 @@ pub(super) enum HexWrite {
 /// is not that file; that refuses with `InvalidData` and nothing is written.
 /// A whole-file write replaces the file outright, so there is nothing for it
 /// to be wrong about.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 pub(super) fn save_hex(
     h: &dyn Host,
     path: &Path,

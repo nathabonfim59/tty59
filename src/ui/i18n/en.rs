@@ -2576,8 +2576,22 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HexStatusOffset => "Offset {hex} ({dec})",
         L10nKey::HexStatusSelection => "Sel {count}",
         L10nKey::HexStatusSize => "Size {size}",
+        L10nKey::HexEditEmpty => "This file is empty, so there is no byte to edit",
+        L10nKey::HexEditOverwriteOnly => "This editor overwrites bytes, it cannot insert or delete",
+        L10nKey::HexCopyTooLarge => "The selection is over {limit}, too much to copy",
+        L10nKey::HexPasteNotHex => "The clipboard does not hold hex bytes, nothing was pasted",
+        L10nKey::HexPasteTruncated => {
+            "Pasted {written} bytes, left out {left} that ran past the end of the file"
+        }
         L10nKey::HexTooLarge => {
             "\"{name}\" is {size} MiB, over the {limit} MiB that can be opened over a connection"
+        }
+        L10nKey::HexSavePartlyWritten => {
+            "The file may be partly written. Saving again rewrites every change."
+        }
+        L10nKey::EditorSaveSiblingTitle => "Another tab of \"{name}\" has unsaved changes",
+        L10nKey::EditorSaveSiblingBody => {
+            "Saving here writes the file without them, and that tab will then see the file as changed."
         }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {

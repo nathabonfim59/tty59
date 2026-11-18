@@ -214,6 +214,20 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             mv("ctrl-shift-home", DocStart, true),
             mv("ctrl-shift-end", DocEnd, true),
             KeyBinding::new("tab", HexToggleSide, hex),
+            // The text editor's own chords for these (gpui-component's `Input` table): Cmd on
+            // macOS, Ctrl elsewhere, and redo is Cmd+Shift+Z / Ctrl+Y.
+            KeyBinding::new("secondary-c", HexCopy, hex),
+            KeyBinding::new("secondary-v", HexPaste, hex),
+        ]);
+        #[cfg(target_os = "macos")]
+        bindings.extend([
+            KeyBinding::new("cmd-z", HexUndo, hex),
+            KeyBinding::new("cmd-shift-z", HexRedo, hex),
+        ]);
+        #[cfg(not(target_os = "macos"))]
+        bindings.extend([
+            KeyBinding::new("ctrl-z", HexUndo, hex),
+            KeyBinding::new("ctrl-y", HexRedo, hex),
         ]);
         #[cfg(target_os = "macos")]
         bindings.extend([
@@ -3518,6 +3532,61 @@ mod gpui_tests {
                     .is_some_and(|a| a.partial_eq(&HexToggleSide)),
                 "and stays the terminal's in a terminal"
             );
+        });
+    }
+
+    /// Undo, redo, copy and paste in the hex view sit on the chords the text editor uses for
+    /// them on this OS (gpui-component's `Input` table: Cmd on macOS, Ctrl elsewhere, redo on
+    /// Cmd+Shift+Z / Ctrl+Y), run the hex actions, and in a terminal stay the terminal's.
+    /// Guards the four bindings the hex block adds.
+    #[gpui::test]
+    fn the_hex_view_edit_chords_match_the_text_editors(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let first = |keys: &str, stack: &[&str]| {
+                let input = vec![Keystroke::parse(keys).expect("the typed keystroke parses")];
+                let stack: Vec<gpui::KeyContext> = stack
+                    .iter()
+                    .map(|c| gpui::KeyContext::parse(c).expect("the context parses"))
+                    .collect();
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().boxed_clone())
+            };
+            let hex = ["Workspace", "EditorDocument HexEditor"];
+            let terminal = ["Workspace", "Terminal"];
+            let (m, undo, redo) = if cfg!(target_os = "macos") {
+                ("cmd", "cmd-z", "cmd-shift-z")
+            } else {
+                ("ctrl", "ctrl-z", "ctrl-y")
+            };
+            let copy = format!("{m}-c");
+            let paste = format!("{m}-v");
+            let table: [(&str, Box<dyn gpui::Action>); 4] = [
+                (undo, Box::new(HexUndo)),
+                (redo, Box::new(HexRedo)),
+                (copy.as_str(), Box::new(HexCopy)),
+                (paste.as_str(), Box::new(HexPaste)),
+            ];
+            for (keys, want) in table {
+                let got = first(keys, &hex);
+                assert!(
+                    got.as_ref().is_some_and(|a| a.partial_eq(want.as_ref())),
+                    "{keys} in the hex view runs {}",
+                    want.name()
+                );
+                let outside = first(keys, &terminal);
+                assert!(
+                    !outside
+                        .as_ref()
+                        .is_some_and(|a| a.partial_eq(want.as_ref())),
+                    "{keys} in a terminal is not {}",
+                    want.name()
+                );
+            }
         });
     }
 

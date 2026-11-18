@@ -18,18 +18,22 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Entity, FocusHandle, HighlightStyle, KeyContext, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollWheelEvent, SharedString,
-    Size, StyledText, Subscription, UnderlineStyle, Window, canvas, div, point, px, size,
+    App, Bounds, ClipboardItem, Context, Entity, FocusHandle, HighlightStyle, Hsla, KeyContext,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+    ScrollWheelEvent, SharedString, Size, StyledText, Subscription, UnderlineStyle, Window, canvas,
+    div, point, px, size,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::ScrollbarHandle;
+use gpui_component::{ActiveTheme as _, WindowExt as _};
 
-use super::data::{HexContent, HexData};
-use super::model::{self, Byte, HexModel, ROW, Side, Values};
-use crate::core::actions::{HEX_KEY_CONTEXT, HexMotion, HexMove, HexToggleSide};
+use super::data::{COPY_LIMIT, Done, Failure, HexContent, HexData, Op};
+use super::model::{self, Byte, EditRefusal, HexModel, ROW, Side, Values};
+use crate::core::actions::{
+    HEX_KEY_CONTEXT, HexCopy, HexMotion, HexMove, HexPaste, HexRedo, HexToggleSide, HexUndo,
+};
 use crate::core::config::Config;
 use crate::ui::code_editor::DOCUMENT_KEY_CONTEXT;
+use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::scrollbar::with_vertical_scrollbar;
 use crate::ui::zoom::zoom_wheel;
 
@@ -314,9 +318,16 @@ pub(crate) struct HexView {
     scroll: Rc<Cell<Scroll>>,
     layout: Rc<Cell<Layout>>,
     /// The rows the pages were last asked for, so prepaint defers a request only on a change.
-    requested: Rc<Cell<Option<(u64, u64)>>>,
+    /// The (generation, first, end) rows last asked for: a reload bumps the generation and
+    /// drops every cached page, so the same rows must be asked for again.
+    requested: Rc<Cell<Option<(u64, u64, u64)>>>,
     /// Where a mouse drag began, while the button is down.
     drag_from: Option<u64>,
+    /// The one edit waiting for a page to land; see `run_op`.
+    pending: Option<Op>,
+    /// Set when the document changed while an edit was waiting: the next prepaint defers the
+    /// retry, because a retry may need the window.
+    retry_due: bool,
     /// The last measurement and what it was made for.
     measured: RefCell<Option<(MeasureKey, Metrics, Pixels)>>,
     font_warned: Cell<bool>,
@@ -326,11 +337,17 @@ pub(crate) struct HexView {
     /// Rows built by render, for the tests that pin that only visible rows are.
     #[cfg(test)]
     row_builds: Rc<Cell<usize>>,
+    /// The messages shown, for the tests (a notification's text is not readable back).
+    #[cfg(test)]
+    said: Rc<RefCell<Vec<String>>>,
 }
 
 impl HexView {
     pub(crate) fn new(data: Entity<HexData>, slot: usize, cx: &mut Context<Self>) -> Self {
-        let _data_changed = cx.observe(&data, |_, _, cx| cx.notify());
+        let _data_changed = cx.observe(&data, |this, _, cx| {
+            this.retry_due |= this.pending.is_some();
+            cx.notify();
+        });
         Self {
             focus: cx.focus_handle(),
             data,
@@ -339,12 +356,16 @@ impl HexView {
             layout: Rc::default(),
             requested: Rc::default(),
             drag_from: None,
+            pending: None,
+            retry_due: false,
             measured: RefCell::new(None),
             font_warned: Cell::new(false),
             header: header_text(),
             _data_changed,
             #[cfg(test)]
             row_builds: Rc::default(),
+            #[cfg(test)]
+            said: Rc::default(),
         }
     }
 
@@ -398,7 +419,8 @@ impl HexView {
     fn request_visible(&mut self, window: &Window, cx: &mut Context<Self>) {
         let l = self.layout.get();
         let rows = visible_rows(self.scroll.get(), l.viewport_h(), l.metrics.row_h, l.rows);
-        self.requested.set(Some((rows.start, rows.end)));
+        let generation = self.data.read(cx).generation();
+        self.requested.set(Some((generation, rows.start, rows.end)));
         self.data.update(cx, |data, cx| {
             if let HexContent::Ready(m) = &mut data.content {
                 m.store.touch_rows(rows.clone());
@@ -440,6 +462,7 @@ impl HexView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        self.pending = None;
         let page = self.layout.get().page();
         self.with_caret(cx, |caret, len| match motion {
             HexMotion::Left => caret.left(len, extend),
@@ -456,7 +479,126 @@ impl HexView {
         self.caret_moved(window, cx);
     }
 
+    /// Does one edit, copy, undo or redo. When a page is missing it asks for it and keeps the op
+    /// as `pending`: it is tried once more when the document next changes (a page landing), and
+    /// dropped if it is still short while no read is running, so a failed read never loops.
+    fn run_op(&mut self, op: Op, retry: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !retry {
+            self.pending = None;
+        }
+        let pasting = match &op {
+            Op::Paste(bytes) => bytes.len(),
+            _ => 0,
+        };
+        match self.data.update(cx, |data, cx| data.run(&op, cx)) {
+            Ok(Done::Edited) => self.caret_moved(window, cx),
+            Ok(Done::Pasted(pasted)) => {
+                if pasted.truncated {
+                    let left = pasting.saturating_sub(pasted.written);
+                    self.say(truncated_notice(pasted.written, left), window, cx);
+                }
+                self.caret_moved(window, cx);
+            }
+            Ok(Done::NothingToDo) => {}
+            Ok(Done::Copied(text)) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Err(Failure::Edit(EditRefusal::NotLoaded)) => {
+                let waiting = self.data.update(cx, |data, cx| {
+                    // A retry that is still short must not ask again: a page whose read failed
+                    // would be read, fail and be asked for in a loop.
+                    if !retry {
+                        let pages = data.pages_missing_for(&op);
+                        data.ensure_pages(&pages, window, cx);
+                    }
+                    data.reading()
+                });
+                self.pending = waiting.then_some(op);
+            }
+            Err(failure) => {
+                if let Some(text) = failure_notice(&failure) {
+                    self.say(text, window, cx);
+                }
+            }
+        }
+    }
+
+    /// Tells the user something short. The editor's status bar has no slot for a passing
+    /// message, so it is a notification.
+    fn say(&self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(test)]
+        self.said.borrow_mut().push(text.clone());
+        window.push_notification(text, cx);
+    }
+
+    /// The deferred retry of the edit that was waiting for a page.
+    fn retry_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.retry_due = false;
+        if let Some(op) = self.pending.take() {
+            self.run_op(op, true, window, cx);
+        }
+    }
+
+    /// Typing: a hex digit in the hex column, a printable character in the ASCII one. Chords with
+    /// ctrl, alt or cmd belong to actions and pass through; so does anything that is not an edit.
+    fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let k = &ev.keystroke;
+        let m = &k.modifiers;
+        if m.control || m.alt || m.platform || m.function {
+            return;
+        }
+        let side = match &self.data.read(cx).content {
+            HexContent::Ready(model) => model.caret.side,
+            HexContent::TooLarge { .. } => return,
+        };
+        if matches!(k.key.as_str(), "backspace" | "delete") {
+            // Bytes are overwritten, never inserted or removed: say so rather than do nothing.
+            self.pending = None;
+            self.say(t(L10nKey::HexEditOverwriteOnly).to_string(), window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        let mut chars = k.key_char.iter().flat_map(|s| s.chars());
+        let (Some(ch), None) = (chars.next(), chars.next()) else {
+            return;
+        };
+        let op = match side {
+            Side::Hex => match u8::try_from(ch) {
+                Ok(digit) if digit.is_ascii_hexdigit() => Op::Hex(digit),
+                _ => return,
+            },
+            // Only what can be typed is ours; Tab, Enter and the rest go on to their bindings.
+            Side::Ascii if (' '..='~').contains(&ch) => Op::Ascii(ch),
+            Side::Ascii => return,
+        };
+        cx.stop_propagation();
+        self.run_op(op, false, window, cx);
+    }
+
+    /// The clipboard's text as bytes for the column the caret is in: hex digits in the hex
+    /// column, the text's own UTF-8 bytes in the ASCII one.
+    fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let side = match &self.data.read(cx).content {
+            HexContent::Ready(model) => model.caret.side,
+            HexContent::TooLarge { .. } => return,
+        };
+        let text = cx.read_from_clipboard().and_then(|item| item.text());
+        let bytes = match (side, text) {
+            (Side::Ascii, Some(text)) => text.into_bytes(),
+            (Side::Hex, Some(text)) => model::parse_hex_pattern(&text).ok().unwrap_or_default(),
+            (_, None) => Vec::new(),
+        };
+        if bytes.is_empty() {
+            // No text in the ASCII column is just an empty paste; in the hex column the
+            // clipboard held something that is not bytes.
+            if side == Side::Hex {
+                self.say(t(L10nKey::HexPasteNotHex).to_string(), window, cx);
+            }
+            return;
+        }
+        self.run_op(Op::Paste(bytes), false, window, cx);
+    }
+
     fn toggle_side(&mut self, cx: &mut Context<Self>) {
+        self.pending = None;
         self.data.update(cx, |data, cx| {
             if let HexContent::Ready(m) = &mut data.content {
                 m.toggle_side();
@@ -498,6 +640,7 @@ impl HexView {
 
     fn mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
+        self.pending = None;
         let len = self.data.read(cx).len().unwrap_or(0);
         let Some((offset, side)) = self.hit(ev.position, len) else {
             return;
@@ -542,6 +685,35 @@ impl HexView {
     }
 }
 
+/// The words for a paste that ran past the end of the file.
+fn truncated_notice(written: usize, left: usize) -> String {
+    t_fmt(
+        L10nKey::HexPasteTruncated,
+        &[
+            ("written", &written.to_string()),
+            ("left", &left.to_string()),
+        ],
+    )
+}
+
+/// What the user is told when an op did nothing. A character that is not a digit, or not
+/// printable, is not worth a notice per keystroke, and a missing page is waited for.
+fn failure_notice(failure: &Failure) -> Option<String> {
+    match failure {
+        Failure::Edit(EditRefusal::NothingToEdit) => Some(t(L10nKey::HexEditEmpty).to_string()),
+        Failure::Edit(
+            EditRefusal::NotLoaded | EditRefusal::NotHexDigit | EditRefusal::NotPrintable,
+        ) => None,
+        Failure::CopyTooLarge => Some(t_fmt(
+            L10nKey::HexCopyTooLarge,
+            &[(
+                "limit",
+                &crate::ui::image_preview::view::human_size(COPY_LIMIT),
+            )],
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Rows
 
@@ -576,6 +748,8 @@ struct Marks {
     caret_here: HighlightStyle,
     caret_other: HighlightStyle,
     pending: HighlightStyle,
+    /// The text colour of a byte that differs from the disk.
+    edited: Hsla,
 }
 
 fn row_text(m: &HexModel, row: u64, grid: Grid, marks: &Marks) -> RowText {
@@ -618,8 +792,9 @@ fn row_text(m: &HexModel, row: u64, grid: Grid, marks: &Marks) -> RowText {
         };
         let is_caret = off == m.caret.offset;
         let selected = selection.as_ref().is_some_and(|r| r.contains(&off));
+        let edited = matches!(byte, Byte::Loaded { edited: true, .. });
         let style = |side: Side| {
-            if is_caret {
+            let base = if is_caret {
                 Some(if m.caret.side == side {
                     marks.caret_here
                 } else {
@@ -631,6 +806,15 @@ fn row_text(m: &HexModel, row: u64, grid: Grid, marks: &Marks) -> RowText {
                 Some(marks.pending)
             } else {
                 None
+            };
+            // The edit colour rides on whatever the caret or selection already paints.
+            if edited {
+                Some(HighlightStyle {
+                    color: Some(marks.edited),
+                    ..base.unwrap_or_default()
+                })
+            } else {
+                base
             }
         };
         let push = |list: &mut Vec<(Range<usize>, HighlightStyle)>,
@@ -706,6 +890,8 @@ impl Render for HexView {
                 color: Some(muted),
                 ..Default::default()
             },
+            // The same token the source-control panel uses for a modified file.
+            edited: theme.warning,
         };
 
         let measured = self.layout.get();
@@ -798,10 +984,18 @@ impl Render for HexView {
                     metrics,
                     rows: rows_total,
                 });
+                if view.read(cx).retry_due {
+                    let view = view.clone();
+                    window.defer(cx, move |window, cx| {
+                        view.update(cx, |this, cx| this.retry_pending(window, cx));
+                    });
+                }
                 let (top, h) = (view.read(cx).scroll.get(), bounds.size.height.as_f32());
                 let range = visible_rows(top, h, metrics.row_h, rows_total);
-                if requested.get() != Some((range.start, range.end)) {
-                    requested.set(Some((range.start, range.end)));
+                let generation = view.read(cx).data.read(cx).generation();
+                let key = Some((generation, range.start, range.end));
+                if requested.get() != key {
+                    requested.set(key);
                     let view = view.clone();
                     window.defer(cx, move |window, cx| {
                         view.update(cx, |this, cx| this.request_visible(window, cx));
@@ -844,6 +1038,25 @@ impl Render for HexView {
                 this.apply_motion(a.motion, a.extend, window, cx)
             }))
             .on_action(cx.listener(|this, _: &HexToggleSide, _, cx| this.toggle_side(cx)))
+            .on_action(
+                cx.listener(|this, _: &HexUndo, window, cx| {
+                    this.run_op(Op::Undo, false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &HexRedo, window, cx| {
+                    this.run_op(Op::Redo, false, window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &HexCopy, window, cx| {
+                    this.run_op(Op::Copy, false, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &HexPaste, window, cx| this.paste(window, cx)))
+            .on_key_down(
+                cx.listener(|this, ev: &KeyDownEvent, window, cx| this.key_down(ev, window, cx)),
+            )
             .child(header)
             .child(with_vertical_scrollbar(
                 ("hex-scrollbar", self.slot),
@@ -900,6 +1113,24 @@ mod tests {
         len: u64,
         head: &[u8],
     ) -> (Rig, &'a mut VisualTestContext) {
+        rig_in(cx, len, head, false)
+    }
+
+    /// Like `rig`, with the view under a `Root` so notifications have somewhere to go.
+    fn rig_rooted<'a>(
+        cx: &'a mut TestAppContext,
+        len: u64,
+        head: &[u8],
+    ) -> (Rig, &'a mut VisualTestContext) {
+        rig_in(cx, len, head, true)
+    }
+
+    fn rig_in<'a>(
+        cx: &'a mut TestAppContext,
+        len: u64,
+        head: &[u8],
+        rooted: bool,
+    ) -> (Rig, &'a mut VisualTestContext) {
         crate::core::config::pin_test_config_dir();
         cx.update(|cx| {
             gpui_component::init(cx);
@@ -908,10 +1139,23 @@ mod tests {
         let host = Counting::new();
         let (data, dir) = paged(len, head, &host);
         let data = cx.new(|_| data);
-        let (view, vcx) = cx.add_window_view({
-            let data = data.clone();
-            move |_, cx| HexView::new(data, 0, cx)
-        });
+        let made: Rc<RefCell<Option<Entity<HexView>>>> = Rc::default();
+        let (view, vcx) = if rooted {
+            let (_, vcx) = cx.add_window_view({
+                let (data, made) = (data.clone(), made.clone());
+                move |window, cx| {
+                    let view = cx.new(|cx| HexView::new(data, 0, cx));
+                    *made.borrow_mut() = Some(view.clone());
+                    gpui_component::Root::new(view, window, cx)
+                }
+            });
+            (made.take().expect("the window made its view"), vcx)
+        } else {
+            cx.add_window_view({
+                let data = data.clone();
+                move |_, cx| HexView::new(data, 0, cx)
+            })
+        };
         settle(vcx, &data);
         let rig = Rig {
             view,
@@ -996,6 +1240,7 @@ mod tests {
                 color: Some(gpui::hsla(0.5, 0.5, 0.5, 1.)),
                 ..Default::default()
             },
+            edited: gpui::hsla(0.1, 0.9, 0.5, 1.),
         };
         let bytes: Vec<u8> = (0x41u8..0x51).collect();
         let loaded = HexModel::new(Source::Whole(Arc::from(bytes)));
@@ -1177,6 +1422,36 @@ mod tests {
         assert_eq!(scroll(&rig, vcx).top_row, l.rows - l.page());
     }
 
+    /// A reload drops every cached page, and the rows still on screen are asked for again
+    /// without any scroll. Guards the generation in the `requested` key (request_visible and
+    /// the prepaint check): with only the rows in it the second read never happens.
+    #[gpui::test]
+    fn a_reload_loads_the_visible_rows_again_without_a_scroll(cx: &mut TestAppContext) {
+        use super::super::io::{HexFile, HexSource};
+        let (rig, vcx) = rig(cx, GIB, &[]);
+        let handle = rig.view.read_with(vcx, |v, _| v.scroll_handle());
+        handle.set_offset(point(px(0.), px(-1e9)));
+        redraw(&rig, vcx);
+        let last_page = (GIB - 1) / PAGE as u64 * PAGE as u64;
+        assert_eq!(rig.host.reads(), vec![last_page]);
+
+        rig.data.update(vcx, |d, cx| {
+            let file = HexFile {
+                path: d.path.clone(),
+                source: HexSource::Paged {
+                    len: GIB,
+                    first_page: vec![0; PAGE],
+                },
+                mtime: None,
+                len: GIB,
+                opens_as_text: false,
+            };
+            d.apply_reload(file, cx);
+        });
+        settle(vcx, &rig.data);
+        assert_eq!(rig.host.reads(), vec![last_page, last_page]);
+    }
+
     // --- keys ----------------------------------------------------------------------------
 
     /// Each motion moves the caret as the model says. Guards `apply_motion`'s mapping of every
@@ -1230,6 +1505,429 @@ mod tests {
         assert_eq!(side(&rig, vcx), Side::Ascii);
         rig.view.update(vcx, |v, cx| v.toggle_side(cx));
         assert_eq!(side(&rig, vcx), Side::Hex);
+    }
+
+    // --- editing -------------------------------------------------------------------------
+
+    fn focus(rig: &Rig, vcx: &mut VisualTestContext) {
+        rig.view
+            .update_in(vcx, |v, window, cx| window.focus(&v.focus, cx));
+    }
+
+    /// A key-down as the window delivers it, straight to the view's handler.
+    fn key(
+        rig: &Rig,
+        vcx: &mut VisualTestContext,
+        key: &str,
+        key_char: Option<&str>,
+        modifiers: Modifiers,
+    ) {
+        let ev = KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers,
+                key: key.into(),
+                key_char: key_char.map(Into::into),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        };
+        rig.view
+            .update_in(vcx, |v, window, cx| v.key_down(&ev, window, cx));
+        settle(vcx, &rig.data);
+    }
+
+    /// Types each character as a plain key.
+    fn type_text(rig: &Rig, vcx: &mut VisualTestContext, text: &str) {
+        for ch in text.chars() {
+            let s = ch.to_string();
+            key(rig, vcx, &s, Some(&s), Modifiers::default());
+        }
+    }
+
+    fn dispatch(rig: &Rig, vcx: &mut VisualTestContext, action: impl gpui::Action) {
+        focus(rig, vcx);
+        vcx.dispatch_action(action);
+        settle(vcx, &rig.data);
+    }
+
+    /// The bytes as the user sees them, edits applied.
+    fn bytes(rig: &Rig, vcx: &VisualTestContext, range: Range<u64>) -> Vec<Option<u8>> {
+        rig.data.read_with(vcx, |d, _| match &d.content {
+            HexContent::Ready(m) => range.map(|off| m.store.effective(off)).collect(),
+            HexContent::TooLarge { .. } => panic!("too large"),
+        })
+    }
+
+    fn dirty(rig: &Rig, vcx: &VisualTestContext) -> bool {
+        rig.data.read_with(vcx, |d, _| d.dirty())
+    }
+
+    /// The messages the view has shown so far.
+    fn said(rig: &Rig, vcx: &VisualTestContext) -> Vec<String> {
+        rig.view.read_with(vcx, |v, _| v.said.borrow().clone())
+    }
+
+    fn put_on_clipboard(vcx: &mut VisualTestContext, text: &str) {
+        vcx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+    }
+
+    fn clipboard(vcx: &mut VisualTestContext) -> Option<String> {
+        vcx.read_from_clipboard().and_then(|item| item.text())
+    }
+
+    fn select_first(rig: &Rig, vcx: &mut VisualTestContext, count: u64) {
+        for _ in 1..count {
+            motion(rig, vcx, HexMotion::Right, true);
+        }
+    }
+
+    /// Typing `4` then `1` on the hex side writes 0x41 and moves on, through the window's own
+    /// key dispatch. Guards `.on_key_down` on the view, `key_down`'s hex arm and `Op::Hex`
+    /// reaching `type_hex`.
+    #[gpui::test]
+    fn typing_two_hex_digits_writes_a_byte_and_advances(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 100, &[0, 0]);
+        focus(&rig, vcx);
+        vcx.simulate_keystrokes("4 1");
+        assert_eq!(bytes(&rig, vcx, 0..2), [Some(0x41), Some(0)]);
+        assert_eq!(
+            status(&rig, vcx).offset,
+            1,
+            "the caret moved to the next byte"
+        );
+        assert!(dirty(&rig, vcx));
+    }
+
+    /// Typing `A` on the ASCII side writes 0x41; the hex side ignores a character that is not
+    /// a digit. Guards `key_down`'s ASCII arm and its digit filter.
+    #[gpui::test]
+    fn typing_a_character_on_the_ascii_side_writes_its_byte(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig_rooted(cx, 100, &[]);
+        key(&rig, vcx, "g", Some("g"), Modifiers::default());
+        assert!(!dirty(&rig, vcx), "g is not a hex digit");
+        assert!(said(&rig, vcx).is_empty(), "and not worth a notice");
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        key(&rig, vcx, "a", Some("A"), Modifiers::shift());
+        assert_eq!(bytes(&rig, vcx, 0..2), [Some(0x41), Some(0)]);
+        assert_eq!(status(&rig, vcx).offset, 1);
+        key(&rig, vcx, "enter", Some("\n"), Modifiers::default());
+        assert_eq!(
+            bytes(&rig, vcx, 1..2),
+            [Some(0)],
+            "a control character is not typed"
+        );
+    }
+
+    /// On the ASCII side Tab still switches the column and Enter writes nothing: only printable
+    /// characters are typed, the rest go on to their bindings. Guards the printable filter in
+    /// `key_down`.
+    #[gpui::test]
+    fn tab_and_enter_are_not_typed_on_the_ascii_side(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 100, &[]);
+        vcx.update(|_, cx| {
+            cx.bind_keys([gpui::KeyBinding::new(
+                "tab",
+                HexToggleSide,
+                Some(HEX_KEY_CONTEXT),
+            )]);
+        });
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        focus(&rig, vcx);
+        vcx.simulate_keystrokes("tab");
+        let side = rig.data.read_with(vcx, |d, _| match &d.content {
+            HexContent::Ready(m) => m.caret.side,
+            HexContent::TooLarge { .. } => panic!("too large"),
+        });
+        assert_eq!(side, Side::Hex, "Tab switched the column");
+        key(&rig, vcx, "enter", Some("\n"), Modifiers::default());
+        key(&rig, vcx, "tab", Some("\t"), Modifiers::default());
+        assert!(!dirty(&rig, vcx));
+    }
+
+    /// Writing a byte back to what the disk holds makes the document clean again. Guards
+    /// `HexData::run` notifying and the overlay drop, seen through `dirty`.
+    #[gpui::test]
+    fn a_byte_typed_back_to_its_original_is_clean(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 100, &[0x41]);
+        type_text(&rig, vcx, "42");
+        assert!(dirty(&rig, vcx));
+        motion(&rig, vcx, HexMotion::Left, false);
+        type_text(&rig, vcx, "41");
+        assert_eq!(bytes(&rig, vcx, 0..1), [Some(0x41)]);
+        assert!(!dirty(&rig, vcx));
+    }
+
+    /// Undo twice restores two separate edits and clears the dirty state; redo brings the
+    /// first back. Goes through the bound actions. Guards the `HexUndo`/`HexRedo` handlers and
+    /// `Op::Undo`/`Op::Redo`.
+    #[gpui::test]
+    fn undo_and_redo_run_through_their_actions(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 100, &[]);
+        type_text(&rig, vcx, "41");
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        type_text(&rig, vcx, "42");
+        assert_eq!(bytes(&rig, vcx, 0..2), [Some(0x41), Some(0x42)]);
+        dispatch(&rig, vcx, HexUndo);
+        assert_eq!(bytes(&rig, vcx, 0..2), [Some(0x41), Some(0)]);
+        dispatch(&rig, vcx, HexUndo);
+        assert_eq!(bytes(&rig, vcx, 0..2), [Some(0), Some(0)]);
+        assert!(!dirty(&rig, vcx), "undone to the file as it was");
+        dispatch(&rig, vcx, HexRedo);
+        assert_eq!(bytes(&rig, vcx, 0..2), [Some(0x41), Some(0)]);
+        assert!(dirty(&rig, vcx));
+        dispatch(&rig, vcx, HexUndo);
+        dispatch(&rig, vcx, HexUndo);
+        assert!(!dirty(&rig, vcx), "nothing left to undo is not an error");
+    }
+
+    /// A key on a page that has not been read is held, the page is requested, and the key lands
+    /// when the page does, with one read and no second try. Guards `run_op`'s `NotLoaded` arm,
+    /// `pending`, the observer's `retry_due` and the prepaint retry.
+    #[gpui::test]
+    fn typing_on_an_unread_page_lands_after_the_page_arrives(cx: &mut TestAppContext) {
+        let page = PAGE as u64;
+        let (rig, vcx) = rig(cx, page * 4, &[]);
+        rig.data.update(vcx, |d, _| {
+            if let HexContent::Ready(m) = &mut d.content {
+                m.caret.offset = 2 * page;
+            }
+        });
+        assert_eq!(bytes(&rig, vcx, 2 * page..2 * page + 1), [None]);
+        type_text(&rig, vcx, "4");
+        assert_eq!(bytes(&rig, vcx, 2 * page..2 * page + 1), [Some(0x40)]);
+        let reads = rig.host.reads();
+        assert_eq!(
+            reads.iter().filter(|&&off| off == 2 * page).count(),
+            1,
+            "the page was read once, not again: {reads:?}"
+        );
+        assert!(rig.view.read_with(vcx, |v, _| v.pending.is_none()));
+    }
+
+    /// When the read fails the key is dropped and the page is not asked for in a loop; a later
+    /// key asks again. Guards the `!retry` condition around `ensure_pages` and the `waiting`
+    /// check that drops `pending`.
+    #[gpui::test]
+    fn a_failed_read_drops_the_key_without_looping(cx: &mut TestAppContext) {
+        let page = PAGE as u64;
+        let (rig, vcx) = rig(cx, page * 4, &[]);
+        rig.host
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        rig.data.update(vcx, |d, _| {
+            if let HexContent::Ready(m) = &mut d.content {
+                m.caret.offset = 2 * page;
+            }
+        });
+        type_text(&rig, vcx, "4");
+        let reads = rig.host.reads();
+        assert_eq!(
+            reads.iter().filter(|&&off| off == 2 * page).count(),
+            1,
+            "asked once: {reads:?}"
+        );
+        assert!(!dirty(&rig, vcx));
+        assert!(rig.view.read_with(vcx, |v, _| v.pending.is_none()));
+        rig.host
+            .fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        type_text(&rig, vcx, "4");
+        assert_eq!(bytes(&rig, vcx, 2 * page..2 * page + 1), [Some(0x40)]);
+    }
+
+    /// Backspace and Delete leave the bytes alone and say the editor only overwrites. Guards
+    /// the `backspace`/`delete` arm of `key_down`.
+    #[gpui::test]
+    fn backspace_and_delete_change_nothing_and_say_why(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig_rooted(cx, 100, &[7, 8]);
+        let words = t(L10nKey::HexEditOverwriteOnly);
+        for (i, name) in ["backspace", "delete"].into_iter().enumerate() {
+            key(&rig, vcx, name, None, Modifiers::default());
+            assert_eq!(said(&rig, vcx).len(), i + 1, "{name} says so");
+        }
+        assert!(said(&rig, vcx).iter().all(|s| s == words));
+        assert_eq!(bytes(&rig, vcx, 0..2), [Some(7), Some(8)]);
+        assert!(!dirty(&rig, vcx));
+        assert_eq!(status(&rig, vcx).len, 100);
+    }
+
+    /// Chords with ctrl, alt or cmd are not typed, even with a character attached. Guards the
+    /// modifier check at the top of `key_down`.
+    #[gpui::test]
+    fn chords_with_ctrl_alt_or_cmd_are_not_typed(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig_rooted(cx, 100, &[]);
+        for modifiers in [
+            Modifiers::control(),
+            Modifiers::alt(),
+            Modifiers::command(),
+            Modifiers::function(),
+        ] {
+            key(&rig, vcx, "a", Some("a"), modifiers);
+            key(&rig, vcx, "backspace", None, modifiers);
+        }
+        assert!(!dirty(&rig, vcx));
+        assert!(said(&rig, vcx).is_empty(), "not even the overwrite message");
+    }
+
+    /// Copy on the hex side writes `de ad be ef`; on the ASCII side the same selection as text
+    /// with dots; with no selection, the caret's byte. Guards `HexData::copy_text` and the
+    /// `HexCopy` handler.
+    #[gpui::test]
+    fn copy_formats_both_sides_and_the_caret_byte(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 100, &[0xde, 0xad, 0xbe, 0xef]);
+        dispatch(&rig, vcx, HexCopy);
+        assert_eq!(
+            clipboard(vcx).as_deref(),
+            Some("de"),
+            "no selection copies the caret byte"
+        );
+        select_first(&rig, vcx, 4);
+        dispatch(&rig, vcx, HexCopy);
+        assert_eq!(clipboard(vcx).as_deref(), Some("de ad be ef"));
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        dispatch(&rig, vcx, HexCopy);
+        assert_eq!(
+            clipboard(vcx).as_deref(),
+            Some("...."),
+            "non-printables are dots"
+        );
+    }
+
+    /// Printable bytes copy as themselves from the ASCII side. Guards the `Side::Ascii` arm of
+    /// `copy_text`.
+    #[gpui::test]
+    fn copy_from_the_ascii_side_keeps_printable_bytes(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 100, b"Hi\x00!");
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        select_first(&rig, vcx, 4);
+        dispatch(&rig, vcx, HexCopy);
+        assert_eq!(clipboard(vcx).as_deref(), Some("Hi.!"));
+    }
+
+    /// Pasting hex overwrites from the caret as one undo step. Guards the hex arm of `paste`
+    /// and `Op::Paste` reaching `HexModel::paste`.
+    #[gpui::test]
+    fn pasting_hex_overwrites_from_the_caret(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig_rooted(cx, 100, &[1, 2, 3, 4]);
+        motion(&rig, vcx, HexMotion::Right, false);
+        put_on_clipboard(vcx, "de:AD 0xbe");
+        dispatch(&rig, vcx, HexPaste);
+        assert_eq!(
+            bytes(&rig, vcx, 0..5),
+            [Some(1), Some(0xde), Some(0xad), Some(0xbe), Some(0)]
+        );
+        assert!(said(&rig, vcx).is_empty(), "nothing was cut");
+        dispatch(&rig, vcx, HexUndo);
+        assert_eq!(bytes(&rig, vcx, 0..4), [Some(1), Some(2), Some(3), Some(4)]);
+        assert!(!dirty(&rig, vcx));
+    }
+
+    /// Pasting text on the ASCII side writes its bytes. Guards the ASCII arm of `paste`.
+    #[gpui::test]
+    fn pasting_text_on_the_ascii_side_writes_its_bytes(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig_rooted(cx, 100, &[]);
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        put_on_clipboard(vcx, "Hi!");
+        dispatch(&rig, vcx, HexPaste);
+        assert_eq!(
+            bytes(&rig, vcx, 0..4),
+            [Some(0x48), Some(0x69), Some(0x21), Some(0)]
+        );
+    }
+
+    /// A paste that runs past the end writes what fits and says how much was left out. Guards
+    /// the `truncated` branch of `run_op` and `truncated_notice`.
+    #[gpui::test]
+    fn pasting_past_the_end_truncates_and_says_so(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig_rooted(cx, 4, &[9, 9, 9, 9]);
+        motion(&rig, vcx, HexMotion::Right, false);
+        motion(&rig, vcx, HexMotion::Right, false);
+        put_on_clipboard(vcx, "01 02 03 04 05");
+        dispatch(&rig, vcx, HexPaste);
+        assert_eq!(bytes(&rig, vcx, 0..4), [Some(9), Some(9), Some(1), Some(2)]);
+        assert_eq!(status(&rig, vcx).len, 4, "the file did not grow");
+        assert_eq!(
+            said(&rig, vcx),
+            [truncated_notice(2, 3)],
+            "2 written, 3 left out"
+        );
+    }
+
+    /// The truncation message carries both counts. Guards `truncated_notice`.
+    #[test]
+    fn the_truncation_notice_names_what_was_written_and_what_was_left_out() {
+        let text = truncated_notice(2, 5);
+        assert!(text.contains('2') && text.contains('5'), "{text}");
+        assert_ne!(truncated_notice(2, 5), truncated_notice(2, 6));
+    }
+
+    /// Text that is not hex pastes nothing and says so, for non-hex digits and for an odd
+    /// number of them. Guards the parse in `paste` and its message.
+    #[gpui::test]
+    fn invalid_hex_pastes_nothing(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig_rooted(cx, 100, &[1, 2]);
+        for text in ["zz", "abc", ""] {
+            put_on_clipboard(vcx, text);
+            let before = said(&rig, vcx).len();
+            dispatch(&rig, vcx, HexPaste);
+            let now = said(&rig, vcx);
+            assert_eq!(now.len(), before + 1, "{text:?} is refused out loud");
+            assert_eq!(
+                now.last().map(String::as_str),
+                Some(t(L10nKey::HexPasteNotHex))
+            );
+            assert!(!dirty(&rig, vcx), "{text:?} wrote nothing");
+        }
+    }
+
+    /// A refusal speaks only when it helps: an empty file does, a stray character does not.
+    /// Guards `failure_notice`'s arms.
+    #[test]
+    fn only_some_refusals_get_a_notice() {
+        assert!(failure_notice(&Failure::Edit(EditRefusal::NothingToEdit)).is_some());
+        assert!(failure_notice(&Failure::CopyTooLarge).is_some());
+        for silent in [
+            EditRefusal::NotLoaded,
+            EditRefusal::NotHexDigit,
+            EditRefusal::NotPrintable,
+        ] {
+            assert!(
+                failure_notice(&Failure::Edit(silent)).is_none(),
+                "{silent:?}"
+            );
+        }
+    }
+
+    /// An edited byte takes the edit colour in both columns, on top of the caret's mark; its
+    /// neighbours do not. Guards the `edited` branch of `row_text`'s style.
+    #[test]
+    fn an_edited_byte_is_drawn_in_the_edit_colour() {
+        let edited = gpui::hsla(0.1, 0.9, 0.5, 1.);
+        let marks = Marks {
+            selection: HighlightStyle::default(),
+            caret_here: HighlightStyle::default(),
+            caret_other: HighlightStyle::default(),
+            pending: HighlightStyle::default(),
+            edited,
+        };
+        let mut model = HexModel::new(Source::Whole(Arc::from(vec![0x41u8, 0x42, 0x43])));
+        model.caret.offset = 2;
+        model.caret.low_nibble = false;
+        assert!(model.type_hex(b'5').is_ok());
+        let row = row_text(&model, 0, Grid::new(3), &marks);
+        // The byte typed into is the one the caret stayed on.
+        assert_eq!(row.hex, "41 42 53");
+        let colour = |marks: &[(Range<usize>, HighlightStyle)], start: usize| {
+            marks
+                .iter()
+                .find(|(r, _)| r.start == start)
+                .and_then(|(_, s)| s.color)
+        };
+        assert_eq!(colour(&row.hex_marks, 6), Some(edited));
+        assert_eq!(colour(&row.ascii_marks, 2), Some(edited));
+        assert_eq!(colour(&row.hex_marks, 3), None);
+        assert_eq!(colour(&row.ascii_marks, 0), None);
     }
 
     // --- mouse ---------------------------------------------------------------------------
