@@ -861,4 +861,22 @@ mod tests {
         assert!(download_file(&*LocalHost::shared(), &src, &into, 1024).is_err());
         assert!(!into.join("pkg").exists());
     }
+
+    /// A download that dies partway leaves no half-written file under the
+    /// name it had claimed, and the caller still hears why.
+    #[test]
+    fn a_fill_that_fails_partway_leaves_no_file_behind() {
+        use std::io::Write as _;
+
+        let dir = scratch("claim-fails");
+        let err = claim_local_file(&dir, "partial.bin", |file| {
+            file.write_all(b"some bytes")?;
+            Err(io::Error::other("the link went away"))
+        })
+        .expect_err("the fill failed, so the claim fails");
+
+        assert_eq!(err.to_string(), "the link went away");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
 }

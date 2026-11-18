@@ -2820,7 +2820,23 @@ impl Tty59App {
                 }),
             );
         }
-        // Before Copy Path. (Download goes right above this item.)
+        // A remote file is not here to show in Finder, so Download is the item
+        // that makes sense there. A local file gets it too, as the file tree's
+        // row menu gives it: one in a project folder is often wanted as a copy
+        // in Downloads, to attach it somewhere.
+        if let Some(host) = self.doc_host(id) {
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::Download)).on_click({
+                let app = app.clone();
+                let path = path.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        this.download_to_downloads(host.clone(), &path, window, cx)
+                    });
+                }
+            }));
+        }
+        // Before Copy Path. The tree only shows the spawn host, so a file on
+        // any other host has no row to land on.
         if self.can_show_in_file_tree(id, cx)
             && let Some(host) = self.doc_host(id)
         {

@@ -15397,11 +15397,10 @@ mod show_in_file_tree_tests {
                 .expect("the pane's socket takes the cwd");
             // The subscription every spawn path registers for its panes.
             app.update_in(&mut vcx, |app, window, cx| {
-                for tab in 0..app.tabs.len() {
-                    for view in app.tabs[tab].pane.terminals() {
-                        let handle = view.read(cx).focus_handle.clone();
-                        watch_pane_focus(&handle, view.entity_id(), window, cx);
-                    }
+                let views: Vec<_> = app.tabs.iter().flat_map(|t| t.pane.terminals()).collect();
+                for view in views {
+                    let handle = view.read(cx).focus_handle.clone();
+                    watch_pane_focus(&handle, view.entity_id(), window, cx);
                 }
                 app.right_panel_visible = true;
                 app.right_panel_tab = RightPanelTab::Files;
@@ -15591,14 +15590,14 @@ mod show_in_file_tree_tests {
                 .any(|c| c.contains("PopupMenu")),
             "the focus is in a popup menu, so the keys below reach it"
         );
-        // Close Tab, then Open (where this machine can open files), Reveal and
-        // ours: the other items in front of it are disabled or separators,
-        // which the arrows skip.
+        // Close Tab, then Open (where this machine can open files), Reveal,
+        // Download and ours: the other items in front of it are disabled or
+        // separators, which the arrows skip.
         let opens = f
             .app
             .update_in(&mut f.vcx, |app, _, cx| app.can_spawn_locally(cx));
-        let downs = if opens { 4 } else { 3 };
-        let keys = format!("{} enter", ["down"; 4][..downs].join(" "));
+        let downs = if opens { 5 } else { 4 };
+        let keys = format!("{} enter", ["down"; 5][..downs].join(" "));
         f.vcx.simulate_keystrokes(&keys);
         f.wait(|_, focus| focus.is_some());
         f.draw();
