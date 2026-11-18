@@ -15388,7 +15388,9 @@ mod show_in_file_tree_tests {
             let _ = std::fs::remove_dir_all(&base);
             let pane_dir = base.join("pane");
             std::fs::create_dir_all(&pane_dir).unwrap();
-            let base = std::fs::canonicalize(&base).unwrap();
+            let base = tty59_core::core::path_spelling::local_spelling_buf(
+                std::fs::canonicalize(&base).unwrap(),
+            );
             let pane_dir = base.join("pane");
 
             let (app, mut vcx, mut streams) = harness_with_tabs(cx, 2);
