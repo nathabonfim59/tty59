@@ -868,8 +868,8 @@ mod tests {
 
     use gpui::{Modifiers, ScrollDelta, TestAppContext, TouchPhase, VisualTestContext};
 
-    use super::super::data::test_support::{Counting, paged};
     use super::super::model::{PAGE, Source};
+    use super::super::test_support::{Counting, paged};
     use super::*;
     use crate::core::config::MouseZoomModifier;
 
