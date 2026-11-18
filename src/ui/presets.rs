@@ -4807,6 +4807,34 @@ ansi:
         assert_no_misses("dark knob separation", misses);
     }
 
+    /// The hex editor draws an edited byte in the warning ink: as text on the editor background
+    /// (text floor) and, under a selection, as a 2px underline on the selection fill (mark
+    /// floor). Guards the token in that role across every built-in and generated theme.
+    #[test]
+    fn warning_ink_serves_edited_hex_bytes_in_every_theme() {
+        let misses: Vec<String> = sweep_themes()
+            .iter()
+            .flat_map(|t| {
+                let m = t.neutrals();
+                let ink = t.semantics_with(&m).warning.ink;
+                let mut out = Vec::new();
+                let text = contrast(ink, m.background);
+                if text < AA_TEXT {
+                    out.push(format!("{}: warning text on background {text:.2}", t.id));
+                }
+                let mark = contrast(ink, m.selection);
+                if mark < AA_MARK {
+                    out.push(format!(
+                        "{}: warning underline on selection {mark:.2}",
+                        t.id
+                    ));
+                }
+                out
+            })
+            .collect();
+        assert_no_misses("edited hex bytes", misses);
+    }
+
     fn crossover_theme(background: u32, foreground: u32) -> Theme {
         Theme {
             id: format!("crossover-{background:06x}"),

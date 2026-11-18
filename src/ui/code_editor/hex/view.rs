@@ -804,15 +804,27 @@ fn row_text(m: &HexModel, row: u64, grid: Grid, marks: &Marks) -> RowText {
             } else {
                 None
             };
-            // The edit colour rides on whatever the caret or selection already paints.
-            if edited {
-                Some(HighlightStyle {
-                    color: Some(marks.edited),
-                    ..base.unwrap_or_default()
-                })
-            } else {
-                base
+            if !edited {
+                return base;
             }
+            // The edit colour is text, and text in it has to clear the editor background but
+            // not the selection's, which it misses in some themes. On a highlighted byte the
+            // text stays the normal foreground and an underline (a mark, a lower floor)
+            // carries the edit; the caret's own underline wins where it is already there.
+            Some(match base {
+                Some(b) if b.background_color.is_some() => HighlightStyle {
+                    underline: b.underline.or(Some(UnderlineStyle {
+                        thickness: px(2.),
+                        color: Some(marks.edited),
+                        wavy: false,
+                    })),
+                    ..b
+                },
+                other => HighlightStyle {
+                    color: Some(marks.edited),
+                    ..other.unwrap_or_default()
+                },
+            })
         };
         let push = |list: &mut Vec<(Range<usize>, HighlightStyle)>,
                     start: usize,
@@ -1972,6 +1984,43 @@ mod tests {
         assert_eq!(colour(&row.ascii_marks, 2), Some(edited));
         assert_eq!(colour(&row.hex_marks, 3), None);
         assert_eq!(colour(&row.ascii_marks, 0), None);
+    }
+
+    /// An edited byte under a selection keeps the normal text colour and gets an underline in
+    /// the edit colour instead, since that colour is not legible on the selection in every
+    /// theme. Guards the highlighted-byte arm of the `edited` branch of `row_text`.
+    #[test]
+    fn an_edited_selected_byte_is_underlined_not_recoloured() {
+        let edited = gpui::hsla(0.1, 0.9, 0.5, 1.);
+        let marks = Marks {
+            selection: HighlightStyle {
+                background_color: Some(gpui::hsla(0., 0., 0.8, 1.)),
+                ..Default::default()
+            },
+            caret_here: HighlightStyle::default(),
+            caret_other: HighlightStyle::default(),
+            pending: HighlightStyle::default(),
+            edited,
+        };
+        let mut model = HexModel::new(Source::Whole(Arc::from(vec![0x41u8, 0x42, 0x43])));
+        assert!(model.type_hex(b'5').is_ok());
+        // Caret to the end with the anchor on the edited byte: bytes 0..=2 are selected.
+        model.caret.anchor = Some(0);
+        model.caret.offset = 2;
+        let row = row_text(&model, 0, Grid::new(3), &marks);
+        let style = row
+            .hex_marks
+            .iter()
+            .find(|(r, _)| r.start == 0)
+            .map(|(_, s)| *s)
+            .expect("the selected edited byte is marked");
+        assert_eq!(style.color, None, "text stays the normal foreground");
+        assert_eq!(style.underline.and_then(|u| u.color), Some(edited));
+        let neighbour = row.hex_marks.iter().find(|(r, _)| r.start == 3);
+        assert!(
+            neighbour.is_some_and(|(_, s)| s.underline.is_none()),
+            "an unedited selected byte has no underline"
+        );
     }
 
     // --- mouse ---------------------------------------------------------------------------
