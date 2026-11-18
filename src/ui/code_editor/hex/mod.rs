@@ -318,7 +318,16 @@ impl Tty59App {
             // The view draws nothing for a file that was never read; the card is the tab.
             Some((len, limit)) => {
                 let focus = view.read(cx).focus.clone();
-                Self::render_hex_too_large(id, slot, &name, &path, len, limit, &focus, cx)
+                const MIB: u64 = 1024 * 1024;
+                let message = t_fmt(
+                    L10nKey::HexTooLarge,
+                    &[
+                        ("name", &name),
+                        ("size", &(len / MIB).to_string()),
+                        ("limit", &(limit / MIB).to_string()),
+                    ],
+                );
+                Self::render_hex_too_large(id, slot, message, &path, &focus, cx)
             }
             None => view.into_any_element(),
         };
@@ -334,26 +343,14 @@ impl Tty59App {
     }
 
     /// The card that says a file is too large to bring over, with the way to get it anyway.
-    #[allow(clippy::too_many_arguments)]
     fn render_hex_too_large(
         id: BufferId,
         slot: usize,
-        name: &str,
+        message: String,
         path: &Path,
-        len: u64,
-        limit: u64,
         focus: &FocusHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        const MIB: u64 = 1024 * 1024;
-        let message = t_fmt(
-            L10nKey::HexTooLarge,
-            &[
-                ("name", name),
-                ("size", &(len / MIB).to_string()),
-                ("limit", &(limit / MIB).to_string()),
-            ],
-        );
         let theme = cx.theme();
         // The same card as a picture that cannot be shown: a danger stripe, the reason, the
         // path; and here the one thing that can be done about it.

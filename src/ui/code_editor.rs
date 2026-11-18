@@ -728,6 +728,13 @@ enum EditorOpenError {
     Message(String),
 }
 
+/// What the open that found a file not to be text had already read.
+struct NotTextFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    mtime: Option<MTime>,
+}
+
 /// A file read off its host, decoded, with everything needed to edit it.
 struct Loaded {
     path: PathBuf,
@@ -1519,7 +1526,8 @@ impl Tty59App {
                 }
                 Err(EditorOpenError::NotText { path, bytes, mtime }) => {
                     app.image_request_done(seq);
-                    app.open_outside_the_editor(host, tab, path, bytes, mtime, window, cx);
+                    let file = NotTextFile { path, bytes, mtime };
+                    app.open_outside_the_editor(host, tab, file, window, cx);
                 }
                 Err(EditorOpenError::TooLarge { path, message }) => {
                     app.image_request_done(seq);
@@ -1546,24 +1554,27 @@ impl Tty59App {
     /// Where those words used to be, there is now a hex tab of the bytes that
     /// were already read, so the file can still be looked into. What the
     /// desktop can open is unchanged.
-    #[allow(clippy::too_many_arguments)]
     fn open_outside_the_editor(
         &mut self,
         host: SharedHost,
         tab: TabId,
-        path: PathBuf,
-        bytes: Vec<u8>,
-        mtime: Option<MTime>,
+        file: NotTextFile,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let local = host.id().is_local();
-        if goes_to_hex_by_default(local, self.can_spawn_locally(cx), is_program(&path)) {
+        if goes_to_hex_by_default(local, self.can_spawn_locally(cx), is_program(&file.path)) {
+            let NotTextFile { path, bytes, mtime } = file;
             let file = hex::io::hex_from_not_text(local, path, bytes, mtime);
             self.editor_land_hex(tab, host, hex::io::HexLoaded::File(file), true, window, cx);
             return;
         }
-        Self::open_with(&path, crate::terminal::view::open_file_path, window, cx);
+        Self::open_with(
+            &file.path,
+            crate::terminal::view::open_file_path,
+            window,
+            cx,
+        );
     }
 
     /// Runs one of the desktop openers on a local file, and says so when it
