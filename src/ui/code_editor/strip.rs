@@ -1726,6 +1726,10 @@ mod gpui_tests {
 
     #[gpui::test]
     fn the_hoisted_header_with_one_file_never_clips_the_chevron(cx: &mut TestAppContext) {
+        // The header is never hoisted on macOS.
+        if cfg!(target_os = "macos") {
+            return;
+        }
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
         crate::ui::i18n::set_locale("en");
         dock_config(&mut vcx, DocumentLayout::Dock);
