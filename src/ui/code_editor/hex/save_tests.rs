@@ -104,12 +104,15 @@ impl Host for Fake {
                 .write_ranges(p, &patches[..after.min(patches.len())], expect)?;
             return Err(io::Error::other("injected: no space left"));
         }
+        // Counted only when the host took the write: a call it refuses as a conflict (the
+        // un-forced retry after a half write) wrote nothing.
+        let meta = self.inner.write_ranges(p, patches, expect)?;
         self.runs_written.fetch_add(patches.len(), Ordering::SeqCst);
         self.bytes_written.fetch_add(
             patches.iter().map(|(_, run)| run.len()).sum(),
             Ordering::SeqCst,
         );
-        self.inner.write_ranges(p, patches, expect)
+        Ok(meta)
     }
     fn canonicalize(&self, p: &Path) -> io::Result<PathBuf> {
         self.inner.canonicalize(p)

@@ -329,8 +329,9 @@ impl HexData {
                         text.push(' ');
                     }
                     let [hi, lo] = model::hex_byte(value);
-                    text.push(char::from(hi));
-                    text.push(char::from(lo));
+                    // Lowercase on the clipboard, though the grid shows uppercase.
+                    text.push(char::from(hi.to_ascii_lowercase()));
+                    text.push(char::from(lo.to_ascii_lowercase()));
                 }
                 Side::Ascii => text.push(model::ascii_char(value)),
             }
