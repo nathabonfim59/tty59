@@ -89,9 +89,16 @@ src/terminal/signature.rs|std::fs::read_to_string
 src/terminal/search.rs|.is_absolute()
 
 # Clipboard-image paste stages the bytes into the OS temp dir so an agent TUI
-# can be handed a path. Always `std::env::temp_dir()` on this machine.
-src/terminal/view.rs|std::fs::create_dir_all
-src/terminal/view.rs|std::fs::write
+# can be handed a path, and Copy Image stages there too (`ui::clipboard_image`).
+# Always `std::env::temp_dir()` on this machine.
+src/ui/clipboard_image.rs|std::fs::create_dir_all
+src/ui/clipboard_image.rs|std::fs::write
+# The file `wl-copy` reads on stdin is the one just staged in this machine's
+# temp dir.
+src/ui/clipboard_image.rs|std::fs::File::open
+# Finding `wl-copy` / `xclip` on this machine's $PATH. The clipboard is this
+# machine's desktop's, never a workspace path.
+src/ui/clipboard_image.rs|std::fs::metadata
 # The source side of a paste/drop upload into a remote pane: the paths the
 # clipboard or desktop hands over are on this machine by construction, so
 # asking whether one is a directory is a local read. The remote side of the
