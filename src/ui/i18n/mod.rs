@@ -1034,6 +1034,8 @@ l10n_keys! {
     EditorNoFileOpen,
     EditorStripSearch,
     EditorStripAllFiles,
+    CmdEditorSearchOpenFiles,
+    CmdEditorSearchOpenFilesAlias,
     EditorStripHidden,
     EditorStripInBar,
     EditorStripNoMatch,

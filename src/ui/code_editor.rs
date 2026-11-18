@@ -36,7 +36,7 @@ mod split;
 pub(crate) mod status;
 mod strip;
 
-pub(crate) use nav::KEY_CONTEXT as NAV_KEY_CONTEXT;
+pub(crate) use nav::{DOCUMENT_KEY_CONTEXT, KEY_CONTEXT as NAV_KEY_CONTEXT};
 pub(crate) use strip::{HEADER_HYSTERESIS, header_inline};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
@@ -3814,6 +3814,7 @@ impl Tty59App {
                     // while it is shown — zooming the document, not the
                     // terminal — and clicking into the text puts the focus
                     // there. `track_focus` takes the mouse-down itself.
+                    .key_context(DOCUMENT_KEY_CONTEXT)
                     .track_focus(&focus)
                     .on_action(cx.listener(move |this, _: &IncreaseFontSize, window, cx| {
                         this.editor_zoom_step(id, 1, None, window, cx);

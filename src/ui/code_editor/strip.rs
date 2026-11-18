@@ -7,7 +7,9 @@
 //! which put the file you were just in out of sight as often as not. Now it
 //! holds the most recently fronted files — in their strip order, so nothing
 //! jumps about as you switch between them — and a `+N` button at its end
-//! lists everything, hidden files first, with a filter box.
+//! lists everything, hidden files first, with a filter box. With nothing
+//! hidden the button is only its chevron, so the list is one click away from
+//! the first file on.
 //!
 //! **Dock / Fill** is a two-cell switch rather than a menu entry, and a filled
 //! editor leads with a pill naming the terminal it covers, which docks it back
@@ -119,6 +121,11 @@ impl OverflowMetrics {
     }
 }
 
+/// The filter's placeholder. No count: the list opens for one file too.
+fn strip_search_placeholder() -> gpui::SharedString {
+    t(L10nKey::EditorStripSearch).into()
+}
+
 fn digits(n: usize) -> usize {
     n.checked_ilog10().map_or(1, |d| d as usize + 1)
 }
@@ -137,12 +144,20 @@ fn overflow_w(hidden_digits: usize, g: OverflowGlyphs) -> f32 {
         + OVERFLOW_CHEVRON
 }
 
+/// What the chevron alone takes beside the strip, the gap before it included:
+/// the button with nothing hidden has no dot and no `+N`. It is there whenever
+/// the editor has a file, so the list is always one click away.
+fn chevron_w() -> f32 {
+    HEADER_GAP + 2. * OVERFLOW_PAD_X + OVERFLOW_CHEVRON
+}
+
 /// How many of `total` files a strip with `room` points draws at
-/// [`TAB_MIN_W`] each, with the `+N` the rest fold into. At least one, so the
-/// file in front is never the one left out.
+/// [`TAB_MIN_W`] each. When they all fit the room must also hold the bare
+/// chevron; when they do not, the rest fold into a `+N` that takes
+/// [`overflow_w`]. At least one, so the file in front is never the one left out.
 pub(crate) fn strip_fit(room: f32, total: usize, g: OverflowGlyphs) -> usize {
     let fit = |w: f32| ((w + TAB_GAP) / (TAB_MIN_W + TAB_GAP)).floor().max(1.) as usize;
-    if total <= fit(room) {
+    if total <= fit(room - chevron_w()) {
         return total;
     }
     // `N` has at most as many digits as the files that could hide; settle on
@@ -356,12 +371,14 @@ impl Tty59App {
     }
 
     /// The least width the hoisted header needs to keep its controls, the
-    /// front file at [`TAB_MIN_W`] and the `+N` the others fold into.
+    /// front file at [`TAB_MIN_W`] and the `+N` the others fold into, or the
+    /// bare chevron when there is only the one file.
     fn editor_header_need(&self, window: &Window, cx: &gpui::App) -> f32 {
         let total = self.tab_code().map_or(0, |c| c.files.len());
         let chrome = DocumentChrome::DockHoisted;
         let overflow = match total {
-            0 | 1 => 0.,
+            0 => 0.,
+            1 => chevron_w(),
             _ => overflow_w(digits(total - 1), self.editor.overflow_glyphs.glyphs),
         };
         self.editor_header_fixed_w(chrome, window, cx)
@@ -564,8 +581,12 @@ impl Tty59App {
         (rows, hidden)
     }
 
+    /// Opens the list, or closes it when it is open. `from_button` is whether
+    /// the pointer is on the button: opened from the keyboard it is not, so a
+    /// click outside closes the list straight away.
     pub(super) fn editor_toggle_strip_picker(
         &mut self,
+        from_button: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -573,11 +594,8 @@ impl Tty59App {
             self.editor_close_strip_picker(window, cx);
             return;
         }
-        let n = self.tab_code().map_or(0, |c| c.files.len());
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(t_fmt(L10nKey::EditorStripSearch, &[("n", &n.to_string())]))
-        });
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(strip_search_placeholder()));
         input.update(cx, |state, cx| state.focus(window, cx));
         let _sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -590,7 +608,7 @@ impl Tty59App {
         self.editor.strip_picker = Some(StripPicker {
             input,
             hi: 0,
-            over_button: true,
+            over_button: from_button,
             _sub,
         });
         cx.notify();
@@ -651,14 +669,16 @@ impl Tty59App {
         cx.stop_propagation();
     }
 
-    /// The `+N` button at the end of the strip, with its list when open.
+    /// The button at the end of the strip, with its list when open: `+N ▾`
+    /// when files are hidden, the bare chevron otherwise. Drawn whenever the
+    /// editor has a file.
     pub(super) fn render_strip_overflow(
         &self,
         hidden: &[BufferId],
         cap: usize,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        if hidden.is_empty() {
+        if self.tab_code().is_none_or(|c| c.files.is_empty()) {
             return None;
         }
         let theme = cx.theme();
@@ -700,15 +720,28 @@ impl Tty59App {
                 };
                 d.child(dot)
             })
-            .child(format!("+{}", hidden.len()))
+            .when(!hidden.is_empty(), |d| {
+                d.child(
+                    div()
+                        .when(cfg!(test), |d| {
+                            d.debug_selector(|| "editor-strip-more-count".into())
+                        })
+                        .child(format!("+{}", hidden.len())),
+                )
+            })
             .child(
                 Icon::new(IconName::ChevronDown)
                     .with_size(px(OVERFLOW_CHEVRON))
                     .text_color(theme.muted_foreground),
             )
             .tooltip(|window, cx| {
-                gpui_component::tooltip::Tooltip::new(t(L10nKey::EditorStripAllFiles))
-                    .build(window, cx)
+                // Resolved on hover, not every frame.
+                crate::ui::tab_strip::chord_tooltip(
+                    t(L10nKey::EditorStripAllFiles),
+                    "EditorSearchOpenFiles",
+                    cx,
+                )(window, cx)
+                .into()
             })
             .on_hover(cx.listener(|this, over: &bool, _, _| {
                 if let Some(p) = this.editor.strip_picker.as_mut() {
@@ -716,7 +749,7 @@ impl Tty59App {
                 }
             }))
             .on_click(cx.listener(|this, _, window, cx| {
-                this.editor_toggle_strip_picker(window, cx);
+                this.editor_toggle_strip_picker(true, window, cx);
             }));
         Some(
             div()
@@ -740,6 +773,9 @@ impl Tty59App {
 
         let heading = |label: SharedString| {
             div()
+                .when(cfg!(test), |d| {
+                    d.debug_selector(|| "editor-strip-heading".into())
+                })
                 .h(px(24.))
                 .pt(px(4.))
                 .px(px(8.))
@@ -762,7 +798,7 @@ impl Tty59App {
                     t_fmt(L10nKey::EditorStripHidden, &[("n", &hidden.to_string())]).into(),
                 ));
             }
-            if !querying && i == hidden {
+            if !querying && hidden > 0 && i == hidden {
                 list = list.child(heading(t(L10nKey::EditorStripInBar).into()));
             }
             let id = row.id;
@@ -878,9 +914,14 @@ impl Tty59App {
         }
 
         let rule = || div().h(px(1.)).mx(px(6.)).my(px(4.)).bg(theme.border);
+        // The footer acts on every file, whatever the query, so it is
+        // decided from the editor's files, not the filtered rows.
+        let show_saved = !self.editor_strip_others(true).is_empty();
+        let show_others = !self.editor_strip_others(false).is_empty();
         let footer_button = |key: &'static str, label: L10nKey| {
             div()
                 .id(key)
+                .when(cfg!(test), |d| d.debug_selector(|| key.into()))
                 .text_color(muted)
                 .hover(|s| s.text_color(fg))
                 .child(t(label))
@@ -930,33 +971,48 @@ impl Tty59App {
             )
             .child(rule())
             .child(list)
-            .child(rule())
-            .child(
-                h_flex()
-                    .h(px(28.))
-                    .px(px(8.))
-                    .gap(px(14.))
-                    .items_center()
-                    .text_size(rems(12. / 16.))
-                    .child(
-                        footer_button("editor-strip-close-saved", L10nKey::EditorStripCloseSaved)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.editor.strip_picker = None;
-                                let ids = this.editor_strip_others(true);
-                                this.editor_close_buffers(ids, window, cx);
-                                this.focus_editor(window, cx);
-                            })),
-                    )
-                    .child(
-                        footer_button("editor-strip-close-others", L10nKey::EditorStripCloseOthers)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.editor.strip_picker = None;
-                                let ids = this.editor_strip_others(false);
-                                this.editor_close_buffers(ids, window, cx);
-                                this.focus_editor(window, cx);
-                            })),
-                    ),
-            );
+            .when(show_saved || show_others, |card| {
+                card.child(rule()).child(
+                    h_flex()
+                        .h(px(28.))
+                        .px(px(8.))
+                        .gap(px(14.))
+                        .items_center()
+                        .text_size(rems(12. / 16.))
+                        .when(show_saved, |row| {
+                            row.child(
+                                footer_button(
+                                    "editor-strip-close-saved",
+                                    L10nKey::EditorStripCloseSaved,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.editor.strip_picker = None;
+                                        let ids = this.editor_strip_others(true);
+                                        this.editor_close_buffers(ids, window, cx);
+                                        this.focus_editor(window, cx);
+                                    },
+                                )),
+                            )
+                        })
+                        .when(show_others, |row| {
+                            row.child(
+                                footer_button(
+                                    "editor-strip-close-others",
+                                    L10nKey::EditorStripCloseOthers,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.editor.strip_picker = None;
+                                        let ids = this.editor_strip_others(false);
+                                        this.editor_close_buffers(ids, window, cx);
+                                        this.focus_editor(window, cx);
+                                    },
+                                )),
+                            )
+                        }),
+                )
+            });
         Some(
             div()
                 .absolute()
@@ -988,6 +1044,51 @@ impl Tty59App {
             .filter(|id| Some(*id) != front)
             .filter(|id| !saved_only || self.buffer(*id).is_some_and(|f| !f.dirty))
             .collect()
+    }
+
+    /// Whether the open-files picker is showing.
+    pub(crate) fn editor_strip_picker_open(&self) -> bool {
+        self.editor.strip_picker.is_some()
+    }
+
+    /// Whether the open-files picker is showing with the keyboard in its
+    /// filter. What a test asks after a chord or a palette command.
+    #[cfg(test)]
+    pub(crate) fn editor_strip_picker_filter_focused(
+        &self,
+        window: &Window,
+        cx: &gpui::App,
+    ) -> bool {
+        use gpui::Focusable as _;
+        self.editor
+            .strip_picker
+            .as_ref()
+            .is_some_and(|p| p.input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// The keyboard and palette way into the open-files picker. With the
+    /// picker showing, `toggle` closes it and otherwise it stays, its filter
+    /// focused; with it closed it opens. `false` when the tab's editor holds
+    /// no file, so the caller can let the chord go on.
+    pub(crate) fn editor_search_open_files(
+        &mut self,
+        toggle: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(picker) = self.editor.strip_picker.as_ref() {
+            if toggle {
+                self.editor_close_strip_picker(window, cx);
+            } else {
+                picker.input.update(cx, |state, cx| state.focus(window, cx));
+            }
+            return true;
+        }
+        if self.tab_code().is_none_or(|c| c.files.is_empty()) {
+            return false;
+        }
+        self.editor_toggle_strip_picker(false, window, cx);
+        true
     }
 }
 
@@ -1048,6 +1149,65 @@ mod tests {
         code.swap_focus();
         code.note_front();
         assert_eq!(code.recent, vec![ids[1], ids[0], ids[2], ids[3]]);
+    }
+
+    const GLYPHS: OverflowGlyphs = OverflowGlyphs {
+        plus: 7.,
+        digit: 7.,
+    };
+
+    /// The room `n` cells take at [`TAB_MIN_W`], gaps between.
+    fn cells_w(n: usize) -> f32 {
+        n as f32 * TAB_MIN_W + (n - 1) as f32 * TAB_GAP
+    }
+
+    #[test]
+    fn the_chevron_is_the_plus_n_button_without_its_dot_and_text() {
+        for digits in 1..=3 {
+            assert_eq!(
+                overflow_w(digits, GLYPHS),
+                chevron_w()
+                    + crate::ui::tab_strip::ROW_STATUS_DOT
+                    + 2. * OVERFLOW_GAP
+                    + GLYPHS.plus
+                    + digits as f32 * GLYPHS.digit,
+                "{digits} digits: the +N button's width is unchanged"
+            );
+        }
+        assert!(chevron_w() < overflow_w(1, GLYPHS));
+    }
+
+    #[test]
+    fn all_fit_only_with_the_chevron_beside_them() {
+        let boundary = cells_w(3) + chevron_w();
+        assert_eq!(strip_fit(boundary, 3, GLYPHS), 3);
+        assert!(
+            strip_fit(boundary - 0.5, 3, GLYPHS) < 3,
+            "half a point under the chevron's room, one file folds"
+        );
+        // The old rule held three in `cells_w(3)` alone: the boundary moved by
+        // exactly the chevron.
+        assert!(strip_fit(cells_w(3), 3, GLYPHS) < 3);
+        assert_eq!(boundary - cells_w(3), chevron_w());
+    }
+
+    #[test]
+    fn a_single_file_is_always_drawn() {
+        for room in [0., 10., 56., cells_w(1) + chevron_w(), 1000.] {
+            assert_eq!(strip_fit(room, 1, GLYPHS), 1, "room {room}");
+        }
+        assert_eq!(strip_fit(500., 0, GLYPHS), 0);
+    }
+
+    #[test]
+    fn folding_still_reserves_the_plus_n_button() {
+        // Room for five cells and the +N for the other five (one digit):
+        let room = cells_w(5) + overflow_w(1, GLYPHS);
+        assert_eq!(strip_fit(room, 10, GLYPHS), 5);
+        assert_eq!(strip_fit(room - 0.5, 10, GLYPHS), 4);
+        // Ten digits' worth of files: the digit count settles.
+        let room = cells_w(3) + overflow_w(2, GLYPHS);
+        assert_eq!(strip_fit(room, 100, GLYPHS), 3);
     }
 
     #[test]
@@ -1113,6 +1273,8 @@ mod gpui_tests {
         strip: Bounds<Pixels>,
         tabs: Vec<(usize, Bounds<Pixels>)>,
         more: Option<Bounds<Pixels>>,
+        /// The `+N` text inside the button.
+        count: Option<Bounds<Pixels>>,
         new_file: Bounds<Pixels>,
         switch: Bounds<Pixels>,
     }
@@ -1133,6 +1295,7 @@ mod gpui_tests {
                 .expect("file tab strip should be painted"),
             tabs,
             more: vcx.debug_bounds("editor-strip-more"),
+            count: vcx.debug_bounds("editor-strip-more-count"),
             new_file: vcx
                 .debug_bounds("editor-new-file")
                 .expect("new file button should be painted"),
@@ -1144,8 +1307,9 @@ mod gpui_tests {
 
     /// What the header must look like in whatever box it is in: the file in
     /// front among the cells, no cell under 56px or past the strip, the rest
-    /// behind a `+N` that exists exactly when some file is left out, and
-    /// every control clear of its neighbour.
+    /// behind a button that is there whenever there is a file and counts
+    /// them (`+N`) exactly when some file is left out, and every control
+    /// clear of its neighbour.
     fn assert_header(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, label: &str) -> Painted {
         let (total, active) = app.read_with(vcx, |app, _| {
             let code = app.tab_code().expect("the tab has editor state");
@@ -1180,10 +1344,21 @@ mod gpui_tests {
         }
         assert_eq!(
             p.more.is_some(),
+            total >= 1,
+            "{label}: the chevron must be there exactly when there is a file ({total})"
+        );
+        assert_eq!(
+            p.count.is_some(),
             p.tabs.len() < total,
             "{label}: +N must be there exactly when files are left out ({} of {total} drawn)",
             p.tabs.len()
         );
+        if let (Some(more), Some(count)) = (p.more, p.count) {
+            assert!(
+                count.left() >= more.left() - eps && count.right() <= more.right() + eps,
+                "{label}: +N {count:?} leaves its button {more:?}"
+            );
+        }
         let strip_end = p.more.map_or(p.strip.right(), |m| {
             assert!(
                 m.left() >= p.strip.right() - eps,
@@ -1304,7 +1479,8 @@ mod gpui_tests {
         open_names(&app, &mut vcx, &["/repo/a.rs", "/repo/b.rs"]);
         let p = assert_header(&app, &mut vcx, "two files in a wide fill");
         assert_eq!(p.tabs.len(), 2, "files that fit are all drawn");
-        assert!(p.more.is_none(), "nothing is left out, so no +N");
+        assert!(p.count.is_none(), "nothing is left out, so no count");
+        assert!(p.more.is_some(), "the chevron is there all the same");
 
         dock_config(&mut vcx, DocumentLayout::Dock);
         open_names(&app, &mut vcx, &NAMES);
@@ -1345,7 +1521,7 @@ mod gpui_tests {
                     );
                     let p = assert_header(&app, &mut vcx, &label);
                     assert!(
-                        p.more.is_some(),
+                        p.count.is_some(),
                         "{label}: ten files cannot all fit, +N expected"
                     );
                     seen.push((
@@ -1365,6 +1541,214 @@ mod gpui_tests {
                 );
             }
         }
+    }
+
+    fn click_at(vcx: &mut VisualTestContext, at: gpui::Point<Pixels>) {
+        vcx.simulate_mouse_move(at, None, gpui::Modifiers::none());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.simulate_click(at, gpui::Modifiers::none());
+        vcx.run_until_parked();
+    }
+
+    fn picker_open(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.read_with(&*vcx, |app, _| app.editor.strip_picker.is_some())
+    }
+
+    #[gpui::test]
+    fn one_file_has_a_chevron_that_opens_the_list_without_headings(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Fill);
+        resize(&mut vcx, 1440., 900.);
+        open_names(&app, &mut vcx, &["/repo/only.rs"]);
+
+        let p = assert_header(&app, &mut vcx, "one file in a wide fill");
+        let more = p.more.expect("the chevron is painted for a single file");
+        assert!(p.count.is_none(), "nothing hidden, so no +N text");
+        assert!(
+            more.left() >= p.header.left() && more.right() <= p.header.right(),
+            "the chevron {more:?} is inside the header {:?}",
+            p.header
+        );
+        assert!(
+            more.left() >= p.strip.right() && more.right() <= p.new_file.left(),
+            "the chevron {more:?} sits between the strip {:?} and the new-file tile {:?}",
+            p.strip,
+            p.new_file
+        );
+        // Bare chevron: its box is the width `chevron_w` reserves, less the
+        // gap before it.
+        assert_eq!(
+            more.size.width,
+            px(chevron_w() - HEADER_GAP),
+            "the bare chevron is as wide as the strip reserved"
+        );
+
+        assert!(!picker_open(&app, &mut vcx));
+        click_at(&mut vcx, more.center());
+        assert!(picker_open(&app, &mut vcx), "a click on the chevron opens");
+        assert_eq!(
+            app.read_with(&vcx, |app, cx| app.editor_strip_rows(cx).len()),
+            1,
+            "the one file is the one row"
+        );
+        assert!(
+            vcx.debug_bounds("editor-strip-heading").is_none(),
+            "nothing hidden, so no section headings over the only list"
+        );
+        assert!(
+            vcx.debug_bounds("editor-strip-more-count").is_none(),
+            "the open list does not add a count"
+        );
+
+        click_at(&mut vcx, more.center());
+        assert!(!picker_open(&app, &mut vcx), "a second click closes");
+    }
+
+    /// Open the picker from the keyboard and let it paint.
+    fn open_picker(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| {
+            app.editor_toggle_strip_picker(false, window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(picker_open(app, vcx), "the picker is open");
+    }
+
+    fn footer_painted(vcx: &mut VisualTestContext) -> (bool, bool) {
+        (
+            vcx.debug_bounds("editor-strip-close-saved").is_some(),
+            vcx.debug_bounds("editor-strip-close-others").is_some(),
+        )
+    }
+
+    /// Covers the `show_saved`/`show_others` false branches of the footer
+    /// (no rule, no row) and the count-free placeholder.
+    #[gpui::test]
+    fn one_file_has_no_footer_and_a_count_free_placeholder(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Fill);
+        resize(&mut vcx, 1440., 900.);
+        open_names(&app, &mut vcx, &["/repo/only.rs"]);
+        open_picker(&app, &mut vcx);
+        assert_eq!(
+            footer_painted(&mut vcx),
+            (false, false),
+            "nothing to close, so no footer button"
+        );
+        let placeholder = strip_search_placeholder();
+        assert_eq!(placeholder.as_ref(), t(L10nKey::EditorStripSearch));
+        assert!(
+            !placeholder.chars().any(|c| c.is_ascii_digit()),
+            "the placeholder carries no count: {placeholder}"
+        );
+    }
+
+    /// Covers the `when(show_saved)` and `when(show_others)` true branches.
+    #[gpui::test]
+    fn two_saved_files_offer_both_footer_actions(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Fill);
+        resize(&mut vcx, 1440., 900.);
+        open_names(&app, &mut vcx, &["/repo/a.rs", "/repo/b.rs"]);
+        open_picker(&app, &mut vcx);
+        assert_eq!(footer_painted(&mut vcx), (true, true));
+    }
+
+    /// Covers `show_saved` false with `show_others` true: the one other
+    /// file is unsaved, so only "Close others" has work.
+    #[gpui::test]
+    fn an_unsaved_other_file_hides_close_saved_only(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Fill);
+        resize(&mut vcx, 1440., 900.);
+        open_names(&app, &mut vcx, &["/repo/a.rs", "/repo/b.rs"]);
+        app.update_in(&mut vcx, |app, _, cx| {
+            let other = app.editor_strip_others(false);
+            assert_eq!(other.len(), 1, "one file besides the front one");
+            app.buffer_mut(other[0]).unwrap().dirty = true;
+            cx.notify();
+        });
+        open_picker(&app, &mut vcx);
+        assert_eq!(footer_painted(&mut vcx), (false, true));
+    }
+
+    #[gpui::test]
+    fn hidden_files_keep_their_headings_and_count(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Dock);
+        resize(&mut vcx, 1000., 700.);
+        open_names(&app, &mut vcx, &NAMES);
+        let p = assert_header(&app, &mut vcx, "ten files");
+        assert!(p.count.is_some(), "ten files fold into a +N");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.editor_toggle_strip_picker(true, window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(
+            vcx.debug_bounds("editor-strip-heading").is_some(),
+            "with files hidden the list is sectioned"
+        );
+    }
+
+    #[gpui::test]
+    fn a_keyboard_opened_list_closes_on_an_outside_press(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Fill);
+        resize(&mut vcx, 1440., 900.);
+        open_names(&app, &mut vcx, &["/repo/only.rs"]);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.editor_toggle_strip_picker(false, window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(app.read_with(&vcx, |app, _| {
+            app.editor
+                .strip_picker
+                .as_ref()
+                .is_some_and(|p| !p.over_button)
+        }));
+        let header = vcx.debug_bounds("editor-header").expect("header");
+        let away = gpui::point(px(10.), header.bottom() + px(300.));
+        vcx.simulate_mouse_move(away, None, gpui::Modifiers::none());
+        vcx.simulate_mouse_down(away, gpui::MouseButton::Left, gpui::Modifiers::none());
+        vcx.run_until_parked();
+        assert!(
+            !picker_open(&app, &mut vcx),
+            "a press outside closes a list the pointer never entered the button for"
+        );
+    }
+
+    #[gpui::test]
+    fn the_hoisted_header_with_one_file_never_clips_the_chevron(cx: &mut TestAppContext) {
+        // The header is never hoisted on macOS.
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Dock);
+        open_names(&app, &mut vcx, &["/repo/only.rs"]);
+        // `hoist_boundary` runs `assert_header` on both sides of the point
+        // the header leaves the title bar, so the chevron is checked at the
+        // narrowest the hoisted header gets.
+        let (first_inline, lifted) = hoist_boundary(&app, &mut vcx);
+        assert!(
+            lifted > first_inline,
+            "the hysteresis keeps the lifted header from flapping ({first_inline} vs {lifted})"
+        );
+        let p = painted(&mut vcx, 1);
+        let more = p.more.expect("the chevron is painted");
+        assert!(
+            more.right() <= p.header.right() && more.left() >= p.strip.right(),
+            "the chevron {more:?} is whole inside the lifted header {:?}",
+            p.header
+        );
     }
 
     #[gpui::test]
@@ -1480,7 +1864,7 @@ mod gpui_tests {
             for id in &ids {
                 app.buffer_mut(*id).unwrap().dirty = true;
             }
-            app.editor_toggle_strip_picker(window, cx);
+            app.editor_toggle_strip_picker(true, window, cx);
         });
         vcx.run_until_parked();
 
@@ -1651,7 +2035,7 @@ mod gpui_tests {
         assert_dirty_dots_warning(&mut vcx, "strip and +N");
 
         app.update_in(&mut vcx, |app, window, cx| {
-            app.editor_toggle_strip_picker(window, cx);
+            app.editor_toggle_strip_picker(true, window, cx);
         });
         vcx.run_until_parked();
 

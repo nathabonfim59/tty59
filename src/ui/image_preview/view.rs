@@ -446,6 +446,7 @@ impl ImageView {
             .h(bounds.size.height)
             .overflow_hidden()
             .bg(background)
+            .key_context(crate::ui::code_editor::DOCUMENT_KEY_CONTEXT)
             .track_focus(&focus)
             .cursor(if dragging {
                 CursorStyle::ClosedHand
@@ -707,6 +708,7 @@ impl ImageView {
             // The card has the view's focus like the picture does, or there
             // is nothing in the tab for a click or the panel's keys to land on
             // and a close of the last file falls through to the terminal.
+            .key_context(crate::ui::code_editor::DOCUMENT_KEY_CONTEXT)
             .track_focus(&self.focus)
             .size_full()
             .flex()

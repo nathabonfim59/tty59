@@ -142,6 +142,7 @@ actions!(
         EditorSaveAs,
         EditorGoToLine,
         EditorGoToSymbol,
+        EditorSearchOpenFiles,
         EditorNavigateBack,
         EditorNavigateForward,
         EditorSplitRight,

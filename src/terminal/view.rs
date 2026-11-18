@@ -20064,3 +20064,154 @@ mod prompt_handover_tests {
         );
     }
 }
+
+/// Search Open Files shares Ctrl+Shift+A with the composer's text field. The
+/// view's key handler returns early while the composer holds the keyboard, and
+/// an `Input` binds the chord only on macOS, so on the base commit the chord
+/// does nothing there. Run through the real app and keymap, it must still do
+/// nothing: the root handler lets it go on, and the editor's picker stays
+/// closed even with a file open.
+#[cfg(test)]
+mod search_open_files_chord_tests {
+    use super::*;
+    use crate::core::cli_agent::CLIAgent;
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn the_chord_leaves_the_composer_and_the_editor_picker_alone(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 1);
+        let view = app.read_with(&vcx, |app, _| {
+            match app.tabs[0].pane.leaves().into_iter().next() {
+                Some(crate::ui::pane::PaneSlot::Ready(view)) => view,
+                _ => panic!("the tab holds a ready pane"),
+            }
+        });
+
+        // A file open in the editor, so the chord has something to act on.
+        let dir = tempfile::tempdir().unwrap();
+        let file = tty59_core::core::path_spelling::local_spelling_buf(
+            std::fs::canonicalize(dir.path()).unwrap(),
+        )
+        .join("notes.txt");
+        std::fs::write(&file, "some notes\n").unwrap();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_file_in_editor(&file, window, cx);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.read_with(&vcx, |app, _| {
+            app.tab_code().is_none_or(|code| code.files.is_empty())
+        }) && std::time::Instant::now() < deadline
+        {
+            vcx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // An agent in the pane, so the composer exists; then the box, focused,
+        // holding a selected draft.
+        // The box is drawn only while the agent's input prompt is on screen, so
+        // the agent draws one first, as Claude Code does.
+        vcx.update(|window, _| window.refresh());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(400));
+        vcx.run_until_parked();
+        let (cols, lines) = vcx.update(|_, cx| {
+            let term = view.read(cx).terminal.term.lock();
+            let vt = term.view();
+            (vt.columns(), vt.screen_lines())
+        });
+        let rule = "─".repeat(cols);
+        let input = format!(
+            "\x1b[2J\x1b[H⏺ Ready.\x1b[{};1H{rule}\x1b[{};1H❯ \x1b[{};1H{rule}\x1b[{};1H  ? for shortcuts",
+            lines - 3,
+            lines - 2,
+            lines - 1,
+            lines,
+        );
+        DaemonMsg::Agent(Some(CLIAgent::Claude))
+            .encode(&mut streams[0])
+            .unwrap();
+        DaemonMsg::Output(format!("\x1b[?2004h{input}").into_bytes())
+            .encode(&mut streams[0])
+            .unwrap();
+        let mut ready = false;
+        for _ in 0..200 {
+            vcx.run_until_parked();
+            ready = vcx.update(|_, cx| {
+                let v = view.read(cx);
+                let term = v.terminal.term.lock();
+                let vt = term.view();
+                v.agent() == Some(CLIAgent::Claude)
+                    && vt.modes().contains(Modes::BRACKETED_PASTE)
+                    && (0..vt.screen_lines() as i32).any(|l| {
+                        (0..vt.columns()).any(|c| {
+                            vt.glyph(GridPoint {
+                                line: l,
+                                col: c as u16,
+                            })
+                            .c == '❯'
+                        })
+                    })
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(ready, "the agent's prompt never reached the screen");
+        view.update_in(&mut vcx, |v, window, cx| v.toggle_composer(window, cx));
+        vcx.update(|window, _| window.refresh());
+        vcx.executor()
+            .advance_clock(std::time::Duration::from_millis(400));
+        vcx.run_until_parked();
+        assert!(
+            view.read_with(&vcx, |v, _| v.composer_shown()),
+            "the box is over the agent's input"
+        );
+        let input = view.update_in(&mut vcx, |v, window, cx| {
+            let input = v
+                .composer
+                .as_ref()
+                .expect("the composer opened for the agent")
+                .input
+                .clone();
+            input.update(cx, |s, cx| {
+                s.set_value("draft text", window, cx);
+                // Focused here, not left to `toggle_composer`: the test is
+                // about the chord, not about who takes the keyboard.
+                s.focus(window, cx);
+            });
+            input
+        });
+        vcx.run_until_parked();
+        let _ = vcx.update(|window, cx| window.draw(cx));
+        vcx.run_until_parked();
+        assert!(
+            !app.update_in(&mut vcx, |app, window, cx| app.editor_has_focus(window, cx)),
+            "the editor does not hold the keyboard, so the handler propagates"
+        );
+        let snapshot = |vcx: &mut gpui::VisualTestContext| {
+            input.read_with(vcx, |s, _| (s.value().to_string(), s.selected_range()))
+        };
+        assert!(
+            vcx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window)),
+            "the composer holds the keyboard"
+        );
+        let before = snapshot(&mut vcx);
+
+        vcx.simulate_keystrokes("secondary-shift-a");
+        vcx.run_until_parked();
+
+        assert!(
+            vcx.update(|window, cx| input.read(cx).focus_handle(cx).is_focused(window)),
+            "the composer still holds the keyboard"
+        );
+        assert_eq!(snapshot(&mut vcx), before, "the draft and its selection");
+        assert!(
+            !app.read_with(&vcx, |app, _| app.editor_strip_picker_open()),
+            "the editor's picker stays closed"
+        );
+    }
+}
