@@ -531,10 +531,11 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ForkAgentSessionDown", ""),
         ("ForkAgentSessionUp", ""),
         ("CopyAgentSessionId", ""),
-        // ⌘⇧A for "agent" on macOS, where nothing else in the table or the
-        // terminal holds it. Off macOS Ctrl+Shift+A is the toolkit text
-        // input's select-to-start-of-line chord, so the plain Ctrl+Shift chord
-        // stays out of reach: Linux takes Alt as well (Ctrl+Alt+Shift+A), and
+        // ⌘⇧A for "agent" on macOS, where the terminal does not hold it and
+        // the only other binding is Search Open Files, inside the editor,
+        // which hands it on everywhere else. Off macOS Ctrl+Shift+A is that
+        // same editor command and otherwise reaches the shell, so New Agent
+        // Tab takes Alt as well on Linux (Ctrl+Alt+Shift+A), and
         // Windows, where AltGr+Shift+A is a printable Ą on a Polish layout,
         // moves to Ctrl+Alt+Shift+Insert (see `new_agent_tab_default`). Neither
         // carries a C0 byte, and the conformance gate in this file finds no
@@ -545,8 +546,8 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("NewAgentTab", new_agent_tab_default(CURRENT_OS)),
         // Search open files, on a chord that is safe to share. It is bound in
         // the text field's context and the editor documents' only, so the
-        // terminal never matches it (Ctrl+Shift+A stays select-all, ⌘⇧A New
-        // Agent Tab); the handler in `app.rs` propagates whenever the editor
+        // terminal never matches it, so Ctrl+Shift+A still reaches the shell and
+        // ⌘⇧A New Agent Tab; the handler in `app.rs` propagates whenever the editor
         // is not what has the focus, so any other text field still falls
         // through to the binding next in line. Listed after `NewAgentTab`: a
         // tie in depth goes to the later.
@@ -3871,8 +3872,8 @@ mod gpui_tests {
         });
     }
 
-    /// Search Open Files shares ⌘⇧A with New Agent Tab on macOS and Ctrl+Shift+A
-    /// with the terminal's select-all elsewhere. It is bound in the text
+    /// Search Open Files shares ⌘⇧A with New Agent Tab on macOS and
+    /// Ctrl+Shift+A, which reaches the shell, elsewhere. It is bound in the text
     /// field's context and the editor documents' only: a terminal sees exactly
     /// what it saw before, and either editor context ranks it first, ahead of
     /// New Agent Tab, which stays next in line for the handler to propagate to.
