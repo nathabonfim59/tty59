@@ -405,7 +405,12 @@ impl Tty59App {
 
     /// A file or folder was deleted through tty59: hex documents at or under it say so rather
     /// than waiting for the watcher.
-    pub(in crate::ui::code_editor) fn hex_path_removed(&mut self, host: HostId, path: &Path, cx: &mut Context<Self>) {
+    pub(in crate::ui::code_editor) fn hex_path_removed(
+        &mut self,
+        host: HostId,
+        path: &Path,
+        cx: &mut Context<Self>,
+    ) {
         for doc in &self.editor.hex.docs {
             if doc.host.id() == host && doc.path.starts_with(path) {
                 doc.data.update(cx, |d, cx| {
