@@ -2659,6 +2659,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexTooLarge => {
             "「{name}」は {size} MiB で、接続越しに開ける上限 {limit} MiB を超えています"
         }
+        L10nKey::HexSavePartlyWritten => {
+            "ファイルが一部だけ書き込まれた可能性があります。もう一度保存すると、すべての変更が書き直されます。"
+        }
+        L10nKey::EditorSaveSiblingTitle => "「{name}」の別のタブに未保存の変更があります",
+        L10nKey::EditorSaveSiblingBody => {
+            "ここで保存すると、その変更を含まない内容が書き込まれ、もう一方のタブにはファイルが変更されたと表示されます。"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} を起動できませんでした。tty59 は PATH 上で次を探します：{programs}。{name} がインストールされ、実行できることを確認してください。"

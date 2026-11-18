@@ -2026,6 +2026,9 @@ l10n_keys! {
     HexStatusSelection,
     HexStatusSize,
     HexTooLarge,
+    HexSavePartlyWritten,
+    EditorSaveSiblingTitle,
+    EditorSaveSiblingBody,
     // B3-E: editor status, empty hint and gutter peek.
     LspMissingBody,
     LspErrorCount,

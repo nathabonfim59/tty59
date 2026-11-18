@@ -11,6 +11,7 @@ use tty59_core::host::{MTime, SharedHost};
 
 use super::io::{self, HexLoaded, HexSource};
 use super::model::{HexModel, Source};
+use crate::ui::code_editor::DiskConflict;
 use crate::ui::host_ops::HostOps;
 
 /// What the document holds.
@@ -31,16 +32,21 @@ pub(crate) struct HexData {
     // `HexModel` is private to the hex module, so the field is too; the rest of the editor asks
     // through the methods below.
     pub(super) content: HexContent,
-    /// The disk mtime the model was read at.
-    #[expect(
-        dead_code,
-        reason = "used by M3 save, which checks the file is still the one read"
-    )]
+    /// The disk mtime the model was read at, and a save's check that the file is still that one.
     pub(crate) mtime: Option<MTime>,
     pub(crate) opens_as_text: bool,
     /// Pages being read, with the generation they were requested under: a reload makes the
     /// same page number a new request, so an older read must not hold it back.
     in_flight: BTreeSet<(u64, u64)>,
+    /// A save is on its way. Like a text buffer's: a second save waits for it, and an external
+    /// change seen meanwhile is the save's own.
+    pub(super) saving: bool,
+    pub(super) save_pending: bool,
+    pub(super) save_then_close: bool,
+    /// Why the document and the file no longer agree, for the banner.
+    pub(super) conflict: Option<DiskConflict>,
+    /// Counts reloads, so the answer of one that has since been superseded is dropped.
+    pub(super) reload_seq: u64,
 }
 
 impl HexData {
@@ -75,6 +81,11 @@ impl HexData {
             mtime,
             opens_as_text,
             in_flight: BTreeSet::new(),
+            saving: false,
+            save_pending: false,
+            save_then_close: false,
+            conflict: None,
+            reload_seq: 0,
         }
     }
 
@@ -85,6 +96,14 @@ impl HexData {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| self.path.display().to_string())
             .into()
+    }
+
+    /// Which reading of the file the cached pages belong to; 0 for one never read.
+    pub(crate) fn generation(&self) -> u64 {
+        match &self.content {
+            HexContent::Ready(model) => model.store.generation(),
+            HexContent::TooLarge { .. } => 0,
+        }
     }
 
     /// `None` for a file that is too large to open.

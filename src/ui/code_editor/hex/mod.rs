@@ -22,6 +22,9 @@ use crate::ui::image_preview::view::{ErrorCard, error_card};
 pub(super) mod data;
 pub(super) mod io;
 pub(super) mod model;
+mod save;
+#[cfg(test)]
+mod save_tests;
 #[cfg(test)]
 mod test_support;
 pub(super) mod view;
@@ -617,6 +620,7 @@ impl Tty59App {
             path,
             name,
         });
+        self.editor_rebuild_watcher(cx);
         self.editor_show_in_tab(tab, id, front, window, cx);
         Some(id)
     }
@@ -648,6 +652,7 @@ impl Tty59App {
             doc.name = doc.data.read(cx).name();
             moved = true;
         }
+        // The caller rebuilds the watcher when anything moved.
         moved
     }
 
@@ -662,6 +667,9 @@ impl Tty59App {
             .borrow_mut()
             .retain(|(view_id, ..), _| *view_id != id);
         self.editor.hex.docs.retain(|d| d.id() != id);
+        // Whatever was waiting on this document to be saved is not going to see that now.
+        self.editor_saves_failed(id);
+        self.editor_rebuild_watcher(cx);
         cx.notify();
     }
 
@@ -677,13 +685,15 @@ impl Tty59App {
             .filter_map(|t| t.code.as_deref())
             .flat_map(TabCode::all_files)
             .collect();
+        // A document with edits is never swept: `hex_adopt_orphans` hands it to the tab in
+        // front, as a text buffer's are, rather than losing it.
         let orphans: Vec<BufferId> = self
             .editor
             .hex
             .docs
             .iter()
             .map(HexDoc::id)
-            .filter(|id| !shown.contains(id))
+            .filter(|id| !shown.contains(id) && self.hex_clean(*id, cx))
             .collect();
         for id in orphans {
             self.editor_drop_hex(id, cx);

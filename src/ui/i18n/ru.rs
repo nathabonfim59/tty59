@@ -2677,6 +2677,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexTooLarge => {
             "«{name}» занимает {size} МиБ, больше {limit} МиБ, доступных по соединению"
         }
+        L10nKey::HexSavePartlyWritten => {
+            "Файл мог быть записан частично. Повторное сохранение перезапишет все изменения."
+        }
+        L10nKey::EditorSaveSiblingTitle => "В другой вкладке «{name}» есть несохранённые изменения",
+        L10nKey::EditorSaveSiblingBody => {
+            "Сохранение здесь запишет файл без этих изменений, и другая вкладка увидит файл изменённым."
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "Не удалось запустить {name}. tty59 ищет в PATH: {programs}. Проверьте, что сервер {name} установлен и запускается."

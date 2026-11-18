@@ -122,7 +122,6 @@ impl ByteStore {
 
     /// Drops every cached page and invalidates reads still in flight. Called when the file
     /// changed on disk. The overlay is untouched: the caller decides whether to keep it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn bump_generation(&mut self) {
         self.generation += 1;
         self.saving_pages.clear();
@@ -131,7 +130,6 @@ impl ByteStore {
     }
 
     /// A reload with new contents: new generation, no pages, no edits.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn set_source(&mut self, source: Source) {
         self.source = source;
         self.overlay.clear();
@@ -301,7 +299,6 @@ impl ByteStore {
     /// or `end_save`: a save is asynchronous, and by the time it lands the user may have
     /// reverted a byte (dropping its overlay entry and so its page's pin), yet the fold needs
     /// the old disk byte to keep that revert.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     fn begin_save(&mut self) -> SaveSnapshot {
         let written = self.overlay.clone();
         self.saving_pages = written.keys().map(|off| off / PAGE_U64).collect();
@@ -326,7 +323,6 @@ impl ByteStore {
     }
 
     /// The save failed or was abandoned: the pages need no more protection.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     fn end_save(&mut self) {
         self.saving_pages.clear();
     }
@@ -338,7 +334,6 @@ impl ByteStore {
     /// the meantime (no overlay entry) becomes an edit again, since the disk no longer has it.
     /// Offsets that were not written are untouched. Bytes whose page is not cached are skipped;
     /// `begin_save` keeps those pages, so that does not happen through the normal paths.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     fn fold_written(&mut self, written: &BTreeMap<u64, u8>) -> BTreeMap<u64, u8> {
         let mut old = BTreeMap::new();
         if let Source::Whole(buf) = &mut self.source {
@@ -395,7 +390,6 @@ impl ByteStore {
 
 /// What a save writes: the edits as they were when it started. `apply_saved` folds exactly
 /// these, so edits made while the save is in flight are not mistaken for saved ones.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 pub(super) struct SaveSnapshot {
     written: BTreeMap<u64, u8>,
     /// For a whole-buffer source: the bytes with the edits applied, to write as the file.
@@ -406,13 +400,11 @@ pub(super) struct SaveSnapshot {
 
 impl SaveSnapshot {
     /// The written bytes as contiguous runs, ascending, for a paged save.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn patches(&self) -> Vec<(u64, Vec<u8>)> {
         runs(&self.written)
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
 fn runs(bytes: &BTreeMap<u64, u8>) -> Vec<(u64, Vec<u8>)> {
     let mut runs: Vec<(u64, Vec<u8>)> = Vec::new();
     for (&off, &value) in bytes {
@@ -634,7 +626,6 @@ impl HexModel {
     }
 
     /// The file changed on disk: new contents, no edits, no history, caret kept in range.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn reload(&mut self, source: Source) {
         self.store.set_source(source);
         self.history = History::default();
@@ -875,13 +866,11 @@ impl HexModel {
     /// Freezes the edits for a save: patches for a paged file, the edited buffer for a whole
     /// one. Edits made afterwards are not part of it; hand it back to `apply_saved` when the
     /// write succeeded or to `abort_save` when it did not.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn save_snapshot(&mut self) -> SaveSnapshot {
         self.store.begin_save()
     }
 
     /// The save failed or was dropped; the edits stay as they are.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn abort_save(&mut self) {
         self.store.end_save();
     }
@@ -894,7 +883,6 @@ impl HexModel {
     /// would now mean the *saved* byte; so every `None` at an offset that was just written is
     /// rewritten to the byte the disk held before, an absolute value. Undoing then marks the
     /// byte edited again (dirty), and redoing back to the saved value clears the edit.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
     pub(super) fn apply_saved(&mut self, snapshot: &SaveSnapshot) {
         if snapshot.generation != self.store.generation() {
             return;

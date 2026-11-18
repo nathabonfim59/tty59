@@ -189,6 +189,11 @@ src/ui/settings/keyboard_tests.rs|std::fs::read_to_string
 # writes a small or sparse file into a per-test local temp dir for a counting host to read.
 # Local test data, never a workspace path.
 src/ui/code_editor/hex/test_support.rs|std::fs::
+
+# The save tests of the hex editor: cfg(test) module in its own file that writes a neutral
+# binary into a per-test local temp dir, edits it behind the editor's back and reads it back to
+# compare byte for byte. Local test data, never a workspace path and never a remote one.
+src/ui/code_editor/hex/save_tests.rs|std::fs::
 EOF
 )
 

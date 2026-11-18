@@ -1954,7 +1954,7 @@ impl Tty59App {
             // Unsaved editor buffers hold the window open until the question
             // about them is answered; the answer closes it.
             let asked = app.update(cx, |app, cx| {
-                let unsaved = app.editor_unsaved();
+                let unsaved = app.editor_unsaved(cx);
                 app.editor_guard_unsaved(
                     unsaved,
                     crate::ui::code_editor::AfterUnsaved::CloseWindow,
@@ -2064,7 +2064,7 @@ impl Tty59App {
     }
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let unsaved = self.editor_unsaved();
+        let unsaved = self.editor_unsaved(cx);
         if self.editor_guard_unsaved(
             unsaved,
             crate::ui::code_editor::AfterUnsaved::CloseWindow,
@@ -2567,7 +2567,7 @@ impl Tty59App {
         // holds them. Quitting ends every window, so another window's
         // buffers count as much as this one's: hand the quit over to it, and
         // it asks about its own before carrying the quit on.
-        let unsaved = self.editor_unsaved();
+        let unsaved = self.editor_unsaved(cx);
         if self.editor_guard_unsaved(
             unsaved,
             crate::ui::code_editor::AfterUnsaved::Quit,
@@ -2580,7 +2580,7 @@ impl Tty59App {
         let elsewhere = crate::ui::windows::WindowRegistry::open_windows(cx)
             .into_iter()
             .filter_map(|(ws, app)| Some((ws, app.upgrade()?)))
-            .find(|(_, app)| app.entity_id() != me && !app.read(cx).editor_unsaved().is_empty());
+            .find(|(_, app)| app.entity_id() != me && !app.read(cx).editor_unsaved(cx).is_empty());
         if let Some((ws, app)) = elsewhere
             && let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, ws)
         {
@@ -4922,7 +4922,7 @@ impl Tty59App {
                 .get(self.active)
                 .is_some_and(|tab| tab.pane.leaves().len() <= 1)
         {
-            let unsaved = self.editor_unsaved_in_tab(self.active);
+            let unsaved = self.editor_unsaved_in_tab(self.active, cx);
             if self.editor_guard_unsaved(
                 unsaved,
                 crate::ui::code_editor::AfterUnsaved::ClosePane,
@@ -5940,7 +5940,7 @@ impl Tty59App {
         }
         if !confirmed {
             let id = self.tabs[index].tree_id.get();
-            let unsaved = self.editor_unsaved_in_tab(index);
+            let unsaved = self.editor_unsaved_in_tab(index, cx);
             if self.editor_guard_unsaved(
                 unsaved,
                 crate::ui::code_editor::AfterUnsaved::CloseTab(id),
@@ -6162,7 +6162,9 @@ impl Tty59App {
     /// files — see [`Self::close_other_tabs_inner`].
     fn bulk_closable(&self, indices: impl Iterator<Item = usize>, cx: &App) -> Vec<usize> {
         indices
-            .filter(|&i| !self.tab_has_warn_ssh(i, cx) && self.editor_unsaved_in_tab(i).is_empty())
+            .filter(|&i| {
+                !self.tab_has_warn_ssh(i, cx) && self.editor_unsaved_in_tab(i, cx).is_empty()
+            })
             .collect()
     }
 
@@ -6216,7 +6218,7 @@ impl Tty59App {
             // cannot ask about them one tab at a time, and must not lose them.
             if i == index
                 || self.tab_has_warn_ssh(i, cx)
-                || !self.editor_unsaved_in_tab(i).is_empty()
+                || !self.editor_unsaved_in_tab(i, cx).is_empty()
             {
                 continue;
             }
@@ -6249,7 +6251,7 @@ impl Tty59App {
         }
         // Same bargain as `close_other_tabs`.
         for i in ((index + 1)..self.tabs.len()).rev() {
-            if self.tab_has_warn_ssh(i, cx) || !self.editor_unsaved_in_tab(i).is_empty() {
+            if self.tab_has_warn_ssh(i, cx) || !self.editor_unsaved_in_tab(i, cx).is_empty() {
                 continue;
             }
             self.close_tab_inner(i, true, window, cx);

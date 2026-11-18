@@ -2579,6 +2579,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HexTooLarge => {
             "\"{name}\" is {size} MiB, over the {limit} MiB that can be opened over a connection"
         }
+        L10nKey::HexSavePartlyWritten => {
+            "The file may be partly written. Saving again rewrites every change."
+        }
+        L10nKey::EditorSaveSiblingTitle => "Another tab of \"{name}\" has unsaved changes",
+        L10nKey::EditorSaveSiblingBody => {
+            "Saving here writes the file without them, and that tab will then see the file as changed."
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} could not be started. tty59 looks on PATH for: {programs}. Make sure {name} is installed and can run."

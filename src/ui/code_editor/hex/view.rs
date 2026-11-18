@@ -314,7 +314,9 @@ pub(crate) struct HexView {
     scroll: Rc<Cell<Scroll>>,
     layout: Rc<Cell<Layout>>,
     /// The rows the pages were last asked for, so prepaint defers a request only on a change.
-    requested: Rc<Cell<Option<(u64, u64)>>>,
+    /// The (generation, first, end) rows last asked for: a reload bumps the generation and
+    /// drops every cached page, so the same rows must be asked for again.
+    requested: Rc<Cell<Option<(u64, u64, u64)>>>,
     /// Where a mouse drag began, while the button is down.
     drag_from: Option<u64>,
     /// The last measurement and what it was made for.
@@ -398,7 +400,8 @@ impl HexView {
     fn request_visible(&mut self, window: &Window, cx: &mut Context<Self>) {
         let l = self.layout.get();
         let rows = visible_rows(self.scroll.get(), l.viewport_h(), l.metrics.row_h, l.rows);
-        self.requested.set(Some((rows.start, rows.end)));
+        let generation = self.data.read(cx).generation();
+        self.requested.set(Some((generation, rows.start, rows.end)));
         self.data.update(cx, |data, cx| {
             if let HexContent::Ready(m) = &mut data.content {
                 m.store.touch_rows(rows.clone());
@@ -800,8 +803,10 @@ impl Render for HexView {
                 });
                 let (top, h) = (view.read(cx).scroll.get(), bounds.size.height.as_f32());
                 let range = visible_rows(top, h, metrics.row_h, rows_total);
-                if requested.get() != Some((range.start, range.end)) {
-                    requested.set(Some((range.start, range.end)));
+                let generation = view.read(cx).data.read(cx).generation();
+                let key = Some((generation, range.start, range.end));
+                if requested.get() != key {
+                    requested.set(key);
                     let view = view.clone();
                     window.defer(cx, move |window, cx| {
                         view.update(cx, |this, cx| this.request_visible(window, cx));
@@ -1175,6 +1180,36 @@ mod tests {
         assert_eq!(rig.host.reads(), vec![last_page]);
         let l = layout(&rig, vcx);
         assert_eq!(scroll(&rig, vcx).top_row, l.rows - l.page());
+    }
+
+    /// A reload drops every cached page, and the rows still on screen are asked for again
+    /// without any scroll. Guards the generation in the `requested` key (request_visible and
+    /// the prepaint check): with only the rows in it the second read never happens.
+    #[gpui::test]
+    fn a_reload_loads_the_visible_rows_again_without_a_scroll(cx: &mut TestAppContext) {
+        use super::super::io::{HexFile, HexSource};
+        let (rig, vcx) = rig(cx, GIB, &[]);
+        let handle = rig.view.read_with(vcx, |v, _| v.scroll_handle());
+        handle.set_offset(point(px(0.), px(-1e9)));
+        redraw(&rig, vcx);
+        let last_page = (GIB - 1) / PAGE as u64 * PAGE as u64;
+        assert_eq!(rig.host.reads(), vec![last_page]);
+
+        rig.data.update(vcx, |d, cx| {
+            let file = HexFile {
+                path: d.path.clone(),
+                source: HexSource::Paged {
+                    len: GIB,
+                    first_page: vec![0; PAGE],
+                },
+                mtime: None,
+                len: GIB,
+                opens_as_text: false,
+            };
+            d.apply_reload(file, cx);
+        });
+        settle(vcx, &rig.data);
+        assert_eq!(rig.host.reads(), vec![last_page, last_page]);
     }
 
     // --- keys ----------------------------------------------------------------------------

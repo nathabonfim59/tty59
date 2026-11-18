@@ -1244,23 +1244,31 @@ impl Tty59App {
 
     /// Unsaved buffers that only tab `tab_ix` shows — the ones closing it
     /// would lose. A buffer another tab also shows survives the close.
-    pub(crate) fn editor_unsaved_in_tab(&self, tab_ix: usize) -> Vec<BufferId> {
+    pub(crate) fn editor_unsaved_in_tab(&self, tab_ix: usize, cx: &gpui::App) -> Vec<BufferId> {
         let Some(code) = self.tabs.get(tab_ix).and_then(|t| t.code.as_deref()) else {
             return Vec::new();
         };
         code.all_files()
             .into_iter()
-            .filter(|id| self.buffer(*id).is_some_and(|b| b.dirty) && self.buffer_tabs(*id) == 1)
+            .filter(|id| self.doc_dirty(*id, cx) && self.buffer_tabs(*id) == 1)
             .collect()
     }
 
-    /// Every unsaved buffer in the window.
-    pub(crate) fn editor_unsaved(&self) -> Vec<BufferId> {
+    /// Every unsaved buffer in the window, hex documents with edits included.
+    pub(crate) fn editor_unsaved(&self, cx: &gpui::App) -> Vec<BufferId> {
         self.editor
             .buffers
             .iter()
             .filter(|b| b.dirty)
             .map(OpenFile::id)
+            .chain(
+                self.editor
+                    .hex
+                    .docs
+                    .iter()
+                    .map(hex::HexDoc::id)
+                    .filter(|id| self.hex_dirty(*id, cx)),
+            )
             .collect()
     }
 
@@ -1277,6 +1285,14 @@ impl Tty59App {
             .iter()
             .filter(|f| f.untitled.is_none() && f.host.id() == watch_host)
             .map(|f| f.path.clone())
+            .chain(
+                self.editor
+                    .hex
+                    .docs
+                    .iter()
+                    .filter(|d| d.host.id() == watch_host)
+                    .map(|d| d.path.clone()),
+            )
             .collect();
         let dirs: HashSet<PathBuf> = files
             .iter()
@@ -2170,6 +2186,17 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.hex(id).is_some() {
+            self.hex_save(id, then_close, force, window, cx);
+            return;
+        }
+        // Another tab of this file with edits of its own must not be overwritten
+        // by accident: ask first. An Overwrite comes back here forced.
+        if !force && self.sibling_unsaved(id, cx) {
+            self.editor_saves_failed(id);
+            self.editor_ask_sibling_overwrite(id, then_close, window, cx);
+            return;
+        }
         let Some(f) = self.buffer_mut(id) else {
             return;
         };
@@ -2241,6 +2268,7 @@ impl Tty59App {
                         if let Some(dir) = &saved_in {
                             app.scm_invalidate_cwd(host_id, dir, cx);
                         }
+                        app.editor_notify_siblings(id, mtime, window, cx);
                         if pending {
                             app.editor_save_file(id, false, false, window, cx);
                             return;
@@ -2277,10 +2305,9 @@ impl Tty59App {
 
     /// Asked when a save finds the file changed underneath it.
     fn editor_ask_overwrite(&mut self, id: BufferId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(f) = self.buffer(id) else {
+        let Some(name) = self.doc_label(id) else {
             return;
         };
-        let name = f.label();
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::EditorSaveConflictTitle, &[("name", &name)]),
@@ -2621,20 +2648,18 @@ impl Tty59App {
         let Some(id) = self.tab_code().and_then(|c| c.files.get(pos).copied()) else {
             return;
         };
-        // A picture has nothing to lose: it closes without asking. Neither
-        // does a hex document until it can be edited.
-        if self.image(id).is_some() || self.hex(id).is_some() {
+        // A picture has nothing to lose: it closes without asking.
+        if self.image(id).is_some() {
             self.editor_remove_from_tab(tab_ix, id, cx);
             return;
         }
-        let Some(f) = self.buffer(id) else {
+        let Some(name) = self.doc_label(id) else {
             return;
         };
-        if !f.dirty || self.buffer_refs(id) > 1 {
+        if !self.doc_dirty(id, cx) || self.buffer_refs(id) > 1 {
             self.editor_remove_from_tab(tab_ix, id, cx);
             return;
         }
-        let name = f.label();
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::EditorUnsavedChanges, &[("name", &name)]),
@@ -2691,7 +2716,7 @@ impl Tty59App {
         let unsaved: Vec<BufferId> = ids
             .iter()
             .copied()
-            .filter(|id| self.buffer(*id).is_some_and(|f| f.dirty) && self.buffer_refs(*id) == 1)
+            .filter(|id| self.doc_dirty(*id, cx) && self.buffer_refs(*id) == 1)
             .collect();
         if self.editor_guard_unsaved(
             unsaved,
@@ -3074,10 +3099,7 @@ impl Tty59App {
             return true;
         }
         self.editor.unsaved_prompt_open = true;
-        let names: Vec<SharedString> = ids
-            .iter()
-            .filter_map(|id| self.buffer(*id).map(OpenFile::label))
-            .collect();
+        let names: Vec<SharedString> = ids.iter().filter_map(|id| self.doc_label(*id)).collect();
         let title = match names.as_slice() {
             [one] => t_fmt(L10nKey::EditorUnsavedChanges, &[("name", one)]),
             _ => t_fmt(
@@ -3159,9 +3181,12 @@ impl Tty59App {
             std::mem::take(&mut self.editor.waiters)
                 .into_iter()
                 .partition(|w| {
-                    w.ids.iter().all(|id| {
-                        self.buffer(*id)
-                            .is_none_or(|f| !f.dirty && !f.saving && f.untitled.is_none())
+                    w.ids.iter().all(|id| match self.buffer(*id) {
+                        Some(f) => !f.dirty && !f.saving && f.untitled.is_none(),
+                        None => self.hex(*id).is_none_or(|d| {
+                            let d = d.data.read(cx);
+                            !d.dirty() && !d.saving
+                        }),
                     })
                 });
         self.editor.waiters = waiting;
@@ -3250,6 +3275,7 @@ impl Tty59App {
                 f.disk_mtime = None;
             }
         }
+        self.hex_path_removed(host, path, cx);
         cx.notify();
     }
 
@@ -3294,9 +3320,24 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The same file open as text and as bytes is two documents, and both hear of it.
+        if let Some(hex) = self.hex_at(host, path) {
+            self.hex_apply_external_change(hex, observed, window, cx);
+        }
         let Some(id) = self.buffer_at(host, path) else {
             return;
         };
+        self.editor_buffer_external_change(id, observed, window, cx);
+    }
+
+    /// What a change seen on disk means for the text buffer `id`.
+    fn editor_buffer_external_change(
+        &mut self,
+        id: BufferId,
+        observed: Observed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(f) = self.buffer_mut(id) else {
             return;
         };
@@ -3324,6 +3365,10 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.hex(id).is_some() {
+            self.hex_reload_from_disk(id, window, cx);
+            return;
+        }
         let Some(f) = self.buffer_mut(id) else {
             return;
         };
@@ -3412,6 +3457,7 @@ impl Tty59App {
         // Pictures no tab shows go, and so do views of places that are gone.
         self.editor_sweep_images(cx);
         self.editor_sweep_hex(cx);
+        self.hex_adopt_orphans(window, cx);
         // No tabs at all is the gap in the middle of a server restart or a
         // workspace switch, not a verdict on the buffers: wait for the tabs.
         if self.editor.buffers.is_empty() || self.tabs.is_empty() {
@@ -3815,8 +3861,7 @@ impl Tty59App {
             cx,
         );
         let conflict_banner = self
-            .active_buffer()
-            .and_then(|f| f.conflict.map(|c| (f.id(), c)))
+            .active_conflict(cx)
             .map(|(id, c)| self.render_editor_conflict_banner(id, c, cx));
         let bar = self.render_editor_bar(window, cx);
 
@@ -4929,6 +4974,19 @@ impl Tty59App {
             }))
     }
 
+    /// Keep mine: the file as it is on disk is the one a save may replace.
+    fn editor_keep_mine(&mut self, id: BufferId, observed: Option<MTime>, cx: &mut Context<Self>) {
+        if self.hex(id).is_some() {
+            self.hex_keep_mine(id, observed, cx);
+            return;
+        }
+        if let Some(f) = self.buffer_mut(id) {
+            f.disk_mtime = observed;
+            f.conflict = None;
+            cx.notify();
+        }
+    }
+
     fn render_editor_conflict_banner(
         &self,
         id: BufferId,
@@ -4988,13 +5046,9 @@ impl Tty59App {
                     rungs,
                     cx,
                     cx.listener(move |this, _, _w, cx| {
-                        if let Some(f) = this.buffer_mut(id) {
-                            // The version seen on disk is now the one a
-                            // save is allowed to replace.
-                            f.disk_mtime = observed;
-                            f.conflict = None;
-                            cx.notify();
-                        }
+                        // The version seen on disk is now the one a save is
+                        // allowed to replace.
+                        this.editor_keep_mine(id, observed, cx);
                     }),
                 ))
                 .into_any_element(),
