@@ -15658,14 +15658,14 @@ mod show_in_file_tree_tests {
                 .any(|c| c.contains("PopupMenu")),
             "the focus is in a popup menu, so the keys below reach it"
         );
-        // Close Tab, then Open (where this machine can open files), Reveal,
-        // Download and ours: the other items in front of it are disabled or
-        // separators, which the arrows skip.
+        // Close Tab, Open as Hex, then Open (where this machine can open
+        // files), Reveal, Download and ours: the other items in front of it
+        // are disabled or separators, which the arrows skip.
         let opens = f
             .app
             .update_in(&mut f.vcx, |app, _, cx| app.can_spawn_locally(cx));
-        let downs = if opens { 5 } else { 4 };
-        let keys = format!("{} enter", ["down"; 5][..downs].join(" "));
+        let downs = if opens { 6 } else { 5 };
+        let keys = format!("{} enter", ["down"; 6][..downs].join(" "));
         f.vcx.simulate_keystrokes(&keys);
         f.wait(|_, focus| focus.is_some());
         f.draw();
