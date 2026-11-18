@@ -5,4 +5,6 @@
 pub(super) mod data;
 pub(super) mod io;
 pub(super) mod model;
+#[cfg(test)]
+mod test_support;
 pub(super) mod view;

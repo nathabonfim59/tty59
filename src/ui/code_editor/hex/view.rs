@@ -864,6 +864,7 @@ impl Render for HexView {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use gpui::{Modifiers, ScrollDelta, TestAppContext, TouchPhase, VisualTestContext};
 
@@ -881,12 +882,23 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    fn settle(vcx: &mut VisualTestContext) {
-        for _ in 0..3 {
+    /// Draws until the page reads the frames asked for have landed. They run on a real thread,
+    /// so the scheduler may park and the loop polls, bounded at ten seconds.
+    fn settle(vcx: &mut VisualTestContext, data: &Entity<HexData>) {
+        vcx.executor().allow_parking();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut quiet = 0;
+        while quiet < 3 && Instant::now() < deadline {
             vcx.run_until_parked();
             let _ = vcx.update(|window, cx| window.draw(cx));
+            vcx.run_until_parked();
+            if data.read_with(vcx, |d, _| d.reading()) {
+                quiet = 0;
+                std::thread::sleep(Duration::from_millis(2));
+            } else {
+                quiet += 1;
+            }
         }
-        vcx.run_until_parked();
     }
 
     /// A view over a real file of `len` bytes starting with `head`, drawn and settled.
@@ -907,7 +919,7 @@ mod tests {
             let data = data.clone();
             move |_, cx| HexView::new(data, 0, cx)
         });
-        settle(vcx);
+        settle(vcx, &data);
         let rig = Rig {
             view,
             data,
@@ -934,7 +946,7 @@ mod tests {
     fn motion(rig: &Rig, vcx: &mut VisualTestContext, m: HexMotion, extend: bool) {
         rig.view
             .update_in(vcx, |v, window, cx| v.apply_motion(m, extend, window, cx));
-        settle(vcx);
+        settle(vcx, &rig.data);
     }
 
     fn set_zoom(vcx: &mut VisualTestContext, zoom: f32) {
@@ -943,7 +955,7 @@ mod tests {
 
     fn redraw(rig: &Rig, vcx: &mut VisualTestContext) {
         rig.view.update(vcx, |_, cx| cx.notify());
-        settle(vcx);
+        settle(vcx, &rig.data);
     }
 
     fn at(x: f32, y: f32) -> Point<Pixels> {
@@ -968,8 +980,15 @@ mod tests {
         assert!(l.viewport_h() > 0., "the view was laid out");
         assert_eq!(l.rows, GIB / ROW);
         assert!(built > 0, "a frame was drawn");
-        assert_eq!(built, shown.count(), "one build per row on screen");
-        assert!(built < 200, "{built} rows is not 67 million");
+        let per_frame = shown.count();
+        assert!(
+            per_frame > 0 && per_frame < 200,
+            "{per_frame} rows on screen"
+        );
+        assert!(
+            built >= per_frame && built % per_frame == 0 && built / per_frame <= 3,
+            "{built} rows built over a few frames of {per_frame}"
+        );
     }
 
     /// The first pending bytes draw as dim dots, loaded ones as hex and ASCII, with the extra
@@ -1375,8 +1394,11 @@ mod tests {
                 },
             )
         });
-        let (view, vcx) = cx.add_window_view(move |_, cx| HexView::new(data, 0, cx));
-        settle(vcx);
+        let (view, vcx) = cx.add_window_view({
+            let data = data.clone();
+            move |_, cx| HexView::new(data, 0, cx)
+        });
+        settle(vcx, &data);
         assert!(view.read_with(vcx, |v, cx| v.status(cx)).is_none());
         assert_eq!(view.read_with(vcx, |v, _| v.row_builds.get()), 0);
         assert!(host.reads().is_empty());

@@ -179,6 +179,11 @@ src/ui/scm/rows_stale_tests.rs|std::fs::
 # just published in the child-private pinned local config dir, to prove the
 # endpoint identity. Local test state, never a workspace or remote path.
 src/ui/settings/keyboard_tests.rs|std::fs::read_to_string
+
+# The hex tests' fixtures: a cfg(test) file of its own (not a trailing `mod tests`) that
+# writes a small or sparse file into a per-test local temp dir for a counting host to read.
+# Local test data, never a workspace path.
+src/ui/code_editor/hex/test_support.rs|std::fs::
 EOF
 )
 
