@@ -181,6 +181,48 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             editor,
         ));
     }
+    // ---- Hex editor ------------------------------------------------------------------------
+    // The hex view's navigation, on its own context so nothing else sees these keys. Tab
+    // switches the column; it has to be bound here because Root's focus walker would otherwise
+    // take it (as for the switcher above). Shift extends the selection. The document ends are
+    // Ctrl+Home/End, and Cmd+Up/Down on macOS as in the text editor.
+    {
+        use HexMotion::*;
+        let hex = Some(HEX_KEY_CONTEXT);
+        let mv = |keys: &str, motion: HexMotion, extend: bool| {
+            KeyBinding::new(keys, HexMove { motion, extend }, hex)
+        };
+        bindings.extend([
+            mv("left", Left, false),
+            mv("right", Right, false),
+            mv("up", Up, false),
+            mv("down", Down, false),
+            mv("shift-left", Left, true),
+            mv("shift-right", Right, true),
+            mv("shift-up", Up, true),
+            mv("shift-down", Down, true),
+            mv("pageup", PageUp, false),
+            mv("pagedown", PageDown, false),
+            mv("shift-pageup", PageUp, true),
+            mv("shift-pagedown", PageDown, true),
+            mv("home", RowStart, false),
+            mv("end", RowEnd, false),
+            mv("shift-home", RowStart, true),
+            mv("shift-end", RowEnd, true),
+            mv("ctrl-home", DocStart, false),
+            mv("ctrl-end", DocEnd, false),
+            mv("ctrl-shift-home", DocStart, true),
+            mv("ctrl-shift-end", DocEnd, true),
+            KeyBinding::new("tab", HexToggleSide, hex),
+        ]);
+        #[cfg(target_os = "macos")]
+        bindings.extend([
+            mv("cmd-up", DocStart, false),
+            mv("cmd-down", DocEnd, false),
+            mv("cmd-shift-up", DocStart, true),
+            mv("cmd-shift-down", DocEnd, true),
+        ]);
+    }
     bindings
 }
 
@@ -3384,6 +3426,89 @@ mod gpui_tests {
                     "{keys} in a terminal"
                 );
             }
+        });
+    }
+
+    /// The hex view's keys run its caret motions, Tab its column switch, and only inside the
+    /// `HexEditor` context: in a terminal the same chords stay the terminal's. Guards every
+    /// binding of the hex block in `fixed_bindings`.
+    #[gpui::test]
+    fn the_hex_view_keys_run_the_hex_actions_only_in_its_context(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let first = |keys: &str, stack: &[&str]| {
+                let input: Vec<Keystroke> = keys
+                    .split(' ')
+                    .map(|k| Keystroke::parse(k).expect("the typed keystroke parses"))
+                    .collect();
+                let stack: Vec<gpui::KeyContext> = stack
+                    .iter()
+                    .map(|c| gpui::KeyContext::parse(c).expect("the context parses"))
+                    .collect();
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().boxed_clone())
+            };
+            let hex = ["Workspace", "EditorDocument HexEditor"];
+            use HexMotion::*;
+            let mut table = vec![
+                ("left", Left, false),
+                ("right", Right, false),
+                ("up", Up, false),
+                ("down", Down, false),
+                ("shift-left", Left, true),
+                ("shift-right", Right, true),
+                ("shift-up", Up, true),
+                ("shift-down", Down, true),
+                ("pageup", PageUp, false),
+                ("pagedown", PageDown, false),
+                ("shift-pageup", PageUp, true),
+                ("shift-pagedown", PageDown, true),
+                ("home", RowStart, false),
+                ("end", RowEnd, false),
+                ("shift-home", RowStart, true),
+                ("shift-end", RowEnd, true),
+                ("ctrl-home", DocStart, false),
+                ("ctrl-end", DocEnd, false),
+                ("ctrl-shift-home", DocStart, true),
+                ("ctrl-shift-end", DocEnd, true),
+            ];
+            if cfg!(target_os = "macos") {
+                table.extend([
+                    ("cmd-up", DocStart, false),
+                    ("cmd-down", DocEnd, false),
+                    ("cmd-shift-up", DocStart, true),
+                    ("cmd-shift-down", DocEnd, true),
+                ]);
+            }
+            for (keys, motion, extend) in table {
+                let want = HexMove { motion, extend };
+                let got = first(keys, &hex);
+                assert!(
+                    got.as_ref().is_some_and(|a| a.partial_eq(&want)),
+                    "{keys} in the hex view runs {want:?}"
+                );
+                let outside = first(keys, &["Workspace", "Terminal"]);
+                assert!(
+                    !outside.as_ref().is_some_and(|a| a.partial_eq(&want)),
+                    "{keys} in a terminal is not {want:?}"
+                );
+            }
+            let tab = first("tab", &hex);
+            assert!(
+                tab.as_ref().is_some_and(|a| a.partial_eq(&HexToggleSide)),
+                "Tab switches the column"
+            );
+            let terminal_tab = first("tab", &["Workspace", "Terminal"]);
+            assert!(
+                !terminal_tab
+                    .as_ref()
+                    .is_some_and(|a| a.partial_eq(&HexToggleSide)),
+                "and stays the terminal's in a terminal"
+            );
         });
     }
 

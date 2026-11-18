@@ -189,3 +189,35 @@ actions!(
 pub struct LaunchAgent {
     pub agent: tty59_core::core::cli_agent::CLIAgent,
 }
+
+// ---- Hex editor (`HexEditor` key context) -------------------------------------------------
+// Fixed bindings of the hex view, not on the Keybindings page: they only mean something while
+// the view has the focus. See the matching block in `ui::keymap`.
+
+actions!(tty59, [HexToggleSide]);
+
+/// Where a hex caret goes. The model's own moves, one per motion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HexMotion {
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    RowStart,
+    RowEnd,
+    DocStart,
+    DocEnd,
+}
+
+/// Moves the hex caret; with `extend` the selection anchor stays put (Shift held).
+#[derive(Clone, Debug, PartialEq, gpui::Action)]
+#[action(namespace = tty59, no_json)]
+pub struct HexMove {
+    pub motion: HexMotion,
+    pub extend: bool,
+}
+
+/// The key context the hex view declares; the bindings above are scoped to it.
+pub const HEX_KEY_CONTEXT: &str = "HexEditor";
