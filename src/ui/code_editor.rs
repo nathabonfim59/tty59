@@ -244,6 +244,12 @@ pub(crate) struct TabCode {
     /// what decides which files keep a place in the header's strip when
     /// it cannot hold them all (see `strip`).
     pub(crate) recent: Vec<BufferId>,
+    /// The folder "Show in File Tree" pinned the tree to, in place of the
+    /// panes' project roots, so a file opened from elsewhere can be shown in
+    /// its own project. Temporary and never saved: it ends when a terminal
+    /// pane takes the focus or the tab is switched, and the tree then follows
+    /// the panes again.
+    pub(crate) tree_focus: Option<PathBuf>,
 }
 
 impl TabCode {
@@ -257,6 +263,7 @@ impl TabCode {
             selected: None,
             split: None,
             recent: Vec::new(),
+            tree_focus: None,
         }
     }
 
@@ -1110,6 +1117,22 @@ impl Tty59App {
 
     fn buffer(&self, id: BufferId) -> Option<&OpenFile> {
         self.editor.buffers.iter().find(|b| b.id() == id)
+    }
+
+    /// The host a document lives on, whatever kind it is.
+    fn doc_host(&self, id: BufferId) -> Option<SharedHost> {
+        match self.buffer(id) {
+            Some(f) => Some(f.host.clone()),
+            None => self.image(id).map(|d| d.host.clone()),
+        }
+    }
+
+    /// Whether "Show in File Tree" applies to a document: the tree only shows
+    /// the spawn host, so a file on any other host has no row to land on.
+    /// Untitled buffers are not anywhere yet.
+    fn can_show_in_file_tree(&self, id: BufferId, cx: &gpui::App) -> bool {
+        self.doc_location(id)
+            .is_some_and(|(host, _)| host == self.spawn_host(cx))
     }
 
     fn buffer_mut(&mut self, id: BufferId) -> Option<&mut OpenFile> {
@@ -2750,9 +2773,10 @@ impl Tty59App {
         this.editor_file_menu_items(menu, id, app, cx)
     }
 
-    /// What both menus offer for the file as a whole: open it outside tty59,
-    /// show it in its folder, copy where it is. Nothing for a file that has
-    /// never been saved, since it is not anywhere yet.
+    /// What both menus offer for a saved document as a whole, text or
+    /// picture: open it outside tty59, show it in its folder, copy where it
+    /// is. Nothing for one that has never been saved, since it is not anywhere
+    /// yet.
     fn editor_file_menu_items(
         &self,
         menu: PopupMenu,
@@ -2760,13 +2784,13 @@ impl Tty59App {
         app: &gpui::WeakEntity<Self>,
         cx: &gpui::App,
     ) -> PopupMenu {
-        let Some(f) = self.buffer(id).filter(|f| f.untitled.is_none()) else {
+        let Some((host, path)) = self.doc_location(id) else {
             return menu;
         };
-        let path = f.path.clone();
+        let path = path.to_path_buf();
         // Only this machine's desktop can open or show a file, and only a
         // file that is on this machine — the same rule as the file tree.
-        let local = f.host.id().is_local();
+        let local = host.is_local();
         let mut menu = menu.separator();
         if local && self.can_spawn_locally(cx) && !is_program(&path) {
             let browser = opens_in_browser(&path);
@@ -2792,6 +2816,38 @@ impl Tty59App {
                     let path = path.clone();
                     move |_, _window, cx| {
                         cx.reveal_path(&crate::ui::path_display::native_separators(&path));
+                    }
+                }),
+            );
+        }
+        // A remote file is not here to show in Finder, so Download is the item
+        // that makes sense there. A local file gets it too, as the file tree's
+        // row menu gives it: one in a project folder is often wanted as a copy
+        // in Downloads, to attach it somewhere.
+        if let Some(host) = self.doc_host(id) {
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::Download)).on_click({
+                let app = app.clone();
+                let path = path.clone();
+                move |_, window, cx| {
+                    let _ = app.update(cx, |this, cx| {
+                        this.download_to_downloads(host.clone(), &path, window, cx)
+                    });
+                }
+            }));
+        }
+        // Before Copy Path. The tree only shows the spawn host, so a file on
+        // any other host has no row to land on.
+        if self.can_show_in_file_tree(id, cx)
+            && let Some(host) = self.doc_host(id)
+        {
+            menu = menu.item(
+                PopupMenuItem::new(t(L10nKey::EditorShowInFileTree)).on_click({
+                    let app = app.clone();
+                    let path = path.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| {
+                            this.file_tree_focus_file(host.clone(), &path, window, cx)
+                        });
                     }
                 }),
             );
@@ -5675,6 +5731,35 @@ mod image_dispatch_tests {
         );
     }
 
+    /// A picture is a saved document like any other, so its tab menu has the
+    /// file items; it used to return early for anything but a text buffer.
+    #[gpui::test]
+    fn an_image_tab_menu_offers_the_file_items(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let svg = real_dir(&dir).join("logo.svg");
+        std::fs::write(&svg, VALID_SVG).unwrap();
+        open_and_wait(&app, &mut vcx, &svg);
+        let id = app
+            .read_with(&vcx, |app, _| app.tab_code().and_then(TabCode::active_id))
+            .expect("the picture is the active document");
+
+        let weak = app.downgrade();
+        let menu = vcx.update(|window, cx| {
+            PopupMenu::build(window, cx, move |menu, _window, cx| match weak.upgrade() {
+                Some(app) => app.read(cx).editor_file_menu_items(menu, id, &weak, cx),
+                None => menu,
+            })
+        });
+
+        assert!(
+            !vcx.read_entity(&menu, |menu, _| menu.is_empty()),
+            "a picture's menu has Copy Path and the rest, not nothing"
+        );
+    }
+
     /// Content beats the name in both directions: words in a file called
     /// `.png` are words, and stay editable.
     #[gpui::test]
@@ -5810,5 +5895,35 @@ mod image_open_tests {
             matches!(load_document(&*h, words), Ok(Opened::Text(_))),
             "text is text whatever it is called"
         );
+    }
+}
+
+#[cfg(test)]
+mod show_in_file_tree_tests {
+    use gpui::TestAppContext;
+
+    use super::nav::gpui_tests::open_rs;
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+
+    /// The menu offers "Show in File Tree" for a saved file on the host the
+    /// tree shows, and not for a buffer that is not anywhere yet.
+    #[gpui::test]
+    fn only_a_saved_file_can_be_shown_in_the_tree(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let saved = open_rs(&app, &mut vcx, "/show/a.rs");
+        let untitled = app.update_in(&mut vcx, |app, window, cx| {
+            app.editor_new_file(window, cx);
+            app.tab_code()
+                .and_then(TabCode::active_id)
+                .expect("a new buffer")
+        });
+        assert_ne!(saved, untitled);
+        app.read_with(&vcx, |app, cx| {
+            assert!(app.can_show_in_file_tree(saved, cx));
+            assert!(!app.can_show_in_file_tree(untitled, cx));
+            assert!(app.doc_host(saved).is_some());
+        });
     }
 }

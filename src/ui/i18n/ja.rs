@@ -1424,6 +1424,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorDuplicateLine => "行を複製",
         L10nKey::EditorDeleteLine => "行を削除",
         L10nKey::EditorCopyRelativePath => "相対パスをコピー",
+        L10nKey::EditorShowInFileTree => "ファイルツリーに表示",
         L10nKey::EditorGitNextChange => "次の変更へ移動",
         L10nKey::EditorGitPrevChange => "前の変更へ移動",
         L10nKey::EditorGitRevertChange => "変更を元に戻す",

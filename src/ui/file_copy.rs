@@ -298,9 +298,11 @@ fn copy_file(host: &dyn Host, src: &Path, dest: &Path, len: u64) -> io::Result<(
 /// machine. Named the way the SFTP panel's Download names things — the remote
 /// name, numbered rather than written over when it is taken.
 ///
-/// `max` is the ceiling on the file; over it, nothing is transferred. For a
-/// remote host that is [`REMOTE_FILE_MAX`], since `read_file` answers in a
-/// single control frame just as `write_file` asks in one.
+/// `max` is the ceiling on a remote file; over it, nothing is transferred. It
+/// is [`REMOTE_FILE_MAX`] there, since `read_file` answers in a single control
+/// frame just as `write_file` asks in one. A local file is not bound by that
+/// frame, so it is streamed straight into the new file and `max` does not
+/// apply: buffering a multi-GB file in memory is the failure, not its size.
 pub(crate) fn download_file(
     host: &dyn Host,
     src: &Path,
@@ -325,6 +327,11 @@ pub(crate) fn download_file(
     if meta.is_dir {
         return Err(io::Error::from(io::ErrorKind::IsADirectory));
     }
+    if host.id().is_local() {
+        let mut from = std::fs::File::open(src)?;
+        std::fs::create_dir_all(dir)?;
+        return claim_local_file(dir, &name, |to| io::copy(&mut from, to).map(|_| ()));
+    }
     // Asked up front so the answer is the limit, not whatever the far end
     // says when `read_file` refuses — and so nothing crosses the wire first.
     if meta.len > max {
@@ -335,11 +342,22 @@ pub(crate) fn download_file(
     }
     let bytes = host.read_file(src, max)?;
     std::fs::create_dir_all(dir)?;
-    // The name is chosen only once the bytes are here, and taken with
-    // `create_new`: two downloads of the same file racing each other each get
-    // their own number instead of one landing on the other.
+    claim_local_file(dir, &name, |to| to.write_all(&bytes))
+}
+
+/// Take a free name for `name` in `dir` and let `fill` write the contents.
+///
+/// The name is chosen only once there is something to put in it, and taken
+/// with `create_new`: two downloads of the same file racing each other each get
+/// their own number instead of one landing on the other. A file `fill` could
+/// not finish is removed, so a failed download leaves nothing half-written.
+fn claim_local_file(
+    dir: &Path,
+    name: &str,
+    mut fill: impl FnMut(&mut std::fs::File) -> io::Result<()>,
+) -> io::Result<PathBuf> {
     for _ in 0..WORKING_NAME_TRIES {
-        let Some(dest) = crate::ui::sftp::free_local_path(dir, &name, &Default::default()) else {
+        let Some(dest) = crate::ui::sftp::free_local_path(dir, name, &Default::default()) else {
             break;
         };
         let mut file = match std::fs::OpenOptions::new()
@@ -351,7 +369,7 @@ pub(crate) fn download_file(
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         };
-        if let Err(e) = file.write_all(&bytes) {
+        if let Err(e) = fill(&mut file) {
             drop(file);
             let _ = std::fs::remove_file(&dest);
             return Err(e);
@@ -360,7 +378,7 @@ pub(crate) fn download_file(
     }
     Err(io::Error::other(t_fmt(
         L10nKey::SftpErrorNoFreeLocalName,
-        &[("name", &name)],
+        &[("name", name)],
     )))
 }
 
@@ -368,6 +386,82 @@ pub(crate) fn download_file(
 mod tests {
     use super::*;
     use tty59_core::host::local::LocalHost;
+    use tty59_core::host::{ContentLimits, ContentQuery, ContentResults, ShellInventory};
+
+    use crate::ui::host_ops::{Entry, HostId, Meta, Output, SearchHit, SharedHost, WatchSub};
+
+    /// The real local host answering as someone else's: only `id` differs, so
+    /// the branch a remote download takes can be exercised against real files.
+    struct AsRemote(SharedHost);
+
+    impl Host for AsRemote {
+        fn id(&self) -> HostId {
+            HostId(1)
+        }
+        fn separator(&self) -> char {
+            self.0.separator()
+        }
+        fn is_absolute(&self, p: &Path) -> bool {
+            self.0.is_absolute(p)
+        }
+        fn read_dir(&self, dir: &Path, root: Option<&Path>) -> io::Result<Vec<Entry>> {
+            self.0.read_dir(dir, root)
+        }
+        fn stat(&self, p: &Path) -> io::Result<Meta> {
+            self.0.stat(p)
+        }
+        fn read_file(&self, p: &Path, max_bytes: u64) -> io::Result<Vec<u8>> {
+            self.0.read_file(p, max_bytes)
+        }
+        fn canonicalize(&self, p: &Path) -> io::Result<PathBuf> {
+            self.0.canonicalize(p)
+        }
+        fn search(
+            &self,
+            roots: &[PathBuf],
+            query: &str,
+            limit: usize,
+            max_dirs: usize,
+            show_hidden: bool,
+        ) -> io::Result<Vec<SearchHit>> {
+            self.0.search(roots, query, limit, max_dirs, show_hidden)
+        }
+        fn search_content(
+            &self,
+            roots: &[PathBuf],
+            query: &ContentQuery,
+            limits: &ContentLimits,
+        ) -> io::Result<ContentResults> {
+            self.0.search_content(roots, query, limits)
+        }
+        fn write_file(&self, p: &Path, bytes: &[u8]) -> io::Result<Meta> {
+            self.0.write_file(p, bytes)
+        }
+        fn create_file_new(&self, p: &Path) -> io::Result<()> {
+            self.0.create_file_new(p)
+        }
+        fn create_dir(&self, p: &Path, recursive: bool) -> io::Result<()> {
+            self.0.create_dir(p, recursive)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.0.rename(from, to)
+        }
+        fn remove(&self, p: &Path, recursive: bool) -> io::Result<()> {
+            self.0.remove(p, recursive)
+        }
+        fn repo_root(&self, p: &Path) -> io::Result<Option<PathBuf>> {
+            self.0.repo_root(p)
+        }
+        fn git(&self, cwd: &Path, args: &[&str]) -> io::Result<Output> {
+            self.0.git(cwd, args)
+        }
+        fn shells(&self) -> io::Result<ShellInventory> {
+            self.0.shells()
+        }
+        fn watch(&self, dirs: &[PathBuf]) -> io::Result<WatchSub> {
+            self.0.watch(dirs)
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tty59-drop-{name}-{}", std::process::id()));
@@ -702,19 +796,59 @@ mod tests {
     }
 
     #[test]
-    fn a_download_over_the_limit_says_so_and_writes_nothing() {
+    fn a_remote_download_over_the_limit_says_so_and_writes_nothing() {
         let root = scratch("download-big");
         let src = root.join("far/big.bin");
         write(&src, &"x".repeat(4096));
         let into = root.join("Downloads");
 
-        let err = download_file(&*LocalHost::shared(), &src, &into, 1024).unwrap_err();
+        let err = download_file(&AsRemote(LocalHost::shared()), &src, &into, 1024).unwrap_err();
 
         assert_eq!(
             err.to_string(),
             t_fmt(L10nKey::FileTreeDownloadTooLarge, &[("limit", "0")])
         );
         assert!(!into.join("big.bin").exists());
+    }
+
+    #[test]
+    fn a_remote_download_under_the_limit_lands_by_name() {
+        let root = scratch("download-remote-ok");
+        let src = root.join("far/small.txt");
+        write(&src, "hello");
+        let into = root.join("Downloads");
+
+        let got = download_file(&AsRemote(LocalHost::shared()), &src, &into, 1024).unwrap();
+
+        assert_eq!(got, into.join("small.txt"));
+        assert_eq!(std::fs::read_to_string(&got).unwrap(), "hello");
+    }
+
+    #[test]
+    fn a_local_download_ignores_the_remote_cap() {
+        let root = scratch("download-local-big");
+        let src = root.join("proj/big.bin");
+        write(&src, &"x".repeat(16));
+        let into = root.join("Downloads");
+
+        let got = download_file(&*LocalHost::shared(), &src, &into, 1).unwrap();
+
+        assert_eq!(got, into.join("big.bin"));
+        assert_eq!(std::fs::read_to_string(&got).unwrap(), "x".repeat(16));
+    }
+
+    #[test]
+    fn a_dotfile_download_is_numbered_after_its_whole_name() {
+        let root = scratch("download-dotfile");
+        let src = root.join("proj/.env");
+        write(&src, "K=1");
+        let into = root.join("Downloads");
+
+        let first = download_file(&*LocalHost::shared(), &src, &into, 1024).unwrap();
+        let second = download_file(&*LocalHost::shared(), &src, &into, 1024).unwrap();
+
+        assert_eq!(first, into.join(".env"));
+        assert_eq!(second, into.join(".env (2)"));
     }
 
     #[test]
@@ -726,5 +860,23 @@ mod tests {
 
         assert!(download_file(&*LocalHost::shared(), &src, &into, 1024).is_err());
         assert!(!into.join("pkg").exists());
+    }
+
+    /// A download that dies partway leaves no half-written file under the
+    /// name it had claimed, and the caller still hears why.
+    #[test]
+    fn a_fill_that_fails_partway_leaves_no_file_behind() {
+        use std::io::Write as _;
+
+        let dir = scratch("claim-fails");
+        let err = claim_local_file(&dir, "partial.bin", |file| {
+            file.write_all(b"some bytes")?;
+            Err(io::Error::other("the link went away"))
+        })
+        .expect_err("the fill failed, so the claim fails");
+
+        assert_eq!(err.to_string(), "the link went away");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
     }
 }

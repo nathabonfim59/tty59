@@ -1469,6 +1469,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorDuplicateLine => "Дублировать строку",
         L10nKey::EditorDeleteLine => "Удалить строку",
         L10nKey::EditorCopyRelativePath => "Копировать относительный путь",
+        L10nKey::EditorShowInFileTree => "Показать в дереве файлов",
         L10nKey::EditorGitNextChange => "Перейти к следующему изменению",
         L10nKey::EditorGitPrevChange => "Перейти к предыдущему изменению",
         L10nKey::EditorGitRevertChange => "Отменить изменение",

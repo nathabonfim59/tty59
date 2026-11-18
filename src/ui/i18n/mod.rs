@@ -1067,6 +1067,7 @@ l10n_keys! {
     EditorDuplicateLine,
     EditorDeleteLine,
     EditorCopyRelativePath,
+    EditorShowInFileTree,
     EditorGitNextChange,
     EditorGitPrevChange,
     EditorGitRevertChange,

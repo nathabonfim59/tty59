@@ -1272,6 +1272,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorDuplicateLine => "复制行",
         L10nKey::EditorDeleteLine => "删除行",
         L10nKey::EditorCopyRelativePath => "复制相对路径",
+        L10nKey::EditorShowInFileTree => "在文件树中显示",
         L10nKey::EditorGitNextChange => "转到下一处更改",
         L10nKey::EditorGitPrevChange => "转到上一处更改",
         L10nKey::EditorGitRevertChange => "还原此处更改",

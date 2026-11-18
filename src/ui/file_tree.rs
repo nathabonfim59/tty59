@@ -986,6 +986,23 @@ impl Tty59App {
 
     pub(crate) fn file_tree_refresh_roots(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.spawn_host(cx);
+        // "Show in File Tree" pins the tree to one folder, whatever the panes
+        // are doing; until it is cleared the panes' roots are not asked for.
+        if self.tab_code().is_some_and(|c| c.tree_focus.is_some()) {
+            let Some(host) = self.active_host(cx) else {
+                return;
+            };
+            if let Some(code) = self.tab_code_mut()
+                && let Some(root) = code.tree_focus.as_ref()
+                && code.roots.as_slice() != std::slice::from_ref(root)
+            {
+                code.roots = vec![root.clone()];
+                self.file_tree.invalidate_all();
+                cx.notify();
+            }
+            self.file_tree_sync_watch(host, cx);
+            return;
+        }
         let Some((host, mut roots)) = self.project_roots(cx) else {
             return;
         };
@@ -1034,6 +1051,74 @@ impl Tty59App {
         self.file_tree.show_hidden = want;
         self.file_tree.invalidate_all();
         cx.notify();
+    }
+
+    /// "Show in File Tree": roots the tree at `path`'s project — its
+    /// repository root, or its own folder outside one, the same rule the
+    /// panes' roots follow — and reveals the file there. The tree goes back
+    /// to following the panes when a terminal takes the focus or the tab is
+    /// switched (see `TabCode::tree_focus`).
+    ///
+    /// The repository lookup is a host call, so it runs off the UI thread; an
+    /// answer that arrives after the tab was switched is dropped, since the
+    /// tree it was for is no longer the one in front.
+    ///
+    /// The landing is always asynchronous, even when the root is already
+    /// known. The menu this runs from hands the focus back to where it came
+    /// from when it closes, and a landing inside the click would be undone by
+    /// that. The tree takes the focus when it lands, so the keyboard is in the
+    /// tree showing the file whichever way the race falls; if the focus ends up
+    /// in a terminal instead, the override ends, as it does for any terminal
+    /// that takes the focus.
+    pub(crate) fn file_tree_focus_file(
+        &mut self,
+        host: SharedHost,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(tab) = self.tabs.get(self.active).map(|t| t.tree_id.get()) else {
+            return;
+        };
+        let path = path.to_path_buf();
+        let known = self.file_tree.repo_roots.get(host.id(), &dir).cloned();
+        // An answer already in hand goes the same road: the menu this runs
+        // from hands the focus back to the terminal when it closes, and a
+        // landing that beat that would be cleared by it.
+        HostOps::run_in(
+            host,
+            window,
+            cx,
+            move |h| known.unwrap_or_else(|| h.repo_root(&dir).ok().flatten().unwrap_or(dir)),
+            move |app, root, window, cx| {
+                let still_here = app
+                    .tabs
+                    .get(app.active)
+                    .is_some_and(|t| t.tree_id.get() == tab);
+                if still_here {
+                    app.file_tree_land_focus(&root, &path, window, cx);
+                }
+            },
+        );
+    }
+
+    fn file_tree_land_focus(
+        &mut self,
+        root: &Path,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(code) = self.tab_code_mut_or_init() else {
+            return;
+        };
+        code.tree_focus = Some(root.to_path_buf());
+        self.file_tree_refresh_roots(window, cx);
+        self.file_tree_show(path, window, cx);
+        self.file_tree.focus_handle.focus(window, cx);
     }
 
     /// The project directories behind the active tab, on the host they live
@@ -1719,12 +1804,40 @@ impl Tty59App {
         cx.notify();
     }
 
-    /// Copy a file of a remote tree into this machine's Downloads folder,
+    /// Copy a file from `host` into this machine's Downloads folder,
     /// named and numbered the way the SFTP panel's Download does it.
-    fn file_tree_download(&mut self, path: &Path, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(host) = self.active_host(cx) else {
-            return;
-        };
+    ///
+    /// Works for both hosts: a remote file is fetched (up to the daemon's
+    /// frame limit), a local one is streamed across. The result is a
+    /// notification naming where it landed, or the reason it did not. The
+    /// editor's menus and image viewer call this too, so they all say the same thing.
+    pub(crate) fn download_to_downloads(
+        &mut self,
+        host: SharedHost,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.download_into(
+            host,
+            path,
+            crate::ui::sftp::local_download_dir(),
+            window,
+            cx,
+        );
+    }
+
+    /// [`Self::download_to_downloads`] with the destination folder given.
+    /// `dir` exists only so tests can point it at a scratch folder instead of
+    /// the real Downloads.
+    fn download_into(
+        &mut self,
+        host: SharedHost,
+        path: &Path,
+        dir: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -1734,14 +1847,7 @@ impl Tty59App {
             host,
             window,
             cx,
-            move |h| {
-                file_copy::download_file(
-                    h,
-                    &src,
-                    &crate::ui::sftp::local_download_dir(),
-                    file_copy::REMOTE_FILE_MAX,
-                )
-            },
+            move |h| file_copy::download_file(h, &src, &dir, file_copy::REMOTE_FILE_MAX),
             move |_app, result: std::io::Result<PathBuf>, window, cx| match result {
                 Ok(local) => window.push_notification(
                     t_fmt(
@@ -2764,15 +2870,21 @@ impl Tty59App {
                     }
                 }),
             );
-        } else if !is_dir {
-            // Reveal's place on a remote tree: the file is not here to show in
-            // Finder, so the item that makes sense is the one that brings it
-            // here. A local file is already on this machine and gets Reveal.
+        }
+        // A remote file is not here to show in Finder, so Download is the item
+        // that makes sense there. A local file gets it too, after Reveal: one
+        // in a project folder is often wanted as a copy in Downloads, to
+        // attach it somewhere, and the editor's tab menu offers the same.
+        if !is_dir {
             menu = menu.item(PopupMenuItem::new(t(L10nKey::Download)).on_click({
                 let app = app.clone();
                 let p = p.clone();
                 move |_, window, cx| {
-                    let _ = app.update(cx, |this, cx| this.file_tree_download(&p, window, cx));
+                    let _ = app.update(cx, |this, cx| {
+                        if let Some(host) = this.active_host(cx) {
+                            this.download_to_downloads(host, &p, window, cx);
+                        }
+                    });
                 }
             }));
         }
@@ -4947,6 +5059,26 @@ mod drop_gpui_tests {
             assert!(std::time::Instant::now() < deadline, "{what}");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[gpui::test]
+    fn a_local_file_downloads_into_the_chosen_folder(cx: &mut TestAppContext) {
+        let _serial = serial();
+        let root = scratch("download-local");
+        let dest = scratch("download-local-dest");
+        std::fs::write(root.join("note.txt"), "hello").unwrap();
+        let (app, mut vcx, _pane) = files_panel_on(cx, &root);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            let host = app.active_host(cx).expect("the panel has a host");
+            app.download_into(host, &root.join("note.txt"), dest.clone(), window, cx);
+        });
+        wait_until(&mut vcx, "the download never landed", |_| {
+            std::fs::read_to_string(dest.join("note.txt")).is_ok_and(|text| text == "hello")
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dest);
     }
 
     #[gpui::test]

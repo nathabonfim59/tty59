@@ -5605,6 +5605,10 @@ impl Tty59App {
             // zoomed; merely looking at another tab does not.
             if let Some(outgoing) = self.tabs.get_mut(self.active) {
                 outgoing.zoomed = self.maximized.take();
+                // "Show in File Tree" lasts only while the tab stays in front.
+                if let Some(code) = outgoing.code.as_deref_mut() {
+                    code.tree_focus = None;
+                }
             }
             self.active = index;
             self.touch_active_tab();
@@ -11635,6 +11639,11 @@ fn watch_pane_focus(
             if let Some(app) = app.upgrade() {
                 app.update(cx, |app, cx| {
                     app.remember_focused_leaf(leaf);
+                    // A terminal taking the focus ends "Show in File Tree":
+                    // the tree goes back to following the panes.
+                    if let Some(code) = app.tab_code_mut() {
+                        code.tree_focus = None;
+                    }
                     cx.notify();
                 });
             }
@@ -15348,5 +15357,308 @@ mod open_workspace_on_machine_tests {
             let sw = app.switcher.as_ref().expect("the command opens the picker");
             assert_eq!(sw.query.read(cx).value(), "@");
         });
+    }
+}
+
+/// "Show in File Tree": the tree is pinned to a file's project until a
+/// terminal takes the focus or the tab is switched.
+#[cfg(test)]
+mod show_in_file_tree_tests {
+    use std::path::{Path, PathBuf};
+
+    use super::test_window::harness_with_tabs;
+    use super::{Tty59App, watch_pane_focus};
+    use crate::core::config::RightPanelTab;
+    use crate::daemon::protocol::DaemonMsg;
+    use gpui::{Entity, Modifiers, MouseButton, TestAppContext, VisualTestContext};
+
+    struct Fixture {
+        app: Entity<Tty59App>,
+        vcx: VisualTestContext,
+        base: PathBuf,
+        /// The tab's pane cwd: a plain folder, not in a repository.
+        pane_dir: PathBuf,
+        _streams: Vec<crate::daemon::transport::Stream>,
+    }
+
+    impl Fixture {
+        fn new(cx: &mut TestAppContext, name: &str) -> Self {
+            let base =
+                std::env::temp_dir().join(format!("tty59-focus-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&base);
+            let pane_dir = base.join("pane");
+            std::fs::create_dir_all(&pane_dir).unwrap();
+            let base = tty59_core::core::path_spelling::local_spelling_buf(
+                std::fs::canonicalize(&base).unwrap(),
+            );
+            let pane_dir = base.join("pane");
+
+            let (app, mut vcx, mut streams) = harness_with_tabs(cx, 2);
+            DaemonMsg::Cwd(pane_dir.clone())
+                .encode(&mut streams[0])
+                .expect("the pane's socket takes the cwd");
+            // The subscription every spawn path registers for its panes.
+            app.update_in(&mut vcx, |app, window, cx| {
+                let views: Vec<_> = app.tabs.iter().flat_map(|t| t.pane.terminals()).collect();
+                for view in views {
+                    let handle = view.read(cx).focus_handle.clone();
+                    watch_pane_focus(&handle, view.entity_id(), window, cx);
+                }
+                app.right_panel_visible = true;
+                app.right_panel_tab = RightPanelTab::Files;
+                cx.notify();
+            });
+            let mut me = Self {
+                app,
+                vcx,
+                base,
+                pane_dir: pane_dir.clone(),
+                _streams: streams,
+            };
+            me.wait(|roots, _| roots == [pane_dir.clone()]);
+            me
+        }
+
+        /// Pumps the app until `done(roots, tree_focus)` holds for the active tab.
+        fn wait(&mut self, done: impl Fn(&[PathBuf], &Option<PathBuf>) -> bool) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                self.vcx.background_executor.run_until_parked();
+                let ok = self.app.update_in(&mut self.vcx, |app, window, cx| {
+                    app.file_tree_refresh_roots(window, cx);
+                    app.tab_code()
+                        .is_some_and(|c| done(&c.roots, &c.tree_focus))
+                });
+                if ok {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the tree never reached the expected state"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        /// A file two folders down in a repository (a `.git` directory is all
+        /// the local host looks for), and the repository's root.
+        fn repo_file(&self) -> (PathBuf, PathBuf) {
+            let repo = self.base.join("repo");
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            std::fs::create_dir_all(repo.join("src/deep")).unwrap();
+            let file = repo.join("src/deep/a.txt");
+            std::fs::write(&file, "").unwrap();
+            (repo, file)
+        }
+
+        fn focus_file(&mut self, file: &Path) {
+            let file = file.to_path_buf();
+            self.app.update_in(&mut self.vcx, |app, window, cx| {
+                let host = app.active_host(cx).expect("a host");
+                app.file_tree_focus_file(host, &file, window, cx);
+            });
+        }
+
+        /// Focus goes off the panes and then into the first terminal of the
+        /// active tab, which is the one event that ends the override.
+        fn focus_terminal(&mut self) {
+            // Focus-in listeners run when a frame is drawn, so each change is
+            // followed by one.
+            self.app.update_in(&mut self.vcx, |app, window, cx| {
+                app.home_focus.clone().focus(window, cx);
+            });
+            self.draw();
+            self.app.update_in(&mut self.vcx, |app, window, cx| {
+                let view = app.tabs[app.active].pane.terminals()[0].clone();
+                view.read(cx).focus_handle.clone().focus(window, cx);
+            });
+            self.draw();
+            let focused = self.app.update_in(&mut self.vcx, |app, window, cx| {
+                let view = app.tabs[app.active].pane.terminals()[0].clone();
+                view.read(cx).focus_handle.is_focused(window)
+            });
+            assert!(focused, "the terminal did not take the focus");
+        }
+
+        fn draw(&mut self) {
+            self.vcx.run_until_parked();
+            let _ = self.vcx.update(|window, cx| window.draw(cx));
+            self.vcx.run_until_parked();
+        }
+
+        /// Opens `file` in the active tab's editor, as a click on it would.
+        fn open_in_editor(&mut self, file: &Path) {
+            let file = file.to_path_buf();
+            self.app.update_in(&mut self.vcx, |app, window, cx| {
+                let host = app.active_host(cx).expect("a host");
+                app.editor_open_on_host(host, &file, window, cx);
+            });
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                self.draw();
+                if self.vcx.debug_bounds("editor-file-tab-0").is_some() {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the file never opened"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        fn state(
+            &mut self,
+        ) -> (
+            Option<PathBuf>,
+            Vec<PathBuf>,
+            Option<PathBuf>,
+            RightPanelTab,
+        ) {
+            self.app.update_in(&mut self.vcx, |app, _, _| {
+                let code = app.tab_code().expect("tab state");
+                (
+                    code.tree_focus.clone(),
+                    code.roots.clone(),
+                    code.selected.clone(),
+                    app.right_panel_tab,
+                )
+            })
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.base);
+        }
+    }
+
+    /// Orchestrator rule A, through the real menu: with a terminal focused,
+    /// the file's tab is right-clicked and "Show in File Tree" picked by
+    /// keyboard, so the item's own click runs and then the menu closes and
+    /// hands the focus back to the terminal. What the action set must still
+    /// be there once everything has run — the refocus must not clear it.
+    ///
+    /// A plain `#[test]` with a context it never tears down, like
+    /// `tab_sidebar`'s header menu test: an open `ContextMenu` trips
+    /// `#[gpui::test]`'s leak detector through a known toolkit cycle
+    /// (`ui-audit/bugs/gpui-component-contextmenu-leak.md`). That is a limit of
+    /// this harness, not proof that this menu releases its state.
+    #[test]
+    fn the_menu_action_survives_with_a_terminal_focused() {
+        let mut cx = TestAppContext::build(gpui::TestDispatcher::new(0), None);
+        // Forgotten on every path, a failed assertion included: dropping the
+        // context after a panic would run the leak teardown a second time and
+        // abort, which would hide the assertion that actually failed.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            show_in_file_tree_from_the_menu(&mut cx)
+        }));
+        if outcome.is_ok() {
+            cx.run_until_parked();
+        }
+        std::mem::forget(cx);
+        if let Err(failure) = outcome {
+            std::panic::resume_unwind(failure);
+        }
+    }
+
+    fn show_in_file_tree_from_the_menu(cx: &mut TestAppContext) {
+        let mut f = Fixture::new(cx, "survives");
+        let (repo, file) = f.repo_file();
+        f.open_in_editor(&file);
+        f.focus_terminal();
+
+        let tab = f
+            .vcx
+            .debug_bounds("editor-file-tab-0")
+            .expect("the file's tab is drawn");
+        let before = f.vcx.update(|window, cx| window.focused(cx));
+        f.vcx
+            .simulate_mouse_down(tab.center(), MouseButton::Right, Modifiers::none());
+        f.vcx
+            .simulate_mouse_up(tab.center(), MouseButton::Right, Modifiers::none());
+        // Drawn, not just parked: the menu's focus and key context exist once
+        // its frame is mounted.
+        f.draw();
+        let open = f.vcx.update(|window, cx| window.focused(cx));
+        assert!(
+            open.is_some() && open != before,
+            "the right click opened a menu and focused it"
+        );
+        assert!(
+            f.vcx
+                .update(|window, _| window.context_stack())
+                .iter()
+                .any(|c| c.contains("PopupMenu")),
+            "the focus is in a popup menu, so the keys below reach it"
+        );
+        // Close Tab, then Open (where this machine can open files), Reveal,
+        // Download and ours: the other items in front of it are disabled or
+        // separators, which the arrows skip.
+        let opens = f
+            .app
+            .update_in(&mut f.vcx, |app, _, cx| app.can_spawn_locally(cx));
+        let downs = if opens { 5 } else { 4 };
+        let keys = format!("{} enter", ["down"; 5][..downs].join(" "));
+        f.vcx.simulate_keystrokes(&keys);
+        f.wait(|_, focus| focus.is_some());
+        f.draw();
+
+        let tree_focused = f.app.update_in(&mut f.vcx, |app, window, _| {
+            app.file_tree.focus_handle.is_focused(window)
+        });
+        assert!(tree_focused, "the keyboard is in the tree");
+        let (focus, roots, selected, tab) = f.state();
+        assert_eq!(focus, Some(repo.clone()));
+        assert_eq!(roots, vec![repo]);
+        assert_eq!(selected, Some(file));
+        assert_eq!(tab, RightPanelTab::Files);
+    }
+
+    /// A terminal taking the focus ends it, and the tree follows the pane.
+    #[gpui::test]
+    fn focusing_a_terminal_again_ends_it(cx: &mut TestAppContext) {
+        let mut f = Fixture::new(cx, "ends");
+        let (_repo, file) = f.repo_file();
+        f.focus_file(&file);
+        f.wait(|_, focus| focus.is_some());
+
+        f.focus_terminal();
+        let pane_dir = f.pane_dir.clone();
+        f.wait(|roots, focus| focus.is_none() && roots == [pane_dir.clone()]);
+    }
+
+    /// Leaving the tab ends it on the tab left, not on the one arrived at.
+    #[gpui::test]
+    fn switching_tabs_clears_the_tab_left(cx: &mut TestAppContext) {
+        let mut f = Fixture::new(cx, "switch");
+        let (_repo, file) = f.repo_file();
+        f.focus_file(&file);
+        f.wait(|_, focus| focus.is_some());
+
+        f.app
+            .update_in(&mut f.vcx, |app, window, cx| app.activate(1, window, cx));
+        f.vcx.run_until_parked();
+        let left = f.app.read_with(&f.vcx, |app, _| {
+            app.tabs[0].code.as_deref().map(|c| c.tree_focus.clone())
+        });
+        assert_eq!(left, Some(None));
+    }
+
+    /// Outside a repository the project is the file's own folder.
+    #[gpui::test]
+    fn outside_a_repository_the_root_is_the_files_folder(cx: &mut TestAppContext) {
+        let mut f = Fixture::new(cx, "plain");
+        let dir = f.base.join("plain/notes");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("n.txt");
+        std::fs::write(&file, "").unwrap();
+
+        f.focus_file(&file);
+        f.wait(|_, focus| focus.is_some());
+        let (focus, roots, selected, _) = f.state();
+        assert_eq!(focus, Some(dir.clone()));
+        assert_eq!(roots, vec![dir]);
+        assert_eq!(selected, Some(file));
     }
 }

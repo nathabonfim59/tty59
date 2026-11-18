@@ -108,6 +108,9 @@ src/ui/code_editor.rs|std::fs::metadata
 # read even when the tree being dropped on is remote — the destination side of
 # that copy goes through `Host`, and the one `std::fs::copy` that touches a
 # destination sits inside a branch already gated on `host.id().is_local()`.
+# A download's destination is this machine's Downloads folder, and its source is
+# read with `std::fs` only in `download_file`'s branch gated on
+# `host.id().is_local()`.
 src/ui/file_copy.rs|std::fs::
 
 # The code editor's language servers run on this machine and only ever take a
