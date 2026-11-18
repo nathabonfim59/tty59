@@ -91,11 +91,6 @@ impl Grid {
         self.ascii_start() + ROW_BYTES + MARGIN
     }
 
-    /// Characters into the hex text where byte `i` of a row starts.
-    fn hex_at(i: u32) -> u32 {
-        3 * i + u32::from(i >= GROUP)
-    }
-
     /// The byte (0..16) and column under `x`, in characters from the row's left edge.
     fn hit(&self, x: f32) -> Option<(u32, Side)> {
         let hex = self.hex_start() as f32;
@@ -645,10 +640,10 @@ fn row_text(m: &HexModel, row: u64, grid: Grid, marks: &Marks) -> RowText {
                 None
             }
         };
-        let mut push = |list: &mut Vec<(Range<usize>, HighlightStyle)>,
-                        start: usize,
-                        end: usize,
-                        style: Option<HighlightStyle>| {
+        let push = |list: &mut Vec<(Range<usize>, HighlightStyle)>,
+                    start: usize,
+                    end: usize,
+                    style: Option<HighlightStyle>| {
             if let Some(style) = style {
                 list.push((start..end, style));
             }
@@ -746,19 +741,27 @@ impl Render for HexView {
             .size_full()
             .overflow_hidden()
             .cursor_text()
-            .on_scroll_wheel(cx.listener(|this, ev, window, cx| this.scroll_wheel(ev, window, cx)))
+            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, cx| {
+                this.scroll_wheel(ev, window, cx)
+            }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, ev, window, cx| this.mouse_down(ev, window, cx)),
+                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                    this.mouse_down(ev, window, cx)
+                }),
             )
-            .on_mouse_move(cx.listener(|this, ev, window, cx| this.mouse_move(ev, window, cx)))
+            .on_mouse_move(
+                cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
+                    this.mouse_move(ev, window, cx)
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, ev, window, cx| this.mouse_up(ev, window, cx)),
+                cx.listener(|this, ev: &MouseUpEvent, window, cx| this.mouse_up(ev, window, cx)),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, ev, window, cx| this.mouse_up(ev, window, cx)),
+                cx.listener(|this, ev: &MouseUpEvent, window, cx| this.mouse_up(ev, window, cx)),
             );
         for row in rows.clone() {
             #[cfg(test)]

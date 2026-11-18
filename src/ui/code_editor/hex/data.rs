@@ -18,7 +18,7 @@ use crate::ui::host_ops::HostOps;
 
 /// What the document holds.
 pub(super) enum HexContent {
-    Ready(HexModel),
+    Ready(Box<HexModel>),
     /// Remote file over the transfer limit (D2): the tab shows an error card.
     TooLarge {
         len: u64,
@@ -58,7 +58,7 @@ impl HexData {
                 };
                 (
                     file.path,
-                    HexContent::Ready(model),
+                    HexContent::Ready(Box::new(model)),
                     file.mtime,
                     file.opens_as_text,
                 )
@@ -180,8 +180,8 @@ impl HexData {
 pub(in crate::ui::code_editor::hex) mod test_support {
     use std::io;
     use std::path::Path;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use tty59_core::host::local::LocalHost;
     use tty59_core::host::{
