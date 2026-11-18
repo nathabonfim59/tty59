@@ -896,6 +896,8 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // hand the key back when there is none.
         ("EditorCopyImage", ""),
         ("EditorDownloadImage", ""),
+        ("EditorOpenAsHex", ""),
+        ("EditorOpenAsText", ""),
         // Alt+F5 / Shift+Alt+F5 (VS Code's) are fixed `Input`-context
         // bindings: a default on a function key would hide it from the shell.
         ("EditorNextChange", ""),
@@ -1252,6 +1254,11 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
         "EditorDownloadImage" => (
             CommandGroup::Terminal,
             t(L10nKey::CmdImageDownload).to_string(),
+        ),
+        "EditorOpenAsHex" => (CommandGroup::Terminal, t(L10nKey::CmdOpenAsHex).to_string()),
+        "EditorOpenAsText" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdOpenAsText).to_string(),
         ),
         "EditorGoToSymbol" => (
             CommandGroup::Terminal,
@@ -2139,6 +2146,8 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         // handler gates on the picture in front instead.
         "EditorCopyImage" => KeyBinding::new(keystroke, EditorCopyImage, None),
         "EditorDownloadImage" => KeyBinding::new(keystroke, EditorDownloadImage, None),
+        "EditorOpenAsHex" => KeyBinding::new(keystroke, EditorOpenAsHex, None),
+        "EditorOpenAsText" => KeyBinding::new(keystroke, EditorOpenAsText, None),
         "EditorNextChange" => KeyBinding::new(keystroke, EditorNextChange, None),
         "EditorPrevChange" => KeyBinding::new(keystroke, EditorPrevChange, None),
         "EditorRevertChange" => KeyBinding::new(keystroke, EditorRevertChange, None),
@@ -3710,6 +3719,71 @@ mod gpui_tests {
             );
             assert_eq!(
                 CommandKind::EditorDownloadImage.key_spec(cx).as_deref(),
+                Some("ctrl-f10")
+            );
+        });
+    }
+
+    /// The hex commands ship with no chord, like the image commands.
+    #[gpui::test]
+    fn the_hex_commands_ship_unbound(cx: &mut TestAppContext) {
+        use crate::ui::search::CommandKind;
+        for action in ["EditorOpenAsHex", "EditorOpenAsText"] {
+            assert!(
+                default_bindings().contains(&(action, "")),
+                "{action} has a slot and no default chord"
+            );
+        }
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            assert_eq!(CommandKind::EditorOpenAsHex.key_spec(cx), None);
+            assert_eq!(CommandKind::EditorOpenAsText.key_spec(cx), None);
+        });
+    }
+
+    /// On the Keybindings page they carry the same names as the palette rows.
+    #[test]
+    fn the_hex_commands_are_named_on_the_keybindings_page() {
+        crate::ui::i18n::set_locale("en");
+        assert_eq!(
+            authored_entry("EditorOpenAsHex")
+                .map(|(_, name)| name)
+                .as_deref(),
+            Some("Open as Hex")
+        );
+        assert_eq!(
+            authored_entry("EditorOpenAsText")
+                .map(|(_, name)| name)
+                .as_deref(),
+            Some("Open as Text")
+        );
+    }
+
+    /// A chord from config.json reaches the actions, and the palette row shows it.
+    #[gpui::test]
+    fn a_user_chord_runs_the_hex_commands(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+
+        use crate::ui::search::CommandKind;
+        cx.update(|cx| {
+            running_on_json(
+                cx,
+                r#"{"keybindings": {"EditorOpenAsHex": "ctrl-f9", "EditorOpenAsText": "ctrl-f10"}}"#,
+            );
+            assert_eq!(
+                fired(cx, "ctrl-f9").first(),
+                Some(&EditorOpenAsHex::name_for_type())
+            );
+            assert_eq!(
+                fired(cx, "ctrl-f10").first(),
+                Some(&EditorOpenAsText::name_for_type())
+            );
+            assert_eq!(
+                CommandKind::EditorOpenAsHex.key_spec(cx).as_deref(),
+                Some("ctrl-f9")
+            );
+            assert_eq!(
+                CommandKind::EditorOpenAsText.key_spec(cx).as_deref(),
                 Some("ctrl-f10")
             );
         });

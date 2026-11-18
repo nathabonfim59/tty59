@@ -162,6 +162,8 @@ actions!(
         EditorFindReferences,
         EditorCopyImage,
         EditorDownloadImage,
+        EditorOpenAsHex,
+        EditorOpenAsText,
         EditorNextChange,
         EditorPrevChange,
         EditorRevertChange,

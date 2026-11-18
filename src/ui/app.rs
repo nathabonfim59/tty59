@@ -7447,6 +7447,16 @@ impl Tty59App {
                     self.editor_download_image(id, window, cx);
                 }
             }
+            EditorOpenAsHex => {
+                if let Some(id) = self.editor_open_as_hex_target() {
+                    self.editor_open_as_hex(id, window, cx);
+                }
+            }
+            EditorOpenAsText => {
+                if let Some(id) = self.editor_open_as_text_target(cx) {
+                    self.editor_open_as_text(id, window, cx);
+                }
+            }
             RestartSshSession => self.restart_ssh_session(window, cx),
             SetTheme(i) => {
                 if let Some(id) = crate::ui::presets::all(cx).get(i).map(|t| t.id.clone()) {
@@ -10779,6 +10789,20 @@ impl Render for Tty59App {
                             this.editor_download_image(id, window, cx)
                         }
                         _ => cx.propagate(),
+                    }
+                }))
+                // Same for the hex commands: a saved file in front to open as
+                // hex, a hex tab of a text file to open as text.
+                .on_action(cx.listener(|this, _: &EditorOpenAsHex, window, cx| {
+                    match this.editor_open_as_hex_target() {
+                        Some(id) => this.editor_open_as_hex(id, window, cx),
+                        None => cx.propagate(),
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &EditorOpenAsText, window, cx| {
+                    match this.editor_open_as_text_target(cx) {
+                        Some(id) => this.editor_open_as_text(id, window, cx),
+                        None => cx.propagate(),
                     }
                 }))
                 .on_action(

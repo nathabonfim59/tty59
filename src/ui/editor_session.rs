@@ -36,6 +36,10 @@ pub(crate) struct TabEditor {
     /// The right group of a split editor.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) split: Option<SplitEditor>,
+    /// Indices into `files` that were open as bytes, not as text or a picture.
+    /// A path can be listed twice, once each way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) hex: Vec<usize>,
 }
 
 /// The right-hand group of a split editor.
@@ -47,6 +51,9 @@ pub(crate) struct SplitEditor {
     /// Whether this group, not the left one, had the focus.
     #[serde(default)]
     pub(crate) focused: bool,
+    /// As [`TabEditor::hex`], for this group's `files`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) hex: Vec<usize>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -200,14 +207,20 @@ mod tests {
             id,
             Entry {
                 state: TabEditor {
-                    files: vec![PathBuf::from("/src/main.rs"), PathBuf::from("/README.md")],
+                    files: vec![
+                        PathBuf::from("/src/main.rs"),
+                        PathBuf::from("/README.md"),
+                        PathBuf::from("/src/main.rs"),
+                    ],
                     active: 1,
                     visible: true,
                     split: Some(SplitEditor {
                         files: vec![PathBuf::from("/src/lib.rs")],
                         active: 0,
                         focused: true,
+                        hex: vec![0],
                     }),
+                    hex: vec![2],
                 },
                 touched: 7,
             },
@@ -225,6 +238,8 @@ mod tests {
             serde_json::from_str(r#"{"files": ["/a.rs"], "active": 0, "visible": true}"#).unwrap();
         assert_eq!(state.split, None);
         assert!(!serde_json::to_string(&state).unwrap().contains("split"));
+        assert!(state.hex.is_empty(), "no record of hex tabs means none");
+        assert!(!serde_json::to_string(&state).unwrap().contains("hex"));
     }
 
     #[test]

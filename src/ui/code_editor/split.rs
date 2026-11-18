@@ -375,6 +375,8 @@ impl Tty59App {
             EditorFindReferences,
             EditorCopyImage,
             EditorDownloadImage,
+            EditorOpenAsHex,
+            EditorOpenAsText,
             EditorNextChange,
             EditorPrevChange,
             EditorRevertChange,
@@ -716,7 +718,9 @@ mod gpui_tests {
                 files: vec![c.clone()],
                 active: 0,
                 focused: true,
+                hex: Vec::new(),
             }),
+            hex: Vec::new(),
         };
         // The second tab was split when the window last closed.
         let tab = app.read_with(&vcx, |app, _| app.tabs[1].tree_id.get());
@@ -769,7 +773,9 @@ mod gpui_tests {
                 files: vec![c.clone()],
                 active: 0,
                 focused: true,
+                hex: Vec::new(),
             }),
+            hex: Vec::new(),
         };
         let tab = app.read_with(&vcx, |app, _| app.tabs[0].tree_id.get());
         vcx.update(|_, cx| editor_session::put(cx, tab, state.clone()));
@@ -871,7 +877,9 @@ mod gpui_tests {
                 files: vec![c.clone()],
                 active: 0,
                 focused: false,
+                hex: Vec::new(),
             }),
+            hex: Vec::new(),
         };
         let tab = app.read_with(&vcx, |app, _| app.tabs[0].tree_id.get());
         vcx.update(|_, cx| editor_session::put(cx, tab, state));

@@ -30,7 +30,7 @@ const PAGE_BYTES: u64 = PAGE as u64;
 
 /// Where a document's bytes come from, in plain data: the model's own `Source`
 /// is built from this where the two meet.
-pub(super) enum HexSource {
+pub(in crate::ui::code_editor) enum HexSource {
     /// A host that reads in parts: the size, and the first page so the view
     /// has something to draw before any further read answers.
     Paged { len: u64, first_page: Vec<u8> },
@@ -39,18 +39,18 @@ pub(super) enum HexSource {
 }
 
 /// A file read for the hex view.
-pub(super) struct HexFile {
-    pub(super) path: PathBuf,
-    pub(super) source: HexSource,
-    pub(super) mtime: Option<MTime>,
-    pub(super) len: u64,
+pub(in crate::ui::code_editor) struct HexFile {
+    pub(in crate::ui::code_editor) path: PathBuf,
+    pub(in crate::ui::code_editor) source: HexSource,
+    pub(in crate::ui::code_editor) mtime: Option<MTime>,
+    pub(in crate::ui::code_editor) len: u64,
     /// Whether the text editor would have taken this file, which decides
     /// whether the tab offers "Open as Text".
-    pub(super) opens_as_text: bool,
+    pub(in crate::ui::code_editor) opens_as_text: bool,
 }
 
 /// What loading a file for the hex view came to.
-pub(super) enum HexLoaded {
+pub(in crate::ui::code_editor) enum HexLoaded {
     File(HexFile),
     /// A file a host that cannot read in parts has no way to bring over: the
     /// tab says so and names `limit`, rather than showing nothing.
@@ -110,7 +110,10 @@ fn paged_opens_as_text(h: &dyn Host, path: &Path, len: u64) -> Result<bool, Edit
 /// `Unsupported` to a ranged read, is read whole in a single request, so what
 /// the connection can carry bounds it: over [`REMOTE_FILE_MAX`], by its size
 /// or by the read itself refusing, is [`HexLoaded::TooLarge`].
-pub(super) fn load_hex(h: &dyn Host, requested: PathBuf) -> Result<HexLoaded, EditorOpenError> {
+pub(in crate::ui::code_editor) fn load_hex(
+    h: &dyn Host,
+    requested: PathBuf,
+) -> Result<HexLoaded, EditorOpenError> {
     let path = h.canonicalize(&requested).unwrap_or(requested);
     let meta = h.stat(&path).map_err(|e| cant_open(&path, &e))?;
 
@@ -167,7 +170,7 @@ pub(super) fn load_hex(h: &dyn Host, requested: PathBuf) -> Result<HexLoaded, Ed
 /// The bytes are whatever `load_document` read, which is the whole file up to
 /// its own limit: a larger file never gets this far and comes through
 /// [`load_hex`].
-pub(super) fn hex_from_not_text(
+pub(in crate::ui::code_editor) fn hex_from_not_text(
     local: bool,
     path: PathBuf,
     bytes: Vec<u8>,

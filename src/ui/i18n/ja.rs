@@ -1402,7 +1402,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorWrapOn => "折り返し: オン",
         L10nKey::EditorWrapOff => "折り返し: オフ",
         L10nKey::EditorFileTooLarge => "「{path}」はエディタで開くには大きすぎます（{size} MB）",
-        L10nKey::EditorBinaryFile => "「{path}」はバイナリファイルのようです",
         L10nKey::EditorUntitled => "無題-{n}",
         L10nKey::EditorUnsavedChangesMany => "{count} 個のファイルに未保存の変更があります",
         L10nKey::EditorSaveAll => "すべて保存",
@@ -2652,6 +2651,14 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopy => "画像をコピー",
         L10nKey::CmdImageCopy => "画像をコピー",
         L10nKey::CmdImageDownload => "画像をダウンロード",
+        L10nKey::CmdOpenAsHex => "16進数で開く",
+        L10nKey::CmdOpenAsText => "テキストで開く",
+        L10nKey::HexStatusOffset => "オフセット {hex}（{dec}）",
+        L10nKey::HexStatusSelection => "選択 {count}",
+        L10nKey::HexStatusSize => "サイズ {size}",
+        L10nKey::HexTooLarge => {
+            "「{name}」は {size} MiB で、接続越しに開ける上限 {limit} MiB を超えています"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} を起動できませんでした。tty59 は PATH 上で次を探します：{programs}。{name} がインストールされ、実行できることを確認してください。"

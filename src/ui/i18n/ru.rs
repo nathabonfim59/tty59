@@ -1447,7 +1447,6 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorWrapOn => "Перенос: вкл.",
         L10nKey::EditorWrapOff => "Перенос: выкл.",
         L10nKey::EditorFileTooLarge => "«{path}» слишком велик для редактора ({size} МБ)",
-        L10nKey::EditorBinaryFile => "«{path}» похож на двоичный файл",
         L10nKey::EditorUntitled => "Без имени-{n}",
         L10nKey::EditorUnsavedChangesMany => "Файлов с несохранёнными изменениями: {count}",
         L10nKey::EditorSaveAll => "Сохранить все",
@@ -2670,6 +2669,14 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopy => "Копировать изображение",
         L10nKey::CmdImageCopy => "Копировать изображение",
         L10nKey::CmdImageDownload => "Скачать изображение",
+        L10nKey::CmdOpenAsHex => "Открыть как hex",
+        L10nKey::CmdOpenAsText => "Открыть как текст",
+        L10nKey::HexStatusOffset => "Смещение {hex} ({dec})",
+        L10nKey::HexStatusSelection => "Выбрано {count}",
+        L10nKey::HexStatusSize => "Размер {size}",
+        L10nKey::HexTooLarge => {
+            "«{name}» занимает {size} МиБ, больше {limit} МиБ, доступных по соединению"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "Не удалось запустить {name}. tty59 ищет в PATH: {programs}. Проверьте, что сервер {name} установлен и запускается."
