@@ -543,6 +543,14 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         // claim. They are the least guessable chords in the table, which is why
         // the palette row and the Keybindings page show the effective one.
         ("NewAgentTab", new_agent_tab_default(CURRENT_OS)),
+        // Search open files, on a chord that is safe to share. It is bound in
+        // the text field's context and the editor documents' only, so the
+        // terminal never matches it (Ctrl+Shift+A stays select-all, ⌘⇧A New
+        // Agent Tab); the handler in `app.rs` propagates whenever the editor
+        // is not what has the focus, so any other text field still falls
+        // through to the binding next in line. Listed after `NewAgentTab`: a
+        // tie in depth goes to the later.
+        ("EditorSearchOpenFiles", "secondary-shift-a"),
         // U for "up next": the agent that has waited on you longest. Free in
         // the table on both sides, and a letter under Ctrl+Shift off macOS,
         // where window actions live. GNOME's IBus claims Ctrl+Shift+U for
@@ -1237,6 +1245,10 @@ fn authored_entry(action: &str) -> Option<(CommandGroup, String)> {
             CommandGroup::Terminal,
             t(L10nKey::EditorGoToSymbolAction).to_string(),
         ),
+        "EditorSearchOpenFiles" => (
+            CommandGroup::Terminal,
+            t(L10nKey::CmdEditorSearchOpenFiles).to_string(),
+        ),
         "EditorNavigateBack" => (
             CommandGroup::Terminal,
             t(L10nKey::EditorNavigateBack).to_string(),
@@ -1895,8 +1907,23 @@ fn action_context(action: &str) -> Option<&'static str> {
         | "EditorSplitRight"
         | "EditorFocusLeftGroup"
         | "EditorFocusRightGroup" => Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
+        "EditorSearchOpenFiles" => Some(any_editor_document_context()),
         _ => None,
     }
+}
+
+/// Any text field, or an editor document that has none (the image view, the
+/// markdown preview): the contexts a chord that works with any open file in
+/// front is bound in. Built from the two names so they stay one source.
+fn any_editor_document_context() -> &'static str {
+    static CONTEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{} || {}",
+            crate::ui::code_editor::NAV_KEY_CONTEXT,
+            crate::ui::code_editor::DOCUMENT_KEY_CONTEXT
+        )
+    });
+    CONTEXT.as_str()
 }
 
 fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
@@ -2049,6 +2076,11 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
             keystroke,
             EditorGoToSymbol,
             Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
+        ),
+        "EditorSearchOpenFiles" => KeyBinding::new(
+            keystroke,
+            EditorSearchOpenFiles,
+            Some(any_editor_document_context()),
         ),
         "EditorNavigateBack" => KeyBinding::new(
             keystroke,
@@ -2205,6 +2237,12 @@ mod tests {
         // The four names the critique found for one action; the menu bar, the
         // palette and the docs all say Zoom Pane.
         assert_eq!(action_entry("ToggleMaximizePane").1, "Zoom Pane");
+        // The row the page draws for Search Open Files, under the same name the
+        // palette gives it, and listed with its shipped chord.
+        assert_eq!(
+            action_entry("EditorSearchOpenFiles").1,
+            t(L10nKey::CmdEditorSearchOpenFiles)
+        );
         assert_eq!(action_entry("CloseActiveTab").1, "Close Pane / Tab");
         assert_eq!(action_entry("NewWindow").1, "New Window");
         assert_eq!(action_entry("CloseWindow").1, "Close Window");
@@ -3833,6 +3871,54 @@ mod gpui_tests {
         });
     }
 
+    /// Search Open Files shares ⌘⇧A with New Agent Tab on macOS and Ctrl+Shift+A
+    /// with the terminal's select-all elsewhere. It is bound in the text
+    /// field's context and the editor documents' only: a terminal sees exactly
+    /// what it saw before, and either editor context ranks it first, ahead of
+    /// New Agent Tab, which stays next in line for the handler to propagate to.
+    #[gpui::test]
+    fn search_open_files_ranks_first_in_the_editor_and_never_reaches_a_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let typed_in = |keys: &str, innermost: &str| -> Vec<&'static str> {
+                let input = [Keystroke::parse(keys).expect("the keystroke parses")];
+                let context = [
+                    gpui::KeyContext::parse("Workspace").expect("the context parses"),
+                    gpui::KeyContext::parse(innermost).expect("the context parses"),
+                ];
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &context)
+                    .0
+                    .iter()
+                    .map(|b| b.action().name())
+                    .collect()
+            };
+            let search = EditorSearchOpenFiles::name_for_type();
+            let mac = cfg!(target_os = "macos");
+            let new_agent_tab = NewAgentTab::name_for_type();
+            assert_eq!(
+                fired(cx, "secondary-shift-a"),
+                if mac { vec![new_agent_tab] } else { vec![] },
+                "a terminal gets what it always did"
+            );
+            for context in ["Input", "EditorDocument"] {
+                let hits = typed_in("secondary-shift-a", context);
+                assert_eq!(hits.first(), Some(&search), "in {context}");
+                if mac {
+                    assert_eq!(
+                        hits.get(1),
+                        Some(&new_agent_tab),
+                        "next in line in {context}"
+                    );
+                }
+            }
+        });
+    }
+
     /// macOS binds alt-left/right in the input to word movement; Linux spells
     /// the same verbs on ctrl-left/right, so a Linux-only run cannot show
     /// whether the rail's alt bindings win that collision. Lay the macOS
@@ -4600,9 +4686,42 @@ mod conformance {
             } else {
                 "ctrl-alt-shift-a"
             };
-            assert_eq!(
-                owners_of(&table, new_agent_tab),
-                vec![(NewAgentTab::name_for_type().to_string(), String::new())]
+            let search_context = any_editor_document_context();
+            let mut owners = owners_of(&table, new_agent_tab);
+            if cfg!(target_os = "macos") {
+                // ⌘⇧A is shared on purpose: Search Open Files answers it in
+                // the text field and editor-document contexts only and hands
+                // it on (the handler propagates) everywhere else, where New
+                // Agent Tab answers. Order does not matter to this read.
+                owners.sort();
+                let mut both = vec![
+                    (NewAgentTab::name_for_type().to_string(), String::new()),
+                    (
+                        EditorSearchOpenFiles::name_for_type().to_string(),
+                        search_context.to_string(),
+                    ),
+                ];
+                both.sort();
+                assert_eq!(owners, both);
+            } else {
+                assert_eq!(
+                    owners,
+                    vec![(NewAgentTab::name_for_type().to_string(), String::new())]
+                );
+            }
+            // Search Open Files ships on its own chord in its own scope.
+            assert_installed_for(
+                &table,
+                EditorSearchOpenFiles::name_for_type(),
+                "secondary-shift-a",
+                search_context,
+            );
+            assert!(
+                effective_chords(cx)
+                    .iter()
+                    .any(|(a, k)| a == "EditorSearchOpenFiles"
+                        && k.iter().any(|c| c == "secondary-shift-a")),
+                "the Keybindings page lists it on its shipped chord"
             );
             let copy_raw = if cfg!(target_os = "macos") {
                 "cmd-alt-c"
@@ -4631,10 +4750,23 @@ mod conformance {
                 "NewAgentTab": ["ctrl-alt-n"],
                 "CopyRaw": "",
                 "ToggleSwitcher": [SWITCHER_FIXTURE_CHORD],
+                "EditorSearchOpenFiles": ["ctrl-alt-o"],
             }))
             .expect("the overrides load");
             rebind(cx);
             let table = gate(cx, "overridden config");
+            assert_installed_for(
+                &table,
+                EditorSearchOpenFiles::name_for_type(),
+                "ctrl-alt-o",
+                search_context,
+            );
+            assert!(
+                !owners_of(&table, "secondary-shift-a")
+                    .iter()
+                    .any(|(a, _)| a == EditorSearchOpenFiles::name_for_type()),
+                "a rebound Search Open Files releases its shipped chord"
+            );
             assert_installed_for(&table, NewAgentTab::name_for_type(), "ctrl-alt-n", "");
             assert!(
                 owners_of(&table, new_agent_tab).is_empty(),
@@ -4683,6 +4815,25 @@ mod conformance {
                 CopyRaw::name_for_type(),
                 "ctrl-alt-insert",
                 "Terminal",
+            );
+
+            // Unbound, Search Open Files is installed on no chord at all.
+            cx.global_mut::<Config>().keybindings = serde_json::from_value(serde_json::json!({
+                "EditorSearchOpenFiles": "",
+            }))
+            .expect("the override loads");
+            rebind(cx);
+            let table = gate(cx, "unbound Search Open Files");
+            assert!(
+                !table
+                    .iter()
+                    .any(|b| b.action == EditorSearchOpenFiles::name_for_type()),
+                "an unbound Search Open Files is installed on no chord"
+            );
+            assert!(
+                owners_of(&table, "secondary-shift-a")
+                    .iter()
+                    .all(|(a, _)| a != EditorSearchOpenFiles::name_for_type()),
             );
         });
     }

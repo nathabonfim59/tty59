@@ -7422,6 +7422,9 @@ impl Tty59App {
                 );
             }
             EditorGoToSymbol => self.editor_go_to_symbol(window, cx),
+            EditorSearchOpenFiles => {
+                self.editor_search_open_files(false, window, cx);
+            }
             EditorNavigateBack => self.editor_navigate(false, window, cx),
             EditorNavigateForward => self.editor_navigate(true, window, cx),
             EditorSplitRight => {
@@ -10639,6 +10642,18 @@ impl Render for Tty59App {
                         return;
                     }
                     this.editor_save_active(window, cx)
+                }))
+                // The chord is bound in every text field (`Input`) and in the
+                // editor's documents without one. Outside the editor it goes
+                // on to the binding next in line (⌘⇧A, New Agent Tab).
+                .on_action(cx.listener(|this, _: &EditorSearchOpenFiles, window, cx| {
+                    if !this.editor_strip_picker_open() && !this.editor_has_focus(window, cx) {
+                        cx.propagate();
+                        return;
+                    }
+                    if !this.editor_search_open_files(true, window, cx) {
+                        cx.propagate();
+                    }
                 }))
                 // Same shape as `EditorSave`: the chord belongs to the editor
                 // only while it has the focus, and reaches the terminal

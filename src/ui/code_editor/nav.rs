@@ -57,6 +57,12 @@ const OUTLINE_THROTTLE: Duration = Duration::from_millis(250);
 /// binding next in line.
 pub(crate) const KEY_CONTEXT: &str = "Input";
 
+/// The key context of an editor document that has no text field: the image
+/// view and the rendered markdown preview. `KEY_CONTEXT` never reaches them,
+/// so the chords that must work with any file in front are bound in this one
+/// too.
+pub(crate) const DOCUMENT_KEY_CONTEXT: &str = "EditorDocument";
+
 /// One place the caret has been.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NavLocation {
@@ -669,24 +675,43 @@ impl Tty59App {
 
     // ---- Chrome ----
 
-    /// The palette's editor rows, offered while a file is in front of it.
+    /// The palette's editor rows: the open-files search while the panel holds
+    /// any file (text or image), the navigation rows while a text buffer is in
+    /// front of it.
     pub(crate) fn editor_palette_items(&self) -> Vec<Item> {
         use crate::ui::search::CommandGroup;
-        if !self.code_panel_visible() || self.active_buffer().is_none() {
-            return Vec::new();
+        let mut items = Vec::new();
+        if !self.code_panel_visible() {
+            return items;
         }
-        [
-            (L10nKey::CmdEditorGoToSymbol, CommandKind::EditorGoToSymbol),
-            (L10nKey::CmdEditorGoBack, CommandKind::EditorNavigateBack),
-            (
-                L10nKey::CmdEditorGoForward,
-                CommandKind::EditorNavigateForward,
-            ),
-            (L10nKey::CmdEditorSplitRight, CommandKind::EditorSplitRight),
-        ]
-        .into_iter()
-        .map(|(key, kind)| Item::localized(key, kind).in_group(CommandGroup::View))
-        .collect()
+        if self.tab_code().is_some_and(|c| !c.files.is_empty()) {
+            items.push(
+                Item::localized(
+                    L10nKey::CmdEditorSearchOpenFiles,
+                    CommandKind::EditorSearchOpenFiles,
+                )
+                .with_alias(t(L10nKey::CmdEditorSearchOpenFilesAlias))
+                .with_aliases_of(L10nKey::CmdEditorSearchOpenFilesAlias)
+                .in_group(CommandGroup::View),
+            );
+        }
+        if self.active_buffer().is_none() {
+            return items;
+        }
+        items.extend(
+            [
+                (L10nKey::CmdEditorGoToSymbol, CommandKind::EditorGoToSymbol),
+                (L10nKey::CmdEditorGoBack, CommandKind::EditorNavigateBack),
+                (
+                    L10nKey::CmdEditorGoForward,
+                    CommandKind::EditorNavigateForward,
+                ),
+                (L10nKey::CmdEditorSplitRight, CommandKind::EditorSplitRight),
+            ]
+            .into_iter()
+            .map(|(key, kind)| Item::localized(key, kind).in_group(CommandGroup::View)),
+        );
+        items
     }
 
     /// The editor's own chords, handled by the element that holds it.
@@ -1281,6 +1306,8 @@ mod tests {
 
 #[cfg(test)]
 pub(super) mod gpui_tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
     use crate::ui::app::test_window::harness_with_tabs;
     use crate::ui::editor_text::{EditorConfig, TextFormat};
@@ -1791,11 +1818,222 @@ pub(super) mod gpui_tests {
         assert_eq!(
             kinds,
             [
+                CommandKind::EditorSearchOpenFiles,
                 CommandKind::EditorGoToSymbol,
                 CommandKind::EditorNavigateBack,
                 CommandKind::EditorNavigateForward,
                 CommandKind::EditorSplitRight,
             ]
         );
+    }
+
+    const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><rect width="32" height="16" fill="#336699"/></svg>"##;
+
+    /// Opens a real SVG through the shared entry point, so an image document
+    /// is what is in front, and waits (bounded) for the off-thread read.
+    fn open_svg(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, dir: &tempfile::TempDir) {
+        let path = tty59_core::core::path_spelling::local_spelling_buf(
+            std::fs::canonicalize(dir.path()).unwrap(),
+        )
+        .join("logo.svg");
+        std::fs::write(&path, SVG).unwrap();
+        app.update_in(vcx, |app, window, cx| {
+            app.open_file_in_editor(&path, window, cx);
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.read_with(vcx, |app, _| {
+            app.tab_code().is_none_or(|code| code.files.is_empty())
+        }) && Instant::now() < deadline
+        {
+            vcx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        paint(vcx);
+    }
+
+    /// (picker open, keyboard in its filter).
+    fn picker(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> (bool, bool) {
+        app.update_in(vcx, |app, window, cx| {
+            (
+                app.editor_strip_picker_open(),
+                app.editor_strip_picker_filter_focused(window, cx),
+            )
+        })
+    }
+
+    fn text_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.update_in(vcx, |app, window, cx| app.text_has_focus(window, cx))
+    }
+
+    fn focus_editor_now(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| app.focus_editor(window, cx));
+        paint(vcx);
+    }
+
+    /// Exercises the root handler's open and close arms and the binding that
+    /// reaches them: the chord opens the picker with the filter focused, and
+    /// again closes it with the keyboard back in the text.
+    #[gpui::test]
+    fn the_chord_opens_and_closes_the_picker_from_a_text_file(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/nav-test/a.rs");
+        focus_editor_now(&app, &mut vcx);
+        assert!(text_focused(&app, &mut vcx));
+        assert_eq!(picker(&app, &mut vcx), (false, false));
+
+        vcx.simulate_keystrokes("secondary-shift-a");
+        paint(&mut vcx);
+        assert_eq!(picker(&app, &mut vcx), (true, true), "the chord opens it");
+
+        vcx.simulate_keystrokes("secondary-shift-a");
+        paint(&mut vcx);
+        assert_eq!(picker(&app, &mut vcx), (false, false), "and closes it");
+        assert!(text_focused(&app, &mut vcx), "the keyboard is back");
+    }
+
+    /// The image document declares `EditorDocument`, which `Input` never
+    /// reaches: with a picture in front the chord still opens the picker.
+    #[gpui::test]
+    fn the_chord_opens_the_picker_from_an_image_document(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        open_svg(&app, &mut vcx, &dir);
+        focus_editor_now(&app, &mut vcx);
+        assert!(
+            app.update_in(&mut vcx, |app, window, cx| app.image_has_focus(window, cx)),
+            "the picture has the focus"
+        );
+
+        vcx.simulate_keystrokes("secondary-shift-a");
+        paint(&mut vcx);
+        assert_eq!(picker(&app, &mut vcx), (true, true));
+    }
+
+    /// The terminal never matches the binding, so the picker stays closed with
+    /// a shell focused.
+    #[gpui::test]
+    fn the_chord_leaves_the_picker_closed_with_the_terminal_focused(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/nav-test/a.rs");
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        paint(&mut vcx);
+        assert!(!text_focused(&app, &mut vcx));
+
+        vcx.simulate_keystrokes("secondary-shift-a");
+        paint(&mut vcx);
+        assert_eq!(picker(&app, &mut vcx), (false, false));
+    }
+
+    /// `Input` covers every text field, so the root handler has to let the
+    /// chord go on from the ones that are not the editor: a settings field
+    /// and the search palette's query. The picker stays closed in both, and
+    /// the field keeps its text.
+    #[gpui::test]
+    fn the_chord_leaves_other_text_fields_alone(cx: &mut TestAppContext) {
+        use crate::core::actions::TogglePalette;
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/nav-test/a.rs");
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.open_settings_section(crate::ui::settings::SettingsSection::General, window, cx)
+        });
+        paint(&mut vcx);
+        let query = app.update_in(&mut vcx, |app, window, cx| {
+            let input = app.active_settings().unwrap().search.clone();
+            input.update(cx, |s, cx| {
+                s.set_value("theme", window, cx);
+                s.focus(window, cx);
+            });
+            input
+        });
+        paint(&mut vcx);
+        vcx.simulate_keystrokes("secondary-shift-a");
+        paint(&mut vcx);
+        assert_eq!(picker(&app, &mut vcx), (false, false), "settings field");
+        assert_eq!(query.read_with(&vcx, |s, _| s.value().to_string()), "theme");
+
+        vcx.dispatch_action(TogglePalette);
+        paint(&mut vcx);
+        vcx.simulate_input("abc");
+        vcx.simulate_keystrokes("secondary-shift-a");
+        paint(&mut vcx);
+        assert_eq!(picker(&app, &mut vcx), (false, false), "palette query");
+    }
+
+    /// The row is offered while the panel holds any file, text or image, and
+    /// not with the panel hidden or no file; "tabs" finds it by its alias.
+    #[gpui::test]
+    fn the_palette_offers_search_open_files_while_any_file_is_open(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let row = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| -> Option<Item> {
+            app.read_with(vcx, |app, _| {
+                app.editor_palette_items()
+                    .into_iter()
+                    .find(|i| i.kind == CommandKind::EditorSearchOpenFiles)
+            })
+        };
+        assert!(row(&app, &mut vcx).is_none(), "no file open");
+
+        open_rs(&app, &mut vcx, "/nav-test/a.rs");
+        let item = row(&app, &mut vcx).expect("a text file is open");
+        assert_eq!(item.title, "Search Open Files");
+        assert!(
+            item.aliases
+                .iter()
+                .any(|a| a.to_lowercase().contains("tabs")),
+            "\"tabs\" finds it: {:?}",
+            item.aliases
+        );
+        assert_eq!(
+            item.kind.id(),
+            Some("editor-search-open-files"),
+            "the command id"
+        );
+
+        app.update(&mut vcx, |app, _| {
+            app.tab_code_mut_or_init().unwrap().visible = false;
+        });
+        assert!(row(&app, &mut vcx).is_none(), "the panel is hidden");
+
+        // An editor holding only a picture still has files to search.
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        let dir = tempfile::tempdir().unwrap();
+        open_svg(&app, &mut vcx, &dir);
+        assert!(
+            app.read_with(&vcx, |app, _| app.active_buffer().is_none()),
+            "no text buffer is in front"
+        );
+        assert!(row(&app, &mut vcx).is_some(), "an image-only editor");
+    }
+
+    /// Run from the palette, the command opens the picker and the filter is
+    /// still what holds the keyboard after the palette has closed.
+    #[gpui::test]
+    fn running_the_palette_row_opens_the_picker_with_its_filter_focused(cx: &mut TestAppContext) {
+        use crate::core::actions::TogglePalette;
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        open_rs(&app, &mut vcx, "/nav-test/a.rs");
+        focus_editor_now(&app, &mut vcx);
+
+        vcx.dispatch_action(TogglePalette);
+        paint(&mut vcx);
+        vcx.simulate_input("search open files");
+        paint(&mut vcx);
+        vcx.simulate_keystrokes("enter");
+        paint(&mut vcx);
+        paint(&mut vcx);
+        assert!(
+            app.read_with(&vcx, |app, _| app.search.is_none()),
+            "the palette closed"
+        );
+        assert_eq!(picker(&app, &mut vcx), (true, true));
     }
 }

@@ -1432,6 +1432,8 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorNoFileOpen => "Нет открытого файла",
         L10nKey::EditorStripSearch => "Поиск в открытых файлах: {n}",
         L10nKey::EditorStripAllFiles => "Все открытые файлы",
+        L10nKey::CmdEditorSearchOpenFiles => "Поиск по открытым файлам",
+        L10nKey::CmdEditorSearchOpenFilesAlias => "Поиск по вкладкам",
         L10nKey::EditorStripHidden => "Скрыто · {n}",
         L10nKey::EditorStripInBar => "На полосе вкладок",
         L10nKey::EditorStripNoMatch => "Открытые файлы не найдены",
