@@ -1647,6 +1647,82 @@ mod tests {
         assert!(!dirty(&rig, vcx));
     }
 
+    /// A parent that records the key-downs which bubble up to it.
+    struct Parent {
+        child: Entity<HexView>,
+        seen: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Render for Parent {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let seen = self.seen.clone();
+            div()
+                .size_full()
+                .on_key_down(move |ev: &KeyDownEvent, _, _| {
+                    seen.borrow_mut().push(ev.keystroke.key.to_string());
+                })
+                .child(self.child.clone())
+        }
+    }
+
+    /// Keys that are not printable are not swallowed on the ASCII side: a parent's key-down
+    /// still sees Enter and Escape, while a printable one stops at the view. Guards the
+    /// printable filter in `key_down` (without it every character stops propagation).
+    #[gpui::test]
+    fn non_printable_keys_on_the_ascii_side_reach_the_parent(cx: &mut TestAppContext) {
+        crate::core::config::pin_test_config_dir();
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Config::default());
+        });
+        let host = Counting::new();
+        let (data, _dir) = paged(100, &[], &host);
+        let data = cx.new(|_| data);
+        let seen: Rc<RefCell<Vec<String>>> = Rc::default();
+        let made: Rc<RefCell<Option<Entity<HexView>>>> = Rc::default();
+        let (_, vcx) = cx.add_window_view({
+            let (data, seen, made) = (data.clone(), seen.clone(), made.clone());
+            move |_, cx| {
+                let child = cx.new(|cx| HexView::new(data, 0, cx));
+                *made.borrow_mut() = Some(child.clone());
+                Parent { child, seen }
+            }
+        });
+        let view = made.take().expect("the window made its view");
+        settle(vcx, &data);
+        view.update(vcx, |v, cx| v.toggle_side(cx));
+        view.update_in(vcx, |v, window, cx| window.focus(&v.focus, cx));
+        let press = |vcx: &mut VisualTestContext, key: &str, ch: &str| {
+            vcx.simulate_event(KeyDownEvent {
+                keystroke: gpui::Keystroke {
+                    modifiers: Modifiers::default(),
+                    key: key.into(),
+                    key_char: Some(ch.into()),
+                },
+                is_held: false,
+                prefer_character_input: false,
+            });
+        };
+        press(vcx, "enter", "\n");
+        press(vcx, "escape", "\u{1b}");
+        assert_eq!(*seen.borrow(), ["enter", "escape"], "the parent saw both");
+        press(vcx, "a", "a");
+        assert_eq!(
+            seen.borrow().len(),
+            2,
+            "a typed character stops at the view"
+        );
+        assert!(
+            data.read_with(vcx, |d, _| d.dirty()),
+            "the typed character was written"
+        );
+        let first = data.read_with(vcx, |d, _| match &d.content {
+            HexContent::Ready(m) => m.store.effective(0),
+            HexContent::TooLarge { .. } => None,
+        });
+        assert_eq!(first, Some(b'a'), "and Enter and Escape wrote nothing");
+    }
+
     /// Writing a byte back to what the disk holds makes the document clean again. Guards
     /// `HexData::run` notifying and the overlay drop, seen through `dirty`.
     #[gpui::test]
