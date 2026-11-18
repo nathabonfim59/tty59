@@ -137,6 +137,9 @@ pub enum CommandKind {
     EditorNavigateBack,
     EditorNavigateForward,
     EditorSplitRight,
+    /// The picture in front of the editor, from the palette.
+    EditorCopyImage,
+    EditorDownloadImage,
     /// A Go to Symbol row: this 0-based place in the file in front.
     GoToSymbol {
         line: u32,
@@ -298,6 +301,8 @@ impl CommandKind {
             EditorNavigateBack => "editor-go-back",
             EditorNavigateForward => "editor-go-forward",
             EditorSplitRight => "editor-split-right",
+            EditorCopyImage => "editor-copy-image",
+            EditorDownloadImage => "editor-download-image",
             RestartSshSession => "ssh-reconnect",
             ScmCommit => "git-commit",
             ScmStageAll => "git-stage-all",
@@ -447,6 +452,8 @@ impl CommandKind {
             EditorNavigateBack => "EditorNavigateBack",
             EditorNavigateForward => "EditorNavigateForward",
             EditorSplitRight => "EditorSplitRight",
+            EditorCopyImage => "EditorCopyImage",
+            EditorDownloadImage => "EditorDownloadImage",
             RestartSshSession => "RestartSshSession",
             OpenSshProfiles => "OpenSshProfiles",
             ScmCommit => "ScmCommit",

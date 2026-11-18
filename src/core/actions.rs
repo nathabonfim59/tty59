@@ -160,6 +160,8 @@ actions!(
         EditorJoinLines,
         EditorRemoveSurroundingBrackets,
         EditorFindReferences,
+        EditorCopyImage,
+        EditorDownloadImage,
         EditorNextChange,
         EditorPrevChange,
         EditorRevertChange,

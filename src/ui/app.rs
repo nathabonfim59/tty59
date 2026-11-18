@@ -6855,7 +6855,7 @@ impl Tty59App {
         );
 
         // The editor's navigation, while there is a file in front of it.
-        actions.extend(self.editor_palette_items());
+        actions.extend(self.editor_palette_items(cx));
 
         // Groups are something the sidebar draws, so they are offered only
         // while the tabs are in it. Opening a folder as a group asks the
@@ -7249,7 +7249,12 @@ impl Tty59App {
         });
     }
 
-    fn run_command(&mut self, kind: CommandKind, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn run_command(
+        &mut self,
+        kind: CommandKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use CommandKind::*;
         self.bump_command_frecency(&kind, cx);
         match kind {
@@ -7433,6 +7438,16 @@ impl Tty59App {
             EditorNavigateForward => self.editor_navigate(true, window, cx),
             EditorSplitRight => {
                 self.editor_split(window, cx);
+            }
+            EditorCopyImage => {
+                if let Some(id) = self.editor_active_image() {
+                    self.editor_copy_image(id, window, cx);
+                }
+            }
+            EditorDownloadImage => {
+                if let Some(id) = self.editor_active_image() {
+                    self.editor_download_image(id, window, cx);
+                }
             }
             RestartSshSession => self.restart_ssh_session(window, cx),
             SetTheme(i) => {
@@ -10748,6 +10763,25 @@ impl Render for Tty59App {
                         return;
                     }
                     this.toggle_editor_problems(cx)
+                }))
+                // The image commands carry no key context, so a bound chord
+                // reaches here from anywhere: they act only on a picture in
+                // front that can be copied, and hand the key back otherwise.
+                .on_action(cx.listener(|this, _: &EditorCopyImage, window, cx| {
+                    match this.editor_active_image() {
+                        Some(id) if this.image_actions(id, cx).is_some_and(|a| a.copy) => {
+                            this.editor_copy_image(id, window, cx)
+                        }
+                        _ => cx.propagate(),
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &EditorDownloadImage, window, cx| {
+                    match this.editor_active_image() {
+                        Some(id) if this.image_actions(id, cx).is_some_and(|a| a.download) => {
+                            this.editor_download_image(id, window, cx)
+                        }
+                        _ => cx.propagate(),
+                    }
                 }))
                 .on_action(
                     cx.listener(|this, _: &Quit, window, cx| this.quit_stop_sessions(window, cx)),

@@ -30,6 +30,7 @@ use crate::core::actions::{
 use crate::core::config::{BellMode, Config, LinkFileOpen};
 use crate::core::shell_quote::quote_for_shell;
 use crate::daemon::protocol::{RemoteContext, ShellSpec};
+use crate::ui::clipboard_image::write_clipboard_image;
 use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::zoom::{zoom_scroll_steps, zoom_wheel};
 
@@ -1216,23 +1217,6 @@ pub(super) fn clipboard_has_paths(item: &ClipboardItem) -> bool {
     !clipboard_paths(item).is_empty()
 }
 
-fn write_clipboard_image(img: &gpui::Image) -> Option<std::path::PathBuf> {
-    use gpui::ImageFormat;
-    let dir = std::env::temp_dir().join("tty59-clipboard");
-    std::fs::create_dir_all(&dir).ok()?;
-    let (ext, transcoded) = match img.format {
-        ImageFormat::Png => ("png", None),
-        ImageFormat::Jpeg => ("jpg", None),
-        ImageFormat::Gif => ("gif", None),
-        ImageFormat::Webp => ("webp", None),
-        other => ("png", Some(transcode_to_png(&img.bytes, other)?)),
-    };
-    let data: &[u8] = transcoded.as_deref().unwrap_or(&img.bytes);
-    let path = dir.join(format!("paste-{:016x}.{ext}", img.id));
-    std::fs::write(&path, data).ok()?;
-    Some(path)
-}
-
 /// The connection a paste should be uploaded over, when this pane runs on a
 /// remote host reachable over the daemon's russh stack: either a native SSH
 /// workspace pane or a standalone native SSH pane. WSL shares localhost and
@@ -1629,27 +1613,6 @@ fn prepare_remote_clipboard_dir(route: &crate::ui::sftp::SftpRoute) -> Result<St
         SftpOpResult::Error(e) => Err(e),
         other => Err(format!("unexpected reply for {dir}: {other:?}")),
     }
-}
-
-fn transcode_to_png(bytes: &[u8], format: gpui::ImageFormat) -> Option<Vec<u8>> {
-    use gpui::ImageFormat as G;
-    let src = match format {
-        G::Png => image::ImageFormat::Png,
-        G::Jpeg => image::ImageFormat::Jpeg,
-        G::Webp => image::ImageFormat::WebP,
-        G::Gif => image::ImageFormat::Gif,
-        G::Bmp => image::ImageFormat::Bmp,
-        G::Tiff => image::ImageFormat::Tiff,
-        G::Ico => image::ImageFormat::Ico,
-        G::Pnm => image::ImageFormat::Pnm,
-        G::Svg => return None,
-    };
-    let decoded = image::load_from_memory_with_format(bytes, src).ok()?;
-    let mut out = Vec::new();
-    decoded
-        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
-        .ok()?;
-    Some(out)
 }
 
 fn validate_remote_clipboard_image(

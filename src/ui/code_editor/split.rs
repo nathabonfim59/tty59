@@ -373,6 +373,8 @@ impl Tty59App {
             EditorJoinLines,
             EditorRemoveSurroundingBrackets,
             EditorFindReferences,
+            EditorCopyImage,
+            EditorDownloadImage,
             EditorNextChange,
             EditorPrevChange,
             EditorRevertChange,
