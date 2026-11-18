@@ -1972,6 +1972,14 @@ mod layout_tests {
     /// The connect fails with `reason` and the link goes away, which is how a
     /// real pane learns it is over without a child having exited: the reader
     /// tears down and sends its exit event. Returns once the pane says so.
+    ///
+    /// The daemon end is half-closed, not dropped. On Windows the pair is a
+    /// loopback TCP connection, and closing a socket that still holds unread
+    /// bytes from its peer sends a reset, which throws away what the client
+    /// had received but not yet read: the `Failed` status never reaches the
+    /// pane. A write shutdown sends a plain FIN after the frame, so the client
+    /// reads the status and then the end of file, as it does on Unix. The end
+    /// stays alive until the pane has reported, then it is dropped.
     fn fail_ssh_pane(
         vcx: &mut VisualTestContext,
         pane: &gpui::Entity<crate::terminal::view::TerminalView>,
@@ -1987,7 +1995,7 @@ mod layout_tests {
         }
         .encode(&mut daemon)
         .unwrap();
-        drop(daemon);
+        daemon.shutdown(std::net::Shutdown::Write).unwrap();
         let ended = (0..200).any(|_| {
             vcx.run_until_parked();
             let ended = pane.update(vcx, |view, _| {
@@ -1999,6 +2007,7 @@ mod layout_tests {
             ended
         });
         assert!(ended, "the pane never reported failed and disconnected");
+        drop(daemon);
     }
 
     /// The whole fixture in one: an ssh pane that failed and ended, in a
