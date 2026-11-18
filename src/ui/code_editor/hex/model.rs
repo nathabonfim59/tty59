@@ -4,7 +4,7 @@
 //! no IO: the host reads pages and the view paints rows from here.
 
 // Used from M2 on; removed then.
-#![cfg_attr(not(test), allow(dead_code))]
+#![allow(dead_code)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io;
@@ -1862,6 +1862,69 @@ mod tests {
             }
         );
         assert_eq!(m.patches(), vec![(0, vec![1])]);
+    }
+
+    #[test]
+    fn an_aborted_save_leaves_the_edits_dirty_and_unpins_its_pages() {
+        let mut m = HexModel::new(Source::Paged { len: 100 });
+        assert!(m.insert_page(0, 0, vec![0u8; 100]));
+        type_all(&mut m, "99");
+        let snap = m.save_snapshot();
+        m.abort_save();
+        assert!(m.store.dirty());
+        assert_eq!(m.patches(), snap.patches());
+        assert_eq!(m.patches(), vec![(0, vec![0x99])]);
+
+        // Once the edit is gone the page is evictable again; an unaborted save pins it.
+        let mut s = paged(PAGE_U64 * 3, 1);
+        assert!(page(&mut s, 0));
+        s.set(5, 0xFF).unwrap();
+        let _snap = s.begin_save();
+        s.set(5, 0).unwrap();
+        assert!(page(&mut s, 1));
+        assert!(s.missing_pages(0..1).is_empty());
+        s.end_save();
+        assert!(page(&mut s, 2));
+        assert_eq!(s.missing_pages(0..1), vec![0]);
+    }
+
+    #[test]
+    fn undo_after_a_save_waits_for_an_evicted_page_and_then_works() {
+        let mut m = HexModel {
+            store: ByteStore::with_cache_cap(Source::Paged { len: PAGE_U64 * 3 }, 2),
+            caret: Caret::default(),
+            history: History::default(),
+        };
+        assert!(m.insert_page(0, 0, vec![0u8; PAGE]));
+        assert!(m.insert_page(0, 1, vec![0u8; PAGE]));
+        type_all(&mut m, "99");
+        let snap = m.save_snapshot();
+        m.apply_saved(&snap);
+        assert!(m.undo_missing_pages().is_empty());
+        // Move on to page 2: the caret pins it and page 0, now clean, is the one that goes.
+        m.caret.offset = PAGE_U64 * 2;
+        assert!(m.insert_page(0, 2, vec![0u8; PAGE]));
+        assert_eq!(m.undo_missing_pages(), vec![0]);
+        assert!(m.redo_missing_pages().is_empty());
+
+        assert_eq!(m.undo(), Err(EditRefusal::NotLoaded));
+        assert!(!m.store.dirty());
+        assert_eq!(m.caret.offset, PAGE_U64 * 2);
+        assert_eq!(m.undo_missing_pages(), vec![0]);
+
+        // The page comes back as the file now is: with the saved byte.
+        let mut reread = vec![0u8; PAGE];
+        reread[0] = 0x99;
+        assert!(m.insert_page(0, 0, reread));
+        assert!(m.undo_missing_pages().is_empty());
+        assert_eq!(m.undo(), Ok(true));
+        assert_eq!(
+            m.store.byte(0),
+            Byte::Loaded {
+                value: 0,
+                edited: true
+            }
+        );
     }
 
     #[test]
