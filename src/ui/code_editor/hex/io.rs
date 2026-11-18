@@ -18,15 +18,12 @@ use std::sync::Arc;
 
 use tty59_core::host::{Changed, Expect, Host, MTime};
 
+use super::model::PAGE;
 use crate::ui::code_editor::{EditorOpenError, MAX_FILE_BYTES, SaveOutcome};
 use crate::ui::editor_text;
 use crate::ui::file_copy::REMOTE_FILE_MAX;
 use crate::ui::i18n::{L10nKey, t_fmt};
 use crate::ui::image_preview::decode as image_decode;
-
-/// Bytes in one page. Mirrors the page size of the model's byte store; the
-/// two are one constant once the model is integrated.
-pub(super) const PAGE: usize = 64 * 1024;
 
 /// [`PAGE`] as a file offset.
 const PAGE_BYTES: u64 = PAGE as u64;
