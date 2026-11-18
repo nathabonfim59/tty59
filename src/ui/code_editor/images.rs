@@ -999,7 +999,8 @@ mod tests {
 
     /// The palette offers the picture commands for the picture in front, and
     /// for nothing else: not a text file, not a hidden panel. A picture that
-    /// failed has nothing to copy but can still be downloaded.
+    /// failed has nothing to copy but can still be downloaded. The open-files
+    /// search stays offered alongside them.
     #[gpui::test]
     fn the_palette_offers_picture_commands_only_for_a_picture_in_front(cx: &mut TestAppContext) {
         use crate::ui::search::CommandKind;
@@ -1021,10 +1022,11 @@ mod tests {
         assert_eq!(
             palette_kinds(&app, &mut vcx),
             [
+                CommandKind::EditorSearchOpenFiles,
                 CommandKind::EditorCopyImage,
                 CommandKind::EditorDownloadImage
             ],
-            "a picture in front"
+            "a picture in front: the open-files search, then the picture's rows"
         );
 
         app.update_in(&mut vcx, |app, window, cx| {
@@ -1041,14 +1043,18 @@ mod tests {
         open(&app, &mut vcx, &bad, 2);
         assert_eq!(
             palette_kinds(&app, &mut vcx),
-            [CommandKind::EditorDownloadImage],
+            [
+                CommandKind::EditorSearchOpenFiles,
+                CommandKind::EditorDownloadImage
+            ],
             "a failed picture has nothing to copy, but its file can be had"
         );
 
         open_text(&app, &mut vcx, &text);
         let kinds = palette_kinds(&app, &mut vcx);
         assert!(
-            !kinds.contains(&CommandKind::EditorCopyImage)
+            kinds.contains(&CommandKind::EditorSearchOpenFiles)
+                && !kinds.contains(&CommandKind::EditorCopyImage)
                 && !kinds.contains(&CommandKind::EditorDownloadImage),
             "a text file is in front: the text editor's rows, no picture's"
         );
