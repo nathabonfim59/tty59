@@ -1430,7 +1430,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorUnsavedChanges => "В «{name}» есть несохранённые изменения",
         L10nKey::EditorDiscard => "Отменить",
         L10nKey::EditorNoFileOpen => "Нет открытого файла",
-        L10nKey::EditorStripSearch => "Поиск в открытых файлах: {n}",
+        L10nKey::EditorStripSearch => "Поиск по открытым файлам",
         L10nKey::EditorStripAllFiles => "Все открытые файлы",
         L10nKey::CmdEditorSearchOpenFiles => "Поиск по открытым файлам",
         L10nKey::CmdEditorSearchOpenFilesAlias => "Поиск по вкладкам",

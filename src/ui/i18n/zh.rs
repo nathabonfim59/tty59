@@ -1233,7 +1233,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorUnsavedChanges => "“{name}”有未保存的更改",
         L10nKey::EditorDiscard => "放弃",
         L10nKey::EditorNoFileOpen => "没有打开的文件",
-        L10nKey::EditorStripSearch => "搜索 {n} 个打开的文件",
+        L10nKey::EditorStripSearch => "搜索打开的文件",
         L10nKey::EditorStripAllFiles => "所有打开的文件",
         L10nKey::CmdEditorSearchOpenFiles => "搜索打开的文件",
         L10nKey::CmdEditorSearchOpenFilesAlias => "搜索标签页",

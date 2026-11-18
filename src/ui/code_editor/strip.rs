@@ -121,6 +121,11 @@ impl OverflowMetrics {
     }
 }
 
+/// The filter's placeholder. No count: the list opens for one file too.
+fn strip_search_placeholder() -> gpui::SharedString {
+    t(L10nKey::EditorStripSearch).into()
+}
+
 fn digits(n: usize) -> usize {
     n.checked_ilog10().map_or(1, |d| d as usize + 1)
 }
@@ -589,11 +594,8 @@ impl Tty59App {
             self.editor_close_strip_picker(window, cx);
             return;
         }
-        let n = self.tab_code().map_or(0, |c| c.files.len());
-        let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(t_fmt(L10nKey::EditorStripSearch, &[("n", &n.to_string())]))
-        });
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(strip_search_placeholder()));
         input.update(cx, |state, cx| state.focus(window, cx));
         let _sub = cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, _, cx| {
             if matches!(ev, InputEvent::Change) {
@@ -912,9 +914,14 @@ impl Tty59App {
         }
 
         let rule = || div().h(px(1.)).mx(px(6.)).my(px(4.)).bg(theme.border);
+        // The footer acts on every file, whatever the query, so it is
+        // decided from the editor's files, not the filtered rows.
+        let show_saved = !self.editor_strip_others(true).is_empty();
+        let show_others = !self.editor_strip_others(false).is_empty();
         let footer_button = |key: &'static str, label: L10nKey| {
             div()
                 .id(key)
+                .when(cfg!(test), |d| d.debug_selector(|| key.into()))
                 .text_color(muted)
                 .hover(|s| s.text_color(fg))
                 .child(t(label))
@@ -964,33 +971,48 @@ impl Tty59App {
             )
             .child(rule())
             .child(list)
-            .child(rule())
-            .child(
-                h_flex()
-                    .h(px(28.))
-                    .px(px(8.))
-                    .gap(px(14.))
-                    .items_center()
-                    .text_size(rems(12. / 16.))
-                    .child(
-                        footer_button("editor-strip-close-saved", L10nKey::EditorStripCloseSaved)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.editor.strip_picker = None;
-                                let ids = this.editor_strip_others(true);
-                                this.editor_close_buffers(ids, window, cx);
-                                this.focus_editor(window, cx);
-                            })),
-                    )
-                    .child(
-                        footer_button("editor-strip-close-others", L10nKey::EditorStripCloseOthers)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.editor.strip_picker = None;
-                                let ids = this.editor_strip_others(false);
-                                this.editor_close_buffers(ids, window, cx);
-                                this.focus_editor(window, cx);
-                            })),
-                    ),
-            );
+            .when(show_saved || show_others, |card| {
+                card.child(rule()).child(
+                    h_flex()
+                        .h(px(28.))
+                        .px(px(8.))
+                        .gap(px(14.))
+                        .items_center()
+                        .text_size(rems(12. / 16.))
+                        .when(show_saved, |row| {
+                            row.child(
+                                footer_button(
+                                    "editor-strip-close-saved",
+                                    L10nKey::EditorStripCloseSaved,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.editor.strip_picker = None;
+                                        let ids = this.editor_strip_others(true);
+                                        this.editor_close_buffers(ids, window, cx);
+                                        this.focus_editor(window, cx);
+                                    },
+                                )),
+                            )
+                        })
+                        .when(show_others, |row| {
+                            row.child(
+                                footer_button(
+                                    "editor-strip-close-others",
+                                    L10nKey::EditorStripCloseOthers,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.editor.strip_picker = None;
+                                        let ids = this.editor_strip_others(false);
+                                        this.editor_close_buffers(ids, window, cx);
+                                        this.focus_editor(window, cx);
+                                    },
+                                )),
+                            )
+                        }),
+                )
+            });
         Some(
             div()
                 .absolute()
@@ -1583,6 +1605,76 @@ mod gpui_tests {
 
         click_at(&mut vcx, more.center());
         assert!(!picker_open(&app, &mut vcx), "a second click closes");
+    }
+
+    /// Open the picker from the keyboard and let it paint.
+    fn open_picker(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) {
+        app.update_in(vcx, |app, window, cx| {
+            app.editor_toggle_strip_picker(false, window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(picker_open(app, vcx), "the picker is open");
+    }
+
+    fn footer_painted(vcx: &mut VisualTestContext) -> (bool, bool) {
+        (
+            vcx.debug_bounds("editor-strip-close-saved").is_some(),
+            vcx.debug_bounds("editor-strip-close-others").is_some(),
+        )
+    }
+
+    /// Covers the `show_saved`/`show_others` false branches of the footer
+    /// (no rule, no row) and the count-free placeholder.
+    #[gpui::test]
+    fn one_file_has_no_footer_and_a_count_free_placeholder(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Fill);
+        resize(&mut vcx, 1440., 900.);
+        open_names(&app, &mut vcx, &["/repo/only.rs"]);
+        open_picker(&app, &mut vcx);
+        assert_eq!(
+            footer_painted(&mut vcx),
+            (false, false),
+            "nothing to close, so no footer button"
+        );
+        let placeholder = strip_search_placeholder();
+        assert_eq!(placeholder.as_ref(), t(L10nKey::EditorStripSearch));
+        assert!(
+            !placeholder.chars().any(|c| c.is_ascii_digit()),
+            "the placeholder carries no count: {placeholder}"
+        );
+    }
+
+    /// Covers the `when(show_saved)` and `when(show_others)` true branches.
+    #[gpui::test]
+    fn two_saved_files_offer_both_footer_actions(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Fill);
+        resize(&mut vcx, 1440., 900.);
+        open_names(&app, &mut vcx, &["/repo/a.rs", "/repo/b.rs"]);
+        open_picker(&app, &mut vcx);
+        assert_eq!(footer_painted(&mut vcx), (true, true));
+    }
+
+    /// Covers `show_saved` false with `show_others` true: the one other
+    /// file is unsaved, so only "Close others" has work.
+    #[gpui::test]
+    fn an_unsaved_other_file_hides_close_saved_only(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        dock_config(&mut vcx, DocumentLayout::Fill);
+        resize(&mut vcx, 1440., 900.);
+        open_names(&app, &mut vcx, &["/repo/a.rs", "/repo/b.rs"]);
+        app.update_in(&mut vcx, |app, _, cx| {
+            let other = app.editor_strip_others(false);
+            assert_eq!(other.len(), 1, "one file besides the front one");
+            app.buffer_mut(other[0]).unwrap().dirty = true;
+            cx.notify();
+        });
+        open_picker(&app, &mut vcx);
+        assert_eq!(footer_painted(&mut vcx), (false, true));
     }
 
     #[gpui::test]

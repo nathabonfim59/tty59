@@ -1385,7 +1385,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorUnsavedChanges => "「{name}」には保存されていない変更があります",
         L10nKey::EditorDiscard => "破棄",
         L10nKey::EditorNoFileOpen => "開かれているファイルはありません",
-        L10nKey::EditorStripSearch => "開いている {n} 個のファイルを検索",
+        L10nKey::EditorStripSearch => "開いているファイルを検索",
         L10nKey::EditorStripAllFiles => "開いているすべてのファイル",
         L10nKey::CmdEditorSearchOpenFiles => "開いているファイルを検索",
         L10nKey::CmdEditorSearchOpenFilesAlias => "タブを検索",

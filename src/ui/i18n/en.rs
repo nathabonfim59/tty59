@@ -1317,7 +1317,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorUnsavedChanges => "\"{name}\" has unsaved changes",
         L10nKey::EditorDiscard => "Discard",
         L10nKey::EditorNoFileOpen => "No file open",
-        L10nKey::EditorStripSearch => "Search {n} open files",
+        L10nKey::EditorStripSearch => "Search open files",
         L10nKey::EditorStripAllFiles => "All open files",
         L10nKey::CmdEditorSearchOpenFiles => "Search Open Files",
         L10nKey::CmdEditorSearchOpenFilesAlias => "Search Tabs",
