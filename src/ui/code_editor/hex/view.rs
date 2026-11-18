@@ -1006,6 +1006,9 @@ impl Render for HexView {
         let header = div()
             .relative()
             .w_full()
+            // Clipped like the body: the absolutely placed column would otherwise paint past a
+            // narrow panel's edge.
+            .overflow_hidden()
             .h(px(metrics.row_h))
             .flex_none()
             .child(column(
