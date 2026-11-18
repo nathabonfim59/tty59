@@ -17,6 +17,7 @@ use crate::ui::editor_text;
 use crate::ui::file_copy::REMOTE_FILE_MAX;
 use crate::ui::i18n::{L10nKey, t_fmt};
 use crate::ui::image_preview::decode as image_decode;
+use crate::ui::image_preview::view::{ErrorCard, error_card};
 
 pub(super) mod data;
 pub(super) mod io;
@@ -351,57 +352,26 @@ impl Tty59App {
         focus: &FocusHandle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let theme = cx.theme();
-        // The same card as a picture that cannot be shown: a danger stripe, the reason, the
-        // path; and here the one thing that can be done about it.
-        div()
-            .id(("hex-too-large", slot))
-            .debug_selector(move || format!("hex-too-large-{slot}"))
-            .key_context(DOCUMENT_KEY_CONTEXT)
-            .track_focus(focus)
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.background)
-            .child(
-                h_flex()
-                    .max_w(px(560.))
-                    .gap_3()
-                    .p_4()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.secondary)
-                    .child(div().flex_none().w(px(3.)).h_full().bg(theme.danger))
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(theme.foreground)
-                                    .child(message),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme.foreground)
-                                    .child(path.display().to_string()),
-                            )
-                            .child(
-                                div().child(
-                                    Button::new(("hex-too-large-download", slot))
-                                        .label(t(L10nKey::Download))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.editor_download_hex(id, window, cx)
-                                        })),
-                                ),
-                            ),
-                    ),
+        // The picture that cannot be shown has this card too; here it also carries the one
+        // thing that can be done about it.
+        let download = Button::new(("hex-too-large-download", slot))
+            .label(t(L10nKey::Download))
+            .on_click(
+                cx.listener(move |this, _, window, cx| this.editor_download_hex(id, window, cx)),
             )
-            .into_any_element()
+            .into_any_element();
+        error_card(
+            ErrorCard {
+                id: ("hex-too-large", slot),
+                selector: format!("hex-too-large-{slot}"),
+                focus,
+                title: None,
+                message,
+                detail: path.display().to_string(),
+                action: Some(download),
+            },
+            cx,
+        )
     }
 
     /// Right-click on a hex document: what any file offers.

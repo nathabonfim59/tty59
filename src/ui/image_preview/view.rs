@@ -692,65 +692,95 @@ impl ImageView {
         let Content::Failed(failure) = &data.content else {
             return div().into_any_element();
         };
-        let theme = cx.theme();
         let name = data.name();
         let message = failure_message(&name, &data.path, failure);
         let path = match failure.bytes {
             Some(bytes) => format!("{} · {}", data.path.display(), human_size(bytes)),
             None => data.path.display().to_string(),
         };
-        div()
-            .id(("image-preview-error", self.slot))
-            .debug_selector({
-                let slot = self.slot;
-                move || selector("image-preview-error", slot)
-            })
-            // The card has the view's focus like the picture does, or there
-            // is nothing in the tab for a click or the panel's keys to land on
-            // and a close of the last file falls through to the terminal.
-            .key_context(crate::ui::code_editor::DOCUMENT_KEY_CONTEXT)
-            .track_focus(&self.focus)
-            .size_full()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(theme.background)
-            .child(
-                h_flex()
-                    .max_w(px(560.))
-                    .gap_3()
-                    .p_4()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(theme.border)
-                    .bg(theme.secondary)
-                    .child(div().flex_none().w(px(3.)).h_full().bg(theme.danger))
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .min_w_0()
-                            .child(
-                                div()
-                                    .text_size(px(14.))
-                                    .text_color(theme.foreground)
-                                    .child(t(L10nKey::ImagePreviewCantShow)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .text_color(theme.foreground)
-                                    .child(message),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme.foreground)
-                                    .child(path),
-                            ),
-                    ),
-            )
-            .into_any_element()
+        error_card(
+            ErrorCard {
+                id: ("image-preview-error", self.slot),
+                selector: selector("image-preview-error", self.slot),
+                focus: &self.focus,
+                title: Some(t(L10nKey::ImagePreviewCantShow).to_string()),
+                message,
+                detail: path,
+                action: None,
+            },
+            cx,
+        )
     }
+}
+
+/// What a card that says why a document cannot be shown is made of.
+pub(crate) struct ErrorCard<'a> {
+    pub(crate) id: (&'static str, usize),
+    /// What the layout tests find the card by.
+    pub(crate) selector: String,
+    /// The card has the view's focus like the document would, or there is nothing in the tab
+    /// for a click or the panel's keys to land on, and a close of the last file falls through
+    /// to the terminal.
+    pub(crate) focus: &'a FocusHandle,
+    pub(crate) title: Option<String>,
+    pub(crate) message: String,
+    /// A line under the reason: where the file is, and how large.
+    pub(crate) detail: String,
+    /// The one thing that can be done about it, if there is one.
+    pub(crate) action: Option<AnyElement>,
+}
+
+/// The card that says why a document is not shown, centred in its tab: a danger stripe, the
+/// reason, the file, and what can be done. A picture that failed to decode and a file too
+/// large to bring over are drawn by this one function.
+pub(crate) fn error_card(card: ErrorCard<'_>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .id(card.id)
+        .debug_selector(move || card.selector.clone())
+        .key_context(crate::ui::code_editor::DOCUMENT_KEY_CONTEXT)
+        .track_focus(card.focus)
+        .size_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(theme.background)
+        .child(
+            h_flex()
+                .max_w(px(560.))
+                .gap_3()
+                .p_4()
+                .rounded(px(8.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.secondary)
+                .child(div().flex_none().w(px(3.)).h_full().bg(theme.danger))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .min_w_0()
+                        .children(card.title.map(|title| {
+                            div()
+                                .text_size(px(14.))
+                                .text_color(theme.foreground)
+                                .child(title)
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(theme.foreground)
+                                .child(card.message),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme.foreground)
+                                .child(card.detail),
+                        )
+                        .children(card.action.map(|action| div().pt_1().child(action))),
+                ),
+        )
+        .into_any_element()
 }
 
 /// The part of `image` that is inside `clip`, or `None` when none is.
