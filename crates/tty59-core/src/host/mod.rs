@@ -82,6 +82,36 @@ pub struct MTime {
     pub nanos: u32,
 }
 
+/// What a ranged write requires of the file before it touches it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Expect {
+    pub len: u64,
+    pub mtime: Option<MTime>,
+}
+
+/// Why [`Host::write_ranges`] refused: the file is not what the caller last
+/// saw. It travels inside an [`io::Error`] so the trait stays plain `io`, and
+/// is recognised with [`Changed::of`] rather than by its words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Changed {
+    /// The modification time the file has now.
+    pub mtime: Option<MTime>,
+}
+
+impl Changed {
+    pub fn of(e: &io::Error) -> Option<&Changed> {
+        e.get_ref()?.downcast_ref::<Changed>()
+    }
+}
+
+impl std::fmt::Display for Changed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the file changed since it was read")
+    }
+}
+
+impl std::error::Error for Changed {}
+
 impl MTime {
     pub fn from_system_time(t: std::time::SystemTime) -> MTime {
         match t.duration_since(std::time::UNIX_EPOCH) {
@@ -290,6 +320,39 @@ pub trait Host: Send + Sync + 'static {
     }
 
     fn read_file(&self, p: &Path, max_bytes: u64) -> io::Result<Vec<u8>>;
+
+    /// Up to `len` bytes of `p` starting at `offset`: fewer when the file ends
+    /// first, none when `offset` is at or past the end. A directory is
+    /// [`io::ErrorKind::IsADirectory`], as for [`Host::read_file`].
+    ///
+    /// A host that cannot read a part of a file answers
+    /// [`io::ErrorKind::Unsupported`], and the caller reads the whole file
+    /// with [`Host::read_file`] instead.
+    fn read_range(&self, p: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        let _ = (p, offset, len);
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// Overwrites the given runs of `p` in place and returns its new [`Meta`].
+    /// The file is neither created, truncated nor resized: a run that reaches
+    /// past its end is [`io::ErrorKind::InvalidInput`], decided before any
+    /// byte is written.
+    ///
+    /// `expect` is checked against the file that is then written, in this same
+    /// call, so nothing can slip in between the check and the write. A file
+    /// that no longer matches is refused with a [`Changed`] inside the
+    /// [`io::Error`] (see [`Changed::of`]) and nothing is written.
+    ///
+    /// [`io::ErrorKind::Unsupported`] by default, like [`Host::read_range`].
+    fn write_ranges(
+        &self,
+        p: &Path,
+        patches: &[(u64, Vec<u8>)],
+        expect: Expect,
+    ) -> io::Result<Meta> {
+        let _ = (p, patches, expect);
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     fn canonicalize(&self, p: &Path) -> io::Result<PathBuf>;
 

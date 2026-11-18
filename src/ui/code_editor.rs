@@ -28,6 +28,7 @@ use crate::ui::lsp::LspStatus;
 use crate::ui::zoom::SCROLL_GESTURE_IDLE;
 
 mod gutter;
+mod hex;
 mod images;
 mod nav;
 pub(crate) mod outline;
@@ -710,8 +711,13 @@ fn parse_line_target(text: &str) -> Option<(u32, u32)> {
 
 /// Why the built-in editor could not take a file.
 enum EditorOpenError {
-    /// Not text, so the editor was never the right place for it.
-    NotText(PathBuf),
+    /// Not text, so the editor was never the right place for it. What was
+    /// already read comes along, so a hex view of it needs no second read.
+    NotText {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        mtime: Option<MTime>,
+    },
     /// Something already worded for the user.
     Message(String),
 }
@@ -731,10 +737,10 @@ fn load_text(
     h: &dyn tty59_core::host::Host,
     path: PathBuf,
     mtime: Option<MTime>,
-    bytes: &[u8],
+    bytes: Vec<u8>,
 ) -> Result<Loaded, EditorOpenError> {
-    let Some(decoded) = editor_text::decode(bytes) else {
-        return Err(EditorOpenError::NotText(path));
+    let Some(decoded) = editor_text::decode(&bytes) else {
+        return Err(EditorOpenError::NotText { path, bytes, mtime });
     };
     let config = read_editorconfig(h, &path);
     Ok(Loaded {
@@ -851,13 +857,15 @@ fn load_document(
     if len > MAX_FILE_BYTES {
         return Err(too_large_for_text(len));
     }
-    match load_text(h, path, meta.mtime, &bytes) {
+    match load_text(h, path, meta.mtime, bytes) {
         Ok(loaded) => Ok(Opened::Text(loaded)),
-        Err(EditorOpenError::NotText(path)) if hinted => Ok(Opened::ImageFailed(ImageFailed {
-            path,
-            error: image_decode::ImageError::NotAnImage,
-            bytes: Some(len),
-        })),
+        Err(EditorOpenError::NotText { path, .. }) if hinted => {
+            Ok(Opened::ImageFailed(ImageFailed {
+                path,
+                error: image_decode::ImageError::NotAnImage,
+                bytes: Some(len),
+            }))
+        }
         Err(other) => Err(other),
     }
 }
@@ -1467,7 +1475,7 @@ impl Tty59App {
                     let data = ImageData::failed(failed.path, failed.error, failed.bytes);
                     app.editor_land_image(seq, host, data, window, cx);
                 }
-                Err(EditorOpenError::NotText(path)) => {
+                Err(EditorOpenError::NotText { path, .. }) => {
                     app.image_request_done(seq);
                     app.open_outside_the_editor(host_id, &path, window, cx);
                 }
@@ -5886,7 +5894,10 @@ mod image_open_tests {
             _ => panic!("named like a picture by the link"),
         }
         assert!(
-            matches!(load_document(&*h, binary), Err(EditorOpenError::NotText(_))),
+            matches!(
+                load_document(&*h, binary),
+                Err(EditorOpenError::NotText { .. })
+            ),
             "under its own name it is a binary, as before"
         );
 
