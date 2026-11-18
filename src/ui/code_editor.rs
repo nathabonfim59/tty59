@@ -28,6 +28,7 @@ use crate::ui::lsp::LspStatus;
 use crate::ui::zoom::SCROLL_GESTURE_IDLE;
 
 mod gutter;
+mod hex;
 mod images;
 mod nav;
 pub(crate) mod outline;
