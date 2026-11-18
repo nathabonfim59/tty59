@@ -5612,16 +5612,16 @@ mod gpui_tests {
         // else gets an exception.
         let (mut painted, mut natural) = (diff_whole(vcx, what), *whole);
         let usable = (painted_body(vcx, what) - wide.lead - wide.trail).floor();
-        if let (Some(drawn), Some(whole_w)) = (painted.refreshing, whole.refreshing) {
-            if f32::from(whole_w) > usable + 0.01 {
-                assert!(
-                    (f32::from(drawn) - usable).abs() <= 1.,
-                    "{what}: the Refreshing word, {whole_w:?} whole, is {drawn:?} where no row \
-                     holds it: it takes the {usable}px a row has; {report}"
-                );
-                painted.refreshing = None;
-                natural.refreshing = None;
-            }
+        if let (Some(drawn), Some(whole_w)) = (painted.refreshing, whole.refreshing)
+            && f32::from(whole_w) > usable + 0.01
+        {
+            assert!(
+                (f32::from(drawn) - usable).abs() <= 1.,
+                "{what}: the Refreshing word, {whole_w:?} whole, is {drawn:?} where no row \
+                 holds it: it takes the {usable}px a row has; {report}"
+            );
+            painted.refreshing = None;
+            natural.refreshing = None;
         }
         if let (Some(drawn), Some(whole_w)) = (painted.chip, whole.chip) {
             let whole_w = f32::from(whole_w);
@@ -6296,7 +6296,7 @@ mod gpui_tests {
             &wide,
             &down,
             &up,
-            |vcx, what| header_level(vcx, what),
+            header_level,
             &format!("{state}, state"),
         );
         assert_history_two(
@@ -6958,8 +6958,8 @@ mod gpui_tests {
         assert!(
             label.painted
                 && label.text.contains('\u{2026}')
-                && label.text.chars().next() == Some(first)
-                && label.text.chars().last() == Some(last)
+                && label.text.starts_with(first)
+                && label.text.ends_with(last)
                 && label.text.chars().count() < path.chars().count(),
             "{what}: the path {path:?} is not painted with its head, an ellipsis and its tail: \
              {label:?}"

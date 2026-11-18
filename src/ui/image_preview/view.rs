@@ -133,7 +133,7 @@ impl ImageData {
 
 /// Whether any pixel of a BGRA frame is not opaque.
 pub(crate) fn has_alpha(bgra: &[u8]) -> bool {
-    bgra.chunks_exact(4).any(|px| px[3] != 255)
+    bgra.as_chunks::<4>().0.iter().any(|px| px[3] != 255)
 }
 
 /// A count with its thousands set off by commas: `16,777,216`.
@@ -141,7 +141,7 @@ pub(crate) fn grouped(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);

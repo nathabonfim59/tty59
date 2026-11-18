@@ -2206,31 +2206,30 @@ fn current_locale_index() -> usize {
 }
 
 fn translate(locale_idx: usize, key: L10nKey) -> &'static str {
-    if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx) {
-        if let Some(text) = (lang.translate_fn)(key) {
-            return text;
-        }
+    if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx)
+        && let Some(text) = (lang.translate_fn)(key)
+    {
+        return text;
     }
     translate_en(key)
 }
 
 fn translate_variant(locale_idx: usize, key: L10nKey, branch: &'static str) -> &'static str {
-    if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx) {
-        if let Some(text) = (lang.translate_variant_fn)(key, branch) {
-            return text;
-        }
+    if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx)
+        && let Some(text) = (lang.translate_variant_fn)(key, branch)
+    {
+        return text;
     }
     // Locales without few/many use their own other form before falling back to English.
     let fallback = match branch {
         "few" | "many" => "other",
         _ => branch,
     };
-    if fallback != branch {
-        if let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx) {
-            if let Some(text) = (lang.translate_variant_fn)(key, fallback) {
-                return text;
-            }
-        }
+    if fallback != branch
+        && let Some(lang) = SUPPORTED_LANGUAGES.get(locale_idx)
+        && let Some(text) = (lang.translate_variant_fn)(key, fallback)
+    {
+        return text;
     }
     translate_variant_en(key, fallback).unwrap_or_else(|| translate(locale_idx, key))
 }
