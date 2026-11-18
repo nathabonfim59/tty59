@@ -1046,9 +1046,11 @@ mod tests {
         );
 
         open_text(&app, &mut vcx, &text);
+        let kinds = palette_kinds(&app, &mut vcx);
         assert!(
-            palette_kinds(&app, &mut vcx).is_empty(),
-            "a text file is in front"
+            !kinds.contains(&CommandKind::EditorCopyImage)
+                && !kinds.contains(&CommandKind::EditorDownloadImage),
+            "a text file is in front: the text editor's rows, no picture's"
         );
     }
 
@@ -1212,6 +1214,13 @@ mod tests {
             open.is_some() && open != before,
             "the right click opened a menu"
         );
+
+        // Close it: an open menu is a handle still alive at exit.
+        vcx.simulate_keystrokes("escape");
+        settle(&mut vcx);
+        let after = vcx.update(|window, cx| window.focused(cx));
+        assert_ne!(after, open, "the menu is closed");
+        assert!(after.is_some(), "the focus went back out of the menu");
     }
 
     fn click_at(vcx: &mut VisualTestContext, at: gpui::Point<Pixels>) {
@@ -1972,10 +1981,8 @@ mod tests {
     fn run_clock(vcx: &mut VisualTestContext, done: impl Fn() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !done() && Instant::now() < deadline {
-            vcx.update(|_, cx| {
-                cx.background_executor()
-                    .advance_clock(Duration::from_millis(60))
-            });
+            // Outside any `update`: the clock runs app tasks, which borrow the app.
+            vcx.executor().advance_clock(Duration::from_millis(60));
             vcx.run_until_parked();
             std::thread::sleep(Duration::from_millis(2));
         }
