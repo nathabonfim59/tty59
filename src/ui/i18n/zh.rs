@@ -2392,6 +2392,11 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexStatusOffset => "偏移 {hex}（{dec}）",
         L10nKey::HexStatusSelection => "已选 {count}",
         L10nKey::HexStatusSize => "大小 {size}",
+        L10nKey::HexEditEmpty => "文件为空，没有可编辑的字节",
+        L10nKey::HexEditOverwriteOnly => "此编辑器只能覆盖字节，不能插入或删除",
+        L10nKey::HexCopyTooLarge => "所选内容超过 {limit}，无法复制",
+        L10nKey::HexPasteNotHex => "剪贴板中不是十六进制字节，未粘贴任何内容",
+        L10nKey::HexPasteTruncated => "已粘贴 {written} 字节，超出文件末尾的 {left} 字节已舍弃",
         L10nKey::HexTooLarge => "“{name}”大小为 {size} MiB，超过通过连接可打开的上限 {limit} MiB",
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {

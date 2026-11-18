@@ -50,7 +50,6 @@ pub(super) enum Byte {
 
 /// Why an edit did not happen. The UI localizes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 pub(super) enum EditRefusal {
     /// The file is empty, so there is no byte to edit.
     NothingToEdit,
@@ -269,7 +268,6 @@ impl ByteStore {
     }
 
     /// Sets the edited value of one byte; the original value removes the edit.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn set(&mut self, off: u64, value: u8) -> Result<(), EditRefusal> {
         let disk = self.disk_byte(off).ok_or(EditRefusal::NotLoaded)?;
         if value == disk {
@@ -281,7 +279,6 @@ impl ByteStore {
     }
 
     /// Restores a byte to a recorded overlay state: `None` is "not edited".
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn set_state(&mut self, off: u64, state: Option<u8>) -> Result<(), EditRefusal> {
         match state {
             Some(value) => self.set(off, value),
@@ -292,7 +289,6 @@ impl ByteStore {
         }
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn page_missing(&self, idx: u64) -> bool {
         matches!(self.source, Source::Paged { .. }) && !self.pages.contains_key(&idx)
     }
@@ -536,7 +532,6 @@ impl Caret {
 
 /// What a paste did: how many bytes it wrote and whether the rest ran past the end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 pub(super) struct PasteResult {
     pub(super) written: usize,
     pub(super) truncated: bool,
@@ -551,7 +546,6 @@ struct Pos {
 }
 
 impl Pos {
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn of(caret: &Caret) -> Self {
         Self {
             offset: caret.offset,
@@ -563,7 +557,6 @@ impl Pos {
 
 /// One undo step: the overlay state of a run of bytes before and after. Overlay state, not
 /// byte values, so undo returns a byte to "not edited" exactly (`None`).
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 struct Step {
     offset: u64,
     before: Vec<Option<u8>>,
@@ -573,14 +566,12 @@ struct Step {
 }
 
 impl Step {
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn end(&self) -> u64 {
         self.offset + wide(self.before.len())
     }
 
     /// Folds a run that starts inside or right after this step into it, keeping the first
     /// `before` of every byte. False when the run is not adjacent.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn try_merge(
         &mut self,
         start: u64,
@@ -609,7 +600,6 @@ impl Step {
 }
 
 #[derive(Default)]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 struct History {
     undo: Vec<Step>,
     redo: Vec<Step>,
@@ -667,7 +657,6 @@ impl HexModel {
 
     /// Types one hex digit given as its ASCII character: the high nibble first, then the low
     /// one, after which the caret advances (and stays on the last byte at the end).
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn type_hex(&mut self, digit: u8) -> Result<(), EditRefusal> {
         let value = hex_value(digit).ok_or(EditRefusal::NotHexDigit)?;
         let len = self.store.len();
@@ -691,7 +680,6 @@ impl HexModel {
     }
 
     /// Types one printable ASCII character over the caret's byte and advances.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn type_ascii(&mut self, ch: char) -> Result<(), EditRefusal> {
         let byte = u8::try_from(ch)
             .ok()
@@ -713,7 +701,6 @@ impl HexModel {
     /// Overwrites from the selection start (or the caret) without growing the file; what does
     /// not fit is cut and reported. One undo step. Refused whole when a target page is not
     /// loaded yet.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn paste(&mut self, bytes: &[u8]) -> Result<PasteResult, EditRefusal> {
         let len = self.store.len();
         if len == 0 {
@@ -746,7 +733,6 @@ impl HexModel {
 
     /// Writes `new` from `start`, records it for undo and moves the caret. All target bytes must
     /// be loaded; nothing is changed otherwise. `coalesce` lets typing extend the open step.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     fn commit(
         &mut self,
         start: u64,
@@ -797,7 +783,6 @@ impl HexModel {
 
     /// Pages the next undo needs and does not have: restoring an edited value is checked
     /// against the disk byte, so its page must be cached.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn undo_missing_pages(&self) -> Vec<u64> {
         self.history
             .undo
@@ -806,7 +791,6 @@ impl HexModel {
     }
 
     /// Same for the next redo.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn redo_missing_pages(&self) -> Vec<u64> {
         self.history
             .redo
@@ -837,7 +821,6 @@ impl HexModel {
 
     /// Undoes the last step. `Ok(false)` when there is none; `NotLoaded` (nothing changed) when
     /// a page must be read first, see `undo_missing_pages`.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn undo(&mut self) -> Result<bool, EditRefusal> {
         let Some(step) = self.history.undo.pop() else {
             return Ok(false);
@@ -852,7 +835,6 @@ impl HexModel {
         Ok(true)
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
     pub(super) fn redo(&mut self) -> Result<bool, EditRefusal> {
         let Some(step) = self.history.redo.pop() else {
             return Ok(false);
@@ -916,7 +898,6 @@ impl HexModel {
     }
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M3 editing"))]
 fn hex_value(digit: u8) -> Option<u8> {
     char::from(digit)
         .to_digit(16)
@@ -936,7 +917,6 @@ pub(super) enum OffsetError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) enum PatternError {
     Empty,
     OddDigits,
@@ -991,7 +971,6 @@ pub(super) fn parse_offset(input: &str, caret: u64, len: u64) -> Result<u64, Off
 
 /// Find input: hex bytes separated by spaces or `:`, or run together; `0x` prefixes allowed.
 /// Every group must hold whole bytes.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) fn parse_hex_pattern(input: &str) -> Result<Vec<u8>, PatternError> {
     let mut out = Vec::new();
     let mut any = false;

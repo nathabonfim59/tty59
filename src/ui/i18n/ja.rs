@@ -2656,6 +2656,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexStatusOffset => "オフセット {hex}（{dec}）",
         L10nKey::HexStatusSelection => "選択 {count}",
         L10nKey::HexStatusSize => "サイズ {size}",
+        L10nKey::HexEditEmpty => "ファイルが空のため、編集できるバイトがありません",
+        L10nKey::HexEditOverwriteOnly => "このエディターは上書きのみで、挿入や削除はできません",
+        L10nKey::HexCopyTooLarge => "選択範囲が {limit} を超えているためコピーできません",
+        L10nKey::HexPasteNotHex => "クリップボードに16進バイトがないため、貼り付けませんでした",
+        L10nKey::HexPasteTruncated => {
+            "{written} バイトを貼り付け、ファイルの末尾を超えた {left} バイトは除外しました"
+        }
         L10nKey::HexTooLarge => {
             "「{name}」は {size} MiB で、接続越しに開ける上限 {limit} MiB を超えています"
         }

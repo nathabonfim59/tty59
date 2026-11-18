@@ -10,7 +10,7 @@ use gpui::{Context, SharedString, Window};
 use tty59_core::host::{MTime, SharedHost};
 
 use super::io::{self, HexLoaded, HexSource};
-use super::model::{HexModel, Source};
+use super::model::{self, EditRefusal, HexModel, PAGE, PasteResult, ROW, Side, Source};
 use crate::ui::host_ops::HostOps;
 
 /// What the document holds.
@@ -169,8 +169,7 @@ impl HexData {
         cx.notify();
     }
 
-    /// Whether a page read is outstanding; the tests wait on it.
-    #[cfg(test)]
+    /// Whether a page read is outstanding; a pending edit waits on it and the tests too.
     pub(super) fn reading(&self) -> bool {
         !self.in_flight.is_empty()
     }
@@ -179,6 +178,157 @@ impl HexData {
     pub(crate) fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.path = path;
         cx.notify();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Editing: what the view asks of the document. Kept in a block of its own.
+
+/// The most bytes one copy takes: the text is built in one piece on the UI thread, and every
+/// page under the selection has to be cached first.
+pub(super) const COPY_LIMIT: u64 = 1 << 20;
+
+/// One thing the view asks the document to do with its bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Op {
+    /// A hex digit as its ASCII character.
+    Hex(u8),
+    Ascii(char),
+    /// The bytes to overwrite from the selection start or the caret.
+    Paste(Vec<u8>),
+    Undo,
+    Redo,
+    Copy,
+}
+
+/// What an [`Op`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Done {
+    Edited,
+    Pasted(PasteResult),
+    /// An undo or redo with nothing to go back or forward to.
+    NothingToDo,
+    /// The text for the clipboard.
+    Copied(String),
+}
+
+/// Why an [`Op`] did nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Failure {
+    Edit(EditRefusal),
+    /// The selection is over [`COPY_LIMIT`] bytes.
+    CopyTooLarge,
+}
+
+impl HexData {
+    /// The pages `op` needs and the cache does not hold.
+    pub(super) fn pages_missing_for(&self, op: &Op) -> Vec<u64> {
+        let HexContent::Ready(m) = &self.content else {
+            return Vec::new();
+        };
+        let len = m.store.len();
+        if len == 0 {
+            return Vec::new();
+        }
+        let caret = m.caret.offset.min(len - 1);
+        let span = |start: u64, count: u64| {
+            let end = start.saturating_add(count).min(len);
+            m.store.missing_pages(start / ROW..(end - 1) / ROW + 1)
+        };
+        match op {
+            Op::Hex(_) | Op::Ascii(_) => span(caret, 1),
+            Op::Paste(bytes) => {
+                let start = m.caret.selection().map_or(caret, |r| r.start).min(len - 1);
+                span(start, u64::try_from(bytes.len()).unwrap_or(u64::MAX).max(1))
+            }
+            Op::Copy => {
+                let (start, end) = copy_range(m, len);
+                span(start, end - start)
+            }
+            Op::Undo => m.undo_missing_pages(),
+            Op::Redo => m.redo_missing_pages(),
+        }
+    }
+
+    /// Reads the given pages (see `pages_missing_for`) off the UI thread.
+    pub(super) fn ensure_pages(&mut self, pages: &[u64], window: &Window, cx: &mut Context<Self>) {
+        let page_rows = u64::try_from(PAGE).unwrap_or(u64::MAX) / ROW;
+        for &idx in pages {
+            let first = idx.saturating_mul(page_rows);
+            self.ensure_rows(first..first.saturating_add(page_rows), window, cx);
+        }
+    }
+
+    /// Does `op`. A document that is not open for editing refuses everything. Nothing changes
+    /// when it fails; `NotLoaded` means the pages in `pages_missing_for` must be read first.
+    pub(super) fn run(&mut self, op: &Op, cx: &mut Context<Self>) -> Result<Done, Failure> {
+        let HexContent::Ready(m) = &mut self.content else {
+            return Err(Failure::Edit(EditRefusal::NothingToEdit));
+        };
+        let done = match op {
+            Op::Hex(digit) => m.type_hex(*digit).map(|()| Done::Edited),
+            Op::Ascii(ch) => m.type_ascii(*ch).map(|()| Done::Edited),
+            Op::Paste(bytes) => m.paste(bytes).map(Done::Pasted),
+            Op::Undo => m
+                .undo()
+                .map(|did| if did { Done::Edited } else { Done::NothingToDo }),
+            Op::Redo => m
+                .redo()
+                .map(|did| if did { Done::Edited } else { Done::NothingToDo }),
+            Op::Copy => return Self::copy_text(m),
+        };
+        match done {
+            Ok(done) => {
+                m.store.pin_caret(m.caret.offset);
+                cx.notify();
+                Ok(done)
+            }
+            Err(refusal) => Err(Failure::Edit(refusal)),
+        }
+    }
+
+    /// The selection (or the caret's byte) as the side the caret is on writes it: `de ad be ef`
+    /// for the hex column, the ASCII column's characters for the other.
+    fn copy_text(m: &HexModel) -> Result<Done, Failure> {
+        let len = m.store.len();
+        if len == 0 {
+            return Err(Failure::Edit(EditRefusal::NothingToEdit));
+        }
+        let (start, end) = copy_range(m, len);
+        if end - start > COPY_LIMIT {
+            return Err(Failure::CopyTooLarge);
+        }
+        let mut text = String::new();
+        for off in start..end {
+            let value = m
+                .store
+                .effective(off)
+                .ok_or(Failure::Edit(EditRefusal::NotLoaded))?;
+            match m.caret.side {
+                Side::Hex => {
+                    if off > start {
+                        text.push(' ');
+                    }
+                    let [hi, lo] = model::hex_byte(value);
+                    text.push(char::from(hi));
+                    text.push(char::from(lo));
+                }
+                Side::Ascii => text.push(model::ascii_char(value)),
+            }
+        }
+        Ok(Done::Copied(text))
+    }
+}
+
+/// The bytes a copy takes, clipped to a file of `len` (not 0) bytes: the selection, else the
+/// caret's byte.
+fn copy_range(m: &HexModel, len: u64) -> (u64, u64) {
+    match m.caret.selection() {
+        Some(r) => (r.start.min(len - 1), r.end.min(len)),
+        None => {
+            let at = m.caret.offset.min(len - 1);
+            (at, at + 1)
+        }
     }
 }
 
@@ -192,7 +342,7 @@ mod tests {
 
     use super::super::test_support::{Counting, paged, wait};
     use super::*;
-    use crate::ui::code_editor::hex::model::{Byte, PAGE};
+    use crate::ui::code_editor::hex::model::Byte;
 
     const PAGE_ROWS: u64 = (PAGE / 16) as u64;
 
@@ -325,6 +475,80 @@ mod tests {
         data.read_with(vcx, |d, _| {
             assert_eq!(d.len(), Some(100_000));
             assert!(matches!(byte(d, 99_999), Byte::Loaded { value: 7, .. }));
+        });
+    }
+
+    fn caret_at(data: &Entity<HexData>, vcx: &mut gpui::VisualTestContext, off: u64) {
+        data.update(vcx, |d, _| {
+            if let HexContent::Ready(m) = &mut d.content {
+                m.caret.offset = off;
+            }
+        });
+    }
+
+    /// A document that is too large refuses every op and changes nothing. Guards the `Ready`
+    /// check at the top of `run`.
+    #[gpui::test]
+    fn a_too_large_document_refuses_every_op(cx: &mut TestAppContext) {
+        let host = Counting::new();
+        let loaded = HexLoaded::TooLarge {
+            path: PathBuf::from("/x/big.bin"),
+            len: 10,
+            limit: 5,
+        };
+        let (data, vcx) = with_window(cx, HexData::from_loaded(host, loaded));
+        for op in [
+            Op::Hex(b'4'),
+            Op::Ascii('a'),
+            Op::Paste(vec![1]),
+            Op::Undo,
+            Op::Redo,
+            Op::Copy,
+        ] {
+            let got = data.update(vcx, |d, cx| d.run(&op, cx));
+            assert_eq!(
+                got,
+                Err(Failure::Edit(EditRefusal::NothingToEdit)),
+                "{op:?}"
+            );
+        }
+        data.read_with(vcx, |d, _| assert!(!d.dirty()));
+    }
+
+    /// A paste across a page edge needs both pages, a typed key only the caret's, and copy the
+    /// selection's. Guards the spans in `pages_missing_for`.
+    #[gpui::test]
+    fn the_pages_an_op_needs_are_the_ones_it_touches(cx: &mut TestAppContext) {
+        let host = Counting::new();
+        let page = PAGE as u64;
+        let (data, _dir) = paged(page * 4, &[], &host);
+        let (data, vcx) = with_window(cx, data);
+        caret_at(&data, vcx, 2 * page - 1);
+        data.read_with(vcx, |d, _| {
+            assert_eq!(d.pages_missing_for(&Op::Hex(b'4')), vec![1]);
+            assert_eq!(d.pages_missing_for(&Op::Paste(vec![1, 2])), vec![1, 2]);
+            assert_eq!(d.pages_missing_for(&Op::Paste(vec![1])), vec![1]);
+            assert_eq!(d.pages_missing_for(&Op::Copy), vec![1]);
+            assert!(d.pages_missing_for(&Op::Undo).is_empty());
+        });
+    }
+
+    /// Copy refuses a selection over the limit and one whose pages are not read yet. Guards
+    /// `COPY_LIMIT` and the `NotLoaded` arm of `copy_text`.
+    #[gpui::test]
+    fn copy_refuses_a_huge_or_unread_selection(cx: &mut TestAppContext) {
+        let host = Counting::new();
+        let (data, _dir) = paged(COPY_LIMIT * 4, &[], &host);
+        let (data, vcx) = with_window(cx, data);
+        caret_at(&data, vcx, 2 * PAGE as u64);
+        let got = data.update(vcx, |d, cx| d.run(&Op::Copy, cx));
+        assert_eq!(got, Err(Failure::Edit(EditRefusal::NotLoaded)));
+        data.update(vcx, |d, cx| {
+            if let HexContent::Ready(m) = &mut d.content {
+                m.caret.offset = COPY_LIMIT;
+                m.caret.anchor = Some(0);
+            }
+            assert_eq!(d.run(&Op::Copy, cx), Err(Failure::CopyTooLarge));
         });
     }
 

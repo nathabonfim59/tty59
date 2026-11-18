@@ -2674,6 +2674,17 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexStatusOffset => "Смещение {hex} ({dec})",
         L10nKey::HexStatusSelection => "Выбрано {count}",
         L10nKey::HexStatusSize => "Размер {size}",
+        L10nKey::HexEditEmpty => "Файл пуст, редактировать нечего",
+        L10nKey::HexEditOverwriteOnly => {
+            "Редактор только перезаписывает байты, вставлять и удалять нельзя"
+        }
+        L10nKey::HexCopyTooLarge => "Выделено больше {limit}, слишком много для копирования",
+        L10nKey::HexPasteNotHex => {
+            "В буфере обмена нет шестнадцатеричных байтов, ничего не вставлено"
+        }
+        L10nKey::HexPasteTruncated => {
+            "Вставлено байтов: {written}, не поместилось за концом файла: {left}"
+        }
         L10nKey::HexTooLarge => {
             "«{name}» занимает {size} МиБ, больше {limit} МиБ, доступных по соединению"
         }

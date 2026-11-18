@@ -2025,6 +2025,11 @@ l10n_keys! {
     HexStatusOffset,
     HexStatusSelection,
     HexStatusSize,
+    HexEditEmpty,
+    HexEditOverwriteOnly,
+    HexCopyTooLarge,
+    HexPasteNotHex,
+    HexPasteTruncated,
     HexTooLarge,
     // B3-E: editor status, empty hint and gutter peek.
     LspMissingBody,
