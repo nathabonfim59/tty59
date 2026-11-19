@@ -432,7 +432,7 @@ impl SearchSnapshot {
 impl HexData {
     /// Whether the document reads its file in parts, so a save writes only the runs that
     /// were edited.
-    pub(super) fn paged(&self) -> bool {
+    pub(in crate::ui::code_editor) fn paged(&self) -> bool {
         matches!(&self.content, HexContent::Ready(m) if matches!(m.store.source(), Source::Paged { .. }))
     }
 

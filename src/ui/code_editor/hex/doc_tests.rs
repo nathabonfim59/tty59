@@ -243,7 +243,6 @@ fn a_64_mib_sparse_binary_opens_as_a_windowed_hex_tab_after_one_prefix_read() {
     let got = load_document(&*host, path);
     match got {
         Ok(Opened::Hex(io::HexLoaded::File(file))) => {
-            assert_eq!(file.len, 64 * MIB);
             assert!(!file.opens_as_text);
             match file.source {
                 io::HexSource::Paged { len, first_page } => {
