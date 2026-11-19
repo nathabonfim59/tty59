@@ -472,7 +472,8 @@ fn a_forced_paged_save_rereads_the_pages_it_cached(cx: &mut TestAppContext) {
         HexContent::Ready(m) => m.caret.offset,
         HexContent::TooLarge { .. } => panic!("too large"),
     });
-    assert_eq!(caret, 5, "the caret stays where the edit left it");
+    // Two digits complete the byte at 5 and advance the caret to 6; the save must not move it.
+    assert_eq!(caret, 6, "the caret stays where the edit left it");
 }
 
 /// The conflict prompt of a paged document says that only the edited bytes are written; a
