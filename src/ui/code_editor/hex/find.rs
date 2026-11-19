@@ -6,10 +6,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use gpui::prelude::*;
 use gpui::{AnyElement, Window};
 use gpui_component::button::ButtonVariants as _;
-use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _, h_flex};
+use gpui_component::{Selectable as _, h_flex};
 
 use super::data::HexContent;
 use super::model::{self, OffsetError, PatternError};
@@ -82,6 +81,26 @@ impl Drop for Search {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
     }
+}
+
+/// What one Enter or F3 asks of a search.
+struct Ask<'a> {
+    id: BufferId,
+    mode: FindMode,
+    text: &'a str,
+    forward: bool,
+    /// Started from a key in the view: see [`Search::refocus`].
+    refocus: bool,
+}
+
+/// What a search remembers of how it was asked, to tell on its return whether it is wanted.
+struct Sent {
+    id: BufferId,
+    seq: u64,
+    /// The reading of the file it searched.
+    generation: u64,
+    /// The pattern's length, which is how much to select.
+    len: u64,
 }
 
 /// What a hex bar holds besides its field.
@@ -265,7 +284,14 @@ impl Tty59App {
                 (mode, text)
             }
         };
-        self.hex_find(id, mode, &text, forward, true, window, cx);
+        let ask = Ask {
+            id,
+            mode,
+            text: &text,
+            forward,
+            refocus: true,
+        };
+        self.hex_find(ask, window, cx);
     }
 
     /// Enter in the find bar.
@@ -278,19 +304,24 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.hex_find(id, mode, text, forward, false, window, cx);
+        let ask = Ask {
+            id,
+            mode,
+            text,
+            forward,
+            refocus: false,
+        };
+        self.hex_find(ask, window, cx);
     }
 
-    fn hex_find(
-        &mut self,
-        id: BufferId,
-        mode: FindMode,
-        text: &str,
-        forward: bool,
-        refocus: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn hex_find(&mut self, ask: Ask<'_>, window: &mut Window, cx: &mut Context<Self>) {
+        let Ask {
+            id,
+            mode,
+            text,
+            forward,
+            refocus,
+        } = ask;
         let pattern = match pattern_of(mode, text) {
             Ok(pattern) => pattern,
             Err(e) => {
@@ -331,7 +362,13 @@ impl Tty59App {
             cx,
             move |h| snapshot.find(h, &pattern, from, forward, &cancel),
             move |app, found, window, cx| {
-                app.hex_found(id, seq, generation, len, found, window, cx)
+                let sent = Sent {
+                    id,
+                    seq,
+                    generation,
+                    len,
+                };
+                app.hex_found(sent, found, window, cx)
             },
         );
     }
@@ -340,14 +377,17 @@ impl Tty59App {
     /// the file is still the one it read.
     fn hex_found(
         &mut self,
-        id: BufferId,
-        seq: u64,
-        generation: u64,
-        len: u64,
+        sent: Sent,
         found: std::io::Result<Option<u64>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Sent {
+            id,
+            seq,
+            generation,
+            len,
+        } = sent;
         let Some(bar) = self.editor.bar.as_mut() else {
             return;
         };

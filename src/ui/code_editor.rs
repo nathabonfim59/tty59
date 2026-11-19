@@ -2541,7 +2541,6 @@ impl Tty59App {
                         cx.notify();
                     }
                     InputEvent::Focus => cx.notify(),
-                    _ => {}
                 }
             },
         );
