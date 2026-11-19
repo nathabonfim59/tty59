@@ -277,13 +277,8 @@ impl Tty59App {
             .map(HexDoc::id)
     }
 
-    /// What the tests of the file panels outside this module can see of the hex tabs: how many
-    /// opens are still being read, and whether a document is open for a place.
-    #[cfg(test)]
-    pub(crate) fn hex_opens_pending(&self) -> usize {
-        self.editor.hex.requests.len()
-    }
-
+    /// What the tests of the file panels outside this module can see of the hex tabs: whether a
+    /// document is open for a place.
     #[cfg(test)]
     pub(crate) fn hex_is_open_at(&self, host: HostId, path: &Path) -> bool {
         self.hex_at(host, path).is_some()
