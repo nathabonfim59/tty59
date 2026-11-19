@@ -1447,7 +1447,6 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorWrapOn => "Перенос: вкл.",
         L10nKey::EditorWrapOff => "Перенос: выкл.",
         L10nKey::EditorFileTooLarge => "«{path}» слишком велик для редактора ({size} МБ)",
-        L10nKey::EditorBinaryFile => "«{path}» похож на двоичный файл",
         L10nKey::EditorUntitled => "Без имени-{n}",
         L10nKey::EditorUnsavedChangesMany => "Файлов с несохранёнными изменениями: {count}",
         L10nKey::EditorSaveAll => "Сохранить все",
@@ -2670,6 +2669,51 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopy => "Копировать изображение",
         L10nKey::CmdImageCopy => "Копировать изображение",
         L10nKey::CmdImageDownload => "Скачать изображение",
+        L10nKey::CmdOpenAsHex => "Открыть как hex",
+        L10nKey::CmdOpenAsText => "Открыть как текст",
+        L10nKey::HexStatusOffset => "Смещение {hex} ({dec})",
+        L10nKey::HexStatusSelection => "Выбрано {count}",
+        L10nKey::HexStatusSize => "Размер {size}",
+        L10nKey::HexEditEmpty => "Файл пуст, редактировать нечего",
+        L10nKey::HexEditOverwriteOnly => {
+            "Редактор только перезаписывает байты, вставлять и удалять нельзя"
+        }
+        L10nKey::HexCopyTooLarge => "Выделено больше {limit}, слишком много для копирования",
+        L10nKey::HexPasteNotHex => {
+            "В буфере обмена нет шестнадцатеричных байтов, ничего не вставлено"
+        }
+        L10nKey::HexPasteTruncated => {
+            "Вставлено байтов: {written}, не поместилось за концом файла: {left}"
+        }
+        L10nKey::HexTooLarge => {
+            "«{name}» занимает {size} МиБ, больше {limit} МиБ, доступных по соединению"
+        }
+        L10nKey::HexSavePartlyWritten => {
+            "Файл мог быть записан частично. Повторное сохранение перезапишет все изменения."
+        }
+        L10nKey::HexSaveConflictBody => {
+            "Другая программа изменила файл после открытия. Перезапись запишет только изменённые вами байты, остальные изменения останутся."
+        }
+        L10nKey::HexGoToOffset => "Перейти к смещению",
+        L10nKey::HexGoToOffsetPlaceholder => "Смещение: 0x1F, 31, +16, -16",
+        L10nKey::HexOffsetEmpty => "Введите смещение",
+        L10nKey::HexOffsetInvalid => "Это не смещение: используйте 0x1F, 1Fh, 31, +16 или -16",
+        L10nKey::HexOffsetOutOfRange => "За пределами файла, в нём {len} байт",
+        L10nKey::HexFind => "Найти",
+        L10nKey::HexFindHexPlaceholder => "Байты в hex: de ad be ef",
+        L10nKey::HexFindTextPlaceholder => "Текст для поиска",
+        L10nKey::HexFindModeHex => "HEX",
+        L10nKey::HexFindModeText => "Текст",
+        L10nKey::HexFindSearching => "Поиск…",
+        L10nKey::HexFindNotFound => "Не найдено",
+        L10nKey::HexFindFailed => "Поиск не смог прочитать файл: {e}",
+        L10nKey::HexPatternEmpty => "Введите байты для поиска",
+        L10nKey::HexPatternOddDigits => "Байты в hex записываются парами цифр",
+        L10nKey::HexPatternInvalidDigit => "В hex-байтах допустимы только цифры 0-9 и A-F",
+        L10nKey::EditorSaveSiblingTitle => "В другой вкладке «{name}» есть несохранённые изменения",
+        L10nKey::EditorSaveSiblingBody => {
+            "Сохранение здесь запишет файл без этих изменений, и другая вкладка увидит файл изменённым."
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "Не удалось запустить {name}. tty59 ищет в PATH: {programs}. Проверьте, что сервер {name} установлен и запускается."

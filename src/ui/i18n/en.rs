@@ -1334,7 +1334,6 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::EditorWrapOn => "Wrap: on",
         L10nKey::EditorWrapOff => "Wrap: off",
         L10nKey::EditorFileTooLarge => "\"{path}\" is too large for the editor ({size} MB)",
-        L10nKey::EditorBinaryFile => "\"{path}\" looks like a binary file",
         L10nKey::EditorUntitled => "Untitled-{n}",
         L10nKey::EditorUnsavedChangesMany => "{count} files have unsaved changes",
         L10nKey::EditorSaveAll => "Save All",
@@ -2572,6 +2571,47 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ImageCopy => "Copy Image",
         L10nKey::CmdImageCopy => "Copy Image",
         L10nKey::CmdImageDownload => "Download Image",
+        L10nKey::CmdOpenAsHex => "Open as Hex",
+        L10nKey::CmdOpenAsText => "Open as Text",
+        L10nKey::HexStatusOffset => "Offset {hex} ({dec})",
+        L10nKey::HexStatusSelection => "Sel {count}",
+        L10nKey::HexStatusSize => "Size {size}",
+        L10nKey::HexEditEmpty => "This file is empty, so there is no byte to edit",
+        L10nKey::HexEditOverwriteOnly => "This editor overwrites bytes, it cannot insert or delete",
+        L10nKey::HexCopyTooLarge => "The selection is over {limit}, too much to copy",
+        L10nKey::HexPasteNotHex => "The clipboard does not hold hex bytes, nothing was pasted",
+        L10nKey::HexPasteTruncated => {
+            "Pasted {written} bytes, left out {left} that ran past the end of the file"
+        }
+        L10nKey::HexTooLarge => {
+            "\"{name}\" is {size} MiB, over the {limit} MiB that can be opened over a connection"
+        }
+        L10nKey::HexSavePartlyWritten => {
+            "The file may be partly written. Saving again rewrites every change."
+        }
+        L10nKey::HexSaveConflictBody => {
+            "Another program changed it after it was opened here. Overwriting writes only the bytes you edited; its other changes stay."
+        }
+        L10nKey::HexGoToOffset => "Go to offset",
+        L10nKey::HexGoToOffsetPlaceholder => "Offset: 0x1F, 31, +16, -16",
+        L10nKey::HexOffsetEmpty => "Type an offset",
+        L10nKey::HexOffsetInvalid => "Not an offset: use 0x1F, 1Fh, 31, +16 or -16",
+        L10nKey::HexOffsetOutOfRange => "That is outside the file, which has {len} bytes",
+        L10nKey::HexFind => "Find",
+        L10nKey::HexFindHexPlaceholder => "Hex bytes: de ad be ef",
+        L10nKey::HexFindTextPlaceholder => "Text to find",
+        L10nKey::HexFindModeHex => "Hex",
+        L10nKey::HexFindModeText => "Text",
+        L10nKey::HexFindSearching => "Searching…",
+        L10nKey::HexFindNotFound => "Not found",
+        L10nKey::HexFindFailed => "The search could not read the file: {e}",
+        L10nKey::HexPatternEmpty => "Type the bytes to find",
+        L10nKey::HexPatternOddDigits => "Hex bytes come in pairs of digits",
+        L10nKey::HexPatternInvalidDigit => "Hex bytes use only the digits 0-9 and A-F",
+        L10nKey::EditorSaveSiblingTitle => "Another tab of \"{name}\" has unsaved changes",
+        L10nKey::EditorSaveSiblingBody => {
+            "Saving here writes the file without them, and that tab will then see the file as changed."
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} could not be started. tty59 looks on PATH for: {programs}. Make sure {name} is installed and can run."

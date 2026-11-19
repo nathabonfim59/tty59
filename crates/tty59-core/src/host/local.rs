@@ -10,9 +10,33 @@ use notify::{RecursiveMode, Watcher};
 use crate::core::git;
 use crate::core::gitignore::GitignoreChain;
 use crate::host::{
-    ContentLimits, ContentQuery, ContentResults, Entry, Host, HostId, MTime, Meta, Output,
-    SearchHit, SharedHost, ShellInventory, WatchHandle, WatchSub, guard_off_ui,
+    Changed, ContentLimits, ContentQuery, ContentResults, Entry, Expect, Host, HostId, MTime, Meta,
+    Output, SearchHit, SharedHost, ShellInventory, WatchHandle, WatchSub, guard_off_ui,
 };
+
+/// One positioned read, which leaves the file's own cursor alone.
+fn read_at(file: &fs::File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::read_at(file, buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_read(file, buf, offset)
+    }
+}
+
+/// One positioned write, the counterpart of [`read_at`].
+fn write_at(file: &fs::File, buf: &[u8], offset: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::FileExt::write_at(file, buf, offset)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::FileExt::seek_write(file, buf, offset)
+    }
+}
 
 const COALESCE_WINDOW: Duration = Duration::from_millis(100);
 
@@ -199,6 +223,78 @@ impl Host for LocalHost {
             ));
         }
         Ok(bytes)
+    }
+
+    fn read_range(&self, p: &Path, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        guard_off_ui();
+        if fs::metadata(p)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::IsADirectory,
+                format!("{} is a directory", p.display()),
+            ));
+        }
+        let file = fs::File::open(p)?;
+        // What the caller asked for is only a ceiling: a request for a page
+        // of a small file must not reserve the page.
+        let available = file.metadata()?.len().saturating_sub(offset);
+        let mut bytes = vec![0u8; len.min(usize::try_from(available).unwrap_or(usize::MAX))];
+        let mut filled = 0;
+        while filled < bytes.len() {
+            match read_at(&file, &mut bytes[filled..], offset + filled as u64) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        // The file may have shrunk since the size was read.
+        bytes.truncate(filled);
+        Ok(bytes)
+    }
+
+    fn write_ranges(
+        &self,
+        p: &Path,
+        patches: &[(u64, Vec<u8>)],
+        expect: Expect,
+    ) -> io::Result<Meta> {
+        guard_off_ui();
+        // Opened first and judged by what was opened: a stat of the path
+        // could be answering for a file that has been swapped since.
+        let file = fs::OpenOptions::new().write(true).open(p)?;
+        let md = file.metadata()?;
+        let mtime = md.modified().ok().map(MTime::from_system_time);
+        if md.len() != expect.len || mtime != expect.mtime {
+            return Err(io::Error::other(Changed { mtime }));
+        }
+        for (offset, bytes) in patches {
+            let end = u64::try_from(bytes.len())
+                .ok()
+                .and_then(|n| offset.checked_add(n));
+            if end.is_none_or(|end| end > md.len()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "{} bytes at offset {offset} reach past the end of {}",
+                        bytes.len(),
+                        p.display()
+                    ),
+                ));
+            }
+        }
+        for (offset, bytes) in patches {
+            let mut done = 0;
+            while done < bytes.len() {
+                match write_at(&file, &bytes[done..], offset + done as u64) {
+                    Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                    Ok(n) => done += n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        file.sync_all()?;
+        self.stat(p)
     }
 
     /// The real path behind `p`, in the spelling the rest of tty59 keys by.
@@ -808,6 +904,133 @@ mod tests {
             .read_file(&dir.path().join("missing"), 1024)
             .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    }
+
+    #[test]
+    fn read_range_answers_mid_file_at_the_end_and_past_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = LocalHost::new();
+        let path = dir.path().join("ten.bin");
+        std::fs::write(&path, (0u8..10).collect::<Vec<_>>()).unwrap();
+
+        assert_eq!(host.read_range(&path, 3, 4).unwrap(), vec![3, 4, 5, 6]);
+        // Cut short by the end of the file, not an error.
+        assert_eq!(host.read_range(&path, 8, 100).unwrap(), vec![8, 9]);
+        assert_eq!(host.read_range(&path, 10, 4).unwrap(), Vec::<u8>::new());
+        assert_eq!(
+            host.read_range(&path, 1 << 40, 4).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(host.read_range(&path, 0, 0).unwrap(), Vec::<u8>::new());
+        // A huge request against a small file reads the file, not the request.
+        assert_eq!(host.read_range(&path, 0, usize::MAX).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn read_range_keeps_its_refusals() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = LocalHost::new();
+        let err = host.read_range(dir.path(), 0, 8).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::IsADirectory, "{err}");
+        let err = host
+            .read_range(&dir.path().join("missing"), 0, 8)
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+    }
+
+    fn expecting(host: &dyn Host, path: &Path) -> Expect {
+        let meta = host.stat(path).unwrap();
+        Expect {
+            len: meta.len,
+            mtime: meta.mtime,
+        }
+    }
+
+    #[test]
+    fn write_ranges_writes_only_the_runs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = LocalHost::new();
+        let path = dir.path().join("sixteen.bin");
+        std::fs::write(&path, [0u8; 16]).unwrap();
+
+        let expect = expecting(&*host, &path);
+        let meta = host
+            .write_ranges(&path, &[(2, vec![1, 2]), (15, vec![9])], expect)
+            .unwrap();
+
+        let mut want = [0u8; 16];
+        want[2] = 1;
+        want[3] = 2;
+        want[15] = 9;
+        assert_eq!(std::fs::read(&path).unwrap(), want);
+        assert_eq!(meta.len, 16, "the file is never resized");
+        assert_eq!(meta, host.stat(&path).unwrap());
+    }
+
+    #[test]
+    fn write_ranges_refuses_a_file_that_changed_and_writes_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = LocalHost::new();
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [0u8; 8]).unwrap();
+        let good = expecting(&*host, &path);
+
+        let wrong_len = Expect {
+            len: good.len + 1,
+            ..good
+        };
+        let wrong_mtime = Expect {
+            mtime: Some(MTime { secs: 1, nanos: 0 }),
+            ..good
+        };
+        for expect in [wrong_len, wrong_mtime] {
+            let err = host
+                .write_ranges(&path, &[(0, vec![0xff])], expect)
+                .unwrap_err();
+            let changed = Changed::of(&err).expect("recognised without string matching");
+            assert_eq!(changed.mtime, good.mtime, "carries what the file has now");
+            assert_eq!(std::fs::read(&path).unwrap(), [0u8; 8]);
+        }
+        // The same call with the right expectation goes through.
+        host.write_ranges(&path, &[(0, vec![0xff])], good).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap()[0], 0xff);
+    }
+
+    #[test]
+    fn write_ranges_refuses_a_run_past_the_end_before_writing_any() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = LocalHost::new();
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [0u8; 8]).unwrap();
+        let expect = expecting(&*host, &path);
+
+        for bad in [(7u64, vec![1u8, 2]), (8, vec![1]), (u64::MAX, vec![1, 2])] {
+            // The first run is fine; the second must stop it from landing.
+            let err = host
+                .write_ranges(&path, &[(0, vec![0xff]), bad], expect)
+                .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+            assert!(Changed::of(&err).is_none());
+            assert_eq!(std::fs::read(&path).unwrap(), [0u8; 8]);
+        }
+        // Ending exactly at the end is inside the file.
+        host.write_ranges(&path, &[(6, vec![1, 2])], expect)
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap()[6..], [1, 2]);
+    }
+
+    #[test]
+    fn write_ranges_does_not_create_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let host = LocalHost::new();
+        let path = dir.path().join("missing.bin");
+        let expect = Expect {
+            len: 0,
+            mtime: None,
+        };
+        let err = host.write_ranges(&path, &[], expect).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
+        assert!(!path.exists());
     }
 
     #[test]

@@ -1402,7 +1402,6 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorWrapOn => "折り返し: オン",
         L10nKey::EditorWrapOff => "折り返し: オフ",
         L10nKey::EditorFileTooLarge => "「{path}」はエディタで開くには大きすぎます（{size} MB）",
-        L10nKey::EditorBinaryFile => "「{path}」はバイナリファイルのようです",
         L10nKey::EditorUntitled => "無題-{n}",
         L10nKey::EditorUnsavedChangesMany => "{count} 個のファイルに未保存の変更があります",
         L10nKey::EditorSaveAll => "すべて保存",
@@ -2652,6 +2651,49 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopy => "画像をコピー",
         L10nKey::CmdImageCopy => "画像をコピー",
         L10nKey::CmdImageDownload => "画像をダウンロード",
+        L10nKey::CmdOpenAsHex => "16進数で開く",
+        L10nKey::CmdOpenAsText => "テキストで開く",
+        L10nKey::HexStatusOffset => "オフセット {hex}（{dec}）",
+        L10nKey::HexStatusSelection => "選択 {count}",
+        L10nKey::HexStatusSize => "サイズ {size}",
+        L10nKey::HexEditEmpty => "ファイルが空のため、編集できるバイトがありません",
+        L10nKey::HexEditOverwriteOnly => "このエディターは上書きのみで、挿入や削除はできません",
+        L10nKey::HexCopyTooLarge => "選択範囲が {limit} を超えているためコピーできません",
+        L10nKey::HexPasteNotHex => "クリップボードに16進バイトがないため、貼り付けませんでした",
+        L10nKey::HexPasteTruncated => {
+            "{written} バイトを貼り付け、ファイルの末尾を超えた {left} バイトは除外しました"
+        }
+        L10nKey::HexTooLarge => {
+            "「{name}」は {size} MiB で、接続越しに開ける上限 {limit} MiB を超えています"
+        }
+        L10nKey::HexSavePartlyWritten => {
+            "ファイルが一部だけ書き込まれた可能性があります。もう一度保存すると、すべての変更が書き直されます。"
+        }
+        L10nKey::HexSaveConflictBody => {
+            "ここで開いた後に別のプログラムが変更しました。上書きすると、あなたが編集したバイトだけが書き込まれ、その他の変更は残ります。"
+        }
+        L10nKey::HexGoToOffset => "オフセットへ移動",
+        L10nKey::HexGoToOffsetPlaceholder => "オフセット：0x1F、31、+16、-16",
+        L10nKey::HexOffsetEmpty => "オフセットを入力してください",
+        L10nKey::HexOffsetInvalid => {
+            "オフセットではありません：0x1F、1Fh、31、+16、-16 の形式で入力してください"
+        }
+        L10nKey::HexOffsetOutOfRange => "ファイルの範囲外です（ファイルは {len} バイト）",
+        L10nKey::HexFind => "検索",
+        L10nKey::HexFindHexPlaceholder => "16進バイト：de ad be ef",
+        L10nKey::HexFindTextPlaceholder => "検索する文字列",
+        L10nKey::HexFindModeHex => "16進",
+        L10nKey::HexFindModeText => "テキスト",
+        L10nKey::HexFindSearching => "検索中…",
+        L10nKey::HexFindNotFound => "見つかりません",
+        L10nKey::HexFindFailed => "検索中にファイルを読み取れませんでした：{e}",
+        L10nKey::HexPatternEmpty => "検索するバイトを入力してください",
+        L10nKey::HexPatternOddDigits => "16進バイトは2桁ずつで入力してください",
+        L10nKey::HexPatternInvalidDigit => "16進バイトに使えるのは 0-9 と A-F だけです",
+        L10nKey::EditorSaveSiblingTitle => "「{name}」の別のタブに未保存の変更があります",
+        L10nKey::EditorSaveSiblingBody => {
+            "ここで保存すると、その変更を含まない内容が書き込まれ、もう一方のタブにはファイルが変更されたと表示されます。"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "{name} を起動できませんでした。tty59 は PATH 上で次を探します：{programs}。{name} がインストールされ、実行できることを確認してください。"
