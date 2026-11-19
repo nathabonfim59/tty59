@@ -278,8 +278,8 @@ impl Tty59App {
     }
 
     /// What the tests of the file panels outside this module can see of the hex tabs: whether a
-    /// document is open for a place.
-    #[cfg(test)]
+    /// document is open for a place. Only the Unix-gated SFTP test reads it.
+    #[cfg(all(test, unix))]
     pub(crate) fn hex_is_open_at(&self, host: HostId, path: &Path) -> bool {
         self.hex_at(host, path).is_some()
     }

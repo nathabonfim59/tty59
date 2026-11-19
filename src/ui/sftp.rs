@@ -3296,6 +3296,8 @@ mod gpui_tests {
         }
     }
 
+    // Only the Unix-gated test below uses it.
+    #[cfg(unix)]
     fn row_entry(
         name: &str,
         kind: crate::daemon::protocol::SftpEntryKind,
