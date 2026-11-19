@@ -489,7 +489,7 @@ impl Tty59App {
                 crate::ui::code_editor::status::probe(
                     div()
                         .id("editor-bar-note")
-                        .flex_shrink()
+                        .flex_shrink(1.)
                         .min_w_0()
                         .truncate()
                         .text_size(gpui::rems(crate::ui::right_panel::META))
