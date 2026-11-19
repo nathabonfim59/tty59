@@ -218,6 +218,18 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             // macOS, Ctrl elsewhere, and redo is Cmd+Shift+Z / Ctrl+Y.
             KeyBinding::new("secondary-c", HexCopy, hex),
             KeyBinding::new("secondary-v", HexPaste, hex),
+            // Go to line's chord is Ctrl+G everywhere, find's is the text editor's, and next
+            // and previous are the terminal's search chords (F3 / Shift+F3, and Cmd+G /
+            // Cmd+Shift+G on macOS), so the same keys search wherever a search is.
+            KeyBinding::new("ctrl-g", HexGoToOffset, hex),
+            KeyBinding::new("secondary-f", HexFind, hex),
+            KeyBinding::new("f3", HexFindNext, hex),
+            KeyBinding::new("shift-f3", HexFindPrevious, hex),
+        ]);
+        #[cfg(target_os = "macos")]
+        bindings.extend([
+            KeyBinding::new("cmd-g", HexFindNext, hex),
+            KeyBinding::new("cmd-shift-g", HexFindPrevious, hex),
         ]);
         #[cfg(target_os = "macos")]
         bindings.extend([
@@ -3587,6 +3599,81 @@ mod gpui_tests {
                     want.name()
                 );
             }
+        });
+    }
+
+    /// Go to offset, find, next and previous run their hex actions in the hex view only; in the
+    /// text editor the same chords keep their own jobs (Ctrl+G go to line, Find's chord the
+    /// editor's search panel) and in a terminal they stay the terminal's. The text editor has no
+    /// F3: its next/previous are Enter / Shift+Enter in the search panel, which the hex find
+    /// bar answers too. Guards the four bindings (and two macOS ones) the hex block adds.
+    #[gpui::test]
+    fn the_hex_find_chords_win_only_inside_the_hex_view(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let first = |keys: &str, stack: &[&str]| {
+                let input = vec![Keystroke::parse(keys).expect("the typed keystroke parses")];
+                let stack: Vec<gpui::KeyContext> = stack
+                    .iter()
+                    .map(|c| gpui::KeyContext::parse(c).expect("the context parses"))
+                    .collect();
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().boxed_clone())
+            };
+            let hex = ["Workspace", "EditorDocument HexEditor"];
+            let text = ["Workspace", "Input CodeEditor"];
+            let terminal = ["Workspace", "Terminal"];
+            let find = if cfg!(target_os = "macos") {
+                "cmd-f"
+            } else {
+                "ctrl-f"
+            };
+            let mut table: Vec<(&str, Box<dyn gpui::Action>)> = vec![
+                ("ctrl-g", Box::new(HexGoToOffset)),
+                (find, Box::new(HexFind)),
+                ("f3", Box::new(HexFindNext)),
+                ("shift-f3", Box::new(HexFindPrevious)),
+            ];
+            if cfg!(target_os = "macos") {
+                table.push(("cmd-g", Box::new(HexFindNext)));
+                table.push(("cmd-shift-g", Box::new(HexFindPrevious)));
+            }
+            for (keys, want) in &table {
+                let got = first(keys, &hex);
+                assert!(
+                    got.as_ref().is_some_and(|a| a.partial_eq(want.as_ref())),
+                    "{keys} in the hex view runs {}",
+                    want.name()
+                );
+                for (what, stack) in [("the text editor", &text), ("a terminal", &terminal)] {
+                    let outside = first(keys, stack);
+                    assert!(
+                        !outside
+                            .as_ref()
+                            .is_some_and(|a| a.partial_eq(want.as_ref())),
+                        "{keys} in {what} is not {}",
+                        want.name()
+                    );
+                }
+            }
+            let ctrl_g = first("ctrl-g", &text);
+            assert!(
+                ctrl_g
+                    .as_ref()
+                    .is_some_and(|a| a.partial_eq(&EditorGoToLine)),
+                "Ctrl+G in the text editor still goes to a line"
+            );
+            let search = first(find, &text);
+            assert!(
+                search
+                    .as_ref()
+                    .is_some_and(|a| a.partial_eq(&gpui_component::input::Search)),
+                "and the find chord still opens its search panel"
+            );
         });
     }
 

@@ -198,6 +198,13 @@ pub struct LaunchAgent {
 
 actions!(tty59, [HexToggleSide, HexUndo, HexRedo, HexCopy, HexPaste]);
 
+// Go to offset and find. They open the editor's bar and search, so the app handles them, not
+// the view.
+actions!(
+    tty59,
+    [HexGoToOffset, HexFind, HexFindNext, HexFindPrevious]
+);
+
 /// Where a hex caret goes. The model's own moves, one per motion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HexMotion {

@@ -2,15 +2,19 @@
 //! The entity is the document; what is shown of it, and where the caret is looking, belongs to
 //! a [`super::view::HexView`], so a file open in two groups shares its pages and its edits.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use gpui::{Context, SharedString, Window};
-use tty59_core::host::{MTime, SharedHost};
+use tty59_core::host::{Host, MTime, SharedHost};
 
 use super::io::{self, HexLoaded, HexSource};
-use super::model::{self, EditRefusal, HexModel, PAGE, PasteResult, ROW, Side, Source};
+use super::model::{
+    self, ByteSource, EditRefusal, FIND_CHUNK, HexModel, Overlaid, PAGE, PasteResult, ROW, Side,
+    Source,
+};
 use crate::ui::code_editor::DiskConflict;
 use crate::ui::host_ops::HostOps;
 
@@ -349,6 +353,101 @@ fn copy_range(m: &HexModel, len: u64) -> (u64, u64) {
             let at = m.caret.offset.min(len - 1);
             (at, at + 1)
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Search: what a find reads, taken on the UI thread so the thread that runs it needs nothing
+// from the document. Kept in a block of its own.
+
+/// A paged document's file, read through the host in whatever sizes the search asks for.
+struct HostBytes<'a> {
+    host: &'a dyn Host,
+    path: &'a Path,
+    len: u64,
+}
+
+impl ByteSource for HostBytes<'_> {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read(&self, off: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        let bytes = self.host.read_range(self.path, off, buf.len())?;
+        let n = bytes.len().min(buf.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        Ok(n)
+    }
+}
+
+/// The bytes a search looks through as they were when it began: the file, with a copy of the
+/// unsaved edits laid over it, so what is found is what the view shows.
+pub(super) struct SearchSnapshot {
+    source: Source,
+    overlay: BTreeMap<u64, u8>,
+    path: PathBuf,
+    /// Whether reading all of it takes more than one chunk, which is when "Searching…" is worth
+    /// saying.
+    pub(super) large: bool,
+    pub(super) generation: u64,
+    /// Where the caret was, the search's starting point.
+    pub(super) caret: u64,
+}
+
+impl SearchSnapshot {
+    /// First match of `pat` from `from` on the host's thread: forward or backward, wrapping
+    /// once. A whole document never touches the host.
+    pub(super) fn find(
+        &self,
+        host: &dyn Host,
+        pat: &[u8],
+        from: u64,
+        forward: bool,
+        cancel: &AtomicBool,
+    ) -> std::io::Result<Option<u64>> {
+        match &self.source {
+            Source::Whole(bytes) => {
+                let src = Overlaid {
+                    src: &**bytes,
+                    overlay: &self.overlay,
+                };
+                model::find(&src, pat, from, forward, true, cancel)
+            }
+            Source::Paged { len } => {
+                let file = HostBytes {
+                    host,
+                    path: &self.path,
+                    len: *len,
+                };
+                let src = Overlaid {
+                    src: &file,
+                    overlay: &self.overlay,
+                };
+                model::find(&src, pat, from, forward, true, cancel)
+            }
+        }
+    }
+}
+
+impl HexData {
+    /// What a search needs, or `None` for a file that is too large to open.
+    pub(super) fn search_snapshot(&self) -> Option<SearchSnapshot> {
+        let HexContent::Ready(m) = &self.content else {
+            return None;
+        };
+        let source = m.store.source().clone();
+        let large = match &source {
+            Source::Paged { len } => *len > u64::try_from(FIND_CHUNK).unwrap_or(u64::MAX),
+            Source::Whole(_) => false,
+        };
+        Some(SearchSnapshot {
+            source,
+            overlay: m.store.overlay().clone(),
+            path: self.path.clone(),
+            large,
+            generation: m.store.generation(),
+            caret: m.caret.offset,
+        })
     }
 }
 

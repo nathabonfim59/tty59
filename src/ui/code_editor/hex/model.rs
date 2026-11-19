@@ -16,8 +16,7 @@ pub(super) const ROW: u64 = 16;
 /// Pages kept in the cache (16 MiB) before the least recently used go.
 pub(super) const PAGE_CACHE_CAP: usize = 256;
 /// Bytes read per step while searching.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
-const FIND_CHUNK: usize = 1024 * 1024;
+pub(super) const FIND_CHUNK: usize = 1024 * 1024;
 
 const PAGE_U64: u64 = PAGE as u64;
 const HEX_DIGITS: [u8; 16] = *b"0123456789ABCDEF";
@@ -106,12 +105,12 @@ impl ByteStore {
         !self.overlay.is_empty()
     }
 
-    #[expect(
-        dead_code,
-        reason = "used by M4 find, which searches the bytes with the edits applied"
-    )]
     pub(super) fn overlay(&self) -> &BTreeMap<u64, u8> {
         &self.overlay
+    }
+
+    pub(super) fn source(&self) -> &Source {
+        &self.source
     }
 
     /// Page reads carry the generation they were requested under; see `insert_page`.
@@ -896,7 +895,6 @@ fn hex_value(digit: u8) -> Option<u8> {
 // Parsers
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) enum OffsetError {
     Empty,
     Invalid,
@@ -911,7 +909,6 @@ pub(super) enum PatternError {
     InvalidDigit,
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 fn parse_number(text: &str) -> Result<u64, OffsetError> {
     let (digits, radix) = if let Some(rest) = text.strip_prefix("0x").or(text.strip_prefix("0X")) {
         (rest, 16)
@@ -934,7 +931,6 @@ fn parse_number(text: &str) -> Result<u64, OffsetError> {
 
 /// Go-to input: `0x1F`, `1Fh`, `31`, or `+16` / `-16` relative to the caret; surrounding
 /// whitespace and `_` between digits are ignored. The result must be inside the file.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) fn parse_offset(input: &str, caret: u64, len: u64) -> Result<u64, OffsetError> {
     let text = input.trim();
     if text.is_empty() {
@@ -998,7 +994,6 @@ pub(super) fn parse_hex_pattern(input: &str) -> Result<Vec<u8>, PatternError> {
 // Find
 
 /// Random-access bytes for searching: a slice, or the host's file.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) trait ByteSource {
     fn len(&self) -> u64;
     /// Reads at `off` into `buf`; fewer bytes than asked only at the end (0 at or past it).
@@ -1034,7 +1029,6 @@ impl ByteSource for Vec<u8> {
 }
 
 /// A source with the unsaved edits applied, so find sees what the view shows.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) struct Overlaid<'a, S: ByteSource + ?Sized> {
     pub(super) src: &'a S,
     pub(super) overlay: &'a BTreeMap<u64, u8>,
@@ -1073,7 +1067,6 @@ fn read_full(src: &dyn ByteSource, off: u64, buf: &mut [u8]) -> io::Result<usize
 
 /// The first match starting in `lo..hi`. Chunks overlap by `pat.len() - 1` so a match across a
 /// chunk boundary is seen. A cancelled search reports no match.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 fn scan_forward(
     src: &dyn ByteSource,
     pat: &[u8],
@@ -1105,7 +1098,6 @@ fn scan_forward(
 }
 
 /// The last match starting in `lo..hi`, scanning chunks from the end.
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 fn scan_backward(
     src: &dyn ByteSource,
     pat: &[u8],
@@ -1143,7 +1135,6 @@ fn scan_backward(
 /// Finds `pat` starting at `from` (itself included) going forward or backward, optionally
 /// wrapping around the end. Reads 1 MiB at a time and checks `cancel` before each chunk; a
 /// cancelled search returns `Ok(None)`, so the caller looks at the flag to tell it from "none".
-#[cfg_attr(not(test), expect(dead_code, reason = "used by M4 find"))]
 pub(super) fn find(
     src: &dyn ByteSource,
     pat: &[u8],

@@ -88,8 +88,40 @@ impl Grid {
         self.hex_start() + HEX_CHARS + COLUMN_GAP
     }
 
-    /// The byte (0..16) and column under `x`, in characters from the row's left edge.
-    fn hit(&self, x: f32) -> Option<(u32, Side)> {
+    /// Where the horizontally scrolling part begins: the offset column stays pinned to its left.
+    fn scroll_start(&self) -> u32 {
+        self.hex_start()
+    }
+
+    /// Width of the scrolling part in characters: hex, gap, ASCII and a margin after it.
+    fn scroll_chars(&self) -> u32 {
+        (self.ascii_start() + ROW_BYTES + MARGIN).saturating_sub(self.scroll_start())
+    }
+
+    /// Where byte `i` of a row is drawn on `side`, in characters from `scroll_start`.
+    fn cell(&self, i: u32, side: Side) -> Range<u32> {
+        match side {
+            Side::Hex => {
+                let at = self.hex_start().saturating_sub(self.scroll_start())
+                    + 3 * i
+                    + u32::from(i >= GROUP);
+                at..at + 2
+            }
+            Side::Ascii => {
+                let at = self.ascii_start().saturating_sub(self.scroll_start()) + i;
+                at..at + 1
+            }
+        }
+    }
+
+    /// The byte (0..16) and column under `x`, in characters from the row's left edge on screen.
+    /// `scrolled` is how far the scrolling part is shifted left; the pinned part ignores it.
+    fn hit(&self, x: f32, scrolled: f32) -> Option<(u32, Side)> {
+        let x = if x < self.scroll_start() as f32 {
+            x
+        } else {
+            x + scrolled
+        };
         let hex = self.hex_start() as f32;
         let ascii = self.ascii_start() as f32;
         if x >= hex && x < hex + HEX_CHARS as f32 {
@@ -165,17 +197,39 @@ impl Metrics {
     }
 }
 
+impl Default for Grid {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
 /// What the last prepaint measured; hit-testing and the scrollbar read it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Layout {
     /// The rows' viewport, in window coordinates.
     body: Bounds<Pixels>,
     metrics: Metrics,
+    grid: Grid,
     /// Rows in the file.
     rows: u64,
 }
 
 impl Layout {
+    /// Width of the pinned offset column and the gap after it.
+    fn pinned_w(&self) -> f32 {
+        self.grid.scroll_start() as f32 * self.metrics.cell_w
+    }
+
+    /// Width of the part of the viewport the hex and ASCII columns scroll in.
+    fn span_w(&self) -> f32 {
+        (self.body.size.width.as_f32() - self.pinned_w()).max(0.)
+    }
+
+    /// The furthest the columns can be scrolled: no gap after the last of them.
+    fn max_x(&self) -> f32 {
+        (self.grid.scroll_chars() as f32 * self.metrics.cell_w - self.span_w()).max(0.)
+    }
+
     fn viewport_h(&self) -> f32 {
         self.body.size.height.as_f32()
     }
@@ -199,9 +253,25 @@ struct Scroll {
     top_row: u64,
     /// `0 <= sub < row height`.
     sub: f32,
+    /// How far the hex and ASCII columns are shifted left, in pixels; the offset column stays.
+    x: f32,
 }
 
 impl Scroll {
+    fn set_x(&mut self, x: f32, max: f32) {
+        self.x = x.clamp(0., max.max(0.));
+    }
+
+    /// The least horizontal scrolling that shows `cell` (pixels from the scrolling part's left
+    /// edge) fully in a `span` wide viewport.
+    fn reveal_x(&mut self, cell: Range<f32>, span: f32, max: f32) {
+        if cell.start < self.x {
+            self.set_x(cell.start, max);
+        } else if cell.end > self.x + span {
+            self.set_x(cell.end - span, max);
+        }
+    }
+
     fn max_top(total: u64, page: u64) -> u64 {
         total.saturating_sub(page)
     }
@@ -441,6 +511,25 @@ impl HexView {
         });
     }
 
+    /// Scrolls `scroll` sideways the least that shows the caret's cell in the column it is in.
+    fn reveal_caret_x(&self, scroll: &mut Scroll, cx: &App) {
+        let HexContent::Ready(m) = &self.data.read(cx).content else {
+            return;
+        };
+        // The remainder is under 16, so it always fits.
+        let Ok(i) = u32::try_from(m.caret.offset % ROW) else {
+            return;
+        };
+        let l = self.layout.get();
+        let cell = Grid::new(m.store.len()).cell(i, m.caret.side);
+        let cw = l.metrics.cell_w;
+        scroll.reveal_x(
+            cell.start as f32 * cw..cell.end as f32 * cw,
+            l.span_w(),
+            l.max_x(),
+        );
+    }
+
     /// After the caret moved by key or click: bring it into view and load what is there.
     fn caret_moved(&mut self, window: &Window, cx: &mut Context<Self>) {
         let (offset, total) = match &self.data.read(cx).content {
@@ -450,6 +539,7 @@ impl HexView {
         let l = self.layout.get();
         let mut scroll = self.scroll.get();
         scroll.reveal(offset / ROW, total, l.page());
+        self.reveal_caret_x(&mut scroll, cx);
         self.scroll.set(scroll);
         self.request_visible(window, cx);
         cx.notify();
@@ -605,6 +695,10 @@ impl HexView {
             }
             cx.notify();
         });
+        // The other column may be off screen; the rows stay where they are.
+        let mut scroll = self.scroll.get();
+        self.reveal_caret_x(&mut scroll, cx);
+        self.scroll.set(scroll);
     }
 
     fn scroll_wheel(&mut self, ev: &ScrollWheelEvent, window: &Window, cx: &mut Context<Self>) {
@@ -614,11 +708,31 @@ impl HexView {
             return;
         }
         let l = self.layout.get();
-        let dy = -ev.delta.pixel_delta(px(l.metrics.row_h)).y.as_f32();
+        let delta = ev.delta.pixel_delta(px(l.metrics.row_h));
+        let (mut dx, mut dy) = (-delta.x.as_f32(), -delta.y.as_f32());
+        // Shift turns a vertical wheel into a horizontal one.
+        if ev.modifiers.shift {
+            dx += dy;
+            dy = 0.;
+        }
         let mut scroll = self.scroll.get();
-        scroll.by_pixels(dy, l.metrics.row_h, l.rows, l.page());
+        if dx != 0. {
+            scroll.set_x(scroll.x + dx, l.max_x());
+        }
+        if dy != 0. {
+            scroll.by_pixels(dy, l.metrics.row_h, l.rows, l.page());
+        }
         self.scroll.set(scroll);
         self.request_visible(window, cx);
+        cx.notify();
+    }
+
+    /// Pulls the horizontal offset back after the viewport grew, the zoom shrank or the file
+    /// got a narrower offset column, so no empty gap is left at the right.
+    fn clamp_x(&mut self, cx: &mut Context<Self>) {
+        let mut scroll = self.scroll.get();
+        scroll.set_x(scroll.x, self.layout.get().max_x());
+        self.scroll.set(scroll);
         cx.notify();
     }
 
@@ -633,7 +747,7 @@ impl HexView {
         let y = (position.y - l.body.origin.y).as_f32();
         let scroll = self.scroll.get();
         let row = scroll.top_row + ((y + scroll.sub) / row_h).floor().max(0.) as u64;
-        let (i, side) = Grid::new(len).hit(x)?;
+        let (i, side) = Grid::new(len).hit(x, scroll.x / cell_w)?;
         let offset = row.checked_mul(ROW)?.checked_add(u64::from(i))?;
         (offset < len).then_some((offset, side))
     }
@@ -682,6 +796,31 @@ impl HexView {
 
     fn mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
         self.drag_from = None;
+    }
+}
+
+// Go to offset and find: where they put the caret.
+impl HexView {
+    /// Puts the caret on `offset`, with the `len` bytes from there selected (none for a plain
+    /// jump), shows it and loads the page it is on.
+    pub(super) fn jump_to(
+        &mut self,
+        offset: u64,
+        len: u64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending = None;
+        self.with_caret(cx, |caret, file_len| {
+            let last = file_len.saturating_sub(1);
+            caret.offset = offset.min(last);
+            // Both ends of a selection are included, so it ends on the match's last byte.
+            caret.anchor = len
+                .checked_sub(1)
+                .map(|extra| offset.saturating_add(extra).min(last));
+            caret.low_nibble = false;
+        });
+        self.caret_moved(window, cx);
     }
 }
 
@@ -920,13 +1059,25 @@ impl Render for HexView {
         let rows = visible_rows(scroll, viewport_h, metrics.row_h, total);
 
         let at = |chars: u32| px(chars as f32 * metrics.cell_w);
-        let column = |chars: u32, text: StyledText, color| {
+        let column = |left: Pixels, text: StyledText, color| {
             div()
                 .absolute()
-                .left(at(chars))
+                .left(left)
                 .whitespace_nowrap()
                 .text_color(color)
                 .child(text)
+        };
+        // The hex and ASCII columns sit in a clip to the right of the pinned offset column and
+        // are shifted left by the horizontal scroll.
+        let shifted = |chars: u32| at(chars.saturating_sub(grid.scroll_start())) - px(scroll.x);
+        let clip = || {
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(at(grid.scroll_start()))
+                .right_0()
+                .overflow_hidden()
         };
 
         let mut body = div()
@@ -969,21 +1120,26 @@ impl Render for HexView {
                     .left_0()
                     .w_full()
                     .h(px(metrics.row_h))
-                    .child(column(
-                        grid.offset_start(),
-                        StyledText::new(text.offset),
-                        muted,
-                    ))
-                    .child(column(
-                        grid.hex_start(),
-                        StyledText::new(text.hex).with_highlights(text.hex_marks),
-                        fg,
-                    ))
-                    .child(column(
-                        grid.ascii_start(),
-                        StyledText::new(text.ascii).with_highlights(text.ascii_marks),
-                        fg,
-                    )),
+                    .child(
+                        column(at(grid.offset_start()), StyledText::new(text.offset), muted)
+                            .debug_selector(|| "hex-offset-column".into()),
+                    )
+                    .child(
+                        clip()
+                            .child(
+                                column(
+                                    shifted(grid.hex_start()),
+                                    StyledText::new(text.hex).with_highlights(text.hex_marks),
+                                    fg,
+                                )
+                                .debug_selector(|| "hex-hex-column".into()),
+                            )
+                            .child(column(
+                                shifted(grid.ascii_start()),
+                                StyledText::new(text.ascii).with_highlights(text.ascii_marks),
+                                fg,
+                            )),
+                    ),
             );
         }
 
@@ -994,11 +1150,19 @@ impl Render for HexView {
         let rows_total = total;
         let measure = canvas(
             move |bounds, window, cx| {
-                layout.set(Layout {
+                let measured = Layout {
                     body: bounds,
                     metrics,
+                    grid,
                     rows: rows_total,
-                });
+                };
+                layout.set(measured);
+                if view.read(cx).scroll.get().x > measured.max_x() {
+                    let view = view.clone();
+                    window.defer(cx, move |_, cx| {
+                        view.update(cx, |this, cx| this.clamp_x(cx));
+                    });
+                }
                 if view.read(cx).retry_due {
                     let view = view.clone();
                     window.defer(cx, move |window, cx| {
@@ -1031,11 +1195,11 @@ impl Render for HexView {
             .overflow_hidden()
             .h(px(metrics.row_h))
             .flex_none()
-            .child(column(
-                grid.hex_start(),
+            .child(clip().child(column(
+                shifted(grid.hex_start()),
                 StyledText::new(self.header.clone()),
                 muted,
-            ));
+            )));
 
         let mut context = KeyContext::default();
         context.add(DOCUMENT_KEY_CONTEXT);
@@ -1332,6 +1496,7 @@ mod tests {
         let mut s = Scroll {
             top_row: 10,
             sub: 5.,
+            ..Scroll::default()
         };
         s.reveal(12, 100, 8);
         assert_eq!((s.top_row, s.sub), (10, 5.), "inside: untouched");
@@ -1354,6 +1519,7 @@ mod tests {
         let s = Scroll {
             top_row: 5,
             sub: 10.,
+            ..Scroll::default()
         };
         assert_eq!(visible_rows(s, 100., 20., 1000), 5..11);
         assert_eq!(visible_rows(s, 100., 20., 8), 5..8);
@@ -1373,6 +1539,7 @@ mod tests {
                 cell_w: 8.,
             },
             rows,
+            ..Layout::default()
         };
         let handle = HexScrollHandle {
             scroll: Rc::default(),
@@ -2179,6 +2346,254 @@ mod tests {
         let s = scroll(&rig, vcx);
         assert_eq!(s.top_row, 3);
         assert!((s.sub - l.metrics.row_h * 0.5).abs() < 0.01, "{}", s.sub);
+    }
+
+    // --- horizontal scroll ---------------------------------------------------------------
+
+    /// A window too narrow for the 67 characters of hex and ASCII beside the offset column.
+    fn narrow(rig: &Rig, vcx: &mut VisualTestContext) {
+        vcx.simulate_resize(size(px(400.), px(300.)));
+        redraw(rig, vcx);
+        assert!(layout(rig, vcx).max_x() > 0., "the columns do not fit");
+    }
+
+    fn set_x(rig: &Rig, vcx: &mut VisualTestContext, x: f32) {
+        rig.view.update(vcx, |v, _| {
+            let mut s = v.scroll.get();
+            s.x = x;
+            v.scroll.set(s);
+        });
+        redraw(rig, vcx);
+    }
+
+    fn caret_side(rig: &Rig, vcx: &VisualTestContext) -> Side {
+        rig.data.read_with(vcx, |d, _| match &d.content {
+            HexContent::Ready(m) => m.caret.side,
+            HexContent::TooLarge { .. } => panic!("too large"),
+        })
+    }
+
+    /// Asserts the cell at `chars` (start..end, from the scrolling part's edge) is fully shown.
+    fn assert_shown(rig: &Rig, vcx: &VisualTestContext, chars: Range<f32>, what: &str) {
+        let l = layout(rig, vcx);
+        let x = scroll(rig, vcx).x;
+        let (start, end) = (chars.start * l.metrics.cell_w, chars.end * l.metrics.cell_w);
+        assert!(
+            x <= start + 0.01 && end <= x + l.span_w() + 0.01,
+            "{what}: cell {start}..{end} outside the view {x}..{}",
+            x + l.span_w()
+        );
+    }
+
+    /// Moving right across the hex column keeps each byte's cell fully shown, scrolling the
+    /// least (the last byte ends flush with the right edge), and Home goes back to the left.
+    /// Guards `caret_moved` calling `reveal_caret_x` and `Scroll::reveal_x`'s two branches.
+    #[gpui::test]
+    fn the_caret_moving_right_scrolls_its_hex_cell_into_view(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 4096, &[]);
+        narrow(&rig, vcx);
+        let l = layout(&rig, vcx);
+        let cw = l.metrics.cell_w;
+        assert_eq!(scroll(&rig, vcx).x, 0.);
+        for i in 1..16u32 {
+            motion(&rig, vcx, HexMotion::Right, false);
+            let rel = (3 * i + u32::from(i >= 8)) as f32;
+            assert_shown(&rig, vcx, rel..rel + 2., &format!("hex byte {i}"));
+        }
+        let x = scroll(&rig, vcx).x;
+        assert!(x > 0., "scrolled right");
+        assert!(
+            (x - (48. * cw - l.span_w()).min(l.max_x())).abs() < 0.01,
+            "the least: byte 15 ends at the right edge, x = {x}"
+        );
+        motion(&rig, vcx, HexMotion::RowStart, false);
+        assert_eq!(scroll(&rig, vcx).x, 0., "Home shows the first byte again");
+    }
+
+    /// Tab to the ASCII column scrolls to the ASCII cell of the caret byte, and Tab back to
+    /// the hex cell. Guards `toggle_side` calling `reveal_caret_x` and the cell for each side.
+    #[gpui::test]
+    fn tab_scrolls_to_the_cell_of_the_side_it_switches_to(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 4096, &[]);
+        narrow(&rig, vcx);
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        redraw(&rig, vcx);
+        assert_eq!(caret_side(&rig, vcx), Side::Ascii);
+        // ASCII byte 0: character 50 from the scrolling part's edge.
+        assert_shown(&rig, vcx, 50.0..51.0, "ascii byte 0");
+        assert!(scroll(&rig, vcx).x > 0.);
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        redraw(&rig, vcx);
+        assert_eq!(scroll(&rig, vcx).x, 0., "back to the hex cell");
+    }
+
+    /// Typing advances the caret and reveals the next cell: fifteen characters typed on the
+    /// ASCII side leave the caret on the last byte of the row. Guards the edit path reaching
+    /// `caret_moved` (`run_op`), for the ASCII cell at the far end of the row.
+    #[gpui::test]
+    fn typing_on_the_ascii_side_keeps_the_caret_cell_shown(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 4096, &[]);
+        narrow(&rig, vcx);
+        rig.view.update(vcx, |v, cx| v.toggle_side(cx));
+        for _ in 0..15 {
+            type_text(&rig, vcx, "a");
+        }
+        assert_eq!(status(&rig, vcx).offset, 15);
+        assert_shown(&rig, vcx, 65.0..66.0, "ascii byte 15");
+    }
+
+    /// A click while scrolled lands on the byte under the pointer in both columns at both
+    /// zooms, and a click on the pinned offset column selects nothing. Positions come from
+    /// the documented column origins (11 characters pinned, 50 more to the ASCII). Guards
+    /// `Grid::hit`'s shift for the scrolling part and its pinned-part exception.
+    #[gpui::test]
+    fn clicks_land_on_the_right_byte_while_scrolled(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 4096, &[]);
+        for zoom in [1.0, 1.5] {
+            set_zoom(vcx, zoom);
+            narrow(&rig, vcx);
+            let l = layout(&rig, vcx);
+            let (ox, oy) = (l.body.origin.x.as_f32(), l.body.origin.y.as_f32());
+            let (cw, rh) = (l.metrics.cell_w, l.metrics.row_h);
+            let (pinned, y) = (11. * cw, oy + 1.5 * rh);
+
+            // Hex byte 12 of row 1: cell 37..39 from the edge, 38 is its middle.
+            let x = 20. * cw;
+            set_x(&rig, vcx, x);
+            vcx.simulate_click(at(ox + pinned + 38. * cw - x, y), Modifiers::default());
+            assert_eq!(status(&rig, vcx).offset, 16 + 12, "hex at {zoom}x");
+            assert_eq!(caret_side(&rig, vcx), Side::Hex);
+            assert_eq!(scroll(&rig, vcx).x, x, "a shown cell does not scroll");
+
+            // The offset column is pinned: its pixels are not shifted into the hex column.
+            vcx.simulate_click(at(ox + 5. * cw, y), Modifiers::default());
+            assert_eq!(
+                status(&rig, vcx).offset,
+                16 + 12,
+                "offset column at {zoom}x"
+            );
+
+            // ASCII byte 5 of row 1: cell 55..56.
+            let x = layout(&rig, vcx).max_x();
+            set_x(&rig, vcx, x);
+            vcx.simulate_click(at(ox + pinned + 55.5 * cw - x, y), Modifiers::default());
+            assert_eq!(status(&rig, vcx).offset, 16 + 5, "ascii at {zoom}x");
+            assert_eq!(caret_side(&rig, vcx), Side::Ascii);
+        }
+    }
+
+    /// A drag selects across bytes while scrolled. Guards `mouse_move` using the shifted hit.
+    #[gpui::test]
+    fn a_drag_selects_while_scrolled(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 4096, &[]);
+        narrow(&rig, vcx);
+        let l = layout(&rig, vcx);
+        let (ox, oy) = (l.body.origin.x.as_f32(), l.body.origin.y.as_f32());
+        let (cw, rh) = (l.metrics.cell_w, l.metrics.row_h);
+        let x = 20. * cw;
+        set_x(&rig, vcx, x);
+        let hex = |i: f32| at(ox + 11. * cw + (3. * i + 1.) * cw - x, oy + 0.5 * rh);
+        vcx.simulate_mouse_down(hex(10.), MouseButton::Left, Modifiers::default());
+        vcx.simulate_mouse_move(hex(12.), MouseButton::Left, Modifiers::default());
+        vcx.simulate_mouse_up(hex(12.), MouseButton::Left, Modifiers::default());
+        let s = status(&rig, vcx);
+        assert_eq!((s.offset, s.selection), (12, Some(3)));
+    }
+
+    /// The offset column's position does not depend on the horizontal offset, the hex column
+    /// moves by exactly it. Guards the offset column staying outside the shifted clip.
+    #[gpui::test]
+    fn the_offset_column_stays_put_while_the_hex_column_moves(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 4096, &[]);
+        narrow(&rig, vcx);
+        let at_x = |rig: &Rig, vcx: &mut VisualTestContext| {
+            let offset = vcx
+                .debug_bounds("hex-offset-column")
+                .expect("offset column");
+            let hex = vcx.debug_bounds("hex-hex-column").expect("hex column");
+            (
+                offset.origin.x.as_f32(),
+                hex.origin.x.as_f32(),
+                scroll(rig, vcx).x,
+            )
+        };
+        let (off0, hex0, x0) = at_x(&rig, vcx);
+        assert_eq!(x0, 0.);
+        set_x(&rig, vcx, 37.);
+        let (off1, hex1, x1) = at_x(&rig, vcx);
+        assert_eq!(x1, 37.);
+        assert_eq!(off0, off1, "the offset column did not move");
+        assert!((hex0 - hex1 - 37.).abs() < 0.01, "{hex0} -> {hex1}");
+    }
+
+    /// A horizontal wheel delta (and shift+wheel) scrolls sideways, a vertical one only rows,
+    /// and the end is clamped. Guards `scroll_wheel`'s dx/dy split and `Scroll::set_x`.
+    #[gpui::test]
+    fn horizontal_wheel_scrolls_sideways_and_vertical_does_not(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 100_000, &[]);
+        narrow(&rig, vcx);
+        vcx.update(|_, cx| {
+            cx.update_global::<Config, _>(|c, _| c.0.mouse_zoom_modifier = MouseZoomModifier::Ctrl)
+        });
+        let l = layout(&rig, vcx);
+        let inside = at(
+            l.body.origin.x.as_f32() + 40.,
+            l.body.origin.y.as_f32() + 40.,
+        );
+        let wheel = |dx: f32, dy: f32, modifiers| gpui::ScrollWheelEvent {
+            position: inside,
+            delta: ScrollDelta::Pixels(point(px(dx), px(dy))),
+            modifiers,
+            touch_phase: TouchPhase::Moved,
+        };
+        vcx.simulate_event(wheel(-30., 0., Modifiers::default()));
+        assert_eq!(scroll(&rig, vcx).x, 30.);
+        assert_eq!(scroll(&rig, vcx).top_row, 0, "no rows moved");
+        vcx.simulate_event(wheel(0., -l.metrics.row_h * 3., Modifiers::default()));
+        let s = scroll(&rig, vcx);
+        assert_eq!((s.x, s.top_row), (30., 3), "vertical moves rows only");
+        vcx.simulate_event(wheel(0., -10., Modifiers::shift()));
+        let s = scroll(&rig, vcx);
+        assert_eq!((s.x, s.top_row), (40., 3), "shift+wheel moves sideways");
+        vcx.simulate_event(wheel(1e6, 0., Modifiers::default()));
+        assert_eq!(scroll(&rig, vcx).x, 0., "not before the first column");
+        vcx.simulate_event(wheel(-1e6, 0., Modifiers::default()));
+        assert_eq!(scroll(&rig, vcx).x, l.max_x(), "not past the last column");
+    }
+
+    /// Widening the viewport pulls the offset back so no gap is left at the right. Guards the
+    /// prepaint check and `clamp_x`.
+    #[gpui::test]
+    fn widening_the_view_clamps_the_offset(cx: &mut TestAppContext) {
+        let (rig, vcx) = rig(cx, 4096, &[]);
+        narrow(&rig, vcx);
+        let x = layout(&rig, vcx).max_x();
+        set_x(&rig, vcx, x);
+        assert_eq!(scroll(&rig, vcx).x, x);
+        vcx.simulate_resize(size(px(500.), px(300.)));
+        redraw(&rig, vcx);
+        let l = layout(&rig, vcx);
+        assert!(l.max_x() < x, "the wider view needs less scrolling");
+        assert!((scroll(&rig, vcx).x - l.max_x()).abs() < 0.01);
+        vcx.simulate_resize(size(px(1600.), px(300.)));
+        redraw(&rig, vcx);
+        assert_eq!(scroll(&rig, vcx).x, 0.);
+    }
+
+    /// Cells and clicks agree: every byte's cell is where `hit` finds that byte. Guards
+    /// `Grid::cell` against drifting from `Grid::hit`.
+    #[test]
+    fn a_cells_middle_hits_its_own_byte() {
+        let grid = Grid::new(4096);
+        let start = grid.scroll_start() as f32;
+        for i in 0..ROW_BYTES {
+            for side in [Side::Hex, Side::Ascii] {
+                let cell = grid.cell(i, side);
+                let mid = start + (cell.start + cell.end) as f32 / 2.;
+                assert_eq!(grid.hit(mid - 1., 1.), Some((i, side)));
+                assert_eq!(grid.hit(mid, 0.), Some((i, side)));
+            }
+        }
     }
 
     // --- status --------------------------------------------------------------------------

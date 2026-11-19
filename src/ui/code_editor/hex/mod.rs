@@ -20,6 +20,7 @@ use crate::ui::image_preview::decode as image_decode;
 use crate::ui::image_preview::view::{ErrorCard, error_card};
 
 pub(super) mod data;
+pub(super) mod find;
 pub(super) mod io;
 pub(super) mod model;
 mod save;
@@ -167,6 +168,8 @@ pub(super) struct HexState {
     pub(super) views: RefCell<HashMap<ViewKey, Entity<HexView>>>,
     pub(super) requests: HashMap<u64, HexRequest>,
     pub(super) seq: u64,
+    /// What go to offset and find remember between bars.
+    pub(super) find: find::FindState,
 }
 
 /// What the menus and the palette may offer for one document.
@@ -667,6 +670,13 @@ impl Tty59App {
             .borrow_mut()
             .retain(|(view_id, ..), _| *view_id != id);
         self.editor.hex.docs.retain(|d| d.id() != id);
+        // A bar asking about this document has nothing left to ask about, and dropping it
+        // cancels the search it was waiting on.
+        if self.editor.bar.as_ref().is_some_and(|b| {
+            matches!(b.kind, BarKind::GoToOffset { id: shown } | BarKind::HexFind { id: shown, .. } if shown == id)
+        }) {
+            self.editor.bar = None;
+        }
         // Whatever was waiting on this document to be saved is not going to see that now.
         self.editor_saves_failed(id);
         self.editor_rebuild_watcher(cx);
