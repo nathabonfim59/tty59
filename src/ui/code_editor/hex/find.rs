@@ -482,13 +482,30 @@ impl Tty59App {
             } else {
                 cx.theme().muted_foreground
             };
+            // The note gives way, not the field: it is one line cut with an ellipsis at the
+            // width the bar leaves it, and the tooltip has the whole of it.
+            let text = SharedString::from(note.text());
             tail.push(
                 crate::ui::code_editor::status::probe(
                     div()
-                        .flex_none()
+                        .id("editor-bar-note")
+                        .flex_shrink()
+                        .min_w_0()
+                        .truncate()
                         .text_size(gpui::rems(crate::ui::right_panel::META))
                         .text_color(color)
-                        .child(note.text()),
+                        .tooltip({
+                            let text = text.clone();
+                            move |window, cx| {
+                                crate::ui::dialog::bounded_text_tooltip(
+                                    text.clone(),
+                                    "editor-bar-note-tooltip-text",
+                                    window,
+                                    cx,
+                                )
+                            }
+                        })
+                        .child(text),
                     "editor-bar-note",
                 )
                 .into_any_element(),

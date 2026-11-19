@@ -593,6 +593,65 @@ fn the_bar_draws_the_toggle_and_the_note(cx: &mut TestAppContext) {
     assert!(rig.vcx.debug_bounds("editor-bar-note").is_some());
 }
 
+/// Guards the note's `flex_shrink().min_w_0().truncate()` in `hex_bar_tail` and the field's
+/// `min_w` in `render_editor_bar`: in a bar too narrow for a long note, the field keeps its
+/// minimum width and the toggle stays whole, and the note is cut to what is left, all inside
+/// the bar. With the note back to `flex_none` the field is squeezed to nothing and the note
+/// ends past the bar's right edge.
+#[gpui::test]
+fn a_long_note_shrinks_instead_of_pushing_the_field_out(cx: &mut TestAppContext) {
+    let mut rig = rig(cx, 8000, &[]);
+    rig.vcx.simulate_resize(gpui::size(px(400.), px(600.)));
+    rig.open_find();
+    rig.app.update_in(&mut rig.vcx, |app, _, cx| {
+        if let Some(bar) = app.editor.bar.as_mut() {
+            bar.find.note = Some(Note::Offset(OffsetError::OutOfRange, u64::MAX));
+        }
+        cx.notify();
+    });
+    rig.vcx.run_until_parked();
+    let _ = rig.vcx.update(|window, cx| window.draw(cx));
+    let bounds = |rig: &Rig, name: &str| {
+        rig.vcx
+            .debug_bounds(name)
+            .unwrap_or_else(|| panic!("{name} is drawn"))
+    };
+    let bar = bounds(&rig, "editor-bar");
+    let input = bounds(&rig, "editor-bar-input");
+    let toggle = bounds(&rig, "hex-find-mode");
+    let note = bounds(&rig, "editor-bar-note");
+    let min = rig.vcx.update(|window, _| {
+        gpui::rems(
+            crate::ui::right_panel::META * crate::ui::code_editor::EDITOR_BAR_FIELD_MIN_CHARS,
+        )
+        .to_pixels(window.rem_size())
+        .as_f32()
+    });
+    assert!(
+        input.size.width.as_f32() >= min - 0.5,
+        "the field is {:?} wide, its minimum is {min}",
+        input.size.width
+    );
+    assert!(
+        input.right() <= bar.right(),
+        "the field ends inside the bar"
+    );
+    assert!(
+        toggle.right() <= bar.right(),
+        "the toggle stays inside the bar"
+    );
+    assert!(
+        note.right() <= bar.right() + px(0.5),
+        "the note ends at {:?}, the bar at {:?}",
+        note.right(),
+        bar.right()
+    );
+    assert!(
+        note.left() >= input.right(),
+        "the note is beside the field, not over it"
+    );
+}
+
 /// Guards an empty file: nothing to go to, nothing to find, and no panic.
 #[gpui::test]
 fn an_empty_file_has_no_offset_and_no_match(cx: &mut TestAppContext) {
