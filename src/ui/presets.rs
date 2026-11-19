@@ -5093,6 +5093,7 @@ ansi:
             if held(authored) {
                 assert_eq!(cached.popover, authored, "{}: moved without need", theme.id);
             } else {
+                moved += 1;
             }
         }
         assert!(moved > 0, "no theme needed the correction");
