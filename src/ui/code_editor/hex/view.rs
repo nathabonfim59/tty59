@@ -750,6 +750,8 @@ struct Marks {
     pending: HighlightStyle,
     /// The text colour of a byte that differs from the disk.
     edited: Hsla,
+    /// The same colour as an underline on a highlighted byte, floored against the selection.
+    edited_mark: Hsla,
 }
 
 fn row_text(m: &HexModel, row: u64, grid: Grid, marks: &Marks) -> RowText {
@@ -818,7 +820,7 @@ fn row_text(m: &HexModel, row: u64, grid: Grid, marks: &Marks) -> RowText {
                 Some(b) if b.background_color.is_some() => HighlightStyle {
                     underline: b.underline.or(Some(UnderlineStyle {
                         thickness: px(2.),
-                        color: Some(marks.edited),
+                        color: Some(marks.edited_mark),
                         wavy: false,
                     })),
                     ..b
@@ -904,6 +906,7 @@ impl Render for HexView {
             },
             // The same token the source-control panel uses for a modified file.
             edited: theme.warning,
+            edited_mark: gpui::rgb(crate::ui::theme::semantics(cx).warning_mark).into(),
         };
 
         let measured = self.layout.get();
@@ -1150,6 +1153,7 @@ mod tests {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
+            cx.set_global(crate::ui::presets::builtins()[0].semantics());
         });
         let host = Counting::new();
         let (data, dir) = paged(len, head, &host);
@@ -1256,6 +1260,7 @@ mod tests {
                 ..Default::default()
             },
             edited: gpui::hsla(0.1, 0.9, 0.5, 1.),
+            edited_mark: gpui::hsla(0.1, 0.9, 0.4, 1.),
         };
         let bytes: Vec<u8> = (0x41u8..0x51).collect();
         let loaded = HexModel::new(Source::Whole(Arc::from(bytes)));
@@ -1686,6 +1691,7 @@ mod tests {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
+            cx.set_global(crate::ui::presets::builtins()[0].semantics());
         });
         let host = Counting::new();
         let (data, _dir) = paged(100, &[], &host);
@@ -1995,12 +2001,14 @@ mod tests {
     #[test]
     fn an_edited_byte_is_drawn_in_the_edit_colour() {
         let edited = gpui::hsla(0.1, 0.9, 0.5, 1.);
+        let edited_mark = gpui::hsla(0.1, 0.9, 0.4, 1.);
         let marks = Marks {
             selection: HighlightStyle::default(),
             caret_here: HighlightStyle::default(),
             caret_other: HighlightStyle::default(),
             pending: HighlightStyle::default(),
             edited,
+            edited_mark,
         };
         let mut model = HexModel::new(Source::Whole(Arc::from(vec![0x41u8, 0x42, 0x43])));
         model.caret.offset = 2;
@@ -2027,6 +2035,7 @@ mod tests {
     #[test]
     fn an_edited_selected_byte_is_underlined_not_recoloured() {
         let edited = gpui::hsla(0.1, 0.9, 0.5, 1.);
+        let edited_mark = gpui::hsla(0.1, 0.9, 0.4, 1.);
         let marks = Marks {
             selection: HighlightStyle {
                 background_color: Some(gpui::hsla(0., 0., 0.8, 1.)),
@@ -2036,6 +2045,7 @@ mod tests {
             caret_other: HighlightStyle::default(),
             pending: HighlightStyle::default(),
             edited,
+            edited_mark,
         };
         let mut model = HexModel::new(Source::Whole(Arc::from(vec![0x41u8, 0x42, 0x43])));
         assert!(model.type_hex(b'5').is_ok());
@@ -2050,7 +2060,7 @@ mod tests {
             .map(|(_, s)| *s)
             .expect("the selected edited byte is marked");
         assert_eq!(style.color, None, "text stays the normal foreground");
-        assert_eq!(style.underline.and_then(|u| u.color), Some(edited));
+        assert_eq!(style.underline.and_then(|u| u.color), Some(edited_mark));
         let neighbour = row.hex_marks.iter().find(|(r, _)| r.start == 3);
         assert!(
             neighbour.is_some_and(|(_, s)| s.underline.is_none()),
@@ -2201,6 +2211,7 @@ mod tests {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Config::default());
+            cx.set_global(crate::ui::presets::builtins()[0].semantics());
         });
         let host = Counting::new();
         let data = cx.new(|_| {
