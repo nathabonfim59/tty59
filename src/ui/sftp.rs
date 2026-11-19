@@ -742,6 +742,32 @@ impl Tty59App {
         }
     }
 
+    /// The row menu's Open as Hex: the file as bytes, through the same host
+    /// Edit uses. A pane with no editor host offers nothing.
+    fn sftp_open_entry_as_hex(
+        &mut self,
+        entry: SftpEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(host) = self.sftp_editor_host() {
+            self.sftp_open_hex_on(host, &entry, window, cx);
+        }
+    }
+
+    /// Split from the host lookup so a test can hand it a host that answers
+    /// without a daemon.
+    fn sftp_open_hex_on(
+        &mut self,
+        host: crate::ui::host_ops::SharedHost,
+        entry: &SftpEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = remote_join(&self.sftp_panel.cwd, &entry.name);
+        self.editor_open_path_as_hex(host, std::path::PathBuf::from(target), window, cx);
+    }
+
     /// The [`Host`] the editor reads and saves this pane's files through.
     ///
     /// Handed to the editor rather than filed in `HostRegistry`: that table
@@ -1926,6 +1952,21 @@ impl Tty59App {
                 let _ = app.update(cx, |this, cx| this.sftp_open_entry(entry, window, cx));
             }
         }));
+
+        // The same file as bytes, in a tab of its own, whatever it is; a link
+        // to a file follows Edit's lead and opens the file it points at.
+        if !dir_like {
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::CmdOpenAsHex)).on_click({
+                let app = app.clone();
+                let entry = entry.clone();
+                move |_, window, cx| {
+                    let entry = entry.clone();
+                    let _ = app.update(cx, |this, cx| {
+                        this.sftp_open_entry_as_hex(entry, window, cx)
+                    });
+                }
+            }));
+        }
 
         // Editing is the double-click now, but a copy in ~/Downloads is still
         // a thing people come to this menu for.
@@ -3253,5 +3294,140 @@ mod gpui_tests {
                 "the glyph is centred on the row's line: {glyph:?} vs {name_box:?}"
             );
         }
+    }
+
+    fn row_entry(
+        name: &str,
+        kind: crate::daemon::protocol::SftpEntryKind,
+    ) -> crate::daemon::protocol::SftpEntry {
+        crate::daemon::protocol::SftpEntry {
+            name: name.into(),
+            kind,
+            size: 3,
+            mtime: 0,
+            permissions: 0o644,
+            target_is_dir: false,
+        }
+    }
+
+    /// Opens the row menu for `entry`, drawn and focused, then presses Down
+    /// `downs` times and Enter: the item picked is the `downs`th one, counting
+    /// from one. The menu's items are not readable from here, so the keyboard
+    /// is the way to walk it.
+    fn pick_row_menu_item(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        entry: &crate::daemon::protocol::SftpEntry,
+        downs: usize,
+    ) {
+        use gpui::{AvailableSpace, Focusable as _, point, px, size};
+        use gpui_component::menu::PopupMenu;
+
+        let weak = app.downgrade();
+        let dir_like = super::is_dir_like(entry);
+        let entry = entry.clone();
+        let menu = vcx.update(|window, cx| {
+            PopupMenu::build(window, cx, move |menu, _window, _cx| {
+                Tty59App::sftp_row_context_menu(
+                    menu,
+                    &entry,
+                    "/srv/app/x",
+                    None,
+                    dir_like,
+                    false,
+                    gpui::Hsla::default(),
+                    &weak,
+                )
+            })
+        });
+        let drawn = menu.clone();
+        vcx.draw(
+            point(px(0.), px(0.)),
+            size(
+                AvailableSpace::Definite(px(320.)),
+                AvailableSpace::Definite(px(600.)),
+            ),
+            move |_, _| gpui::AnyView::from(drawn),
+        );
+        vcx.update(|window, cx| window.focus(&menu.focus_handle(cx), cx));
+        let keys = "down ".repeat(downs) + "enter";
+        vcx.simulate_keystrokes(&keys);
+    }
+
+    /// Guards the Open as Hex item's place and wiring in `sftp_row_context_menu`:
+    /// it is the second item of a file's menu, straight after Edit (the
+    /// first), and picking it asks the editor for a hex document of the file.
+    /// A directory's menu has no such item: its second item is something else
+    /// and asks for no hex document.
+    ///
+    /// Only the request is checked here: the bytes come over the daemon, which
+    /// a test pane has none of. `a_hex_document_lands_for_the_remote_path_on_the_host`
+    /// finishes the trip.
+    #[gpui::test]
+    fn the_row_menu_offers_open_as_hex_right_after_edit_for_files_only(cx: &mut TestAppContext) {
+        use crate::daemon::protocol::SftpEntryKind::{Dir, File};
+        let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        app.update_in(&mut vcx, |app, _, _| {
+            app.sftp_panel.cwd = "/srv/app".into();
+            app.sftp_panel.open_pane_id = Some(7);
+        });
+        let pending = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.read_with(vcx, |app, _| app.hex_opens_pending())
+        };
+
+        pick_row_menu_item(&app, &mut vcx, &row_entry("dir", Dir), 2);
+        assert_eq!(
+            pending(&app, &mut vcx),
+            0,
+            "a folder's menu has no hex item"
+        );
+
+        pick_row_menu_item(&app, &mut vcx, &row_entry("a.bin", File), 1);
+        assert_eq!(
+            pending(&app, &mut vcx),
+            0,
+            "the first item is Edit, not hex"
+        );
+
+        pick_row_menu_item(&app, &mut vcx, &row_entry("a.bin", File), 2);
+        assert_eq!(pending(&app, &mut vcx), 1, "the second item opens as hex");
+    }
+
+    /// Guards `sftp_open_hex_on`: the document is the cwd-joined remote path,
+    /// on the host it was given. A local host stands in for the SFTP one,
+    /// and the path is a Unix one, hence the gate.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_hex_document_lands_for_the_remote_path_on_the_host(cx: &mut TestAppContext) {
+        use crate::ui::host_ops::SharedHost;
+        let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = tty59_core::core::path_spelling::local_spelling_buf(
+            std::fs::canonicalize(dir.path()).unwrap(),
+        );
+        std::fs::write(dir_path.join("a.bin"), [0u8, 1, 2, 3]).unwrap();
+        let host: SharedHost = tty59_core::host::local::LocalHost::new();
+        let id = host.id();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.sftp_panel.cwd = dir_path.to_string_lossy().into_owned();
+            app.sftp_open_hex_on(
+                host,
+                &row_entry("a.bin", crate::daemon::protocol::SftpEntryKind::File),
+                window,
+                cx,
+            );
+        });
+        for _ in 0..200 {
+            vcx.run_until_parked();
+            if app.read_with(&vcx, |app, _| {
+                app.hex_is_open_at(id, &dir_path.join("a.bin"))
+            }) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("no hex document landed for the remote path");
     }
 }
