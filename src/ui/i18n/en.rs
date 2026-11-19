@@ -2589,6 +2589,22 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HexSavePartlyWritten => {
             "The file may be partly written. Saving again rewrites every change."
         }
+        L10nKey::HexGoToOffset => "Go to offset",
+        L10nKey::HexGoToOffsetPlaceholder => "Offset: 0x1F, 31, +16, -16",
+        L10nKey::HexOffsetEmpty => "Type an offset",
+        L10nKey::HexOffsetInvalid => "Not an offset: use 0x1F, 1Fh, 31, +16 or -16",
+        L10nKey::HexOffsetOutOfRange => "That is outside the file, which has {len} bytes",
+        L10nKey::HexFind => "Find",
+        L10nKey::HexFindHexPlaceholder => "Hex bytes: de ad be ef",
+        L10nKey::HexFindTextPlaceholder => "Text to find",
+        L10nKey::HexFindModeHex => "Hex",
+        L10nKey::HexFindModeText => "Text",
+        L10nKey::HexFindSearching => "Searching…",
+        L10nKey::HexFindNotFound => "Not found",
+        L10nKey::HexFindFailed => "The search could not read the file: {e}",
+        L10nKey::HexPatternEmpty => "Type the bytes to find",
+        L10nKey::HexPatternOddDigits => "Hex bytes come in pairs of digits",
+        L10nKey::HexPatternInvalidDigit => "Hex bytes use only the digits 0-9 and A-F",
         L10nKey::EditorSaveSiblingTitle => "Another tab of \"{name}\" has unsaved changes",
         L10nKey::EditorSaveSiblingBody => {
             "Saving here writes the file without them, and that tab will then see the file as changed."

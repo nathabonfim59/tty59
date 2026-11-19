@@ -194,6 +194,11 @@ src/ui/code_editor/hex/test_support.rs|std::fs::
 # binary into a per-test local temp dir, edits it behind the editor's back and reads it back to
 # compare byte for byte. Local test data, never a workspace path and never a remote one.
 src/ui/code_editor/hex/save_tests.rs|std::fs::
+
+# The go-to-offset and find tests of the hex editor: cfg(test) module in its own file that writes
+# neutral files (sparse ones included) into a per-test local temp dir to search. Local test data,
+# never a workspace path and never a remote one.
+src/ui/code_editor/hex/find/tests.rs|std::fs::
 EOF
 )
 

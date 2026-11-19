@@ -2669,6 +2669,24 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexSavePartlyWritten => {
             "ファイルが一部だけ書き込まれた可能性があります。もう一度保存すると、すべての変更が書き直されます。"
         }
+        L10nKey::HexGoToOffset => "オフセットへ移動",
+        L10nKey::HexGoToOffsetPlaceholder => "オフセット：0x1F、31、+16、-16",
+        L10nKey::HexOffsetEmpty => "オフセットを入力してください",
+        L10nKey::HexOffsetInvalid => {
+            "オフセットではありません：0x1F、1Fh、31、+16、-16 の形式で入力してください"
+        }
+        L10nKey::HexOffsetOutOfRange => "ファイルの範囲外です（ファイルは {len} バイト）",
+        L10nKey::HexFind => "検索",
+        L10nKey::HexFindHexPlaceholder => "16進バイト：de ad be ef",
+        L10nKey::HexFindTextPlaceholder => "検索する文字列",
+        L10nKey::HexFindModeHex => "16進",
+        L10nKey::HexFindModeText => "テキスト",
+        L10nKey::HexFindSearching => "検索中…",
+        L10nKey::HexFindNotFound => "見つかりません",
+        L10nKey::HexFindFailed => "検索中にファイルを読み取れませんでした：{e}",
+        L10nKey::HexPatternEmpty => "検索するバイトを入力してください",
+        L10nKey::HexPatternOddDigits => "16進バイトは2桁ずつで入力してください",
+        L10nKey::HexPatternInvalidDigit => "16進バイトに使えるのは 0-9 と A-F だけです",
         L10nKey::EditorSaveSiblingTitle => "「{name}」の別のタブに未保存の変更があります",
         L10nKey::EditorSaveSiblingBody => {
             "ここで保存すると、その変更を含まない内容が書き込まれ、もう一方のタブにはファイルが変更されたと表示されます。"

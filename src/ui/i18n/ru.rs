@@ -2691,6 +2691,22 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexSavePartlyWritten => {
             "Файл мог быть записан частично. Повторное сохранение перезапишет все изменения."
         }
+        L10nKey::HexGoToOffset => "Перейти к смещению",
+        L10nKey::HexGoToOffsetPlaceholder => "Смещение: 0x1F, 31, +16, -16",
+        L10nKey::HexOffsetEmpty => "Введите смещение",
+        L10nKey::HexOffsetInvalid => "Это не смещение: используйте 0x1F, 1Fh, 31, +16 или -16",
+        L10nKey::HexOffsetOutOfRange => "За пределами файла, в нём {len} байт",
+        L10nKey::HexFind => "Найти",
+        L10nKey::HexFindHexPlaceholder => "Байты в hex: de ad be ef",
+        L10nKey::HexFindTextPlaceholder => "Текст для поиска",
+        L10nKey::HexFindModeHex => "Hex",
+        L10nKey::HexFindModeText => "Текст",
+        L10nKey::HexFindSearching => "Поиск…",
+        L10nKey::HexFindNotFound => "Не найдено",
+        L10nKey::HexFindFailed => "Поиск не смог прочитать файл: {e}",
+        L10nKey::HexPatternEmpty => "Введите байты для поиска",
+        L10nKey::HexPatternOddDigits => "Байты в hex записываются парами цифр",
+        L10nKey::HexPatternInvalidDigit => "В hex-байтах допустимы только цифры 0-9 и A-F",
         L10nKey::EditorSaveSiblingTitle => "В другой вкладке «{name}» есть несохранённые изменения",
         L10nKey::EditorSaveSiblingBody => {
             "Сохранение здесь запишет файл без этих изменений, и другая вкладка увидит файл изменённым."

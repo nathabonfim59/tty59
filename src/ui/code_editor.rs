@@ -350,6 +350,15 @@ enum BarKind {
         id: BufferId,
         offset: usize,
     },
+    /// A byte offset in the hex document `id` (`hex::find`).
+    GoToOffset {
+        id: BufferId,
+    },
+    /// Bytes or text to find in the hex document `id` (`hex::find`).
+    HexFind {
+        id: BufferId,
+        mode: hex::find::FindMode,
+    },
 }
 
 /// The one-line prompt that sits above the text: go to line, or name a file
@@ -357,6 +366,9 @@ enum BarKind {
 struct EditorBar {
     kind: BarKind,
     input: Entity<InputState>,
+    /// What a hex bar says back and the search it has running; dropped with
+    /// the bar, which is what cancels the search.
+    find: hex::find::BarState,
     _sub: Subscription,
 }
 
@@ -2492,6 +2504,8 @@ impl Tty59App {
             }
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAsPlaceholder).to_string(),
             BarKind::Rename { .. } => t_fmt(L10nKey::LspRenamePlaceholder, &[("name", &initial)]),
+            BarKind::GoToOffset { .. } => t(L10nKey::HexGoToOffsetPlaceholder).to_string(),
+            BarKind::HexFind { mode, .. } => hex::find::placeholder(mode).to_string(),
         };
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -2503,13 +2517,22 @@ impl Tty59App {
             window,
             |this: &mut Tty59App, _input, ev, window, cx| {
                 match ev {
-                    InputEvent::PressEnter { .. } => this.editor_submit_bar(window, cx),
+                    InputEvent::PressEnter { shift, .. } => {
+                        this.editor_submit_bar(*shift, window, cx)
+                    }
+                    // A reason the last Enter gave is about what was typed then.
+                    InputEvent::Change => this.hex_bar_edited(cx),
                     // Clicking away from a go-to-line box is how you say never
-                    // mind. A Save As is left up: it may be half-typed.
+                    // mind. A Save As is left up: it may be half-typed, and a
+                    // hex find so Enter and F3 can go on from the match.
                     InputEvent::Blur => {
                         if matches!(
                             this.editor.bar.as_ref().map(|b| &b.kind),
-                            Some(BarKind::GoToLine | BarKind::Rename { .. })
+                            Some(
+                                BarKind::GoToLine
+                                    | BarKind::Rename { .. }
+                                    | BarKind::GoToOffset { .. }
+                            )
                         ) {
                             this.editor.bar = None;
                         }
@@ -2526,12 +2549,18 @@ impl Tty59App {
         self.editor.bar = Some(EditorBar {
             kind,
             input,
+            find: hex::find::BarState::default(),
             _sub: sub,
         });
         cx.notify();
     }
 
     pub(crate) fn editor_go_to_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A hex document has offsets, not lines: the same chord and command ask for one.
+        if self.hex_ready_in_front(cx).is_some() {
+            self.hex_go_to_offset(window, cx);
+            return;
+        }
         if !self.code_panel_visible() || self.active_buffer().is_none() {
             return;
         }
@@ -2554,12 +2583,17 @@ impl Tty59App {
         cx.notify();
     }
 
-    fn editor_submit_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Enter in the bar; `backwards` is Shift+Enter, which only a find has a use for.
+    fn editor_submit_bar(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bar) = self.editor.bar.as_ref() else {
             return;
         };
         let text = bar.input.read(cx).value().to_string();
         match bar.kind {
+            BarKind::GoToOffset { id } => self.hex_go_to_offset_submit(id, &text, window, cx),
+            BarKind::HexFind { id, mode } => {
+                self.hex_find_submit(id, mode, &text, !backwards, window, cx)
+            }
             BarKind::GoToLine => {
                 let Some((line, column)) = parse_line_target(&text) else {
                     return;
@@ -4632,7 +4666,10 @@ impl Tty59App {
             BarKind::GoToLine => t(L10nKey::EditorGoToLine),
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAs),
             BarKind::Rename { .. } => t(L10nKey::LspRenameSymbol),
+            BarKind::GoToOffset { .. } => t(L10nKey::HexGoToOffset),
+            BarKind::HexFind { .. } => t(L10nKey::HexFind),
         };
+        let hex_tail = self.hex_bar_tail(bar, cx);
         // The bar is already a row, so an idle field inside it is not a second
         // box: no fill, no border, no shadow. While it has the focus it is the
         // stock field, fill and ring included: the ring is a half-opacity
@@ -4671,6 +4708,7 @@ impl Tty59App {
                 div().flex_1().min_w_0().child(input),
                 "editor-bar-input",
             ))
+            .children(hex_tail)
             .into_any_element(),
         )
     }

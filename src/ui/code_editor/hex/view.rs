@@ -685,6 +685,31 @@ impl HexView {
     }
 }
 
+// Go to offset and find: where they put the caret.
+impl HexView {
+    /// Puts the caret on `offset`, with the `len` bytes from there selected (none for a plain
+    /// jump), shows it and loads the page it is on.
+    pub(super) fn jump_to(
+        &mut self,
+        offset: u64,
+        len: u64,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending = None;
+        self.with_caret(cx, |caret, file_len| {
+            let last = file_len.saturating_sub(1);
+            caret.offset = offset.min(last);
+            // Both ends of a selection are included, so it ends on the match's last byte.
+            caret.anchor = len
+                .checked_sub(1)
+                .map(|extra| offset.saturating_add(extra).min(last));
+            caret.low_nibble = false;
+        });
+        self.caret_moved(window, cx);
+    }
+}
+
 /// The words for a paste that ran past the end of the file.
 fn truncated_notice(written: usize, left: usize) -> String {
     t_fmt(

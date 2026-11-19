@@ -10701,6 +10701,20 @@ impl Render for Tty59App {
                     }
                     this.editor_go_to_line(window, cx)
                 }))
+                // The hex view's own chords (`HexEditor` context), so only a hex view has the
+                // focus when they arrive.
+                .on_action(cx.listener(|this, _: &HexGoToOffset, window, cx| {
+                    this.hex_go_to_offset(window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &HexFind, window, cx| this.hex_find_open(window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &HexFindNext, window, cx| {
+                    this.hex_find_step(true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &HexFindPrevious, window, cx| {
+                    this.hex_find_step(false, window, cx)
+                }))
                 // The language-server commands (`ui::lsp`) belong to the
                 // editor only while it has the focus; F2 and F12 mean
                 // something to programs in the terminal too.
