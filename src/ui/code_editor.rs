@@ -50,8 +50,8 @@ const RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20
 const EDITORCONFIG_DEPTH: usize = 16;
 
 /// How many characters of the bar's own text size the field of a bar keeps at least, so a long
-/// note beside it cannot push it out: room for a hex offset or a short pattern.
-const EDITOR_BAR_FIELD_MIN_CHARS: f32 = 16.;
+/// note beside it cannot push it out: room for a full 32-bit offset, `0xFFFFFFFF`.
+const EDITOR_BAR_FIELD_MIN_CHARS: f32 = 10.;
 
 /// An open buffer is named by its input's entity id: unique, stable for the
 /// buffer's life, and already what every async landing looks it up by.
