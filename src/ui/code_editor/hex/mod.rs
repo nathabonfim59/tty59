@@ -104,7 +104,6 @@ pub(in crate::ui::code_editor) fn sniff_large(
                         first_page: prefix,
                     },
                     mtime: meta.mtime,
-                    len: meta.len,
                     opens_as_text: false,
                 }));
             }

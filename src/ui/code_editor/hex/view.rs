@@ -1630,7 +1630,6 @@ mod tests {
                     first_page: vec![0; PAGE],
                 },
                 mtime: None,
-                len: GIB,
                 opens_as_text: false,
             };
             d.apply_reload(file, cx);

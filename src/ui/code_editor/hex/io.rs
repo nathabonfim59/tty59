@@ -39,8 +39,6 @@ pub(in crate::ui::code_editor) struct HexFile {
     pub(in crate::ui::code_editor) path: PathBuf,
     pub(in crate::ui::code_editor) source: HexSource,
     pub(in crate::ui::code_editor) mtime: Option<MTime>,
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
-    pub(in crate::ui::code_editor) len: u64,
     /// Whether the text editor would have taken this file, which decides
     /// whether the tab offers "Open as Text".
     pub(in crate::ui::code_editor) opens_as_text: bool,
@@ -125,7 +123,6 @@ pub(in crate::ui::code_editor) fn load_hex(
                         first_page,
                     },
                     mtime: meta.mtime,
-                    len: meta.len,
                     opens_as_text,
                 }));
             }
@@ -144,13 +141,11 @@ pub(in crate::ui::code_editor) fn load_hex(
     }
     match h.read_file(&path, REMOTE_FILE_MAX) {
         Ok(bytes) => {
-            let len = len_of(&bytes);
             let opens_as_text = would_open_as_text(&bytes);
             Ok(HexLoaded::File(HexFile {
                 path,
                 source: HexSource::Whole(Arc::from(bytes)),
                 mtime: meta.mtime,
-                len,
                 opens_as_text,
             }))
         }
@@ -187,7 +182,6 @@ pub(in crate::ui::code_editor) fn hex_from_not_text(
         path,
         source,
         mtime,
-        len,
         // It is here because the text editor declined it.
         opens_as_text: false,
     }
@@ -439,7 +433,6 @@ mod tests {
         let path = file(&dir, "a.bin", &bytes);
 
         let got = loaded(load_hex(&*LocalHost::new(), path));
-        assert_eq!(got.len, bytes.len() as u64);
         assert!(!got.opens_as_text);
         assert!(got.mtime.is_some());
         match got.source {
@@ -463,7 +456,6 @@ mod tests {
                 HexSource::Whole(all) => assert_eq!(&*all, &bytes[..]),
                 HexSource::Paged { .. } => panic!("no ranged reads, so whole"),
             }
-            assert_eq!(got.len, 1000);
             assert_eq!(host.full_reads.load(Ordering::SeqCst), 1);
         }
     }
@@ -595,7 +587,6 @@ mod tests {
         let mtime = Some(MTime { secs: 5, nanos: 6 });
 
         let local = hex_from_not_text(true, PathBuf::from("/x/a.bin"), bytes.clone(), mtime);
-        assert_eq!(local.len, bytes.len() as u64);
         assert_eq!(local.mtime, mtime);
         assert!(!local.opens_as_text);
         match local.source {

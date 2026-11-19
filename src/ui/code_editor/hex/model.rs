@@ -376,8 +376,9 @@ impl ByteStore {
         old
     }
 
-    /// The overlay as contiguous runs, ascending.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
+    /// The overlay as contiguous runs, ascending. A save writes its snapshot's runs instead,
+    /// so only the tests read the live overlay this way.
+    #[cfg(test)]
     pub(super) fn patches(&self) -> Vec<(u64, Vec<u8>)> {
         runs(&self.overlay)
     }
@@ -839,7 +840,7 @@ impl HexModel {
         Ok(true)
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by M3 save"))]
+    #[cfg(test)]
     pub(super) fn patches(&self) -> Vec<(u64, Vec<u8>)> {
         self.store.patches()
     }

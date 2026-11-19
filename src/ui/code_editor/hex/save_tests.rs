@@ -414,6 +414,99 @@ fn a_changed_file_asks_and_overwrite_writes_only_our_bytes(cx: &mut TestAppConte
     assert_eq!(conflict(&app, &mut vcx, id), None);
 }
 
+/// After a forced paged save the view shows the file as it is: the other program's byte at an
+/// offset we never edited (the page cached before their change is dropped and read again) next
+/// to our own edit, and the caret stays. Guards the `force && paged` `bump_generation` in
+/// `hex_save_landed`: without it offset 100 keeps showing the old cached byte.
+#[gpui::test]
+fn a_forced_paged_save_rereads_the_pages_it_cached(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+    crate::ui::i18n::set_locale("en");
+    let (id, path, original, _dir) = rig(&app, &mut vcx, Fake::local());
+    edit(&app, &mut vcx, id, 5, "41");
+    assert_eq!(
+        byte_at(&app, &mut vcx, id, 100),
+        Byte::Loaded {
+            value: original[100],
+            edited: false
+        },
+        "the page was read before their change"
+    );
+    let mut theirs = original;
+    theirs[100] = 0xEE;
+    std::fs::write(&path, &theirs).unwrap();
+
+    save(&app, &mut vcx, id);
+    answer(&mut vcx, L10nKey::EditorOverwrite);
+    wait(&mut vcx, |vcx| {
+        settle(vcx);
+        !dirty(&app, vcx, id)
+            && byte_at(&app, vcx, id, 100)
+                == Byte::Loaded {
+                    value: 0xEE,
+                    edited: false,
+                }
+    });
+
+    let mut want = theirs;
+    want[5] = 0x41;
+    assert_eq!(std::fs::read(&path).unwrap(), want, "both are on disk");
+    assert_eq!(
+        byte_at(&app, &mut vcx, id, 100),
+        Byte::Loaded {
+            value: 0xEE,
+            edited: false
+        },
+        "their byte shows"
+    );
+    assert_eq!(
+        byte_at(&app, &mut vcx, id, 5),
+        Byte::Loaded {
+            value: 0x41,
+            edited: false
+        },
+        "ours shows"
+    );
+    let caret = data(&app, &mut vcx, id).read_with(&vcx, |d, _| match &d.content {
+        HexContent::Ready(m) => m.caret.offset,
+        HexContent::TooLarge { .. } => panic!("too large"),
+    });
+    assert_eq!(caret, 5, "the caret stays where the edit left it");
+}
+
+/// The conflict prompt of a paged document says that only the edited bytes are written; a
+/// whole document keeps the old body (its save does replace the file). Guards the body choice
+/// in `editor_ask_overwrite` (`paged()` picking `HexSaveConflictBody`).
+#[gpui::test]
+fn the_conflict_prompt_words_depend_on_how_the_document_is_saved(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+    crate::ui::i18n::set_locale("en");
+    for (host, body) in [
+        (Fake::local(), L10nKey::HexSaveConflictBody),
+        (Fake::remote(), L10nKey::EditorSaveConflictBody),
+    ] {
+        let (id, path, original, _dir) = rig(&app, &mut vcx, host);
+        edit(&app, &mut vcx, id, 5, "41");
+        let mut theirs = original;
+        theirs[100] = 0xEE;
+        std::fs::write(&path, &theirs).unwrap();
+
+        save(&app, &mut vcx, id);
+        wait(&mut vcx, |vcx| vcx.has_pending_prompt());
+        let (title, detail) = vcx.pending_prompt().expect("it asked");
+        assert!(title.contains("changed on disk"), "{title}");
+        assert_eq!(detail, t(body));
+        vcx.simulate_prompt_answer(t(L10nKey::Cancel));
+        settle(&mut vcx);
+    }
+    assert_ne!(
+        t(L10nKey::HexSaveConflictBody),
+        t(L10nKey::EditorSaveConflictBody)
+    );
+}
+
 /// A resized file refuses even an Overwrite: the offsets mean nothing there. Nothing is
 /// written, the document stays dirty, and the failure is not worded as a partial write.
 /// Guards the length check in `save_hex`'s forced Patches arm.

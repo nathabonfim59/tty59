@@ -2399,6 +2399,9 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexPasteTruncated => "已粘贴 {written} 字节，超出文件末尾的 {left} 字节已舍弃",
         L10nKey::HexTooLarge => "“{name}”大小为 {size} MiB，超过通过连接可打开的上限 {limit} MiB",
         L10nKey::HexSavePartlyWritten => "文件可能只写入了一部分。再次保存会重写所有更改。",
+        L10nKey::HexSaveConflictBody => {
+            "打开之后，另一个程序修改了它。覆盖只会写入你编辑过的字节，其他修改会保留。"
+        }
         L10nKey::HexGoToOffset => "转到偏移",
         L10nKey::HexGoToOffsetPlaceholder => "偏移：0x1F、31、+16、-16",
         L10nKey::HexOffsetEmpty => "请输入偏移",
