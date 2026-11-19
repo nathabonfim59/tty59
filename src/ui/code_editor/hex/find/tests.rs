@@ -593,6 +593,90 @@ fn the_bar_draws_the_toggle_and_the_note(cx: &mut TestAppContext) {
     assert!(rig.vcx.debug_bounds("editor-bar-note").is_some());
 }
 
+/// Guards the note's `flex_shrink(1.).min_w_0().truncate()` in `hex_bar_tail` and the field's
+/// `min_w` in `render_editor_bar`: in a bar too narrow for a long note, the field keeps its
+/// minimum width and the toggle stays whole, and the note is cut to what is left, all inside
+/// the bar. With the note back to `flex_none` the field is squeezed to nothing and the note
+/// ends past the bar's right edge. The bar is as wide as the docked editor is at the default
+/// window, about 340pt.
+#[gpui::test]
+fn a_long_note_shrinks_instead_of_pushing_the_field_out(cx: &mut TestAppContext) {
+    const DOCKED_BAR_W: f32 = 340.;
+    fn bounds(vcx: &mut VisualTestContext, name: &'static str) -> gpui::Bounds<gpui::Pixels> {
+        vcx.debug_bounds(name)
+            .unwrap_or_else(|| panic!("{name} is drawn"))
+    }
+    let mut rig = rig(cx, 8000, &[]);
+    let note_kind = Note::Offset(OffsetError::OutOfRange, u64::MAX);
+    rig.vcx.simulate_resize(gpui::size(px(600.), px(600.)));
+    rig.open_find();
+    rig.app.update_in(&mut rig.vcx, |app, _, cx| {
+        if let Some(bar) = app.editor.bar.as_mut() {
+            bar.find.note = Some(note_kind.clone());
+        }
+        cx.notify();
+    });
+    rig.vcx.run_until_parked();
+    let _ = rig.vcx.update(|window, cx| window.draw(cx));
+    // The editor column is what the window leaves it: size the window so the bar, not the
+    // window, is the realistic width.
+    let first = bounds(&mut rig.vcx, "editor-bar").size.width.as_f32();
+    rig.vcx
+        .simulate_resize(gpui::size(px(600. + DOCKED_BAR_W - first), px(600.)));
+    rig.vcx.run_until_parked();
+    let _ = rig.vcx.update(|window, cx| window.draw(cx));
+    let bar = bounds(&mut rig.vcx, "editor-bar");
+    assert!(
+        (bar.size.width.as_f32() - DOCKED_BAR_W).abs() < 1.,
+        "the bar is {:?} wide, not the docked {DOCKED_BAR_W}",
+        bar.size.width
+    );
+    let input = bounds(&mut rig.vcx, "editor-bar-input");
+    let toggle = bounds(&mut rig.vcx, "hex-find-mode");
+    let note = bounds(&mut rig.vcx, "editor-bar-note");
+    let min = rig.vcx.update(|window, _| {
+        gpui::rems(
+            crate::ui::right_panel::META * crate::ui::code_editor::EDITOR_BAR_FIELD_MIN_CHARS,
+        )
+        .to_pixels(window.rem_size())
+        .as_f32()
+    });
+    let full = rig.vcx.update(|window, _| {
+        let size = gpui::rems(crate::ui::right_panel::META).to_pixels(window.rem_size());
+        crate::ui::text_elision::measure_text(
+            window.text_system(),
+            &window.text_style().font(),
+            size.as_f32(),
+            &note_kind.text(),
+        )
+    });
+    let at = format!(
+        "bar {:?}..{:?}, field {:?}..{:?} (min {min}), toggle ..{:?}, note {:?}..{:?} (text {full})",
+        bar.left(),
+        bar.right(),
+        input.left(),
+        input.right(),
+        toggle.right(),
+        note.left(),
+        note.right()
+    );
+    assert!(
+        input.size.width.as_f32() >= min - 0.5,
+        "field too narrow: {at}"
+    );
+    assert!(input.right() <= bar.right(), "field leaves the bar: {at}");
+    assert!(toggle.right() <= bar.right(), "toggle leaves the bar: {at}");
+    assert!(
+        note.right() <= bar.right() + px(0.5),
+        "note leaves the bar: {at}"
+    );
+    assert!(note.left() >= input.right(), "note over the field: {at}");
+    assert!(
+        note.size.width.as_f32() < full - 1.,
+        "the note is not cut, so this proves nothing: {at}"
+    );
+}
+
 /// Guards an empty file: nothing to go to, nothing to find, and no panic.
 #[gpui::test]
 fn an_empty_file_has_no_offset_and_no_match(cx: &mut TestAppContext) {

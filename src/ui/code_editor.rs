@@ -49,6 +49,10 @@ const RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20
 /// a `root = true` somewhere above it is not one worth stalling an open for.
 const EDITORCONFIG_DEPTH: usize = 16;
 
+/// How many characters of the bar's own text size the field of a bar keeps at least, so a long
+/// note beside it cannot push it out: room for a full 32-bit offset, `0xFFFFFFFF`.
+const EDITOR_BAR_FIELD_MIN_CHARS: f32 = 10.;
+
 /// An open buffer is named by its input's entity id: unique, stable for the
 /// buffer's life, and already what every async landing looks it up by.
 pub(crate) type BufferId = gpui::EntityId;
@@ -4711,7 +4715,13 @@ impl Tty59App {
                 "editor-bar-label",
             ))
             .child(status::probe(
-                div().flex_1().min_w_0().child(input),
+                // Never squeezed out by what follows it: the note shrinks instead.
+                div()
+                    .flex_1()
+                    .min_w(gpui::rems(
+                        crate::ui::right_panel::META * EDITOR_BAR_FIELD_MIN_CHARS,
+                    ))
+                    .child(input),
                 "editor-bar-input",
             ))
             .children(hex_tail)
