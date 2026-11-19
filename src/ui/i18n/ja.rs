@@ -2669,6 +2669,9 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexSavePartlyWritten => {
             "ファイルが一部だけ書き込まれた可能性があります。もう一度保存すると、すべての変更が書き直されます。"
         }
+        L10nKey::HexSaveConflictBody => {
+            "ここで開いた後に別のプログラムが変更しました。上書きすると、あなたが編集したバイトだけが書き込まれ、その他の変更は残ります。"
+        }
         L10nKey::HexGoToOffset => "オフセットへ移動",
         L10nKey::HexGoToOffsetPlaceholder => "オフセット：0x1F、31、+16、-16",
         L10nKey::HexOffsetEmpty => "オフセットを入力してください",

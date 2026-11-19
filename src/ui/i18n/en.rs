@@ -2589,6 +2589,9 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::HexSavePartlyWritten => {
             "The file may be partly written. Saving again rewrites every change."
         }
+        L10nKey::HexSaveConflictBody => {
+            "Another program changed it after it was opened here. Overwriting writes only the bytes you edited; its other changes stay."
+        }
         L10nKey::HexGoToOffset => "Go to offset",
         L10nKey::HexGoToOffsetPlaceholder => "Offset: 0x1F, 31, +16, -16",
         L10nKey::HexOffsetEmpty => "Type an offset",

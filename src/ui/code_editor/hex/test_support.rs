@@ -139,7 +139,6 @@ pub(super) fn paged(len: u64, head: &[u8], host: &Arc<Counting>) -> (HexData, te
         path,
         source: HexSource::Paged { len, first_page },
         mtime: None,
-        len,
         opens_as_text: false,
     });
     (HexData::from_loaded(host.clone(), loaded), dir)

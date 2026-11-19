@@ -2032,6 +2032,7 @@ l10n_keys! {
     HexPasteTruncated,
     HexTooLarge,
     HexSavePartlyWritten,
+    HexSaveConflictBody,
     HexGoToOffset,
     HexGoToOffsetPlaceholder,
     HexOffsetEmpty,

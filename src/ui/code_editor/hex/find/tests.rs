@@ -462,7 +462,6 @@ fn a_whole_document_is_searched_without_reading(cx: &mut TestAppContext) {
         path: PathBuf::from("/x/remote.bin"),
         source: HexSource::Whole(Arc::from(bytes)),
         mtime: None,
-        len: 200_000,
         opens_as_text: false,
     });
     let installed = host.clone();

@@ -2320,10 +2320,17 @@ impl Tty59App {
         let Some(name) = self.doc_label(id) else {
             return;
         };
+        // A paged hex save writes only the bytes that were edited, so the other changes on
+        // disk stay; saying they are replaced would be wrong.
+        let body = if self.hex(id).is_some_and(|d| d.data.read(cx).paged()) {
+            L10nKey::HexSaveConflictBody
+        } else {
+            L10nKey::EditorSaveConflictBody
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::EditorSaveConflictTitle, &[("name", &name)]),
-            Some(t(L10nKey::EditorSaveConflictBody)),
+            Some(t(body)),
             &crate::ui::confirm_answers(t(L10nKey::EditorOverwrite), t(L10nKey::Cancel)),
             cx,
         );

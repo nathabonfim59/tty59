@@ -26,6 +26,14 @@ fn may_be_partly_written(e: &std::io::Error) -> bool {
     )
 }
 
+/// What a save in flight was: the edits it froze, whether it wrote them as patches (a paged
+/// document) and whether it went ahead of a changed file. Handed back with the host's answer.
+struct SaveRun {
+    snapshot: SaveSnapshot,
+    paged: bool,
+    force: bool,
+}
+
 impl HexData {
     /// Freezes the edits for a save and marks it as running: what to write, and what the file
     /// must still look like for the write to be allowed. `None` when there is nothing to save.
@@ -203,7 +211,12 @@ impl Tty59App {
             cx,
             move |h| io::save_hex(h, &path, what, expect, force),
             move |app, outcome: SaveOutcome, window, cx| {
-                app.hex_save_landed(id, snapshot, paged, outcome, window, cx)
+                let run = SaveRun {
+                    snapshot,
+                    paged,
+                    force,
+                };
+                app.hex_save_landed(id, run, outcome, window, cx)
             },
         );
         cx.notify();
@@ -213,12 +226,16 @@ impl Tty59App {
     fn hex_save_landed(
         &mut self,
         id: BufferId,
-        snapshot: SaveSnapshot,
-        paged: bool,
+        run: SaveRun,
         outcome: SaveOutcome,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let SaveRun {
+            snapshot,
+            paged,
+            force,
+        } = run;
         // Closed while it was being written: nothing is left to fold into.
         let Some(doc) = self.hex(id) else {
             return;
@@ -234,6 +251,13 @@ impl Tty59App {
                 data.update(cx, |d, cx| {
                     if let HexContent::Ready(model) = &mut d.content {
                         model.apply_saved(&snapshot);
+                        // A forced patch save wrote only our runs into a file that had
+                        // changed, so the pages read before that change are stale: drop
+                        // them and let the view read them again. Edits made during the
+                        // save stay in the overlay, and the caret is untouched.
+                        if force && paged {
+                            model.store.bump_generation();
+                        }
                     }
                     d.mtime = mtime;
                     d.conflict = None;

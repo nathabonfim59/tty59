@@ -430,6 +430,12 @@ impl SearchSnapshot {
 }
 
 impl HexData {
+    /// Whether the document reads its file in parts, so a save writes only the runs that
+    /// were edited.
+    pub(super) fn paged(&self) -> bool {
+        matches!(&self.content, HexContent::Ready(m) if matches!(m.store.source(), Source::Paged { .. }))
+    }
+
     /// What a search needs, or `None` for a file that is too large to open.
     pub(super) fn search_snapshot(&self) -> Option<SearchSnapshot> {
         let HexContent::Ready(m) = &self.content else {
@@ -584,7 +590,6 @@ mod tests {
             path: PathBuf::from("/x/a.bin"),
             source: HexSource::Whole(Arc::from(vec![7u8; 100_000])),
             mtime: None,
-            len: 100_000,
             opens_as_text: false,
         });
         let (data, vcx) = with_window(cx, HexData::from_loaded(host.clone(), loaded));

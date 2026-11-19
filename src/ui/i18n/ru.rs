@@ -2691,6 +2691,9 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexSavePartlyWritten => {
             "Файл мог быть записан частично. Повторное сохранение перезапишет все изменения."
         }
+        L10nKey::HexSaveConflictBody => {
+            "Другая программа изменила файл после открытия. Перезапись запишет только изменённые вами байты, остальные изменения останутся."
+        }
         L10nKey::HexGoToOffset => "Перейти к смещению",
         L10nKey::HexGoToOffsetPlaceholder => "Смещение: 0x1F, 31, +16, -16",
         L10nKey::HexOffsetEmpty => "Введите смещение",
