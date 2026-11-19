@@ -2699,7 +2699,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::HexFind => "Найти",
         L10nKey::HexFindHexPlaceholder => "Байты в hex: de ad be ef",
         L10nKey::HexFindTextPlaceholder => "Текст для поиска",
-        L10nKey::HexFindModeHex => "Hex",
+        L10nKey::HexFindModeHex => "HEX",
         L10nKey::HexFindModeText => "Текст",
         L10nKey::HexFindSearching => "Поиск…",
         L10nKey::HexFindNotFound => "Не найдено",

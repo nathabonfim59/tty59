@@ -150,15 +150,17 @@ impl Rig {
         self.searched();
     }
 
-    fn cancel_flag(&self) -> Arc<AtomicBool> {
-        self.app.read_with(&self.vcx, |app, _| {
-            app.editor
-                .bar
-                .as_ref()
-                .and_then(|b| b.find.search.as_ref())
-                .expect("a search is running")
-                .cancel
-                .clone()
+    /// Asks for a forward find in one turn, so nothing can land before the caller looks: the
+    /// search's cancel flag and the note the bar shows while it runs.
+    fn start(&mut self, hex: &str) -> (Arc<AtomicBool>, Option<Note>) {
+        self.open_find();
+        let id = self.id;
+        let hex = hex.to_string();
+        self.app.update_in(&mut self.vcx, |app, window, cx| {
+            app.hex_find_submit(id, FindMode::Hex, &hex, true, window, cx);
+            let bar = app.editor.bar.as_ref().expect("the bar");
+            let flag = bar.find.search.as_ref().map(|s| s.cancel.clone());
+            (flag.expect("a search is running"), bar.find.note.clone())
         })
     }
 }
@@ -399,9 +401,7 @@ fn a_superseded_search_is_cancelled_and_its_answer_dropped(cx: &mut TestAppConte
 #[gpui::test]
 fn closing_the_bar_cancels_the_search(cx: &mut TestAppContext) {
     let mut rig = rig(cx, 96 * MIB, &[]);
-    rig.open_find();
-    rig.enter("aa bb cc dd", false);
-    let flag = rig.cancel_flag();
+    let (flag, _) = rig.start("aa bb cc dd");
     assert!(!flag.load(Ordering::Relaxed));
     rig.app.update_in(&mut rig.vcx, |app, window, cx| {
         app.editor_close_bar(window, cx)
@@ -419,9 +419,7 @@ fn closing_the_bar_cancels_the_search(cx: &mut TestAppContext) {
 #[gpui::test]
 fn closing_the_document_cancels_the_search(cx: &mut TestAppContext) {
     let mut rig = rig(cx, 96 * MIB, &[]);
-    rig.open_find();
-    rig.enter("aa bb cc dd", false);
-    let flag = rig.cancel_flag();
+    let (flag, _) = rig.start("aa bb cc dd");
     rig.app.update_in(&mut rig.vcx, |app, window, cx| {
         app.editor_close_file(0, window, cx)
     });
@@ -437,17 +435,15 @@ fn closing_the_document_cancels_the_search(cx: &mut TestAppContext) {
 #[gpui::test]
 fn only_a_large_file_says_searching(cx: &mut TestAppContext) {
     let mut big = rig(cx, 4 * MIB, &[]);
-    big.open_find();
-    big.enter("aa bb", false);
-    assert_eq!(big.note(), Some(Note::Searching));
+    let (_, shown) = big.start("aa bb");
+    assert_eq!(shown, Some(Note::Searching));
     assert_eq!(Note::Searching.text(), "Searching…");
     big.searched();
     assert_eq!(big.note(), Some(Note::NotFound));
 
     let mut small = rig(cx, 8000, &[]);
-    small.open_find();
-    small.enter("aa bb", false);
-    assert_eq!(small.note(), None);
+    let (_, shown) = small.start("aa bb");
+    assert_eq!(shown, None, "a small file never says Searching");
     small.searched();
     assert_eq!(small.note(), Some(Note::NotFound));
 }
