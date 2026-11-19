@@ -83,6 +83,10 @@ pub struct Semantics {
     pub success: Semantic,
     pub info: Semantic,
     pub link: Semantic,
+    /// The warning colour as a non-text mark (the hex editor's edit underline) that must clear
+    /// the selection as well as the backgrounds. It is `warning.ink` untouched wherever that
+    /// already clears the selection.
+    pub warning_mark: u32,
 }
 
 impl Global for Semantics {}
@@ -988,12 +992,14 @@ impl Theme {
         } else {
             (0xc43c43, 0x2f8a52, 0xb7791f)
         };
+        let warning = build(amber);
         Semantics {
             danger: build(red),
             success: build(green),
-            warning: build(amber),
+            warning,
             info: build(self.accent),
             link: build(self.accent),
+            warning_mark: legible_across(&[m.background, m.selection], warning.ink, ACCENT_FLOOR),
         }
     }
 
@@ -4816,23 +4822,42 @@ ansi:
             .iter()
             .flat_map(|t| {
                 let m = t.neutrals();
-                let ink = t.semantics_with(&m).warning.ink;
+                let sem = t.semantics_with(&m);
                 let mut out = Vec::new();
-                let text = contrast(ink, m.background);
+                let text = contrast(sem.warning.ink, m.background);
                 if text < AA_TEXT {
                     out.push(format!("{}: warning text on background {text:.2}", t.id));
                 }
-                let mark = contrast(ink, m.selection);
-                if mark < AA_MARK {
-                    out.push(format!(
-                        "{}: warning underline on selection {mark:.2}",
-                        t.id
-                    ));
+                for (what, fill) in [("selection", m.selection), ("background", m.background)] {
+                    let mark = contrast(sem.warning_mark, fill);
+                    if mark < AA_MARK {
+                        out.push(format!("{}: warning mark on {what} {mark:.2}", t.id));
+                    }
                 }
                 out
             })
             .collect();
         assert_no_misses("edited hex bytes", misses);
+    }
+
+    /// The mark is the warning ink itself wherever that already clears the selection, so only
+    /// the themes that miss it change colour. Guards `legible_across` returning the seed.
+    #[test]
+    fn the_warning_mark_is_the_ink_where_it_already_clears_the_selection() {
+        let mut same = 0;
+        for t in sweep_themes() {
+            let m = t.neutrals();
+            let sem = t.semantics_with(&m);
+            let clears = contrast(sem.warning.ink, m.selection) >= AA_MARK
+                && contrast(sem.warning.ink, m.background) >= AA_MARK;
+            if clears {
+                assert_eq!(sem.warning_mark, sem.warning.ink, "{}", t.id);
+                same += 1;
+            } else {
+                assert_ne!(sem.warning_mark, sem.warning.ink, "{}", t.id);
+            }
+        }
+        assert!(same > 0, "some theme keeps the ink as the mark");
     }
 
     fn crossover_theme(background: u32, foreground: u32) -> Theme {
@@ -5068,7 +5093,6 @@ ansi:
             if held(authored) {
                 assert_eq!(cached.popover, authored, "{}: moved without need", theme.id);
             } else {
-                moved += 1;
             }
         }
         assert!(moved > 0, "no theme needed the correction");
