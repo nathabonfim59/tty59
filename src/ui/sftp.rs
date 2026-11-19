@@ -1937,14 +1937,31 @@ impl Tty59App {
         danger: gpui::Hsla,
         app: &gpui::WeakEntity<Self>,
     ) -> gpui_component::menu::PopupMenu {
-        let mut menu = menu.min_w(px(180.));
+        Self::sftp_row_menu_items(entry, path, host_path, dir_like, is_symlink, danger, app)
+            .into_iter()
+            .fold(menu.min_w(px(180.)), |menu, item| menu.item(item))
+    }
+
+    /// The row menu's items in order, apart from the menu they go into so a
+    /// test can read their labels.
+    #[allow(clippy::too_many_arguments)]
+    fn sftp_row_menu_items(
+        entry: &SftpEntry,
+        path: &str,
+        host_path: Option<&str>,
+        dir_like: bool,
+        is_symlink: bool,
+        danger: gpui::Hsla,
+        app: &gpui::WeakEntity<Self>,
+    ) -> Vec<PopupMenuItem> {
+        let mut items = Vec::new();
 
         let primary_label = if dir_like {
             t(L10nKey::SftpContextOpen)
         } else {
             t(L10nKey::SftpContextEdit)
         };
-        menu = menu.item(PopupMenuItem::new(primary_label).on_click({
+        items.push(PopupMenuItem::new(primary_label).on_click({
             let app = app.clone();
             let entry = entry.clone();
             move |_, window, cx| {
@@ -1956,7 +1973,7 @@ impl Tty59App {
         // The same file as bytes, in a tab of its own, whatever it is; a link
         // to a file follows Edit's lead and opens the file it points at.
         if !dir_like {
-            menu = menu.item(PopupMenuItem::new(t(L10nKey::CmdOpenAsHex)).on_click({
+            items.push(PopupMenuItem::new(t(L10nKey::CmdOpenAsHex)).on_click({
                 let app = app.clone();
                 let entry = entry.clone();
                 move |_, window, cx| {
@@ -1971,7 +1988,7 @@ impl Tty59App {
         // Editing is the double-click now, but a copy in ~/Downloads is still
         // a thing people come to this menu for.
         if !dir_like {
-            menu = menu.item(PopupMenuItem::new(t(L10nKey::Download)).on_click({
+            items.push(PopupMenuItem::new(t(L10nKey::Download)).on_click({
                 let app = app.clone();
                 let entry = entry.clone();
                 move |_, _window, cx| {
@@ -1982,7 +1999,7 @@ impl Tty59App {
         }
 
         if is_symlink {
-            menu = menu.item(
+            items.push(
                 PopupMenuItem::new(t(L10nKey::SftpContextFollowSymlink)).on_click({
                     let app = app.clone();
                     let entry = entry.clone();
@@ -1994,37 +2011,36 @@ impl Tty59App {
             );
         }
 
-        menu = menu
-            .item(PopupMenuItem::new(t(L10nKey::SftpContextRename)).on_click({
-                let app = app.clone();
-                let name = entry.name.clone();
-                move |_, window, cx| {
-                    let name = name.clone();
-                    let _ = app.update(cx, |this, cx| this.sftp_begin_rename(name, window, cx));
-                }
-            }))
-            .item(PopupMenuItem::new(t(L10nKey::SftpContextChmod)).on_click({
-                let app = app.clone();
+        items.push(PopupMenuItem::new(t(L10nKey::SftpContextRename)).on_click({
+            let app = app.clone();
+            let name = entry.name.clone();
+            move |_, window, cx| {
+                let name = name.clone();
+                let _ = app.update(cx, |this, cx| this.sftp_begin_rename(name, window, cx));
+            }
+        }));
+        items.push(PopupMenuItem::new(t(L10nKey::SftpContextChmod)).on_click({
+            let app = app.clone();
+            let entry = entry.clone();
+            move |_, window, cx| {
                 let entry = entry.clone();
-                move |_, window, cx| {
-                    let entry = entry.clone();
-                    let _ = app.update(cx, |this, cx| this.sftp_begin_chmod(entry, window, cx));
-                }
-            }))
-            .separator();
+                let _ = app.update(cx, |this, cx| this.sftp_begin_chmod(entry, window, cx));
+            }
+        }));
+        items.push(PopupMenuItem::separator());
 
         // Folders included: before these, a folder's path could only be read
         // off the breadcrumb after walking into it.
-        menu = menu.item(copy_item(t(L10nKey::FileTreeContextCopyPath), path));
+        items.push(copy_item(t(L10nKey::FileTreeContextCopyPath), path));
         if let Some(host_path) = host_path {
-            menu = menu.item(copy_item(
+            items.push(copy_item(
                 t(L10nKey::FileTreeContextCopyHostPath),
                 host_path,
             ));
         }
-        menu = menu.separator();
+        items.push(PopupMenuItem::separator());
 
-        menu.item(
+        items.push(
             PopupMenuItem::element(move |_window, _cx| {
                 div().text_color(danger).child(t(L10nKey::Delete))
             })
@@ -2036,7 +2052,8 @@ impl Tty59App {
                     let _ = app.update(cx, |this, cx| this.sftp_delete_entry(entry, window, cx));
                 }
             }),
-        )
+        );
+        items
     }
 
     pub(crate) fn sftp_transfers_footer(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -3310,88 +3327,63 @@ mod gpui_tests {
         }
     }
 
-    /// Opens the row menu for `entry`, drawn and focused, then presses Down
-    /// `downs` times and Enter: the item picked is the `downs`th one, counting
-    /// from one. The menu's items are not readable from here, so the keyboard
-    /// is the way to walk it.
-    fn pick_row_menu_item(
+    /// The labels of a row menu's items, in order; a separator is `-` and the
+    /// red Delete, which is drawn by a closure, is `<element>`.
+    fn row_menu_labels(
         app: &Entity<Tty59App>,
-        vcx: &mut VisualTestContext,
         entry: &crate::daemon::protocol::SftpEntry,
-        downs: usize,
-    ) {
-        use gpui::{AvailableSpace, Focusable as _, point, px, size};
-        use gpui_component::menu::PopupMenu;
-
+        is_symlink: bool,
+    ) -> Vec<String> {
+        use gpui_component::menu::PopupMenuItem;
         let weak = app.downgrade();
-        let dir_like = super::is_dir_like(entry);
-        let entry = entry.clone();
-        let menu = vcx.update(|window, cx| {
-            PopupMenu::build(window, cx, move |menu, _window, _cx| {
-                Tty59App::sftp_row_context_menu(
-                    menu,
-                    &entry,
-                    "/srv/app/x",
-                    None,
-                    dir_like,
-                    false,
-                    gpui::Hsla::default(),
-                    &weak,
-                )
-            })
-        });
-        let drawn = menu.clone();
-        vcx.draw(
-            point(px(0.), px(0.)),
-            size(
-                AvailableSpace::Definite(px(320.)),
-                AvailableSpace::Definite(px(600.)),
-            ),
-            move |_, _| gpui::AnyView::from(drawn),
-        );
-        vcx.update(|window, cx| window.focus(&menu.focus_handle(cx), cx));
-        let keys = "down ".repeat(downs) + "enter";
-        vcx.simulate_keystrokes(&keys);
+        Tty59App::sftp_row_menu_items(
+            entry,
+            "/srv/app/x",
+            None,
+            super::is_dir_like(entry),
+            is_symlink,
+            gpui::Hsla::default(),
+            &weak,
+        )
+        .iter()
+        .map(|item| match item {
+            PopupMenuItem::Item { label, .. } => label.to_string(),
+            PopupMenuItem::Separator => "-".into(),
+            _ => "<element>".into(),
+        })
+        .collect()
     }
 
-    /// Guards the Open as Hex item's place and wiring in `sftp_row_context_menu`:
-    /// it is the second item of a file's menu, straight after Edit (the
-    /// first), and picking it asks the editor for a hex document of the file.
-    /// A directory's menu has no such item: its second item is something else
-    /// and asks for no hex document.
-    ///
-    /// Only the request is checked here: the bytes come over the daemon, which
-    /// a test pane has none of. `a_hex_document_lands_for_the_remote_path_on_the_host`
-    /// finishes the trip.
+    /// Guards the Open as Hex item in `sftp_row_menu_items`: a file's menu
+    /// has it second, straight after Edit and before Download; a folder's
+    /// menu, whose first item is Open, has none. The click path is covered by
+    /// `a_hex_document_lands_for_the_remote_path_on_the_host`.
     #[gpui::test]
     fn the_row_menu_offers_open_as_hex_right_after_edit_for_files_only(cx: &mut TestAppContext) {
-        use crate::daemon::protocol::SftpEntryKind::{Dir, File};
-        let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+        use crate::daemon::protocol::SftpEntryKind::{Dir, File, Symlink};
+        let (app, _vcx) = harness(cx);
         crate::ui::i18n::set_locale("en");
-        app.update_in(&mut vcx, |app, _, _| {
-            app.sftp_panel.cwd = "/srv/app".into();
-            app.sftp_panel.open_pane_id = Some(7);
-        });
-        let pending = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
-            app.read_with(vcx, |app, _| app.hex_opens_pending())
-        };
 
-        pick_row_menu_item(&app, &mut vcx, &row_entry("dir", Dir), 2);
+        let file = row_menu_labels(&app, &row_entry("a.bin", File), false);
         assert_eq!(
-            pending(&app, &mut vcx),
-            0,
-            "a folder's menu has no hex item"
+            file[..3],
+            ["Edit", "Open as Hex", "Download"],
+            "a file: {file:?}"
         );
 
-        pick_row_menu_item(&app, &mut vcx, &row_entry("a.bin", File), 1);
+        let link = row_menu_labels(&app, &row_entry("current", Symlink), true);
         assert_eq!(
-            pending(&app, &mut vcx),
-            0,
-            "the first item is Edit, not hex"
+            link[..2],
+            ["Edit", "Open as Hex"],
+            "a link to a file: {link:?}"
         );
 
-        pick_row_menu_item(&app, &mut vcx, &row_entry("a.bin", File), 2);
-        assert_eq!(pending(&app, &mut vcx), 1, "the second item opens as hex");
+        let dir = row_menu_labels(&app, &row_entry("dir", Dir), false);
+        assert_eq!(dir[0], "Open", "a folder: {dir:?}");
+        assert!(
+            !dir.iter().any(|label| label == "Open as Hex"),
+            "a folder has no hex item: {dir:?}"
+        );
     }
 
     /// Guards `sftp_open_hex_on`: the document is the cwd-joined remote path,
