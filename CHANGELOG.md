@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [26.19.0] - 2026-11-23
+
+### Added
+
+- **Hex editor for any file**: binaries that used to show "looks like a
+  binary file" now open as hex, and every saved file offers Open as Hex and
+  Open as Text from its tab, the editor, the file tree, the remote Files tab
+  and the palette. The view shows offsets, 16 bytes per row and ASCII, with
+  the value under the caret in the status bar. Typing overwrites bytes in
+  place, so a file's length never changes; undo, redo, copy, paste, Find and
+  Go to Offset all work. Large local files open in pages, so a 1 GiB binary
+  costs one page to open. Ctrl+S patches a local file in place, writing only
+  the changed bytes; a remote file is written whole. An in-place save that
+  fails midway can leave the file partly patched, and the notice says so.
+
 ## [26.18.0] - 2026-11-18
 
 ### Added
