@@ -28,6 +28,7 @@ use crate::ui::lsp::LspStatus;
 use crate::ui::zoom::SCROLL_GESTURE_IDLE;
 
 mod gutter;
+mod hex;
 mod images;
 mod nav;
 pub(crate) mod outline;
@@ -47,6 +48,10 @@ const RELOAD_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(20
 /// round trip on a remote host, and a project nested deeper than this without
 /// a `root = true` somewhere above it is not one worth stalling an open for.
 const EDITORCONFIG_DEPTH: usize = 16;
+
+/// How many characters of the bar's own text size the field of a bar keeps at least, so a long
+/// note beside it cannot push it out: room for a full 32-bit offset, `0xFFFFFFFF`.
+const EDITOR_BAR_FIELD_MIN_CHARS: f32 = 10.;
 
 /// An open buffer is named by its input's entity id: unique, stable for the
 /// buffer's life, and already what every async landing looks it up by.
@@ -349,6 +354,15 @@ enum BarKind {
         id: BufferId,
         offset: usize,
     },
+    /// A byte offset in the hex document `id` (`hex::find`).
+    GoToOffset {
+        id: BufferId,
+    },
+    /// Bytes or text to find in the hex document `id` (`hex::find`).
+    HexFind {
+        id: BufferId,
+        mode: hex::find::FindMode,
+    },
 }
 
 /// The one-line prompt that sits above the text: go to line, or name a file
@@ -356,6 +370,9 @@ enum BarKind {
 struct EditorBar {
     kind: BarKind,
     input: Entity<InputState>,
+    /// What a hex bar says back and the search it has running; dropped with
+    /// the bar, which is what cancels the search.
+    find: hex::find::BarState,
     _sub: Subscription,
 }
 
@@ -365,6 +382,8 @@ pub(crate) struct EditorPanelState {
     /// Every open picture: documents that have ids like buffers do, and no
     /// text to hold. See `images`.
     images: images::ImageState,
+    /// Every file open as bytes. See `hex`.
+    hex: hex::HexState,
     /// How many times the reader has hidden each tab's editor panel, so a
     /// restore that was asked for before a hide can tell it landed after one.
     panel_epoch: HashMap<TabId, u64>,
@@ -471,6 +490,7 @@ impl EditorPanelState {
         Self {
             buffers: Vec::new(),
             images: images::ImageState::default(),
+            hex: hex::HexState::default(),
             panel_epoch: HashMap::new(),
             next_untitled: 1,
             pending_cursor: None,
@@ -710,10 +730,25 @@ fn parse_line_target(text: &str) -> Option<(u32, u32)> {
 
 /// Why the built-in editor could not take a file.
 enum EditorOpenError {
-    /// Not text, so the editor was never the right place for it.
-    NotText(PathBuf),
+    /// Not text, so the editor was never the right place for it. What was
+    /// already read comes along, so a hex view of it needs no second read.
+    NotText {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        mtime: Option<MTime>,
+    },
+    /// Text too large for the editor. The words are ready; the path is what a
+    /// hex view of it is opened on, which the notice offers.
+    TooLarge { path: PathBuf, message: String },
     /// Something already worded for the user.
     Message(String),
+}
+
+/// What the open that found a file not to be text had already read.
+struct NotTextFile {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    mtime: Option<MTime>,
 }
 
 /// A file read off its host, decoded, with everything needed to edit it.
@@ -731,10 +766,10 @@ fn load_text(
     h: &dyn tty59_core::host::Host,
     path: PathBuf,
     mtime: Option<MTime>,
-    bytes: &[u8],
+    bytes: Vec<u8>,
 ) -> Result<Loaded, EditorOpenError> {
-    let Some(decoded) = editor_text::decode(bytes) else {
-        return Err(EditorOpenError::NotText(path));
+    let Some(decoded) = editor_text::decode(&bytes) else {
+        return Err(EditorOpenError::NotText { path, bytes, mtime });
     };
     let config = read_editorconfig(h, &path);
     Ok(Loaded {
@@ -770,6 +805,9 @@ enum Opened {
     Text(Loaded),
     Image(ImageLoaded),
     ImageFailed(ImageFailed),
+    /// Not text and not a picture, and too large for the text editor to have
+    /// read: what a hex view needs, from the first page or the whole file.
+    Hex(hex::io::HexLoaded),
 }
 
 /// Reads a file off its host once, decides from its *content* what it is, and
@@ -795,16 +833,32 @@ fn load_document(
             &[("path", &path.display().to_string()), ("e", &e.to_string())],
         ))
     })?;
-    let hinted = named_like_a_picture || image_decode::has_image_extension(&path);
-    let too_large_for_text = |len: u64| {
-        EditorOpenError::Message(t_fmt(
+    let mut hinted = named_like_a_picture || image_decode::has_image_extension(&path);
+    let too_large_for_text = |len: u64| EditorOpenError::TooLarge {
+        path: path.clone(),
+        message: t_fmt(
             L10nKey::EditorFileTooLarge,
             &[
                 ("path", &path.display().to_string()),
                 ("size", &(len / (1024 * 1024)).to_string()),
             ],
-        ))
+        ),
     };
+    // Past the text limit what a file is has to be found out without reading
+    // all of it: a big binary is the reason hex exists, and a big text file is
+    // told "too large" with the way out beside it.
+    let mut prefetched = None;
+    if meta.len > MAX_FILE_BYTES && !hinted {
+        match hex::sniff_large(h, &path, &meta)? {
+            hex::Large::Hex(file) => return Ok(Opened::Hex(hex::io::HexLoaded::File(file))),
+            hex::Large::TooLargeForText => return Err(too_large_for_text(meta.len)),
+            // Sniffed as one, so it is held to a picture's limit and words.
+            hex::Large::Picture { bytes } => {
+                hinted = true;
+                prefetched = bytes;
+            }
+        }
+    }
     // Past what any picture may be, nothing is read: a name that says picture
     // gets the picture's words, anything else the text editor's.
     if meta.len > image_decode::MAX_IMAGE_BYTES {
@@ -820,9 +874,12 @@ fn load_document(
     }
     // The host enforces the bound on the bytes it returns, not only on the
     // size it was told: see `Host::read_file`.
-    let bytes = match h.read_file(&path, image_decode::MAX_IMAGE_BYTES) {
-        Ok(bytes) => bytes,
-        Err(e) => return read_refusal(path, hinted, &e),
+    let bytes = match prefetched {
+        Some(bytes) => bytes,
+        None => match h.read_file(&path, image_decode::MAX_IMAGE_BYTES) {
+            Ok(bytes) => bytes,
+            Err(e) => return read_refusal(path, hinted, &e),
+        },
     };
     let len = bytes.len() as u64;
     match image_decode::sniff(&bytes) {
@@ -851,13 +908,15 @@ fn load_document(
     if len > MAX_FILE_BYTES {
         return Err(too_large_for_text(len));
     }
-    match load_text(h, path, meta.mtime, &bytes) {
+    match load_text(h, path, meta.mtime, bytes) {
         Ok(loaded) => Ok(Opened::Text(loaded)),
-        Err(EditorOpenError::NotText(path)) if hinted => Ok(Opened::ImageFailed(ImageFailed {
-            path,
-            error: image_decode::ImageError::NotAnImage,
-            bytes: Some(len),
-        })),
+        Err(EditorOpenError::NotText { path, .. }) if hinted => {
+            Ok(Opened::ImageFailed(ImageFailed {
+                path,
+                error: image_decode::ImageError::NotAnImage,
+                bytes: Some(len),
+            }))
+        }
         Err(other) => Err(other),
     }
 }
@@ -891,6 +950,14 @@ fn read_refusal(
             ("e", &error.to_string()),
         ],
     )))
+}
+
+/// Whether a file the text editor cannot show opens as a hex tab instead of going to the
+/// desktop: where nobody here can hand it to the desktop (another machine, or nothing may be
+/// spawned) and where handing it over would run it (a program). The rest keep going to the
+/// desktop, as they always did.
+fn goes_to_hex_by_default(local: bool, can_spawn: bool, program: bool) -> bool {
+    !local || !can_spawn || program
 }
 
 /// Collects the `.editorconfig` files that apply to `path`, nearest first,
@@ -1122,7 +1189,10 @@ impl Tty59App {
     fn doc_host(&self, id: BufferId) -> Option<SharedHost> {
         match self.buffer(id) {
             Some(f) => Some(f.host.clone()),
-            None => self.image(id).map(|d| d.host.clone()),
+            None => self
+                .image(id)
+                .map(|d| d.host.clone())
+                .or_else(|| self.hex(id).map(|d| d.host.clone())),
         }
     }
 
@@ -1190,23 +1260,31 @@ impl Tty59App {
 
     /// Unsaved buffers that only tab `tab_ix` shows — the ones closing it
     /// would lose. A buffer another tab also shows survives the close.
-    pub(crate) fn editor_unsaved_in_tab(&self, tab_ix: usize) -> Vec<BufferId> {
+    pub(crate) fn editor_unsaved_in_tab(&self, tab_ix: usize, cx: &gpui::App) -> Vec<BufferId> {
         let Some(code) = self.tabs.get(tab_ix).and_then(|t| t.code.as_deref()) else {
             return Vec::new();
         };
         code.all_files()
             .into_iter()
-            .filter(|id| self.buffer(*id).is_some_and(|b| b.dirty) && self.buffer_tabs(*id) == 1)
+            .filter(|id| self.doc_dirty(*id, cx) && self.buffer_tabs(*id) == 1)
             .collect()
     }
 
-    /// Every unsaved buffer in the window.
-    pub(crate) fn editor_unsaved(&self) -> Vec<BufferId> {
+    /// Every unsaved buffer in the window, hex documents with edits included.
+    pub(crate) fn editor_unsaved(&self, cx: &gpui::App) -> Vec<BufferId> {
         self.editor
             .buffers
             .iter()
             .filter(|b| b.dirty)
             .map(OpenFile::id)
+            .chain(
+                self.editor
+                    .hex
+                    .docs
+                    .iter()
+                    .map(hex::HexDoc::id)
+                    .filter(|id| self.hex_dirty(*id, cx)),
+            )
             .collect()
     }
 
@@ -1223,6 +1301,14 @@ impl Tty59App {
             .iter()
             .filter(|f| f.untitled.is_none() && f.host.id() == watch_host)
             .map(|f| f.path.clone())
+            .chain(
+                self.editor
+                    .hex
+                    .docs
+                    .iter()
+                    .filter(|d| d.host.id() == watch_host)
+                    .map(|d| d.path.clone()),
+            )
             .collect();
         let dirs: HashSet<PathBuf> = files
             .iter()
@@ -1466,9 +1552,18 @@ impl Tty59App {
                     let data = ImageData::failed(failed.path, failed.error, failed.bytes);
                     app.editor_land_image(seq, host, data, window, cx);
                 }
-                Err(EditorOpenError::NotText(path)) => {
+                Ok(Opened::Hex(loaded)) => {
                     app.image_request_done(seq);
-                    app.open_outside_the_editor(host_id, &path, window, cx);
+                    app.editor_land_hex(tab, host, loaded, true, window, cx);
+                }
+                Err(EditorOpenError::NotText { path, bytes, mtime }) => {
+                    app.image_request_done(seq);
+                    let file = NotTextFile { path, bytes, mtime };
+                    app.open_outside_the_editor(host, tab, file, window, cx);
+                }
+                Err(EditorOpenError::TooLarge { path, message }) => {
+                    app.image_request_done(seq);
+                    app.editor_too_large_notice(host, path, message, window, cx);
                 }
                 Err(EditorOpenError::Message(message)) => {
                     app.image_request_done(seq);
@@ -1487,24 +1582,31 @@ impl Tty59App {
     /// A program does not: `open` on a Mach-O binary runs it, and a build's
     /// output is full of paths to programs. Clicking a word in a terminal
     /// must not be a way to execute one, so those keep the words too.
+    ///
+    /// Where those words used to be, there is now a hex tab of the bytes that
+    /// were already read, so the file can still be looked into. What the
+    /// desktop can open is unchanged.
     fn open_outside_the_editor(
         &mut self,
-        host_id: HostId,
-        path: &Path,
+        host: SharedHost,
+        tab: TabId,
+        file: NotTextFile,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !host_id.is_local() || !self.can_spawn_locally(cx) || is_program(path) {
-            window.push_notification(
-                t_fmt(
-                    L10nKey::EditorBinaryFile,
-                    &[("path", &path.display().to_string())],
-                ),
-                cx,
-            );
+        let local = host.id().is_local();
+        if goes_to_hex_by_default(local, self.can_spawn_locally(cx), is_program(&file.path)) {
+            let NotTextFile { path, bytes, mtime } = file;
+            let file = hex::io::hex_from_not_text(local, path, bytes, mtime);
+            self.editor_land_hex(tab, host, hex::io::HexLoaded::File(file), true, window, cx);
             return;
         }
-        Self::open_with(path, crate::terminal::view::open_file_path, window, cx);
+        Self::open_with(
+            &file.path,
+            crate::terminal::view::open_file_path,
+            window,
+            cx,
+        );
     }
 
     /// Runs one of the desktop openers on a local file, and says so when it
@@ -1826,7 +1928,7 @@ impl Tty59App {
         // the panel's keys (close, the zoom actions) have a handler on the
         // path and a close of the last file does not fall through to the
         // terminal.
-        if let Some(focus) = self.image_focus(cx) {
+        if let Some(focus) = self.image_focus(cx).or_else(|| self.hex_focus(cx)) {
             window.focus(&focus, cx);
             return;
         }
@@ -2100,6 +2202,17 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.hex(id).is_some() {
+            self.hex_save(id, then_close, force, window, cx);
+            return;
+        }
+        // Another tab of this file with edits of its own must not be overwritten
+        // by accident: ask first. An Overwrite comes back here forced.
+        if !force && self.sibling_unsaved(id, cx) {
+            self.editor_saves_failed(id);
+            self.editor_ask_sibling_overwrite(id, then_close, window, cx);
+            return;
+        }
         let Some(f) = self.buffer_mut(id) else {
             return;
         };
@@ -2171,6 +2284,7 @@ impl Tty59App {
                         if let Some(dir) = &saved_in {
                             app.scm_invalidate_cwd(host_id, dir, cx);
                         }
+                        app.editor_notify_siblings(id, mtime, window, cx);
                         if pending {
                             app.editor_save_file(id, false, false, window, cx);
                             return;
@@ -2207,14 +2321,20 @@ impl Tty59App {
 
     /// Asked when a save finds the file changed underneath it.
     fn editor_ask_overwrite(&mut self, id: BufferId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(f) = self.buffer(id) else {
+        let Some(name) = self.doc_label(id) else {
             return;
         };
-        let name = f.label();
+        // A paged hex save writes only the bytes that were edited, so the other changes on
+        // disk stay; saying they are replaced would be wrong.
+        let body = if self.hex(id).is_some_and(|d| d.data.read(cx).paged()) {
+            L10nKey::HexSaveConflictBody
+        } else {
+            L10nKey::EditorSaveConflictBody
+        };
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::EditorSaveConflictTitle, &[("name", &name)]),
-            Some(t(L10nKey::EditorSaveConflictBody)),
+            Some(t(body)),
             &crate::ui::confirm_answers(t(L10nKey::EditorOverwrite), t(L10nKey::Cancel)),
             cx,
         );
@@ -2395,6 +2515,8 @@ impl Tty59App {
             }
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAsPlaceholder).to_string(),
             BarKind::Rename { .. } => t_fmt(L10nKey::LspRenamePlaceholder, &[("name", &initial)]),
+            BarKind::GoToOffset { .. } => t(L10nKey::HexGoToOffsetPlaceholder).to_string(),
+            BarKind::HexFind { mode, .. } => hex::find::placeholder(mode).to_string(),
         };
         let input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -2406,13 +2528,22 @@ impl Tty59App {
             window,
             |this: &mut Tty59App, _input, ev, window, cx| {
                 match ev {
-                    InputEvent::PressEnter { .. } => this.editor_submit_bar(window, cx),
+                    InputEvent::PressEnter { shift, .. } => {
+                        this.editor_submit_bar(*shift, window, cx)
+                    }
+                    // A reason the last Enter gave is about what was typed then.
+                    InputEvent::Change => this.hex_bar_edited(cx),
                     // Clicking away from a go-to-line box is how you say never
-                    // mind. A Save As is left up: it may be half-typed.
+                    // mind. A Save As is left up: it may be half-typed, and a
+                    // hex find so Enter and F3 can go on from the match.
                     InputEvent::Blur => {
                         if matches!(
                             this.editor.bar.as_ref().map(|b| &b.kind),
-                            Some(BarKind::GoToLine | BarKind::Rename { .. })
+                            Some(
+                                BarKind::GoToLine
+                                    | BarKind::Rename { .. }
+                                    | BarKind::GoToOffset { .. }
+                            )
                         ) {
                             this.editor.bar = None;
                         }
@@ -2421,7 +2552,6 @@ impl Tty59App {
                         cx.notify();
                     }
                     InputEvent::Focus => cx.notify(),
-                    _ => {}
                 }
             },
         );
@@ -2429,12 +2559,18 @@ impl Tty59App {
         self.editor.bar = Some(EditorBar {
             kind,
             input,
+            find: hex::find::BarState::default(),
             _sub: sub,
         });
         cx.notify();
     }
 
     pub(crate) fn editor_go_to_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // A hex document has offsets, not lines: the same chord and command ask for one.
+        if self.hex_ready_in_front(cx).is_some() {
+            self.hex_go_to_offset(window, cx);
+            return;
+        }
         if !self.code_panel_visible() || self.active_buffer().is_none() {
             return;
         }
@@ -2457,12 +2593,17 @@ impl Tty59App {
         cx.notify();
     }
 
-    fn editor_submit_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Enter in the bar; `backwards` is Shift+Enter, which only a find has a use for.
+    fn editor_submit_bar(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(bar) = self.editor.bar.as_ref() else {
             return;
         };
         let text = bar.input.read(cx).value().to_string();
         match bar.kind {
+            BarKind::GoToOffset { id } => self.hex_go_to_offset_submit(id, &text, window, cx),
+            BarKind::HexFind { id, mode } => {
+                self.hex_find_submit(id, mode, &text, !backwards, window, cx)
+            }
             BarKind::GoToLine => {
                 let Some((line, column)) = parse_line_target(&text) else {
                     return;
@@ -2556,14 +2697,13 @@ impl Tty59App {
             self.editor_remove_from_tab(tab_ix, id, cx);
             return;
         }
-        let Some(f) = self.buffer(id) else {
+        let Some(name) = self.doc_label(id) else {
             return;
         };
-        if !f.dirty || self.buffer_refs(id) > 1 {
+        if !self.doc_dirty(id, cx) || self.buffer_refs(id) > 1 {
             self.editor_remove_from_tab(tab_ix, id, cx);
             return;
         }
-        let name = f.label();
         let answer = window.prompt(
             PromptLevel::Warning,
             &t_fmt(L10nKey::EditorUnsavedChanges, &[("name", &name)]),
@@ -2620,7 +2760,7 @@ impl Tty59App {
         let unsaved: Vec<BufferId> = ids
             .iter()
             .copied()
-            .filter(|id| self.buffer(*id).is_some_and(|f| f.dirty) && self.buffer_refs(*id) == 1)
+            .filter(|id| self.doc_dirty(*id, cx) && self.buffer_refs(*id) == 1)
             .collect();
         if self.editor_guard_unsaved(
             unsaved,
@@ -2791,6 +2931,26 @@ impl Tty59App {
         // file that is on this machine — the same rule as the file tree.
         let local = host.is_local();
         let mut menu = menu.separator();
+        // The same file as its bytes, or from its bytes back to text.
+        match self.hex_offer(id, cx) {
+            Some(hex::HexOffer::AsHex) => {
+                menu = menu.item(PopupMenuItem::new(t(L10nKey::CmdOpenAsHex)).on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| this.editor_open_as_hex(id, window, cx));
+                    }
+                }));
+            }
+            Some(hex::HexOffer::AsText) => {
+                menu = menu.item(PopupMenuItem::new(t(L10nKey::CmdOpenAsText)).on_click({
+                    let app = app.clone();
+                    move |_, window, cx| {
+                        let _ = app.update(cx, |this, cx| this.editor_open_as_text(id, window, cx));
+                    }
+                }));
+            }
+            None => {}
+        }
         if local && self.can_spawn_locally(cx) && !is_program(&path) {
             let browser = opens_in_browser(&path);
             let label = match browser {
@@ -2933,6 +3093,10 @@ impl Tty59App {
             self.editor_drop_image(id, cx);
             return;
         }
+        if self.hex(id).is_some() {
+            self.editor_drop_hex(id, cx);
+            return;
+        }
         // Whatever was waiting on this buffer to be saved is not going to
         // see that happen now.
         self.editor_saves_failed(id);
@@ -2979,10 +3143,7 @@ impl Tty59App {
             return true;
         }
         self.editor.unsaved_prompt_open = true;
-        let names: Vec<SharedString> = ids
-            .iter()
-            .filter_map(|id| self.buffer(*id).map(OpenFile::label))
-            .collect();
+        let names: Vec<SharedString> = ids.iter().filter_map(|id| self.doc_label(*id)).collect();
         let title = match names.as_slice() {
             [one] => t_fmt(L10nKey::EditorUnsavedChanges, &[("name", one)]),
             _ => t_fmt(
@@ -3064,9 +3225,12 @@ impl Tty59App {
             std::mem::take(&mut self.editor.waiters)
                 .into_iter()
                 .partition(|w| {
-                    w.ids.iter().all(|id| {
-                        self.buffer(*id)
-                            .is_none_or(|f| !f.dirty && !f.saving && f.untitled.is_none())
+                    w.ids.iter().all(|id| match self.buffer(*id) {
+                        Some(f) => !f.dirty && !f.saving && f.untitled.is_none(),
+                        None => self.hex(*id).is_none_or(|d| {
+                            let d = d.data.read(cx);
+                            !d.dirty() && !d.saving
+                        }),
                     })
                 });
         self.editor.waiters = waiting;
@@ -3134,6 +3298,7 @@ impl Tty59App {
         // Open pictures follow too, or the strip keeps the old name and
         // opening the renamed file reads it again beside the stale copy.
         moved |= self.image_path_moved(host, from, to, cx);
+        moved |= self.hex_path_moved(host, from, to, cx);
         if moved {
             self.editor_rebuild_watcher(cx);
             cx.notify();
@@ -3154,6 +3319,7 @@ impl Tty59App {
                 f.disk_mtime = None;
             }
         }
+        self.hex_path_removed(host, path, cx);
         cx.notify();
     }
 
@@ -3198,9 +3364,24 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The same file open as text and as bytes is two documents, and both hear of it.
+        if let Some(hex) = self.hex_at(host, path) {
+            self.hex_apply_external_change(hex, observed, window, cx);
+        }
         let Some(id) = self.buffer_at(host, path) else {
             return;
         };
+        self.editor_buffer_external_change(id, observed, window, cx);
+    }
+
+    /// What a change seen on disk means for the text buffer `id`.
+    fn editor_buffer_external_change(
+        &mut self,
+        id: BufferId,
+        observed: Observed,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(f) = self.buffer_mut(id) else {
             return;
         };
@@ -3228,6 +3409,10 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.hex(id).is_some() {
+            self.hex_reload_from_disk(id, window, cx);
+            return;
+        }
         let Some(f) = self.buffer_mut(id) else {
             return;
         };
@@ -3315,6 +3500,8 @@ impl Tty59App {
     fn editor_adopt_orphans(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Pictures no tab shows go, and so do views of places that are gone.
         self.editor_sweep_images(cx);
+        self.editor_sweep_hex(cx);
+        self.hex_adopt_orphans(window, cx);
         // No tabs at all is the gap in the middle of a server restart or a
         // workspace switch, not a verdict on the buffers: wait for the tabs.
         if self.editor.buffers.is_empty() || self.tabs.is_empty() {
@@ -3385,12 +3572,20 @@ impl Tty59App {
         // What was recorded is what is being put back; recording it again
         // before the files have loaded would write down an empty tab.
         self.editor.recorded.insert(tab_id, state.clone());
-        // Both groups' files in one trip, the left group's first.
-        let files: Vec<PathBuf> = state
+        // Both groups' files in one trip, the left group's first, each with
+        // whether it was open as bytes: a path listed as both text and hex is
+        // two tabs.
+        let files: Vec<(PathBuf, bool)> = state
             .files
             .iter()
-            .chain(state.split.iter().flat_map(|s| s.files.iter()))
-            .cloned()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), state.hex.contains(&i)))
+            .chain(state.split.iter().flat_map(|s| {
+                s.files
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| (p.clone(), s.hex.contains(&i)))
+            }))
             .collect();
         let requested = files.clone();
         // Hiding the panel while the files are on their way is the reader's
@@ -3403,7 +3598,10 @@ impl Tty59App {
             move |h| {
                 files
                     .into_iter()
-                    .map(|p| load_document(h, p).ok())
+                    .map(|(p, as_hex)| match as_hex {
+                        true => hex::io::load_hex(h, p).ok().map(Opened::Hex),
+                        false => load_document(h, p).ok(),
+                    })
                     .collect::<Vec<_>>()
             },
             move |app, loaded: Vec<Option<Opened>>, window, cx| {
@@ -3426,7 +3624,7 @@ impl Tty59App {
         &mut self,
         tab_id: TabId,
         state: TabEditor,
-        requested: Vec<PathBuf>,
+        requested: Vec<(PathBuf, bool)>,
         loaded: Vec<Option<Opened>>,
         epoch: u64,
         host: SharedHost,
@@ -3434,8 +3632,8 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) {
         let tab_alive = self.tab_index_of(tab_id).is_some();
-        let mut opened: Vec<(PathBuf, BufferId)> = Vec::new();
-        for (path, l) in requested.into_iter().zip(loaded) {
+        let mut opened: Vec<((PathBuf, bool), BufferId)> = Vec::new();
+        for ((path, as_hex), l) in requested.into_iter().zip(loaded) {
             // A picture that no longer decodes is not brought back as an
             // error tab, as a text file that no longer reads is not brought
             // back at all.
@@ -3468,16 +3666,26 @@ impl Tty59App {
                         }
                     }
                 }
-                Some(Opened::ImageFailed(_)) | None => continue,
+                // Only a tab recorded as bytes comes back as bytes: a text
+                // file that has since grown past the editor's limit is not
+                // put back as a hex tab nobody asked for.
+                Some(Opened::Hex(loaded)) if as_hex => {
+                    match self.editor_land_hex(tab_id, host.clone(), loaded, false, window, cx) {
+                        Some(id) => id,
+                        None => continue,
+                    }
+                }
+                Some(Opened::Hex(_)) | Some(Opened::ImageFailed(_)) | None => continue,
             };
-            opened.push((path, id));
+            opened.push(((path, as_hex), id));
         }
-        let group = |paths: &[PathBuf], active: usize| -> (Vec<BufferId>, usize) {
+        let group = |paths: &[PathBuf], hex: &[usize], active: usize| -> (Vec<BufferId>, usize) {
             let front = paths.get(active);
             let mut ids: Vec<BufferId> = Vec::new();
             let mut at = 0;
-            for path in paths {
-                let Some(&(_, id)) = opened.iter().find(|(p, _)| p == path) else {
+            for (i, path) in paths.iter().enumerate() {
+                let key = (path.clone(), hex.contains(&i));
+                let Some(&(_, id)) = opened.iter().find(|(k, _)| *k == key) else {
                     continue;
                 };
                 if ids.contains(&id) {
@@ -3490,11 +3698,11 @@ impl Tty59App {
             }
             (ids, at)
         };
-        let (left, left_active) = group(&state.files, state.active);
+        let (left, left_active) = group(&state.files, &state.hex, state.active);
         let right = state
             .split
             .as_ref()
-            .map(|s| (group(&s.files, s.active), s.focused));
+            .map(|s| (group(&s.files, &s.hex, s.active), s.focused));
         let Some(tab_ix) = self.tab_index_of(tab_id) else {
             return;
         };
@@ -3533,8 +3741,9 @@ impl Tty59App {
             }
             // Only files on the window's own machine: an SFTP buffer's host
             // is a connection that will not exist next launch.
-            let group = |ids: &[BufferId], front: usize| -> (Vec<PathBuf>, usize) {
+            let group = |ids: &[BufferId], front: usize| -> (Vec<PathBuf>, usize, Vec<usize>) {
                 let mut files = Vec::new();
+                let mut hex = Vec::new();
                 let mut active = 0;
                 for (pos, id) in ids.iter().enumerate() {
                     // A text buffer or a picture alike, by where it lives.
@@ -3547,18 +3756,22 @@ impl Tty59App {
                     if pos == front {
                         active = files.len();
                     }
+                    if self.hex(*id).is_some() {
+                        hex.push(files.len());
+                    }
                     files.push(path.to_path_buf());
                 }
-                (files, active)
+                (files, active, hex)
             };
             let sides = code.sides();
-            let (files, active) = group(&sides[0].files, sides[0].active);
+            let (files, active, hex) = group(&sides[0].files, sides[0].active);
             let split = sides.get(1).and_then(|right| {
-                let (files, active) = group(&right.files, right.active);
+                let (files, active, hex) = group(&right.files, right.active);
                 (!files.is_empty()).then_some(editor_session::SplitEditor {
                     files,
                     active,
                     focused: right.focused,
+                    hex,
                 })
             });
             let state = TabEditor {
@@ -3566,6 +3779,7 @@ impl Tty59App {
                 active,
                 visible: code.visible,
                 split,
+                hex,
             };
             if self.editor.recorded.get(&tab_id) != Some(&state) {
                 changed.push((tab_id, state));
@@ -3591,10 +3805,11 @@ impl Tty59App {
             return;
         };
         for id in ids {
-            // A picture is never unsaved; a text buffer is dropped only clean.
+            // A picture is never unsaved; a text buffer is dropped only clean,
+            // and so is a hex document.
             let clean = match self.buffer(id) {
                 Some(b) => !b.dirty,
-                None => self.image(id).is_some(),
+                None => self.image(id).is_some() || self.hex_clean(id, cx),
             };
             if self.buffer_tabs(id) == 1 && clean {
                 self.editor_drop_buffer(id, cx);
@@ -3690,8 +3905,7 @@ impl Tty59App {
             cx,
         );
         let conflict_banner = self
-            .active_buffer()
-            .and_then(|f| f.conflict.map(|c| (f.id(), c)))
+            .active_conflict(cx)
             .map(|(id, c)| self.render_editor_conflict_banner(id, c, cx));
         let bar = self.render_editor_bar(window, cx);
 
@@ -3770,6 +3984,9 @@ impl Tty59App {
         // A picture draws itself, in a view of its own for this tab and group:
         // there is no text to zoom or scroll, and the wheel is the picture's.
         if let Some(body) = id.and_then(|id| self.render_image_body(id, slot, cx)) {
+            return body;
+        }
+        if let Some(body) = id.and_then(|id| self.render_hex_body(id, slot, cx)) {
             return body;
         }
         let zoom = cx.global::<crate::core::config::Config>().editor_zoom;
@@ -4203,10 +4420,16 @@ impl Tty59App {
                     // A picture: named by its file, never unsaved. It has no
                     // breadcrumbs to spell its path out, so its tab always
                     // carries it.
-                    let image = self.image(id)?;
+                    let (name, path) = match self.image(id) {
+                        Some(image) => (image.name.clone(), &image.path),
+                        None => {
+                            let hex = self.hex(id)?;
+                            (hex.name.clone(), &hex.path)
+                        }
+                    };
                     let active = Some(id) == active_id;
-                    let tip = Some(image.path.display().to_string());
-                    return Some((pos, image.name.clone(), tip, active, false));
+                    let tip = Some(path.display().to_string());
+                    return Some((pos, name, tip, active, self.hex_dirty(id, cx)));
                 };
                 let active = Some(id) == active_id;
                 // The breadcrumbs over the text spell out the focused group's
@@ -4453,7 +4676,10 @@ impl Tty59App {
             BarKind::GoToLine => t(L10nKey::EditorGoToLine),
             BarKind::SaveAs { .. } => t(L10nKey::EditorSaveAs),
             BarKind::Rename { .. } => t(L10nKey::LspRenameSymbol),
+            BarKind::GoToOffset { .. } => t(L10nKey::HexGoToOffset),
+            BarKind::HexFind { .. } => t(L10nKey::HexFind),
         };
+        let hex_tail = self.hex_bar_tail(bar, cx);
         // The bar is already a row, so an idle field inside it is not a second
         // box: no fill, no border, no shadow. While it has the focus it is the
         // stock field, fill and ring included: the ring is a half-opacity
@@ -4489,9 +4715,16 @@ impl Tty59App {
                 "editor-bar-label",
             ))
             .child(status::probe(
-                div().flex_1().min_w_0().child(input),
+                // Never squeezed out by what follows it: the note shrinks instead.
+                div()
+                    .flex_1()
+                    .min_w(gpui::rems(
+                        crate::ui::right_panel::META * EDITOR_BAR_FIELD_MIN_CHARS,
+                    ))
+                    .child(input),
                 "editor-bar-input",
             ))
+            .children(hex_tail)
             .into_any_element(),
         )
     }
@@ -4568,6 +4801,17 @@ impl Tty59App {
             .filter(|zoom| *zoom != 1.0)
             .map(|zoom| format!("{}%", (zoom * 100.).round()).into());
         let lsp_status = self.lsp_status_now(cx);
+        // A hex document has no line, language or encoding to report: its offset, the
+        // bytes at the caret read as numbers and its size take those places, and fit
+        // the column by the same rules.
+        let (cursor, language, encoding) = match self.hex_readouts(cx) {
+            Some(hex) => (
+                Some(hex.cursor),
+                Some(hex.values).filter(|v| !v.is_empty()),
+                Some(hex.size),
+            ),
+            None => (cursor, language, encoding),
+        };
 
         // What the bar would say with room for everything; which of it fits
         // the document column is `status`'s decision.
@@ -4784,6 +5028,19 @@ impl Tty59App {
             }))
     }
 
+    /// Keep mine: the file as it is on disk is the one a save may replace.
+    fn editor_keep_mine(&mut self, id: BufferId, observed: Option<MTime>, cx: &mut Context<Self>) {
+        if self.hex(id).is_some() {
+            self.hex_keep_mine(id, observed, cx);
+            return;
+        }
+        if let Some(f) = self.buffer_mut(id) {
+            f.disk_mtime = observed;
+            f.conflict = None;
+            cx.notify();
+        }
+    }
+
     fn render_editor_conflict_banner(
         &self,
         id: BufferId,
@@ -4843,13 +5100,9 @@ impl Tty59App {
                     rungs,
                     cx,
                     cx.listener(move |this, _, _w, cx| {
-                        if let Some(f) = this.buffer_mut(id) {
-                            // The version seen on disk is now the one a
-                            // save is allowed to replace.
-                            f.disk_mtime = observed;
-                            f.conflict = None;
-                            cx.notify();
-                        }
+                        // The version seen on disk is now the one a save is
+                        // allowed to replace.
+                        this.editor_keep_mine(id, observed, cx);
                     }),
                 ))
                 .into_any_element(),
@@ -5885,7 +6138,10 @@ mod image_open_tests {
             _ => panic!("named like a picture by the link"),
         }
         assert!(
-            matches!(load_document(&*h, binary), Err(EditorOpenError::NotText(_))),
+            matches!(
+                load_document(&*h, binary),
+                Err(EditorOpenError::NotText { .. })
+            ),
             "under its own name it is a binary, as before"
         );
 

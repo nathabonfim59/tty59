@@ -742,6 +742,32 @@ impl Tty59App {
         }
     }
 
+    /// The row menu's Open as Hex: the file as bytes, through the same host
+    /// Edit uses. A pane with no editor host offers nothing.
+    fn sftp_open_entry_as_hex(
+        &mut self,
+        entry: SftpEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(host) = self.sftp_editor_host() {
+            self.sftp_open_hex_on(host, &entry, window, cx);
+        }
+    }
+
+    /// Split from the host lookup so a test can hand it a host that answers
+    /// without a daemon.
+    fn sftp_open_hex_on(
+        &mut self,
+        host: crate::ui::host_ops::SharedHost,
+        entry: &SftpEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let target = remote_join(&self.sftp_panel.cwd, &entry.name);
+        self.editor_open_path_as_hex(host, std::path::PathBuf::from(target), window, cx);
+    }
+
     /// The [`Host`] the editor reads and saves this pane's files through.
     ///
     /// Handed to the editor rather than filed in `HostRegistry`: that table
@@ -1926,6 +1952,21 @@ impl Tty59App {
                 let _ = app.update(cx, |this, cx| this.sftp_open_entry(entry, window, cx));
             }
         }));
+
+        // The same file as bytes, in a tab of its own, whatever it is; a link
+        // to a file follows Edit's lead and opens the file it points at.
+        if !dir_like {
+            menu = menu.item(PopupMenuItem::new(t(L10nKey::CmdOpenAsHex)).on_click({
+                let app = app.clone();
+                let entry = entry.clone();
+                move |_, window, cx| {
+                    let entry = entry.clone();
+                    let _ = app.update(cx, |this, cx| {
+                        this.sftp_open_entry_as_hex(entry, window, cx)
+                    });
+                }
+            }));
+        }
 
         // Editing is the double-click now, but a copy in ~/Downloads is still
         // a thing people come to this menu for.
@@ -3253,5 +3294,58 @@ mod gpui_tests {
                 "the glyph is centred on the row's line: {glyph:?} vs {name_box:?}"
             );
         }
+    }
+
+    // Only the Unix-gated test below uses it.
+    #[cfg(unix)]
+    fn row_entry(
+        name: &str,
+        kind: crate::daemon::protocol::SftpEntryKind,
+    ) -> crate::daemon::protocol::SftpEntry {
+        crate::daemon::protocol::SftpEntry {
+            name: name.into(),
+            kind,
+            size: 3,
+            mtime: 0,
+            permissions: 0o644,
+            target_is_dir: false,
+        }
+    }
+
+    /// Guards `sftp_open_hex_on`: the document is the cwd-joined remote path,
+    /// on the host it was given. A local host stands in for the SFTP one,
+    /// and the path is a Unix one, hence the gate.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_hex_document_lands_for_the_remote_path_on_the_host(cx: &mut TestAppContext) {
+        use crate::ui::host_ops::SharedHost;
+        let (app, mut vcx, _streams) = crate::ui::app::test_window::harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = tty59_core::core::path_spelling::local_spelling_buf(
+            std::fs::canonicalize(dir.path()).unwrap(),
+        );
+        std::fs::write(dir_path.join("a.bin"), [0u8, 1, 2, 3]).unwrap();
+        let host: SharedHost = tty59_core::host::local::LocalHost::new();
+        let id = host.id();
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.sftp_panel.cwd = dir_path.to_string_lossy().into_owned();
+            app.sftp_open_hex_on(
+                host,
+                &row_entry("a.bin", crate::daemon::protocol::SftpEntryKind::File),
+                window,
+                cx,
+            );
+        });
+        for _ in 0..200 {
+            vcx.run_until_parked();
+            if app.read_with(&vcx, |app, _| {
+                app.hex_is_open_at(id, &dir_path.join("a.bin"))
+            }) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("no hex document landed for the remote path");
     }
 }

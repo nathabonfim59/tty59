@@ -1250,7 +1250,6 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::EditorWrapOn => "自动换行：开",
         L10nKey::EditorWrapOff => "自动换行：关",
         L10nKey::EditorFileTooLarge => "“{path}”太大，无法在编辑器中打开（{size} MB）",
-        L10nKey::EditorBinaryFile => "“{path}”看起来是二进制文件",
         L10nKey::EditorUntitled => "未命名-{n}",
         L10nKey::EditorUnsavedChangesMany => "{count} 个文件有未保存的更改",
         L10nKey::EditorSaveAll => "全部保存",
@@ -2388,6 +2387,41 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ImageCopy => "复制图片",
         L10nKey::CmdImageCopy => "复制图片",
         L10nKey::CmdImageDownload => "下载图片",
+        L10nKey::CmdOpenAsHex => "以十六进制打开",
+        L10nKey::CmdOpenAsText => "以文本打开",
+        L10nKey::HexStatusOffset => "偏移 {hex}（{dec}）",
+        L10nKey::HexStatusSelection => "已选 {count}",
+        L10nKey::HexStatusSize => "大小 {size}",
+        L10nKey::HexEditEmpty => "文件为空，没有可编辑的字节",
+        L10nKey::HexEditOverwriteOnly => "此编辑器只能覆盖字节，不能插入或删除",
+        L10nKey::HexCopyTooLarge => "所选内容超过 {limit}，无法复制",
+        L10nKey::HexPasteNotHex => "剪贴板中不是十六进制字节，未粘贴任何内容",
+        L10nKey::HexPasteTruncated => "已粘贴 {written} 字节，超出文件末尾的 {left} 字节已舍弃",
+        L10nKey::HexTooLarge => "“{name}”大小为 {size} MiB，超过通过连接可打开的上限 {limit} MiB",
+        L10nKey::HexSavePartlyWritten => "文件可能只写入了一部分。再次保存会重写所有更改。",
+        L10nKey::HexSaveConflictBody => {
+            "打开之后，另一个程序修改了它。覆盖只会写入你编辑过的字节，其他修改会保留。"
+        }
+        L10nKey::HexGoToOffset => "转到偏移",
+        L10nKey::HexGoToOffsetPlaceholder => "偏移：0x1F、31、+16、-16",
+        L10nKey::HexOffsetEmpty => "请输入偏移",
+        L10nKey::HexOffsetInvalid => "不是有效的偏移：请使用 0x1F、1Fh、31、+16 或 -16",
+        L10nKey::HexOffsetOutOfRange => "超出文件范围，文件共 {len} 字节",
+        L10nKey::HexFind => "查找",
+        L10nKey::HexFindHexPlaceholder => "十六进制字节：de ad be ef",
+        L10nKey::HexFindTextPlaceholder => "要查找的文本",
+        L10nKey::HexFindModeHex => "十六进制",
+        L10nKey::HexFindModeText => "文本",
+        L10nKey::HexFindSearching => "正在查找…",
+        L10nKey::HexFindNotFound => "未找到",
+        L10nKey::HexFindFailed => "查找时无法读取文件：{e}",
+        L10nKey::HexPatternEmpty => "请输入要查找的字节",
+        L10nKey::HexPatternOddDigits => "十六进制字节必须是成对的数字",
+        L10nKey::HexPatternInvalidDigit => "十六进制字节只能使用数字 0-9 和 A-F",
+        L10nKey::EditorSaveSiblingTitle => "“{name}”的另一个标签页有未保存的更改",
+        L10nKey::EditorSaveSiblingBody => {
+            "在此保存写入的文件不含那些更改，另一个标签页随后会看到文件已被修改。"
+        }
         // B3-E: editor status, empty hint and gutter peek.
         L10nKey::LspMissingBody => {
             "无法启动 {name}。tty59 会在 PATH 中查找：{programs}。请确认 {name} 已安装且可以运行。"

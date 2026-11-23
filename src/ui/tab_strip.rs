@@ -3871,6 +3871,7 @@ mod tests {
             success: role,
             info: role,
             link: role,
+            warning_mark: 0,
         };
         for status in [
             AgentStatus::Working,

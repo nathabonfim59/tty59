@@ -1954,7 +1954,7 @@ impl Tty59App {
             // Unsaved editor buffers hold the window open until the question
             // about them is answered; the answer closes it.
             let asked = app.update(cx, |app, cx| {
-                let unsaved = app.editor_unsaved();
+                let unsaved = app.editor_unsaved(cx);
                 app.editor_guard_unsaved(
                     unsaved,
                     crate::ui::code_editor::AfterUnsaved::CloseWindow,
@@ -2064,7 +2064,7 @@ impl Tty59App {
     }
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let unsaved = self.editor_unsaved();
+        let unsaved = self.editor_unsaved(cx);
         if self.editor_guard_unsaved(
             unsaved,
             crate::ui::code_editor::AfterUnsaved::CloseWindow,
@@ -2567,7 +2567,7 @@ impl Tty59App {
         // holds them. Quitting ends every window, so another window's
         // buffers count as much as this one's: hand the quit over to it, and
         // it asks about its own before carrying the quit on.
-        let unsaved = self.editor_unsaved();
+        let unsaved = self.editor_unsaved(cx);
         if self.editor_guard_unsaved(
             unsaved,
             crate::ui::code_editor::AfterUnsaved::Quit,
@@ -2580,7 +2580,7 @@ impl Tty59App {
         let elsewhere = crate::ui::windows::WindowRegistry::open_windows(cx)
             .into_iter()
             .filter_map(|(ws, app)| Some((ws, app.upgrade()?)))
-            .find(|(_, app)| app.entity_id() != me && !app.read(cx).editor_unsaved().is_empty());
+            .find(|(_, app)| app.entity_id() != me && !app.read(cx).editor_unsaved(cx).is_empty());
         if let Some((ws, app)) = elsewhere
             && let Some(handle) = crate::ui::windows::WindowRegistry::window_for(cx, ws)
         {
@@ -4922,7 +4922,7 @@ impl Tty59App {
                 .get(self.active)
                 .is_some_and(|tab| tab.pane.leaves().len() <= 1)
         {
-            let unsaved = self.editor_unsaved_in_tab(self.active);
+            let unsaved = self.editor_unsaved_in_tab(self.active, cx);
             if self.editor_guard_unsaved(
                 unsaved,
                 crate::ui::code_editor::AfterUnsaved::ClosePane,
@@ -5940,7 +5940,7 @@ impl Tty59App {
         }
         if !confirmed {
             let id = self.tabs[index].tree_id.get();
-            let unsaved = self.editor_unsaved_in_tab(index);
+            let unsaved = self.editor_unsaved_in_tab(index, cx);
             if self.editor_guard_unsaved(
                 unsaved,
                 crate::ui::code_editor::AfterUnsaved::CloseTab(id),
@@ -6162,7 +6162,9 @@ impl Tty59App {
     /// files — see [`Self::close_other_tabs_inner`].
     fn bulk_closable(&self, indices: impl Iterator<Item = usize>, cx: &App) -> Vec<usize> {
         indices
-            .filter(|&i| !self.tab_has_warn_ssh(i, cx) && self.editor_unsaved_in_tab(i).is_empty())
+            .filter(|&i| {
+                !self.tab_has_warn_ssh(i, cx) && self.editor_unsaved_in_tab(i, cx).is_empty()
+            })
             .collect()
     }
 
@@ -6216,7 +6218,7 @@ impl Tty59App {
             // cannot ask about them one tab at a time, and must not lose them.
             if i == index
                 || self.tab_has_warn_ssh(i, cx)
-                || !self.editor_unsaved_in_tab(i).is_empty()
+                || !self.editor_unsaved_in_tab(i, cx).is_empty()
             {
                 continue;
             }
@@ -6249,7 +6251,7 @@ impl Tty59App {
         }
         // Same bargain as `close_other_tabs`.
         for i in ((index + 1)..self.tabs.len()).rev() {
-            if self.tab_has_warn_ssh(i, cx) || !self.editor_unsaved_in_tab(i).is_empty() {
+            if self.tab_has_warn_ssh(i, cx) || !self.editor_unsaved_in_tab(i, cx).is_empty() {
                 continue;
             }
             self.close_tab_inner(i, true, window, cx);
@@ -7445,6 +7447,16 @@ impl Tty59App {
             EditorDownloadImage => {
                 if let Some(id) = self.editor_active_image() {
                     self.editor_download_image(id, window, cx);
+                }
+            }
+            EditorOpenAsHex => {
+                if let Some(id) = self.editor_open_as_hex_target() {
+                    self.editor_open_as_hex(id, window, cx);
+                }
+            }
+            EditorOpenAsText => {
+                if let Some(id) = self.editor_open_as_text_target(cx) {
+                    self.editor_open_as_text(id, window, cx);
                 }
             }
             RestartSshSession => self.restart_ssh_session(window, cx),
@@ -10689,6 +10701,20 @@ impl Render for Tty59App {
                     }
                     this.editor_go_to_line(window, cx)
                 }))
+                // The hex view's own chords (`HexEditor` context), so only a hex view has the
+                // focus when they arrive.
+                .on_action(cx.listener(|this, _: &HexGoToOffset, window, cx| {
+                    this.hex_go_to_offset(window, cx)
+                }))
+                .on_action(
+                    cx.listener(|this, _: &HexFind, window, cx| this.hex_find_open(window, cx)),
+                )
+                .on_action(cx.listener(|this, _: &HexFindNext, window, cx| {
+                    this.hex_find_step(true, window, cx)
+                }))
+                .on_action(cx.listener(|this, _: &HexFindPrevious, window, cx| {
+                    this.hex_find_step(false, window, cx)
+                }))
                 // The language-server commands (`ui::lsp`) belong to the
                 // editor only while it has the focus; F2 and F12 mean
                 // something to programs in the terminal too.
@@ -10779,6 +10805,20 @@ impl Render for Tty59App {
                             this.editor_download_image(id, window, cx)
                         }
                         _ => cx.propagate(),
+                    }
+                }))
+                // Same for the hex commands: a saved file in front to open as
+                // hex, a hex tab of a text file to open as text.
+                .on_action(cx.listener(|this, _: &EditorOpenAsHex, window, cx| {
+                    match this.editor_open_as_hex_target() {
+                        Some(id) => this.editor_open_as_hex(id, window, cx),
+                        None => cx.propagate(),
+                    }
+                }))
+                .on_action(cx.listener(|this, _: &EditorOpenAsText, window, cx| {
+                    match this.editor_open_as_text_target(cx) {
+                        Some(id) => this.editor_open_as_text(id, window, cx),
+                        None => cx.propagate(),
                     }
                 }))
                 .on_action(
@@ -15634,14 +15674,14 @@ mod show_in_file_tree_tests {
                 .any(|c| c.contains("PopupMenu")),
             "the focus is in a popup menu, so the keys below reach it"
         );
-        // Close Tab, then Open (where this machine can open files), Reveal,
-        // Download and ours: the other items in front of it are disabled or
-        // separators, which the arrows skip.
+        // Close Tab, Open as Hex, then Open (where this machine can open
+        // files), Reveal, Download and ours: the other items in front of it
+        // are disabled or separators, which the arrows skip.
         let opens = f
             .app
             .update_in(&mut f.vcx, |app, _, cx| app.can_spawn_locally(cx));
-        let downs = if opens { 5 } else { 4 };
-        let keys = format!("{} enter", ["down"; 5][..downs].join(" "));
+        let downs = if opens { 6 } else { 5 };
+        let keys = format!("{} enter", ["down"; 6][..downs].join(" "));
         f.vcx.simulate_keystrokes(&keys);
         f.wait(|_, focus| focus.is_some());
         f.draw();

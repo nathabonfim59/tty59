@@ -142,6 +142,11 @@ src/ui/lsp/tests.rs|.canonicalize()
 src/ui/scm/rows_window_tests.rs|std::fs::
 src/ui/scm/rows_window_tests.rs|Command::new("git")
 
+# The hex documents' tests live in their own file. It is cfg(test) fixture code
+# writing neutral files (including sparse ones) in a per-test local temp dir,
+# never a workspace path and never a remote one.
+src/ui/code_editor/hex/doc_tests.rs|std::fs::
+
 # This cfg(test) module lives in its own file and creates/removes neutral
 # fixtures in a per-test local temp dir, never a workspace path.
 src/terminal/view/gpui_tests/path_links.rs|std::fs::create_dir_all
@@ -179,6 +184,21 @@ src/ui/scm/rows_stale_tests.rs|std::fs::
 # just published in the child-private pinned local config dir, to prove the
 # endpoint identity. Local test state, never a workspace or remote path.
 src/ui/settings/keyboard_tests.rs|std::fs::read_to_string
+
+# The hex tests' fixtures: a cfg(test) file of its own (not a trailing `mod tests`) that
+# writes a small or sparse file into a per-test local temp dir for a counting host to read.
+# Local test data, never a workspace path.
+src/ui/code_editor/hex/test_support.rs|std::fs::
+
+# The save tests of the hex editor: cfg(test) module in its own file that writes a neutral
+# binary into a per-test local temp dir, edits it behind the editor's back and reads it back to
+# compare byte for byte. Local test data, never a workspace path and never a remote one.
+src/ui/code_editor/hex/save_tests.rs|std::fs::
+
+# The go-to-offset and find tests of the hex editor: cfg(test) module in its own file that writes
+# neutral files (sparse ones included) into a per-test local temp dir to search. Local test data,
+# never a workspace path and never a remote one.
+src/ui/code_editor/hex/find/tests.rs|std::fs::
 EOF
 )
 
