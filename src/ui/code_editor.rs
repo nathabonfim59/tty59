@@ -5472,6 +5472,50 @@ mod close_gpui_tests {
         }));
         assert_eq!(panel(&app, &mut vcx), (true, 0));
     }
+
+    /// A bulk close cannot ask about unsaved files one tab at a time, so it
+    /// leaves the tab holding them open, asks nothing, and says once how many
+    /// tabs stayed.
+    #[gpui::test]
+    fn a_bulk_close_keeps_a_tab_with_unsaved_files_and_says_so(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        crate::ui::i18n::set_locale("en");
+        app.update_in(&mut vcx, |app, window, cx| app.activate(1, window, cx));
+        let file = open_rs(&app, &mut vcx, "/close/unsaved.rs");
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.buffer_mut(file).expect("the file is open").dirty = true;
+            app.activate(0, window, cx);
+        });
+        settle(&mut vcx);
+        let ids: Vec<_> = app.read_with(&vcx, |app, _| {
+            app.tabs.iter().map(|t| t.tree_id.get()).collect()
+        });
+        let notes = |vcx: &mut VisualTestContext| {
+            vcx.update(|window, cx| {
+                window
+                    .root::<gpui_component::Root>()
+                    .flatten()
+                    .map(|root| root.read(cx).notification.read(cx).notifications().len())
+                    .unwrap_or_default()
+            })
+        };
+        let before = notes(&mut vcx);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_tabs(ids[1..].to_vec(), window, cx)
+        });
+        settle(&mut vcx);
+        let left: Vec<_> = app.read_with(&vcx, |app, _| {
+            app.tabs.iter().map(|t| t.tree_id.get()).collect()
+        });
+        assert_eq!(
+            left,
+            ids[..2].to_vec(),
+            "the tab with the unsaved file stays"
+        );
+        assert!(!vcx.has_pending_prompt(), "and nothing is asked about it");
+        assert_eq!(notes(&mut vcx), before + 1, "one notification says so");
+    }
 }
 
 #[cfg(test)]

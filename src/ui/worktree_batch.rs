@@ -84,8 +84,8 @@ fn removed_notification(out: &Outcome) -> String {
     lines.join("\n")
 }
 
-/// The notifications pushed in a test, in order, so a test can read the one
-/// line the removal jobs answer with (test builds only).
+// The notifications pushed in a test, in order, so a test can read the one
+// line the removal jobs answer with (test builds only).
 #[cfg(test)]
 thread_local! {
     static PUSHED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -837,15 +837,13 @@ mod tests {
         assert_eq!(forced.len(), 1, "forced removals: {forced:?}");
         let gamma = worktree("gamma", true).path.display().to_string();
         assert!(
-            forced[0].iter().any(|arg| *arg == gamma),
+            forced[0].contains(&gamma),
             "the force went to the wrong row: {:?}",
             forced[0]
         );
         let alpha = worktree("alpha", false).path.display().to_string();
         assert!(
-            removes
-                .iter()
-                .any(|args| args.iter().any(|arg| *arg == alpha)),
+            removes.iter().any(|args| args.contains(&alpha)),
             "the clean unkept row was not removed: {removes:?}"
         );
 
@@ -855,7 +853,7 @@ mod tests {
             !form
                 .calls()
                 .iter()
-                .any(|call| call.cwd == kept.path || call.args.iter().any(|arg| *arg == beta)),
+                .any(|call| call.cwd == kept.path || call.args.contains(&beta)),
             "the kept row was touched"
         );
 

@@ -16115,7 +16115,7 @@ mod bulk_close_tests {
         assert!(app.read_with(&vcx, |app, _| app.worktree_batch.is_none()));
         let (title, _) = vcx.pending_prompt().expect("a question is up");
         assert!(title.contains("one-a"), "it asks about one-a: {title}");
-        vcx.simulate_prompt_answer(&t(L10nKey::AppWorktreeKeep));
+        vcx.simulate_prompt_answer(t(L10nKey::AppWorktreeKeep));
         vcx.run_until_parked();
         assert!(wts[0].exists(), "Keep keeps it");
     }
@@ -16135,7 +16135,7 @@ mod bulk_close_tests {
         assert!(vcx.has_pending_prompt(), "one question for the three");
         assert_eq!(ids(&app, &mut vcx).len(), 4, "nothing closed yet");
 
-        vcx.simulate_prompt_answer(&t(L10nKey::Close));
+        vcx.simulate_prompt_answer(t(L10nKey::Close));
         vcx.run_until_parked();
         assert_eq!(ids(&app, &mut vcx), vec![all[0]]);
         assert!(!vcx.has_pending_prompt(), "and no second question per tab");
