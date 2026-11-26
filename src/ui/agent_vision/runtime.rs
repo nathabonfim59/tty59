@@ -144,6 +144,8 @@ impl Tty59App {
             }
         } else {
             self.agent_vision.last_mode = mode;
+            // The agent view draws no tab rows; focus goes to its list.
+            self.tab_selection.clear();
             self.focus_agent_list(window, cx);
         }
         cx.notify();

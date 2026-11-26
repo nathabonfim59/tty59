@@ -3260,6 +3260,8 @@ impl Tty59App {
                     self.maximized = None;
                     self.wake_active_if_asleep(window, cx);
                     self.focus_active(window, cx);
+                    // Closed elsewhere, or gone to another window.
+                    self.prune_tab_selection(window, cx);
                 }
                 true
             }

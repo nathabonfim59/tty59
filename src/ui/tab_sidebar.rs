@@ -151,10 +151,14 @@ fn build_agent_rows(
         .collect()
 }
 
-/// Shared row chrome for tab rows and agent-pane rows.
+/// Shared row chrome for tab rows and agent-pane rows. `picked` is the
+/// multi-tab selection's paint, for a tab row in it: the active row keeps its
+/// own fill, any other takes the selection's, and neither changes under the
+/// pointer.
 fn sidebar_row_chrome(
     id: impl Into<gpui::ElementId>,
     active: bool,
+    picked: Option<crate::ui::presets::RailMark>,
     sf: crate::ui::presets::Surface,
 ) -> Stateful<Div> {
     h_flex()
@@ -168,14 +172,33 @@ fn sidebar_row_chrome(
         .gap(px(row_metrics::GAP))
         .px_2()
         .rounded(crate::ui::rounding::ROW_RADIUS)
-        .when(active, |s| {
-            s.bg(gpui::rgb(sf.selected))
-                .text_color(gpui::rgb(sf.text_selected))
+        .map(|s| match (active, picked) {
+            (true, _) => s
+                .bg(gpui::rgb(sf.selected))
+                .text_color(gpui::rgb(sf.text_selected)),
+            (false, Some(mark)) => s.bg(gpui::rgb(mark.fill)).text_color(gpui::rgb(mark.ink)),
+            (false, None) => s
+                .text_color(gpui::rgb(sf.text_resting))
+                .hover(|s| s.bg(gpui::rgb(sf.hover))),
         })
-        .when(!active, |s| {
-            s.text_color(gpui::rgb(sf.text_resting))
-                .hover(|s| s.bg(gpui::rgb(sf.hover)))
-        })
+}
+
+/// The marker at a selected tab row's leading edge: what says the row is in
+/// the multi-tab selection, on the active row as on any other.
+fn selection_bar(index: usize, mark: crate::ui::presets::RailMark) -> Div {
+    let bar = div()
+        .absolute()
+        .left_0()
+        .top(px(row_metrics::MARK_BAR_INSET))
+        .bottom(px(row_metrics::MARK_BAR_INSET))
+        .w(px(row_metrics::MARK_BAR_WIDTH))
+        .rounded_r(px(row_metrics::MARK_BAR_WIDTH))
+        .bg(gpui::rgb(mark.bar));
+    #[cfg(test)]
+    let bar = bar.debug_selector(move || format!("sidebar-row-selected-{index}"));
+    #[cfg(not(test))]
+    let _ = index;
+    bar
 }
 
 /// What marks a kept group, and what the header button that keeps one reads.
@@ -261,6 +284,12 @@ mod row_metrics {
     pub(super) const TRAIL_FADE: f32 = 10.;
     /// The badge's own box, centred in the slot.
     pub(super) const BADGE: f32 = 20.;
+    /// The selection marker at a selected row's leading edge: its width, and
+    /// how far it stays off the row's top and bottom, which is past the
+    /// row's 7px corner so the marker stands on the flat edge, at any row
+    /// height.
+    pub(super) const MARK_BAR_WIDTH: f32 = 2.;
+    pub(super) const MARK_BAR_INSET: f32 = 8.;
 }
 
 /// The row's trailing action slot: absolute at the row's right inset and its
@@ -430,6 +459,10 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) {
         self.sidebar_list = mode;
+        // The Agents list has no tab rows to pick, nor to show a pick on.
+        if mode == SidebarList::Agents {
+            self.end_tab_selection(window, cx);
+        }
         self.sidebar_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.sidebar_reveal.set(None);
         self.sidebar_agent_reveal.set(None);
@@ -518,7 +551,7 @@ impl Tty59App {
         });
         let rail_fill: gpui::Hsla = gpui::rgb(sf.base).into();
         let group = SharedString::from(format!("sidebar-agent-row-{slot}"));
-        let row = sidebar_row_chrome(("sidebar-agent-row", slot), selected, sf)
+        let row = sidebar_row_chrome(("sidebar-agent-row", slot), selected, None, sf)
             // Named so the trailing badge can follow the row's hover fill.
             .group(group.clone())
             .child(
@@ -709,6 +742,7 @@ impl Tty59App {
     ) -> impl IntoElement + use<> {
         let active = self.active;
         let sf = cx.global::<crate::ui::presets::Surfaces>().rail;
+        let rail_mark = cx.global::<crate::ui::presets::Surfaces>().rail_mark;
         let width = self.sidebar_px(window, cx);
         // As typed, for the "nothing matches" line; matching uses the lowered copy.
         let query_text = self.sidebar_search.read(cx).value().trim().to_string();
@@ -767,7 +801,27 @@ impl Tty59App {
             .overflow_y_scroll()
             .px_3()
             .pb(px(20.))
-            .gap(px(GROUP_GAP));
+            .gap(px(GROUP_GAP))
+            // Where keys go while tabs are selected: Escape ends the
+            // selection; everything else carries on up to the window's own
+            // bindings. Drawn only while there is a selection, so the sidebar
+            // can never hold focus without one, and out of the flow, so it
+            // takes no gap.
+            .when(!self.tab_selection.is_empty(), |list| {
+                list.child(
+                    div()
+                        .id("tab-selection-keys")
+                        .absolute()
+                        .size_0()
+                        .track_focus(&self.tab_selection_focus)
+                        .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, window, cx| {
+                            if ev.keystroke.key == "escape" {
+                                cx.stop_propagation();
+                                this.end_tab_selection(window, cx);
+                            }
+                        })),
+                )
+            });
 
         let keys: Rc<Vec<Option<GroupKey>>> = Rc::new(self.sidebar_group_keys(cx));
         let groups = &self.sidebar_groups;
@@ -958,6 +1012,18 @@ impl Tty59App {
         // gone) is dropped, so it cannot fire when the row turns up later.
         let reveal = self.sidebar_reveal.get();
         let mut reveal_drawn = false;
+        // The tab rows this frame draws, top to bottom: what a Shift click's
+        // range runs over, so a folded group's rows and the ones a search
+        // hides are never taken. Built only while it can be used.
+        let drawn: Rc<Vec<tty59_core::core::machine::TabId>> = Rc::new(match agents_mode {
+            true => Vec::new(),
+            false => blocks
+                .iter()
+                .filter(|(_, ix)| !sections[*ix].folded(folds_apply, groups))
+                .flat_map(|(_, ix)| visible_by_section[*ix].iter())
+                .map(|&i| self.tabs[i].tree_id.get())
+                .collect(),
+        });
         for (n, (group_slot, group_ix)) in blocks.into_iter().enumerate() {
             if n == first_unpinned && show_divider {
                 list = list.child(self.sidebar_divider(divider_lit, divider_zone, cx));
@@ -965,12 +1031,7 @@ impl Tty59App {
             }
             let section = &sections[group_ix];
             let group_key = section.key.clone();
-            // Only a group that draws a header can be folded — there is
-            // nothing to click otherwise, and the one headerless section (the
-            // list below the pinned groups, when nothing else is there) must
-            // never answer to Ungrouped's fold.
-            let folded =
-                section.name.is_some() && folds_apply && groups.is_folded(group_key.as_ref());
+            let folded = section.folded(folds_apply, groups);
             let mut rows: Vec<ContextMenu<Stateful<Div>>> = Vec::new();
             // The header keeps counting every row the group has; folding only
             // stops them being drawn. Nothing downstream then registers a
@@ -1096,6 +1157,18 @@ impl Tty59App {
                 let tab = &self.tabs[i];
                 reveal_drawn |= reveal == Some(tab.tree_id.get());
                 let is_active = i == active;
+                let picked = self
+                    .tab_selection
+                    .contains(tab.tree_id.get())
+                    .then_some(rail_mark);
+                // The fill the row keeps under the pointer, for the trailing
+                // slot to match: the active rung, or the selection's; a plain
+                // row rests on the rail and turns to hover.
+                let held_fill: Option<gpui::Hsla> = match (is_active, picked) {
+                    (true, _) => Some(gpui::rgb(sf.selected).into()),
+                    (false, Some(mark)) => Some(gpui::rgb(mark.fill).into()),
+                    (false, None) => None,
+                };
                 let ssh_dot = self.tab_ssh_dot(tab, cx);
                 let asleep = tab.is_asleep();
                 let agent = tab.agent(cx).or_else(|| tab.asleep_agent());
@@ -1426,12 +1499,13 @@ impl Tty59App {
                         .into_any_element(),
                 };
 
-                let row = sidebar_row_chrome(("tab-row", i), is_active, sf)
+                let row = sidebar_row_chrome(("tab-row", i), is_active, picked, sf)
                     // What a screen reader announces and presses: the full
                     // title, not the elided one drawn.
                     .role(gpui::Role::Tab)
                     .aria_label(SharedString::from(title_text.to_string()))
                     .aria_selected(is_active)
+                    .when_some(picked, |row, mark| row.child(selection_bar(i, mark)))
                     .group(SharedString::from(format!("tab-row-{i}")))
                     .cursor_pointer()
                     .on_drag(DragTab, {
@@ -1513,10 +1587,13 @@ impl Tty59App {
                     // way into another tab's layout must not put itself on
                     // screen on the way there.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, ev, window, cx| {
-                        cx.stop_propagation();
-                        this.click_tab(i, ev, window, cx);
-                    }))
+                    .on_click({
+                        let drawn = drawn.clone();
+                        cx.listener(move |this, ev, window, cx| {
+                            cx.stop_propagation();
+                            this.click_sidebar_tab(i, ev, &drawn, window, cx);
+                        })
+                    })
                     .on_mouse_down(
                         MouseButton::Middle,
                         cx.listener(move |this, _, window, cx| {
@@ -1554,10 +1631,10 @@ impl Tty59App {
                             .justify_center()
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_color(if is_active {
-                                gpui::rgb(sf.text_selected).into()
-                            } else {
-                                cx.theme().muted_foreground
+                            .text_color(match (is_active, picked) {
+                                (true, _) => gpui::rgb(sf.text_selected).into(),
+                                (false, Some(mark)) => gpui::rgb(mark.ink).into(),
+                                (false, None) => cx.theme().muted_foreground,
                             })
                             .child(tab_badge_label(badge_pos));
                         #[cfg(test)]
@@ -1570,10 +1647,9 @@ impl Tty59App {
                             .child(badge);
                         #[cfg(test)]
                         let slot = slot.debug_selector(move || format!("sidebar-row-hit-{i}"));
-                        let (rest, hovered): (gpui::Hsla, gpui::Hsla) = if is_active {
-                            (gpui::rgb(sf.selected).into(), gpui::rgb(sf.selected).into())
-                        } else {
-                            (rail_fill, gpui::rgb(sf.hover).into())
+                        let (rest, hovered): (gpui::Hsla, gpui::Hsla) = match held_fill {
+                            Some(fill) => (fill, fill),
+                            None => (rail_fill, gpui::rgb(sf.hover).into()),
                         };
                         let trailing = trailing_slot(
                             rest,
@@ -1586,11 +1662,8 @@ impl Tty59App {
                         row.child(trailing)
                     })
                     .when(!show_badge, |row| {
-                        let backing: gpui::Hsla = if is_active {
-                            gpui::rgb(sf.selected).into()
-                        } else {
-                            gpui::rgb(sf.hover).into()
-                        };
+                        let backing: gpui::Hsla =
+                            held_fill.unwrap_or_else(|| gpui::rgb(sf.hover).into());
                         let close = crate::ui::tab_strip::hit_target(
                             Button::new(("sidebar-close", i))
                                 .icon(IconName::Close)
@@ -2752,6 +2825,92 @@ impl Tty59App {
         cx.notify();
     }
 
+    /// A sidebar tab row was clicked. With the secondary modifier (Ctrl, or
+    /// Cmd on macOS) the row joins or leaves the selection, with Shift the
+    /// rows from the anchor to it are picked; neither, and it is the click
+    /// every tab takes, which also ends any selection. `drawn` is the rows
+    /// the sidebar drew in the frame that was clicked, in its order.
+    pub(crate) fn click_sidebar_tab(
+        &mut self,
+        index: usize,
+        ev: &gpui::ClickEvent,
+        drawn: &[tty59_core::core::machine::TabId],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let modifiers = ev.modifiers();
+        let picked = modifiers.secondary() || modifiers.shift;
+        let ids = (
+            self.tabs.get(self.active).map(|t| t.tree_id.get()),
+            self.tabs.get(index).map(|t| t.tree_id.get()),
+        );
+        let (true, (Some(active), Some(clicked))) = (picked, ids) else {
+            self.click_tab(index, ev, window, cx);
+            return;
+        };
+        if modifiers.secondary() {
+            self.tab_selection.toggle(active, clicked);
+        } else {
+            self.tab_selection.select_range(active, clicked, drawn);
+        }
+        self.settle_tab_selection_focus(window, cx);
+        cx.notify();
+    }
+
+    /// Whether tab `index` is in the sidebar's selection.
+    pub(crate) fn is_tab_selected(&self, index: usize) -> bool {
+        self.tabs
+            .get(index)
+            .is_some_and(|t| self.tab_selection.contains(t.tree_id.get()))
+    }
+
+    /// The selected tabs' indices, in the sidebar's visual order.
+    pub(crate) fn selected_tab_indices(&self, cx: &gpui::App) -> Vec<usize> {
+        if self.tab_selection.is_empty() {
+            return Vec::new();
+        }
+        self.visual_tab_order(cx)
+            .into_iter()
+            .filter(|&i| self.is_tab_selected(i))
+            .collect()
+    }
+
+    /// End the selection, giving focus back to the active pane.
+    pub(crate) fn end_tab_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_selection.is_empty() {
+            return;
+        }
+        self.tab_selection.clear();
+        self.settle_tab_selection_focus(window, cx);
+        cx.notify();
+    }
+
+    /// Drop the tabs that are no longer in this window from the selection:
+    /// called wherever a tab leaves `self.tabs`. Focus moves only if that
+    /// ends the selection; a selection that survives leaves focus where the
+    /// caller put it.
+    pub(crate) fn prune_tab_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tabs = &self.tabs;
+        if self
+            .tab_selection
+            .retain(|id| tabs.iter().any(|t| t.tree_id.get() == id))
+        {
+            self.settle_tab_selection_focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// The sidebar holds focus exactly while a selection exists, so Escape
+    /// there can end it; once it is over, focus goes back to the active pane
+    /// rather than staying on a list that no longer takes keys.
+    fn settle_tab_selection_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tab_selection.is_empty() {
+            window.focus(&self.tab_selection_focus, cx);
+        } else if self.tab_selection_focus.is_focused(window) {
+            self.focus_active(window, cx);
+        }
+    }
+
     /// Put the dragged tab where it was dropped.
     ///
     /// By id rather than index: a drag is several frames long, and a tab
@@ -3676,6 +3835,15 @@ struct Section {
 impl Section {
     fn pinned(&self) -> Option<GroupId> {
         self.key.as_ref().and_then(GroupKey::pinned)
+    }
+
+    /// Whether the section's rows are hidden under its folded header. Only a
+    /// group that draws a header can be folded — there is nothing to click
+    /// otherwise, and the one headerless section (the list below the pinned
+    /// groups, when nothing else is there) must never answer to Ungrouped's
+    /// fold. A search (`folds_apply` false) outranks every fold.
+    fn folded(&self, folds_apply: bool, groups: &WorkspaceGroups) -> bool {
+        self.name.is_some() && folds_apply && groups.is_folded(self.key.as_ref())
     }
 }
 
@@ -8505,5 +8673,254 @@ mod a51_sidebar_tests {
             failures.len(),
             failures.join("\n")
         );
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::ui::app::test_window::harness_with_tabs;
+    use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+    use tty59_core::core::machine::TabId;
+
+    fn row(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, i: usize) -> Bounds<Pixels> {
+        let row = app.read_with(vcx, |app, _| app.sidebar_slots.borrow()[i]);
+        assert!(
+            row.size.height > px(0.),
+            "row {i} is on screen to be clicked"
+        );
+        row
+    }
+
+    fn click(app: &Entity<Tty59App>, vcx: &mut VisualTestContext, i: usize, m: Modifiers) {
+        let at = row(app, vcx, i).center();
+        vcx.simulate_click(at, m);
+        vcx.run_until_parked();
+    }
+
+    fn ids(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<TabId> {
+        app.read_with(vcx, |app, _| {
+            app.tabs.iter().map(|t| t.tree_id.get()).collect()
+        })
+    }
+
+    /// The selected tabs, as indices in `self.tabs` order.
+    fn picked(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<usize> {
+        app.read_with(vcx, |app, _| {
+            (0..app.tabs.len())
+                .filter(|&i| app.is_tab_selected(i))
+                .collect()
+        })
+    }
+
+    fn sidebar_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.update_in(vcx, |app, window, _| {
+            app.tab_selection_focus.is_focused(window)
+        })
+    }
+
+    /// Whether the active tab's pane has the keys.
+    fn pane_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
+        app.update_in(vcx, |app, window, cx| {
+            app.tabs[app.active]
+                .pane
+                .leaves()
+                .iter()
+                .any(|l| l.contains_focused(window, cx))
+        })
+    }
+
+    #[gpui::test]
+    fn secondary_clicks_pick_rows_without_switching_tabs(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 4);
+        vcx.run_until_parked();
+
+        click(&app, &mut vcx, 1, Modifiers::secondary_key());
+        assert_eq!(
+            picked(&app, &mut vcx),
+            vec![0, 1],
+            "seeded with the active tab"
+        );
+        click(&app, &mut vcx, 2, Modifiers::secondary_key());
+        assert_eq!(picked(&app, &mut vcx), vec![0, 1, 2]);
+        assert_eq!(
+            app.read_with(&vcx, |app, _| app.active),
+            0,
+            "nothing switched"
+        );
+        assert!(
+            sidebar_focused(&app, &mut vcx),
+            "the sidebar takes the keys"
+        );
+        let markers = [
+            "sidebar-row-selected-0",
+            "sidebar-row-selected-1",
+            "sidebar-row-selected-2",
+            "sidebar-row-selected-3",
+        ];
+        for (i, marker) in markers.into_iter().enumerate() {
+            assert_eq!(
+                vcx.debug_bounds(marker).is_some(),
+                i < 3,
+                "row {i} draws the selection marker only while it is selected"
+            );
+        }
+
+        click(&app, &mut vcx, 2, Modifiers::secondary_key());
+        assert_eq!(picked(&app, &mut vcx), vec![0, 1], "a second one lets go");
+        click(&app, &mut vcx, 1, Modifiers::secondary_key());
+        assert!(
+            picked(&app, &mut vcx).is_empty(),
+            "one tab left is no selection"
+        );
+        assert!(
+            vcx.debug_bounds("sidebar-row-selected-0").is_none(),
+            "nor a marker on the active row"
+        );
+        assert!(pane_focused(&app, &mut vcx), "the pane has the keys back");
+    }
+
+    /// Shift runs from the active tab over the rows the sidebar draws, across
+    /// groups, and passes over a folded group's rows without taking them.
+    #[gpui::test]
+    fn a_shift_click_takes_the_drawn_rows_and_skips_a_folded_group(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 5);
+        let alpha = AutoKey::Repo(PathBuf::from("/w/alpha"));
+        let beta = AutoKey::Repo(PathBuf::from("/w/beta"));
+        app.update(&mut vcx, |app, cx| {
+            for (i, root) in [(0, &alpha), (1, &alpha), (2, &beta), (3, &beta)] {
+                *app.tabs[i].auto_group.borrow_mut() = Some(root.clone());
+            }
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        // Whichever group the sidebar draws first, start in it and fold the
+        // other, which then lies between the start and the ungrouped tab 4.
+        let (start, folded_key, folded_tabs) = app.update(&mut vcx, |app, cx| {
+            let order = app.visual_tab_order(cx);
+            assert_eq!(order.last(), Some(&4), "ungrouped sits last");
+            let start = order[0];
+            let (key, tabs) = match start < 2 {
+                true => (beta.clone(), [2, 3]),
+                false => (alpha.clone(), [0, 1]),
+            };
+            app.active = start;
+            app.toggle_sidebar_group(Some(&GroupKey::Auto(key.clone())), cx);
+            (start, key, tabs)
+        });
+        vcx.run_until_parked();
+        assert!(app.read_with(&vcx, |app, _| {
+            app.sidebar_groups
+                .is_folded(Some(&GroupKey::Auto(folded_key.clone())))
+        }));
+
+        click(&app, &mut vcx, 4, Modifiers::shift());
+        let mut want: Vec<usize> = (0..4).filter(|i| !folded_tabs.contains(i)).collect();
+        want.push(4);
+        assert_eq!(
+            picked(&app, &mut vcx),
+            want,
+            "start {start}: the drawn rows only"
+        );
+        assert_eq!(app.read_with(&vcx, |app, _| app.active), start);
+    }
+
+    #[gpui::test]
+    fn a_plain_click_ends_the_selection_and_switches(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 4);
+        vcx.run_until_parked();
+        click(&app, &mut vcx, 1, Modifiers::secondary_key());
+        click(&app, &mut vcx, 2, Modifiers::secondary_key());
+
+        click(&app, &mut vcx, 3, Modifiers::none());
+        assert!(picked(&app, &mut vcx).is_empty());
+        assert_eq!(app.read_with(&vcx, |app, _| app.active), 3);
+        assert!(pane_focused(&app, &mut vcx));
+        assert!(!sidebar_focused(&app, &mut vcx));
+    }
+
+    /// Every way a selection ends gives the keys back to the active pane, so
+    /// a secondary click never leaves them going nowhere.
+    #[gpui::test]
+    fn every_way_a_selection_ends_gives_the_pane_its_keys_back(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 4);
+        vcx.run_until_parked();
+        let pick = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            click(app, vcx, 1, Modifiers::secondary_key());
+            assert_eq!(picked(app, vcx).len(), 2);
+            assert!(sidebar_focused(app, vcx));
+        };
+        let ended = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext, how: &str| {
+            assert!(picked(app, vcx).is_empty(), "{how}: the selection ended");
+            assert!(!sidebar_focused(app, vcx), "{how}: the sidebar let go");
+            assert!(pane_focused(app, vcx), "{how}: the pane has the keys");
+        };
+
+        pick(&app, &mut vcx);
+        vcx.simulate_keystrokes("escape");
+        vcx.run_until_parked();
+        ended(&app, &mut vcx, "Escape");
+
+        pick(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| app.activate(2, window, cx));
+        vcx.run_until_parked();
+        ended(&app, &mut vcx, "activate");
+
+        // Back to tab 0 for the rest, then a close that leaves one tab.
+        click(&app, &mut vcx, 0, Modifiers::none());
+        pick(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| app.close_tab(1, window, cx));
+        vcx.run_until_parked();
+        ended(&app, &mut vcx, "a close down to one");
+
+        pick(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.select_sidebar_list(SidebarList::Agents, window, cx)
+        });
+        vcx.run_until_parked();
+        ended(&app, &mut vcx, "the Agents list");
+    }
+
+    /// A selected row's middle click and its hover × close that row alone;
+    /// it drops out of the selection and the rest stays picked.
+    #[gpui::test]
+    fn closing_a_selected_row_closes_only_it(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 5);
+        vcx.run_until_parked();
+        for i in 1..4 {
+            click(&app, &mut vcx, i, Modifiers::secondary_key());
+        }
+        let before = ids(&app, &mut vcx);
+        assert_eq!(picked(&app, &mut vcx), vec![0, 1, 2, 3]);
+
+        let at = row(&app, &mut vcx, 3).center();
+        vcx.simulate_mouse_down(at, MouseButton::Middle, Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(
+            ids(&app, &mut vcx),
+            [&before[..3], &before[4..]].concat(),
+            "the middle click took tab 3 alone"
+        );
+        assert_eq!(picked(&app, &mut vcx), vec![0, 1, 2]);
+        assert!(
+            sidebar_focused(&app, &mut vcx),
+            "the selection keeps the keys"
+        );
+
+        let at = row(&app, &mut vcx, 2).center();
+        vcx.simulate_mouse_move(at, None::<MouseButton>, Modifiers::none());
+        vcx.run_until_parked();
+        let close = vcx
+            .debug_bounds("sidebar-row-hit-2")
+            .expect("the hover × is laid out")
+            .center();
+        vcx.simulate_click(close, Modifiers::none());
+        vcx.run_until_parked();
+        assert_eq!(
+            ids(&app, &mut vcx),
+            vec![before[0], before[1], before[4]],
+            "the × took tab 2 alone"
+        );
+        assert_eq!(picked(&app, &mut vcx), vec![0, 1]);
     }
 }

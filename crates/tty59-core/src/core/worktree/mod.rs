@@ -135,6 +135,23 @@ pub fn occupied(host: &dyn Host, path: &Path, cwds: &[PathBuf]) -> bool {
         .any(|c| host.canonicalize(c).is_ok_and(|c| c.starts_with(&path)))
 }
 
+/// What closing tabs at `cwds` left behind: the tty59-managed worktrees they
+/// were in that no cwd in `open` (the tabs still open) is in. Each worktree
+/// once, however many closed tabs sat in it, in the order first met.
+pub fn left_behind(host: &dyn Host, cwds: &[PathBuf], open: &[PathBuf]) -> Vec<ManagedWorktree> {
+    let mut found: Vec<ManagedWorktree> = Vec::new();
+    for cwd in cwds {
+        let Some(wt) = managed(host, cwd) else {
+            continue;
+        };
+        if found.iter().any(|f| f.path == wt.path) || occupied(host, &wt.path, open) {
+            continue;
+        }
+        found.push(wt);
+    }
+    found
+}
+
 pub fn remove(host: &dyn Host, wt: &ManagedWorktree, force: bool) -> Result<Removed, String> {
     let path = wt.path.to_str().ok_or("worktree path is not valid UTF-8")?;
     if wt.dirty && !force {
@@ -601,6 +618,44 @@ mod tests {
         assert!(!branch_exists(&*h, &repo, &wt.branch));
         let _ = std::fs::remove_dir_all(&repo);
         let _ = std::fs::remove_dir_all(&own);
+    }
+
+    /// Three closed tabs in two managed worktrees, one of them twice, plus a
+    /// third worktree a tab still open sits in and a cwd that is no worktree:
+    /// the two left behind, each once, in the order first met, dirty marked.
+    #[test]
+    fn left_behind_is_each_unoccupied_managed_worktree_once() {
+        let h = h();
+        let repo = temp_repo("left");
+        let clean = create(&*h, &repo, &req("left-clean")).unwrap();
+        let dirty = create(&*h, &repo, &req("left-dirty")).unwrap();
+        let held = create(&*h, &repo, &req("left-held")).unwrap();
+        std::fs::write(dirty.path.join("b.txt"), "b").unwrap();
+        let sub = dirty.path.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let closed = vec![
+            dirty.path.clone(),
+            repo.clone(),
+            sub,
+            held.path.clone(),
+            clean.path.clone(),
+        ];
+        let open = vec![held.path.join(".")];
+        let left = left_behind(&*h, &closed, &open);
+        let paths: Vec<PathBuf> = left.iter().map(|w| plain(&w.path)).collect();
+        assert_eq!(
+            paths,
+            vec![plain(&dirty.path), plain(&clean.path)],
+            "dirty first (met first), the held one and the main checkout skipped"
+        );
+        assert!(left[0].dirty && !left[1].dirty);
+        assert!(
+            left_behind(&*h, &closed, &[repo.clone(), dirty.path.clone()])
+                .iter()
+                .all(|w| plain(&w.path) != plain(&dirty.path))
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

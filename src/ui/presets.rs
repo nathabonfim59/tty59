@@ -598,6 +598,12 @@ pub mod state {
     pub const PANEL_SELECTED: f32 = 1.12;
     pub const TEXT_RESTING: f32 = 4.6;
     pub const TEXT_STEP: f32 = 1.4;
+    /// How much accent a rail row picked into the multi-tab selection takes
+    /// over the rail (see `RailMark`): a tint that reads as "picked" next to
+    /// the neutral active rung, light enough that the row's text stands on it
+    /// as authored on most themes. Dark rails need more to show at all.
+    pub const MARK_WASH_LIGHT: f32 = 0.14;
+    pub const MARK_WASH_DARK: f32 = 0.22;
 }
 
 /// How much of a surface the Primary button's hover takes over its fill.
@@ -644,12 +650,28 @@ pub struct Scrim {
     pub alpha: f32,
 }
 
+/// How a tab picked into the rail's multi-tab selection is painted, beside
+/// the rail ladder's own hover and selected (active) rungs.
+#[derive(Debug, Clone, Copy)]
+pub struct RailMark {
+    /// A selected row's fill: the accent washed over the rail, so it reads
+    /// apart from the neutral hover and active rungs.
+    pub fill: u32,
+    /// Text on `fill` (text floor).
+    pub ink: u32,
+    /// The marker at a selected row's leading edge, on `fill` or, for the
+    /// active row, on the selected rung (component floor on both and on the
+    /// rail itself). The marker, not the fill, is what has to be seen.
+    pub bar: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct Surfaces {
     pub window: Surface,
     pub sidebar: Surface,
     /// The left tab rail's ladder, built on `Neutrals::rail`.
     pub rail: Surface,
+    pub rail_mark: RailMark,
     pub popover: Surface,
     pub scrim: Scrim,
 }
@@ -833,6 +855,37 @@ impl Theme {
             text_resting,
             text_selected: stepped_ink(selected, base, fg, text_resting),
             ..self.surface_at(base, pole)
+        }
+    }
+
+    /// The multi-tab selection's paint on the rail `rail`: see [`RailMark`].
+    ///
+    /// A selected row still draws its branch and path in the shared caption
+    /// ink (`caption`), so the wash is cut back, where a theme needs it, to
+    /// the strongest that keeps that ink on the text floor. The rail itself
+    /// holds it, so some wash always does.
+    fn rail_mark(&self, rail: &Surface, accent: u32, caption: u32) -> RailMark {
+        let wash = match self.dark {
+            true => state::MARK_WASH_DARK,
+            false => state::MARK_WASH_LIGHT,
+        };
+        let holds = |t: f32| contrast(caption, mix(rail.base, accent, t)) >= TEXT_FLOOR;
+        let wash = match holds(wash) {
+            true => wash,
+            false => {
+                let (mut lo, mut hi) = (0.0, wash);
+                for _ in 0..16 {
+                    let mid = (lo + hi) / 2.;
+                    if holds(mid) { lo = mid } else { hi = mid }
+                }
+                lo
+            }
+        };
+        let fill = mix(rail.base, accent, wash);
+        RailMark {
+            fill,
+            ink: ink_on(fill, rail.text_selected, TEXT_FLOOR),
+            bar: legible_across(&[rail.base, fill, rail.selected], accent, ACCENT_FLOOR),
         }
     }
 
@@ -1376,10 +1429,12 @@ impl Theme {
         // fill on top of it read as a pressed button rather than as a place.
         let sidebar = self.panel_surface(m.sidebar, m.sidebar_fg, fg, pole);
         let rail = self.panel_surface(m.rail, m.rail_fg, fg, pole);
+        let rail_mark = self.rail_mark(&rail, m.accent, m.muted_foreground);
         Surfaces {
             window: self.surface_at(m.background, pole),
             sidebar,
             rail,
+            rail_mark,
             popover: self.surface_at(m.popover, pole),
             // The v5 scrim: a dim, not a blackout. Dark lands on near-black at
             // 45%; light on a warm near-black at 14%, just enough to say the
@@ -3928,6 +3983,44 @@ ansi:
         let mut themes = builtins();
         themes.extend(generated_theme_grid());
         themes
+    }
+
+    /// The multi-tab selection on the rail, on every theme: the row's text
+    /// on its fill is text (4.5:1); the leading marker is a component (3:1)
+    /// on the selected row's fill, on the active rung (an active row can be
+    /// selected too) and on the rail beside the row. The fill itself is a
+    /// state of its own, never one of the two neutral rungs it sits beside.
+    #[test]
+    fn rail_mark_holds_its_floors_on_every_theme() {
+        let mut misses = Vec::new();
+        for t in sweep_themes() {
+            let s = t.surfaces();
+            let (rail, mark) = (s.rail, s.rail_mark);
+            let caption = t.neutrals().muted_foreground;
+            let pairs = [
+                ("ink on fill", mark.ink, mark.fill, AA_TEXT),
+                ("caption on fill", caption, mark.fill, AA_TEXT),
+                ("bar on fill", mark.bar, mark.fill, AA_MARK),
+                ("bar on active", mark.bar, rail.selected, AA_MARK),
+                ("bar on rail", mark.bar, rail.base, AA_MARK),
+            ];
+            for (role, ink, fill, floor) in pairs {
+                let got = contrast(ink, fill);
+                if got < floor {
+                    misses.push(format!(
+                        "{}: {role} #{ink:06x} on #{fill:06x} = {got:.2}",
+                        t.id
+                    ));
+                }
+            }
+            if mark.fill == rail.hover || mark.fill == rail.selected {
+                misses.push(format!(
+                    "{}: fill #{:06x} is a neutral rung",
+                    t.id, mark.fill
+                ));
+            }
+        }
+        assert_no_misses("rail mark", misses);
     }
 
     fn assert_no_misses(what: &str, misses: Vec<String>) {
