@@ -22,6 +22,12 @@ use crate::terminal::git_diff::{
 /// says the read failed rather than showing a silently cut-off file — and the
 /// line budget below cuts rendering long before this does anyway.
 const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024;
+
+/// The key context of the diff surface, declared on the element that takes its
+/// focus. Only the document fill toggle is bound in it — the diff's other keys
+/// are its own key handler's — so that ⌘⇧↵ / Ctrl+Shift+Enter on a focused diff
+/// fills and docks it, as it does an open file, instead of zooming a pane.
+pub(crate) const DIFF_KEY_CONTEXT: &str = "DiffDocument";
 use crate::ui::app::{TitleStripRow as _, Tty59App};
 use crate::ui::diff_list::{DiffRow, FileHead, RowAt};
 use crate::ui::diff_rows::{DiffSelection, Side, SplitCell, SplitRow, UnifiedRow};
@@ -764,6 +770,7 @@ impl Tty59App {
                     d.debug_selector(|| "diff-overlay-body".into())
                 })
                 .text_color(cx.theme().foreground)
+                .key_context(DIFF_KEY_CONTEXT)
                 .track_focus(&focus_handle)
                 .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
                     if ev.keystroke.key.as_str() == "escape" {

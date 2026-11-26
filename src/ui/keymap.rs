@@ -150,15 +150,21 @@ fn fixed_bindings() -> Vec<KeyBinding> {
         bindings.push(KeyBinding::new("alt-f3", EditorPeekChange, input));
     }
     // The code editor's line commands, for the same tie: ⌘/ is the shortcut
-    // sheet, ⌘↵ fullscreen, ⌘⇧↵ maximize and ⌥↑/⌥↓ pane focus off macOS, all
-    // context-free. Bound on `CodeEditor`, which only a multi-line code
-    // editor declares, so every other text field and the terminal keep the
-    // app's keys.
+    // sheet, ⌘↵ fullscreen and ⌥↑/⌥↓ pane focus off macOS, all context-free.
+    // Bound on `CodeEditor`, which only a multi-line code editor declares, so
+    // every other text field and the terminal keep the app's keys.
+    //
+    // ⌘⇧↵ is deliberately not re-added for `InsertLineAbove`: inside the
+    // editor that chord is the document fill toggle (`ToggleDocumentFill`,
+    // the editor's counterpart of Zoom Pane), and re-binding it here, after
+    // the app's table, would put the line command back on top of it. The
+    // toolkit's own binding for it stays in its table and loses to the fill
+    // toggle; Insert Line Below keeps ⌘↵.
     {
         use gpui_component::input::{
-            CODE_EDITOR_CONTEXT, CopyLineDown, CopyLineUp, DeleteLine, InsertLineAbove,
-            InsertLineBelow, MoveLineDown, MoveLineUp, MoveToMatchingBracket, SelectLine,
-            ToggleBlockComment, ToggleLineComment,
+            CODE_EDITOR_CONTEXT, CopyLineDown, CopyLineUp, DeleteLine, InsertLineBelow,
+            MoveLineDown, MoveLineUp, MoveToMatchingBracket, SelectLine, ToggleBlockComment,
+            ToggleLineComment,
         };
         let editor = Some(CODE_EDITOR_CONTEXT);
         bindings.extend([
@@ -170,7 +176,6 @@ fn fixed_bindings() -> Vec<KeyBinding> {
             KeyBinding::new("alt-shift-down", CopyLineDown, editor),
             KeyBinding::new("secondary-shift-k", DeleteLine, editor),
             KeyBinding::new("secondary-enter", InsertLineBelow, editor),
-            KeyBinding::new("secondary-shift-enter", InsertLineAbove, editor),
             KeyBinding::new("secondary-l", SelectLine, editor),
             KeyBinding::new("secondary-shift-\\", MoveToMatchingBracket, editor),
         ]);
@@ -891,10 +896,13 @@ fn shipped_bindings() -> Vec<(&'static str, &'static str)> {
         ("ToggleSftp", ""),
         ("ShowSshForwards", ""),
         ("ToggleCodePanel", "secondary-shift-e"),
-        // Deliberately unbound. Docking is the default and Esc already gets the
-        // terminal back, so a default chord here would only be one more thing
-        // competing for a two-key combination nobody asked for.
-        ("ToggleDocumentFill", ""),
+        // Zoom Pane's chord, given the document's own meaning: with a file or a
+        // diff focused, ⌘⇧↵ / Ctrl+Shift+Enter fills the workspace with it and
+        // docks it again, the way the same keys zoom a pane in the terminal.
+        // Scoped to the document surfaces (see `document_surface_context`), and
+        // listed after `ToggleMaximizePane` so that, at the focused element's
+        // depth where both match, this one ranks first.
+        ("ToggleDocumentFill", "secondary-shift-enter"),
         ("DocumentWidthThird", ""),
         ("DocumentWidthHalf", ""),
         ("DocumentWidthTwoThirds", ""),
@@ -1995,8 +2003,28 @@ fn action_context(action: &str) -> Option<&'static str> {
         | "EditorFocusLeftGroup"
         | "EditorFocusRightGroup" => Some(crate::ui::code_editor::NAV_KEY_CONTEXT),
         "EditorSearchOpenFiles" => Some(any_editor_document_context()),
+        "ToggleDocumentFill" => Some(document_surface_context()),
         _ => None,
     }
+}
+
+/// The document column's focusable surfaces — the code editor's text, the
+/// field-less documents (image, markdown preview, hex) and the diff — and
+/// nothing else: the fill toggle shares Zoom Pane's chord, and anywhere outside
+/// a document (a terminal, any other text field) the chord has to stay Zoom
+/// Pane's. Each name is declared by the element that takes focus, so the
+/// binding matches at the focused element's own depth, level with the
+/// context-free Zoom Pane, and the later of the two in the table wins.
+fn document_surface_context() -> &'static str {
+    static CONTEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "{} || {} || {}",
+            gpui_component::input::CODE_EDITOR_CONTEXT,
+            crate::ui::code_editor::DOCUMENT_KEY_CONTEXT,
+            crate::ui::diff_overlay::DIFF_KEY_CONTEXT
+        )
+    });
+    CONTEXT.as_str()
 }
 
 /// Any text field, or an editor document that has none (the image view, the
@@ -2150,7 +2178,9 @@ fn make_binding(action: &str, keystroke: &str) -> Option<KeyBinding> {
         "ToggleSftp" => KeyBinding::new(keystroke, ToggleSftp, None),
         "ShowSshForwards" => KeyBinding::new(keystroke, ShowSshForwards, None),
         "ToggleCodePanel" => KeyBinding::new(keystroke, ToggleCodePanel, None),
-        "ToggleDocumentFill" => KeyBinding::new(keystroke, ToggleDocumentFill, None),
+        "ToggleDocumentFill" => {
+            KeyBinding::new(keystroke, ToggleDocumentFill, action_context(action))
+        }
         "DocumentWidthThird" => KeyBinding::new(keystroke, DocumentWidthThird, None),
         "DocumentWidthHalf" => KeyBinding::new(keystroke, DocumentWidthHalf, None),
         "DocumentWidthTwoThirds" => KeyBinding::new(keystroke, DocumentWidthTwoThirds, None),
@@ -2751,6 +2781,15 @@ mod tests {
             per_platform("secondary-enter", "f11")
         );
         assert_eq!(key_of("ToggleMaximizePane"), "secondary-shift-enter");
+        // The document fill toggle shares Zoom Pane's chord and coexists with
+        // it only because it is scoped to the document surfaces; unscoped,
+        // the fill toggle would take the chord from every terminal pane.
+        assert_eq!(key_of("ToggleDocumentFill"), "secondary-shift-enter");
+        assert_eq!(action_context("ToggleMaximizePane"), None);
+        assert_eq!(
+            action_context("ToggleDocumentFill"),
+            Some(document_surface_context())
+        );
         for window_chord in ["secondary-enter", "secondary-shift-enter"] {
             assert_ne!(window_chord, INSERT_NEWLINE_DEFAULT);
             assert_ne!(window_chord, INSERT_NEWLINE_ALT_DEFAULT);
@@ -3411,10 +3450,12 @@ mod gpui_tests {
     }
 
     /// The code editor's line commands sit on chords the app also spends —
-    /// ⌘/ is the shortcut sheet, ⌘↵ fullscreen, ⌘⇧↵ maximize, ⌥↑/⌥↓ pane
-    /// focus off macOS. `fixed_bindings` re-adds them on the `CodeEditor`
-    /// context the editor declares beside `Input`, after the app's table, so
-    /// inside the editor they win and everywhere else nothing changes.
+    /// ⌘/ is the shortcut sheet, ⌘↵ fullscreen, ⌥↑/⌥↓ pane focus off macOS.
+    /// `fixed_bindings` re-adds them on the `CodeEditor` context the editor
+    /// declares beside `Input`, after the app's table, so inside the editor
+    /// they win and everywhere else nothing changes. ⌘⇧↵ is not among them:
+    /// in the editor it is the document fill toggle — see
+    /// `the_zoom_chord_fills_a_focused_document_and_zooms_a_focused_terminal`.
     #[gpui::test]
     fn the_code_editor_chords_win_inside_the_editor(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -3445,7 +3486,6 @@ mod gpui_tests {
                 ("alt-shift-down", "input::CopyLineDown"),
                 ("secondary-shift-k", "input::DeleteLine"),
                 ("secondary-enter", "input::InsertLineBelow"),
-                ("secondary-shift-enter", "input::InsertLineAbove"),
                 ("secondary-l", "input::SelectLine"),
                 ("secondary-shift-\\", "input::MoveToMatchingBracket"),
             ]) {
@@ -3461,6 +3501,109 @@ mod gpui_tests {
                     "{keys} in a terminal"
                 );
             }
+        });
+    }
+
+    /// ⌘⇧↵ / Ctrl+Shift+Enter is one gesture with two meanings, picked by what
+    /// has focus: on a document — the code editor, a field-less document
+    /// (image, markdown preview, hex) or a diff — it fills the workspace with
+    /// the document and docks it again; on a terminal pane it zooms the pane,
+    /// as it always has. The editor's own Insert Line Above, which the toolkit
+    /// also puts on the chord, must not win over the fill toggle there, and no
+    /// other text field — the composer over a terminal, the palette — may
+    /// start filling documents.
+    #[gpui::test]
+    fn the_zoom_chord_fills_a_focused_document_and_zooms_a_focused_terminal(
+        cx: &mut TestAppContext,
+    ) {
+        use gpui::Action as _;
+        cx.update(|cx| {
+            running_on_json(cx, "{}");
+            let first = |stack: &[&str]| {
+                let input = [Keystroke::parse("secondary-shift-enter").expect("the chord parses")];
+                let stack: Vec<gpui::KeyContext> = stack
+                    .iter()
+                    .map(|c| gpui::KeyContext::parse(c).expect("the context parses"))
+                    .collect();
+                cx.key_bindings()
+                    .borrow()
+                    .bindings_for_input(&input, &stack)
+                    .0
+                    .first()
+                    .map(|b| b.action().name())
+            };
+            let fill = Some(ToggleDocumentFill::name_for_type());
+            let zoom = Some(ToggleMaximizePane::name_for_type());
+            let code_editor = format!("Input {}", gpui_component::input::CODE_EDITOR_CONTEXT);
+            let hex = format!(
+                "{} {HEX_KEY_CONTEXT}",
+                crate::ui::code_editor::DOCUMENT_KEY_CONTEXT
+            );
+            for document in [
+                code_editor.as_str(),
+                crate::ui::code_editor::DOCUMENT_KEY_CONTEXT,
+                hex.as_str(),
+                crate::ui::diff_overlay::DIFF_KEY_CONTEXT,
+            ] {
+                assert_eq!(
+                    first(&["Workspace", document]),
+                    fill,
+                    "the chord on a focused {document:?} fills / docks the document"
+                );
+            }
+            for elsewhere in [
+                "Terminal",
+                "Terminal alt_screen",
+                "Input",
+                crate::ui::search::KEY_CONTEXT,
+            ] {
+                assert_eq!(
+                    first(&["Workspace", elsewhere]),
+                    zoom,
+                    "the chord on a focused {elsewhere:?} still zooms the pane"
+                );
+            }
+        });
+    }
+
+    /// The fill toggle's chord is a default like any other: setting the action
+    /// to another chord (the list form, which replaces rather than adds) moves
+    /// it, and the old chord on a document goes back to Zoom Pane rather than
+    /// going dead there.
+    #[gpui::test]
+    fn the_document_fill_chord_follows_the_users_binding(cx: &mut TestAppContext) {
+        use gpui::Action as _;
+        let first = |cx: &gpui::App, keys: &str, stack: &str| {
+            let input = [Keystroke::parse(keys).expect("the chord parses")];
+            let stack = [gpui::KeyContext::parse(stack).expect("the context parses")];
+            cx.key_bindings()
+                .borrow()
+                .bindings_for_input(&input, &stack)
+                .0
+                .first()
+                .map(|b| b.action().name())
+        };
+        let document = crate::ui::code_editor::DOCUMENT_KEY_CONTEXT;
+        cx.update(|cx| {
+            running_on_json(
+                cx,
+                r#"{ "keybindings": { "ToggleDocumentFill": ["secondary-alt-f12"] } }"#,
+            );
+            assert_eq!(
+                first(cx, "secondary-alt-f12", document),
+                Some(ToggleDocumentFill::name_for_type()),
+                "the moved chord fills the document"
+            );
+            assert_eq!(
+                first(cx, "secondary-alt-f12", "Terminal"),
+                None,
+                "and stays scoped to the documents"
+            );
+            assert_eq!(
+                first(cx, "secondary-shift-enter", document),
+                Some(ToggleMaximizePane::name_for_type()),
+                "the old chord is Zoom Pane's again"
+            );
         });
     }
 
