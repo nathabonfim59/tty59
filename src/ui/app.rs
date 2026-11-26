@@ -1037,6 +1037,13 @@ pub struct Tty59App {
     pub(crate) closed: Vec<SessionTab>,
     pub(crate) renaming: Option<Renaming>,
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
+    /// The one dialog for the worktrees a bulk close left behind.
+    pub(crate) worktree_batch: Option<crate::ui::worktree_batch::WorktreeBatch>,
+    /// The tabs picked in the sidebar to move or close together.
+    pub(crate) tab_selection: crate::ui::tab_selection::TabSelection,
+    /// Held by the sidebar only while `tab_selection` has tabs in it, so
+    /// Escape there ends the selection without reaching the terminal.
+    pub(crate) tab_selection_focus: gpui::FocusHandle,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
     /// Whether the visible badges number the tab groups rather than tabs.
@@ -1784,6 +1791,9 @@ impl Tty59App {
             closed: Vec::new(),
             renaming: None,
             worktree_prompt: None,
+            worktree_batch: None,
+            tab_selection: Default::default(),
+            tab_selection_focus: cx.focus_handle(),
             maximized: None,
             mod_hint_badges: false,
             mod_hint_group: false,
@@ -10921,6 +10931,9 @@ impl Render for Tty59App {
                 // clipped to the terminal area, which read as "only the
                 // terminal is busy".
                 .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
+                    this.child(el)
+                })
+                .when_some(self.render_worktree_batch_overlay(cx), |this, el| {
                     this.child(el)
                 })
                 // Same reason, and the ssh prompt has more claim to it than any

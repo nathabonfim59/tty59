@@ -63,6 +63,7 @@ pub mod sftp_host;
 pub mod ssh_connect;
 pub mod ssh_prompt;
 pub mod switcher;
+pub mod tab_selection;
 pub mod tab_sidebar;
 pub mod tab_strip;
 pub(crate) mod text_elision;
@@ -70,6 +71,7 @@ pub mod theme;
 pub mod tray;
 pub mod tree_sync;
 pub mod windows;
+pub mod worktree_batch;
 pub mod worktree_prompt;
 pub(crate) mod zoom;
 
