@@ -1924,6 +1924,7 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::ShellDefault => "по умолчанию",
         L10nKey::SidebarUngroupedGroup => "Без группы",
         L10nKey::SidebarMoveToGroup => "Переместить в группу",
+        L10nKey::SidebarMoveTabsToGroup => "Переместить вкладки в группу: {count}",
         L10nKey::SidebarNewGroup => "Новая группа…",
         L10nKey::SidebarRemoveFromGroup => "Убрать из группы",
         L10nKey::SidebarNewGroupName => "Новая группа",
@@ -1937,6 +1938,13 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarDeleteGroup => "Удалить группу",
         L10nKey::SidebarDropToPin => "Перетащите сюда, чтобы закрепить",
         L10nKey::TabContextCloseTab => "Закрыть вкладку",
+        L10nKey::TabContextCloseTabs => "Закрыть вкладки: {count}",
+        L10nKey::TabsSkippedOnClose => {
+            "Вкладки остались открытыми: {count}. Причина — несохранённые файлы или подключение, которое запрашивает подтверждение перед закрытием"
+        }
+        L10nKey::TabsSkippedOnCloseOne => {
+            "1 вкладка осталась открытой: в ней есть несохранённые файлы или подключение, которое запрашивает подтверждение перед закрытием"
+        }
         L10nKey::TerminalContextClear => "Очистить",
         L10nKey::TabContextCloseTabsBelow => "Закрыть вкладки ниже",
         L10nKey::TabContextMarkUnread => "Отметить непрочитанной",
@@ -2354,6 +2362,23 @@ pub fn translate_ru(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneDragHandleTooltip => "Перетащите, чтобы переместить панель",
         L10nKey::AppWorktreeRemoved => "Worktree «{branch}» удалён",
         L10nKey::AppWorktreeRemoveFailed => "Не удалось удалить worktree: {error}",
+        L10nKey::WorktreeBatchTitle => "Закрытые вкладки оставили worktree: {count}",
+        L10nKey::WorktreeBatchDetail => {
+            "Оставленные worktree остаются на диске вместе со своими ветками."
+        }
+        L10nKey::WorktreeBatchDirty => "Незакоммиченные изменения",
+        L10nKey::WorktreeBatchDirtyNote => "Перед удалением сохраняются в refs/tty59/trash/{name}",
+        L10nKey::WorktreeBatchKeep => "Оставить",
+        L10nKey::WorktreeBatchKeepToggle => "Оставить worktree «{branch}»",
+        L10nKey::WorktreeBatchKeepAllShortcut => "Оставить все",
+        L10nKey::WorktreeBatchRemoveAllShortcut => "Удалить все",
+        L10nKey::WorktreeBatchRemoveButton => "Удалить worktree: {count}",
+        L10nKey::WorktreeBatchRemoveButtonOne => "Удалить 1 worktree",
+        L10nKey::WorktreeBatchKeepAllButton => "Оставить все",
+        L10nKey::WorktreeBatchRemoved => "Удалено worktree: {count}",
+        L10nKey::WorktreeBatchRemovedOne => "Удалено 1 worktree",
+        L10nKey::WorktreeBatchBranchesKept => "Ветки сохранены, так как не слиты: {branches}",
+        L10nKey::WorktreeBatchFailed => "Не удалось удалить «{branch}»: {error}",
         L10nKey::WorktreePromptAgent => "Запуск через",
         L10nKey::WorktreePromptShell => "Оболочка",
         L10nKey::WorktreePromptTask => "Первая задача",
