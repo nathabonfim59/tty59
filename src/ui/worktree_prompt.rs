@@ -14,6 +14,10 @@ use crate::ui::i18n::{L10nKey, t, t_fmt};
 use crate::ui::right_panel::META_MONO;
 use crate::ui::text_elision::{ElidedLabel, Mode};
 
+/// The width of the worktree sheets, so the prompt and the batch dialog read
+/// as one.
+pub(crate) const CARD_W: f32 = 440.;
+
 pub(crate) struct WorktreePrompt {
     host: crate::ui::host_ops::SharedHost,
     cwd: std::path::PathBuf,
@@ -436,7 +440,7 @@ impl Tty59App {
         let card = dialog::card(
             "worktree-prompt-card",
             t(L10nKey::WorktreePromptTitle),
-            440.,
+            CARD_W,
             cx,
         )
         .child(dialog::header(t(L10nKey::WorktreePromptTitle), cx))
