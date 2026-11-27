@@ -6385,7 +6385,15 @@ impl Tty59App {
                 host,
                 window,
                 cx,
-                move |h| crate::core::worktree::left_behind(h, &cwds, &open),
+                // The land step only runs for a job that returned, so a
+                // panicking host would leave `waiting` above zero and no other
+                // host would get its dialog. It counts as answered, with none.
+                move |h| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::core::worktree::left_behind(h, &cwds, &open)
+                    }))
+                    .unwrap_or_default()
+                },
                 move |this, found, window, cx| {
                     let rows = {
                         let mut gather = gather.borrow_mut();
@@ -8728,6 +8736,11 @@ impl Tty59App {
         // The Agents list can be switched off from the file or the settings
         // page; the rail's search field has to stop calling itself agents' search.
         self.sync_sidebar_search_placeholder(window, cx);
+        // Only the sidebar's rows draw the selection: with the tab bar on top
+        // it would act on tabs nothing shows as picked, and keep the keys.
+        if cx.global::<Config>().tab_bar_position != TabBarPosition::Left {
+            self.end_tab_selection(window, cx);
+        }
         let config = cx.global::<Config>().clone();
         if config.cursor_style != self.terminal_cursor_style
             || config.scrollback_limit != self.terminal_scrollback_limit

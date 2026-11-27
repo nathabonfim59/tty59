@@ -9007,6 +9007,27 @@ mod selection_tests {
         ended(&app, &mut vcx, "the Agents list");
     }
 
+    /// Moving the tab bar to the top ends the selection: no row is left to
+    /// show it, and the pane gets its keys back.
+    #[gpui::test]
+    fn moving_the_tab_bar_to_the_top_ends_the_selection(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 3);
+        vcx.run_until_parked();
+        click(&app, &mut vcx, 1, Modifiers::secondary_key());
+        assert_eq!(picked(&app, &mut vcx), vec![0, 1]);
+        assert!(sidebar_focused(&app, &mut vcx));
+
+        vcx.update(|_, cx| {
+            let mut cfg = cx.global::<Config>().clone();
+            cfg.tab_bar_position = crate::core::config::TabBarPosition::Top;
+            cx.set_global(cfg);
+        });
+        vcx.run_until_parked();
+        assert!(picked(&app, &mut vcx).is_empty(), "the selection ended");
+        assert!(!sidebar_focused(&app, &mut vcx), "the sidebar let go");
+        assert!(pane_focused(&app, &mut vcx), "the pane has the keys");
+    }
+
     /// A selected row's middle click and its hover × close that row alone;
     /// it drops out of the selection and the rest stays picked.
     #[gpui::test]

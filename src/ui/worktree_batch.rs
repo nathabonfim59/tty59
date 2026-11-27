@@ -18,7 +18,7 @@ use crate::ui::app::Tty59App;
 use crate::ui::dialog::{self, Tone};
 use crate::ui::host_ops::{HostId, HostOps, SharedHost};
 use crate::ui::i18n::{L10nKey, t, t_fmt};
-use crate::ui::right_panel::{META_MONO, TAB_TEXT, TEXT};
+use crate::ui::right_panel::{META, META_MONO, TAB_TEXT, TEXT};
 use crate::ui::text_elision::{ElidedLabel, Mode};
 
 /// The tallest the row list grows before it scrolls.
@@ -52,15 +52,22 @@ struct Outcome {
     failures: Vec<String>,
 }
 
-/// The word on the remove button: singular at exactly one, the count otherwise
-/// (zero included, when the button is disabled).
+/// The word on the remove button: no count while nothing is marked (the
+/// button is disabled then), singular at exactly one, the count otherwise.
 fn remove_button_label(unkept: usize) -> String {
-    if unkept == 1 {
-        t(L10nKey::WorktreeBatchRemoveButtonOne).to_string()
-    } else {
-        let count = unkept.to_string();
-        t_fmt(L10nKey::WorktreeBatchRemoveButton, &[("count", &count)])
+    match unkept {
+        0 => t(L10nKey::WorktreeBatchRemoveButtonNone).to_string(),
+        1 => t(L10nKey::WorktreeBatchRemoveButtonOne).to_string(),
+        _ => {
+            let count = unkept.to_string();
+            t_fmt(L10nKey::WorktreeBatchRemoveButton, &[("count", &count)])
+        }
     }
+}
+
+/// Whether Remove all has a row left to mark.
+fn any_kept(rows: &[LeftWorktree]) -> bool {
+    rows.iter().any(|row| row.keep)
 }
 
 /// Everything the removal jobs did, as the one notification they earn: the
@@ -145,15 +152,15 @@ impl Tty59App {
         }
     }
 
-    /// The Keep all / Remove all shortcuts: every row flips at once.
-    pub(crate) fn set_worktree_batch_keep_all(&mut self, keep: bool, cx: &mut Context<Self>) {
+    /// The Remove all shortcut: every row is marked for removal at once.
+    pub(crate) fn remove_all_in_worktree_batch(&mut self, cx: &mut Context<Self>) {
         let Some(batch) = self.worktree_batch.as_mut() else {
             return;
         };
         let mut changed = false;
         for row in &mut batch.rows {
-            if row.keep != keep {
-                row.keep = keep;
+            if row.keep {
+                row.keep = false;
                 changed = true;
             }
         }
@@ -276,9 +283,20 @@ impl Tty59App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let path =
-                    crate::ui::path_display::readable_path(&row.wt.path.display().to_string())
-                        .into_owned();
+                // Home-relative on this machine, as the sidebar's rows spell
+                // a cwd; a remote path stays whole, since its home is not ours.
+                let home = row
+                    .host
+                    .id()
+                    .is_local()
+                    .then(crate::ui::path_display::local_home)
+                    .flatten();
+                let full = row.wt.path.display().to_string();
+                let path = crate::ui::tab_strip::abbreviate_home(
+                    &crate::ui::path_display::readable_path(&full),
+                    home.as_deref(),
+                )
+                .into_owned();
                 let details = v_flex()
                     .flex_1()
                     .min_w_0()
@@ -295,14 +313,20 @@ impl Tty59App {
                         path,
                         Mode::Path,
                     )))
+                    // Words, not a path: the UI font, the marker in the
+                    // warning colour and the note muted.
                     .when(row.wt.dirty, |col| {
                         col.child(
-                            meta(div())
+                            div()
+                                .text_size(rems(META))
                                 .text_color(cx.theme().warning)
                                 .child(t(L10nKey::WorktreeBatchDirty)),
                         )
                         .child(
-                            meta(div())
+                            div()
+                                .whitespace_normal()
+                                .text_size(rems(META))
+                                .text_color(muted)
                                 .child(t_fmt(L10nKey::WorktreeBatchDirtyNote, &[("name", &name)])),
                         )
                     });
@@ -335,34 +359,22 @@ impl Tty59App {
             })
             .collect::<Vec<_>>();
 
-        let keep_all_shortcut = dialog::button(
-            "worktree-batch-keep-all-shortcut",
-            t(L10nKey::WorktreeBatchKeepAllShortcut),
-            Tone::Secondary,
-            true,
-            rungs,
-            cx,
-            cx.listener(|this, _, _, cx| this.set_worktree_batch_keep_all(true, cx)),
-        );
-        #[cfg(test)]
-        let keep_all_shortcut =
-            keep_all_shortcut.debug_selector(|| "worktree-batch-keep-all-shortcut".into());
+        // Every row starts kept and the footer's Keep All keeps them all, so
+        // the one shortcut is the other way; it has nothing to do once no row
+        // is kept.
         let remove_all_shortcut = dialog::button(
             "worktree-batch-remove-all-shortcut",
             t(L10nKey::WorktreeBatchRemoveAllShortcut),
             Tone::Secondary,
-            true,
+            any_kept(&batch.rows),
             rungs,
             cx,
-            cx.listener(|this, _, _, cx| this.set_worktree_batch_keep_all(false, cx)),
+            cx.listener(|this, _, _, cx| this.remove_all_in_worktree_batch(cx)),
         );
         #[cfg(test)]
         let remove_all_shortcut =
             remove_all_shortcut.debug_selector(|| "worktree-batch-remove-all-shortcut".into());
-        let shortcuts = h_flex()
-            .gap(px(6.))
-            .child(keep_all_shortcut)
-            .child(remove_all_shortcut);
+        let shortcuts = h_flex().gap(px(6.)).child(remove_all_shortcut);
 
         let keep_all = dialog::button(
             "worktree-batch-keep-all",
@@ -755,7 +767,7 @@ mod tests {
                 .is_none(),
             "a fourth row was painted"
         );
-        assert_eq!(remove_button_label(0), "Remove 0 Worktrees");
+        assert_eq!(remove_button_label(0), "Remove Worktrees");
         form.click("worktree-batch-remove");
         assert!(form.is_open(), "a disabled Remove closed the dialog");
         form.assert_no_remove("a disabled Remove reached `git worktree remove`");
@@ -783,16 +795,31 @@ mod tests {
         );
     }
 
-    /// F9(d): Remove all flips every row; Keep all flips them back.
+    /// F9(d): Remove all marks every row, and is the only shortcut: the
+    /// footer's Keep All is the way back. With no row kept it has nothing
+    /// left to do and goes inert; re-keeping one row wakes it.
     #[gpui::test]
-    fn remove_all_then_keep_all_flip_every_row(cx: &mut TestAppContext) {
+    fn remove_all_marks_every_row_then_goes_inert(cx: &mut TestAppContext) {
         let mut form = open(cx, &[("alpha", false), ("beta", false), ("gamma", true)]);
+        assert!(
+            form.vcx
+                .debug_bounds("worktree-batch-keep-all-shortcut")
+                .is_none(),
+            "a Keep all shortcut is drawn"
+        );
+        let any = |form: &mut Form| {
+            form.app.update_in(&mut form.vcx, |app, _, _| {
+                any_kept(&app.worktree_batch.as_ref().expect("open").rows)
+            })
+        };
+        assert!(any(&mut form), "everything starts kept: Remove all is live");
         form.click("worktree-batch-remove-all-shortcut");
         assert_eq!(form.keeps(), vec![false, false, false]);
         assert_eq!(remove_button_label(3), "Remove 3 Worktrees");
-        form.click("worktree-batch-keep-all-shortcut");
-        assert_eq!(form.keeps(), vec![true, true, true]);
-        assert_eq!(remove_button_label(0), "Remove 0 Worktrees");
+        assert!(!any(&mut form), "nothing kept: Remove all is inert");
+        form.click("worktree-batch-keep-1");
+        assert_eq!(form.keeps(), vec![false, true, false]);
+        assert!(any(&mut form), "one kept again: Remove all is live");
     }
 
     /// Escape backs out of a dialog where everything is marked for removal, and
@@ -886,7 +913,10 @@ mod tests {
 
     #[test]
     fn the_remove_button_counts_worktrees() {
-        assert_eq!(remove_button_label(0), "Remove 0 Worktrees");
+        assert_eq!(
+            remove_button_label(0),
+            t(L10nKey::WorktreeBatchRemoveButtonNone)
+        );
         assert_eq!(
             remove_button_label(1),
             t(L10nKey::WorktreeBatchRemoveButtonOne)
