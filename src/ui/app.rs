@@ -1037,6 +1037,15 @@ pub struct Tty59App {
     pub(crate) closed: Vec<SessionTab>,
     pub(crate) renaming: Option<Renaming>,
     pub(crate) worktree_prompt: Option<crate::ui::worktree_prompt::WorktreePrompt>,
+    /// The one dialog for the worktrees a bulk close left behind.
+    pub(crate) worktree_batch: Option<crate::ui::worktree_batch::WorktreeBatch>,
+    /// The tabs picked in the sidebar to move or close together.
+    pub(crate) tab_selection: crate::ui::tab_selection::TabSelection,
+    /// Held by the sidebar only while `tab_selection` has tabs in it, so
+    /// Escape there ends the selection without reaching the terminal.
+    pub(crate) tab_selection_focus: gpui::FocusHandle,
+    /// The tabs a bulk close's raised question is about (`CloseTarget::Tabs`).
+    pending_bulk_close: Vec<tty59_core::core::machine::TabId>,
     pub(crate) maximized: Option<Entity<TerminalView>>,
     pub(crate) mod_hint_badges: bool,
     /// Whether the visible badges number the tab groups rather than tabs.
@@ -1234,10 +1243,16 @@ pub struct Tty59App {
 pub(crate) enum CloseTarget {
     Tab(tty59_core::core::machine::TabId),
     Pane,
-    /// Close Other Tabs, keeping this one.
-    OtherTabs(tty59_core::core::machine::TabId),
-    /// Close Tabs to the Right of this one.
-    TabsRightOf(tty59_core::core::machine::TabId),
+    /// A bulk close (the selection's Close, Close Other Tabs, Close Tabs to
+    /// the Right) of the tabs in `Tty59App::pending_bulk_close`.
+    Tabs,
+}
+
+/// The worktrees a bulk close left behind, gathered while the per-host
+/// lookups land; the last one to land asks.
+struct WorktreeGather {
+    waiting: usize,
+    rows: Vec<crate::ui::worktree_batch::LeftWorktree>,
 }
 
 /// Why closing needs a question first. Closing a tab is the highest-frequency
@@ -1784,6 +1799,10 @@ impl Tty59App {
             closed: Vec::new(),
             renaming: None,
             worktree_prompt: None,
+            worktree_batch: None,
+            tab_selection: Default::default(),
+            tab_selection_focus: cx.focus_handle(),
+            pending_bulk_close: Vec::new(),
             maximized: None,
             mod_hint_badges: false,
             mod_hint_group: false,
@@ -2243,6 +2262,8 @@ impl Tty59App {
         self.tabs = tabs;
         self.active = active;
         self.maximized = None;
+        // A window rebuilt whole is a new set of tabs; nothing is picked.
+        self.tab_selection.clear();
         self.wake_active_if_asleep(window, cx);
         self.save_session(cx);
         crate::ui::windows::refresh_menu(cx);
@@ -5276,6 +5297,7 @@ impl Tty59App {
         if let Some(leaf) = first {
             self.focus_leaf(&leaf, window, cx);
         }
+        self.prune_tab_selection(window, cx);
         self.save_session(cx);
         cx.notify();
     }
@@ -5587,6 +5609,8 @@ impl Tty59App {
     }
 
     pub(crate) fn activate(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        // Putting a tab on screen, by any route, is the end of picking tabs.
+        self.end_tab_selection(window, cx);
         // A tab is woken by being looked at, the way a browser reloads a
         // discarded tab when it is selected: a tab on screen is always a
         // running one, so there is no third state to draw. A wake that fails
@@ -5955,6 +5979,19 @@ impl Tty59App {
             self.ask_before_closing(CloseTarget::Tab(id), reason, window, cx);
             return;
         }
+        let left = self.close_tab_now(index, window, cx);
+        self.offer_worktree_cleanup(left, cx);
+    }
+
+    /// Close tab `index` with no question: every check is behind the caller.
+    /// Answers the host and cwd the tab was in, for the caller to ask about
+    /// a worktree it may have left behind.
+    fn close_tab_now(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<(crate::ui::host_ops::SharedHost, std::path::PathBuf)> {
         self.maximized = None;
         let closing = self.tabs[index].tree_id.get();
         self.editor_close_tab_files(index, cx);
@@ -6016,7 +6053,14 @@ impl Tty59App {
             self.active -= 1;
         }
         self.wake_active_if_asleep(window, cx);
+        // A row closed out of a standing selection (its × or a middle click)
+        // leaves the rest selected, and the sidebar keeps the keys it held.
+        let selecting = self.tab_selection_focus.is_focused(window);
         self.focus_active(window, cx);
+        self.prune_tab_selection(window, cx);
+        if selecting && !self.tab_selection.is_empty() {
+            window.focus(&self.tab_selection_focus, cx);
+        }
         self.save_session(cx);
         if remembered
             && let Some(unsent) =
@@ -6031,7 +6075,7 @@ impl Tty59App {
             }
         }
         cx.notify();
-        self.offer_worktree_cleanup(worktree_cwd, cx);
+        worktree_cwd
     }
 
     /// Keep a closed tab in this window's own list, for a machine that keeps
@@ -6049,16 +6093,7 @@ impl Tty59App {
         cx: &mut Context<Self>,
     ) {
         let Some((host, cwd)) = cwd else { return };
-        let id = host.id();
-        let open_cwds: Vec<std::path::PathBuf> = self
-            .tabs
-            .iter()
-            .flat_map(|tab| tab.pane.terminals())
-            .filter_map(|leaf| {
-                let view = leaf.read(cx);
-                (view.host_id() == id).then(|| view.host_cwd())?
-            })
-            .collect();
+        let open_cwds = self.open_cwds_on(host.id(), cx);
         let remove_host = host.clone();
         crate::ui::host_ops::HostOps::run(
             host,
@@ -6067,85 +6102,110 @@ impl Tty59App {
                 crate::core::worktree::managed(h, &cwd)
                     .filter(|wt| !crate::core::worktree::occupied(h, &wt.path, &open_cwds))
             },
-            move |_this, found, cx| {
-                let Some(wt) = found else { return };
-                let path = wt.path.display().to_string();
-                let name = wt
-                    .path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let detail = if wt.dirty {
-                    t_fmt(
-                        L10nKey::AppWorktreeRemoveDetailDirty,
-                        &[("path", &path), ("name", &name)],
-                    )
-                } else {
-                    t_fmt(L10nKey::AppWorktreeRemoveDetailClean, &[("path", &path)])
-                };
-                let title = t_fmt(L10nKey::AppWorktreeRemoveTitle, &[("branch", &wt.branch)]);
-                let level = if wt.dirty {
-                    PromptLevel::Warning
-                } else {
-                    PromptLevel::Info
-                };
-                let remove_label = if wt.dirty {
-                    t(L10nKey::AppWorktreeDiscardAndRemove)
-                } else {
-                    t(L10nKey::AppWorktreeRemove)
-                };
-                cx.spawn(async move |this, cx| {
-                    let Ok(answer) = this.update_in(cx, |_, window, cx| {
-                        window.prompt(
-                            level,
-                            &title,
-                            Some(&detail),
-                            &crate::ui::confirm_answers(remove_label, t(L10nKey::AppWorktreeKeep)),
-                            cx,
-                        )
-                    }) else {
-                        return;
-                    };
-                    if !matches!(answer.await, Ok(0)) {
-                        return;
-                    }
-                    let force = wt.dirty;
-                    let branch = wt.branch.clone();
-                    let _ = this.update_in(cx, |_, window, cx| {
-                        crate::ui::host_ops::HostOps::run_in(
-                            remove_host,
-                            window,
-                            cx,
-                            move |h| crate::core::worktree::remove(h, &wt, force),
-                            move |_this, result, window, cx| match result {
-                                Ok(removed) => window.push_notification(
-                                    t_fmt(
-                                        if removed.branch_kept {
-                                            L10nKey::AppWorktreeRemovedBranchKept
-                                        } else {
-                                            L10nKey::AppWorktreeRemoved
-                                        },
-                                        &[("branch", &branch)],
-                                    ),
-                                    cx,
-                                ),
-                                Err(e) => window.push_notification(
-                                    crate::ui::host_ops::failure(
-                                        t_fmt(
-                                            L10nKey::AppWorktreeRemoveFailed,
-                                            &[("error", &e.to_string())],
-                                        ),
-                                        &e,
-                                    ),
-                                    cx,
-                                ),
-                            },
-                        );
-                    });
-                })
-                .detach();
+            move |this, found, cx| {
+                if let Some(wt) = found {
+                    this.prompt_remove_worktree(remove_host, wt, cx);
+                }
             },
         );
+    }
+
+    /// The cwds of every pane still open on host `id`: what makes a worktree
+    /// still in use.
+    fn open_cwds_on(&self, id: crate::ui::host_ops::HostId, cx: &App) -> Vec<std::path::PathBuf> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.pane.terminals())
+            .filter_map(|leaf| {
+                let view = leaf.read(cx);
+                (view.host_id() == id).then(|| view.host_cwd())?
+            })
+            .collect()
+    }
+
+    /// Ask whether to remove the one worktree `wt` a close left on
+    /// `remove_host`, and remove it on a yes.
+    fn prompt_remove_worktree(
+        &mut self,
+        remove_host: crate::ui::host_ops::SharedHost,
+        wt: crate::core::worktree::ManagedWorktree,
+        cx: &mut Context<Self>,
+    ) {
+        let path = wt.path.display().to_string();
+        let name = wt
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let detail = if wt.dirty {
+            t_fmt(
+                L10nKey::AppWorktreeRemoveDetailDirty,
+                &[("path", &path), ("name", &name)],
+            )
+        } else {
+            t_fmt(L10nKey::AppWorktreeRemoveDetailClean, &[("path", &path)])
+        };
+        let title = t_fmt(L10nKey::AppWorktreeRemoveTitle, &[("branch", &wt.branch)]);
+        let level = if wt.dirty {
+            PromptLevel::Warning
+        } else {
+            PromptLevel::Info
+        };
+        let remove_label = if wt.dirty {
+            t(L10nKey::AppWorktreeDiscardAndRemove)
+        } else {
+            t(L10nKey::AppWorktreeRemove)
+        };
+        cx.spawn(async move |this, cx| {
+            let Ok(answer) = this.update_in(cx, |_, window, cx| {
+                window.prompt(
+                    level,
+                    &title,
+                    Some(&detail),
+                    &crate::ui::confirm_answers(remove_label, t(L10nKey::AppWorktreeKeep)),
+                    cx,
+                )
+            }) else {
+                return;
+            };
+            if !matches!(answer.await, Ok(0)) {
+                return;
+            }
+            let force = wt.dirty;
+            let branch = wt.branch.clone();
+            let _ = this.update_in(cx, |_, window, cx| {
+                crate::ui::host_ops::HostOps::run_in(
+                    remove_host,
+                    window,
+                    cx,
+                    move |h| crate::core::worktree::remove(h, &wt, force),
+                    move |_this, result, window, cx| match result {
+                        Ok(removed) => window.push_notification(
+                            t_fmt(
+                                if removed.branch_kept {
+                                    L10nKey::AppWorktreeRemovedBranchKept
+                                } else {
+                                    L10nKey::AppWorktreeRemoved
+                                },
+                                &[("branch", &branch)],
+                            ),
+                            cx,
+                        ),
+                        Err(e) => window.push_notification(
+                            crate::ui::host_ops::failure(
+                                t_fmt(
+                                    L10nKey::AppWorktreeRemoveFailed,
+                                    &[("error", &e.to_string())],
+                                ),
+                                &e,
+                            ),
+                            cx,
+                        ),
+                    },
+                );
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn close_other_tabs(
@@ -6198,32 +6258,8 @@ impl Tty59App {
         if index >= self.tabs.len() {
             return;
         }
-        if !confirmed {
-            let count = self
-                .bulk_closable((0..self.tabs.len()).filter(|&i| i != index), cx)
-                .len();
-            let keep = CloseTarget::OtherTabs(self.tabs[index].tree_id.get());
-            if self.ask_before_bulk_close(keep, count, window, cx) {
-                return;
-            }
-        }
-        // A bulk close skips the tabs whose profile asked to be warned about,
-        // and closes the rest outright — one dialog per tab is not a question
-        // anyone can answer, and only the first would ever get asked. It
-        // deliberately does *not* skip merely busy tabs: on a working window
-        // that is most of them, and a menu item that quietly closes nothing is
-        // worse than one that closes what it says.
-        for i in (0..self.tabs.len()).rev() {
-            // Unsaved editor files are skipped the same way: a bulk close
-            // cannot ask about them one tab at a time, and must not lose them.
-            if i == index
-                || self.tab_has_warn_ssh(i, cx)
-                || !self.editor_unsaved_in_tab(i, cx).is_empty()
-            {
-                continue;
-            }
-            self.close_tab_inner(i, true, window, cx);
-        }
+        let ids = self.tab_ids((0..self.tabs.len()).filter(|&i| i != index));
+        self.close_tabs_inner(ids, confirmed, window, cx);
     }
 
     pub(crate) fn close_tabs_right_of(
@@ -6242,19 +6278,149 @@ impl Tty59App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !confirmed && let Some(tab) = self.tabs.get(index) {
-            let count = self.bulk_closable((index + 1)..self.tabs.len(), cx).len();
-            let from = CloseTarget::TabsRightOf(tab.tree_id.get());
-            if self.ask_before_bulk_close(from, count, window, cx) {
+        let ids = self.tab_ids((index + 1)..self.tabs.len());
+        self.close_tabs_inner(ids, confirmed, window, cx);
+    }
+
+    fn tab_ids(
+        &self,
+        indices: impl Iterator<Item = usize>,
+    ) -> Vec<tty59_core::core::machine::TabId> {
+        indices
+            .filter_map(|i| Some(self.tabs.get(i)?.tree_id.get()))
+            .collect()
+    }
+
+    /// Close the tabs `ids`: the sidebar selection's Close, Close Other Tabs
+    /// and Close Tabs to the Right all come through here.
+    pub(crate) fn close_tabs(
+        &mut self,
+        ids: Vec<tty59_core::core::machine::TabId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_tabs_inner(ids, false, window, cx);
+    }
+
+    /// See [`Self::close_pane_inner`] for what `confirmed` carries.
+    ///
+    /// A bulk close skips the tabs whose profile asked to be warned about,
+    /// and the ones holding unsaved editor files, and closes the rest
+    /// outright — one dialog per tab is not a question anyone can answer, and
+    /// only the first would ever get asked; one notification says how many
+    /// stayed. It deliberately does *not* skip merely busy tabs: on a working
+    /// window that is most of them, and a menu item that quietly closes
+    /// nothing is worse than one that closes what it says. Nor does it ask
+    /// about each tab's worktree: once all are closed, the worktrees they
+    /// left are gathered into one question.
+    fn close_tabs_inner(
+        &mut self,
+        ids: Vec<tty59_core::core::machine::TabId>,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let present: Vec<usize> = ids
+            .iter()
+            .filter_map(|&id| self.tabs.iter().position(|t| t.tree_id.get() == id))
+            .collect();
+        let mut closable = self.bulk_closable(present.iter().copied(), cx);
+        if !confirmed {
+            // A question already up owns `pending_bulk_close`.
+            if self.close_prompt_open {
                 return;
             }
-        }
-        // Same bargain as `close_other_tabs`.
-        for i in ((index + 1)..self.tabs.len()).rev() {
-            if self.tab_has_warn_ssh(i, cx) || !self.editor_unsaved_in_tab(i, cx).is_empty() {
-                continue;
+            self.pending_bulk_close = ids;
+            if self.ask_before_bulk_close(CloseTarget::Tabs, closable.len(), window, cx) {
+                return;
             }
-            self.close_tab_inner(i, true, window, cx);
+            self.pending_bulk_close.clear();
+        }
+        let skipped = present.len() - closable.len();
+        // Highest index first, so each close leaves the rest where they were.
+        closable.sort_unstable_by(|a, b| b.cmp(a));
+        let left: Vec<_> = closable
+            .into_iter()
+            .filter_map(|i| self.close_tab_now(i, window, cx))
+            .collect();
+        self.end_tab_selection(window, cx);
+        if skipped > 0 {
+            let note = match skipped {
+                1 => t(L10nKey::TabsSkippedOnCloseOne).to_string(),
+                n => t_fmt(L10nKey::TabsSkippedOnClose, &[("count", &n.to_string())]),
+            };
+            window.push_notification(note, cx);
+        }
+        self.gather_left_worktrees(left, window, cx);
+    }
+
+    /// The worktrees a bulk close left behind, found off the UI thread per
+    /// host they live on, and asked about once: none, nothing; one, the
+    /// single question a lone close asks; more, one dialog for all of them.
+    fn gather_left_worktrees(
+        &mut self,
+        left: Vec<(crate::ui::host_ops::SharedHost, std::path::PathBuf)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut hosts: Vec<(crate::ui::host_ops::SharedHost, Vec<std::path::PathBuf>)> = Vec::new();
+        for (host, cwd) in left {
+            match hosts.iter_mut().find(|(h, _)| h.id() == host.id()) {
+                Some((_, cwds)) => cwds.push(cwd),
+                None => hosts.push((host, vec![cwd])),
+            }
+        }
+        if hosts.is_empty() {
+            return;
+        }
+        let gather = std::rc::Rc::new(std::cell::RefCell::new(WorktreeGather {
+            waiting: hosts.len(),
+            rows: Vec::new(),
+        }));
+        for (host, cwds) in hosts {
+            let open = self.open_cwds_on(host.id(), cx);
+            let row_host = host.clone();
+            let gather = gather.clone();
+            crate::ui::host_ops::HostOps::run_in(
+                host,
+                window,
+                cx,
+                // The land step only runs for a job that returned, so a
+                // panicking host would leave `waiting` above zero and no other
+                // host would get its dialog. It counts as answered, with none.
+                move |h| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::core::worktree::left_behind(h, &cwds, &open)
+                    }))
+                    .unwrap_or_default()
+                },
+                move |this, found, window, cx| {
+                    let rows = {
+                        let mut gather = gather.borrow_mut();
+                        gather.rows.extend(found.into_iter().map(|wt| {
+                            crate::ui::worktree_batch::LeftWorktree {
+                                host: row_host.clone(),
+                                wt,
+                                keep: true,
+                            }
+                        }));
+                        gather.waiting = gather.waiting.saturating_sub(1);
+                        match gather.waiting {
+                            0 => std::mem::take(&mut gather.rows),
+                            _ => return,
+                        }
+                    };
+                    let mut rows = rows.into_iter();
+                    match (rows.next(), rows.next()) {
+                        (None, _) => {}
+                        (Some(one), None) => this.prompt_remove_worktree(one.host, one.wt, cx),
+                        (Some(first), Some(second)) => {
+                            let all = [first, second].into_iter().chain(rows).collect();
+                            this.open_worktree_batch(all, window, cx);
+                        }
+                    }
+                },
+            );
         }
     }
 
@@ -8570,6 +8736,11 @@ impl Tty59App {
         // The Agents list can be switched off from the file or the settings
         // page; the rail's search field has to stop calling itself agents' search.
         self.sync_sidebar_search_placeholder(window, cx);
+        // Only the sidebar's rows draw the selection: with the tab bar on top
+        // it would act on tabs nothing shows as picked, and keep the keys.
+        if cx.global::<Config>().tab_bar_position != TabBarPosition::Left {
+            self.end_tab_selection(window, cx);
+        }
         let config = cx.global::<Config>().clone();
         if config.cursor_style != self.terminal_cursor_style
             || config.scrollback_limit != self.terminal_scrollback_limit
@@ -8883,6 +9054,7 @@ impl Tty59App {
                 // Cancelled, or the window went away with the question open:
                 // either way the work carries on.
                 if !close {
+                    this.pending_bulk_close.clear();
                     cx.notify();
                     return;
                 }
@@ -8895,15 +9067,11 @@ impl Tty59App {
                         }
                     }
                     CloseTarget::Pane => this.close_pane_inner(true, window, cx),
-                    CloseTarget::OtherTabs(id) => {
-                        if let Some(i) = this.tabs.iter().position(|t| t.tree_id.get() == id) {
-                            this.close_other_tabs_inner(i, true, window, cx);
-                        }
-                    }
-                    CloseTarget::TabsRightOf(id) => {
-                        if let Some(i) = this.tabs.iter().position(|t| t.tree_id.get() == id) {
-                            this.close_tabs_right_of_inner(i, true, window, cx);
-                        }
+                    // By id, like `Tab`: tabs that went while the question
+                    // was up are simply not there to close.
+                    CloseTarget::Tabs => {
+                        let ids = std::mem::take(&mut this.pending_bulk_close);
+                        this.close_tabs_inner(ids, true, window, cx);
                     }
                 }
             });
@@ -10921,6 +11089,9 @@ impl Render for Tty59App {
                 // clipped to the terminal area, which read as "only the
                 // terminal is busy".
                 .when_some(self.render_worktree_prompt_overlay(cx), |this, el| {
+                    this.child(el)
+                })
+                .when_some(self.render_worktree_batch_overlay(cx), |this, el| {
                     this.child(el)
                 })
                 // Same reason, and the ssh prompt has more claim to it than any
@@ -15742,5 +15913,244 @@ mod show_in_file_tree_tests {
         assert_eq!(focus, Some(dir.clone()));
         assert_eq!(roots, vec![dir]);
         assert_eq!(selected, Some(file));
+    }
+}
+
+/// A bulk close asks once: under `ConfirmClose::Always` one question for all
+/// the tabs, and afterwards one question for all the worktrees they left.
+#[cfg(test)]
+mod bulk_close_tests {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use tty59_core::core::machine::TabId;
+
+    use super::Tty59App;
+    use super::test_window::{harness_with_tabs, harness_with_tabs_configured};
+    use crate::core::worktree::{WorktreeRequest, create};
+    use crate::daemon::protocol::DaemonMsg;
+    use crate::daemon::transport::Stream;
+    use crate::ui::i18n::{L10nKey, t};
+
+    fn git(root: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+            ])
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    /// A repository with the managed worktrees `names`, answered as (main
+    /// checkout, one path per worktree), each in its plain local spelling.
+    fn repo_with_worktrees(names: &[&str]) -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = tty59_core::core::path_spelling::local_spelling_buf(
+            std::fs::canonicalize(dir.path()).expect("the temp dir resolves"),
+        );
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["config", "core.autocrlf", "false"]);
+        std::fs::write(root.join("a.txt"), "a").expect("a file to commit");
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-q", "-m", "init"]);
+        let host = tty59_core::host::local::LocalHost::new();
+        let worktrees = names
+            .iter()
+            .map(|name| {
+                let req = WorktreeRequest {
+                    name: (*name).into(),
+                    branch: (*name).into(),
+                    base: "HEAD".into(),
+                };
+                let made = create(&*host, &root, &req).expect("the worktree is made");
+                tty59_core::core::path_spelling::local_spelling_buf(made.path)
+            })
+            .collect();
+        (dir, root, worktrees)
+    }
+
+    /// Tell each tab's pane it sits in `cwds[i]`, and wait until it says so.
+    fn put_tabs_in(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+        streams: &mut [Stream],
+        cwds: &[PathBuf],
+    ) {
+        for (stream, cwd) in streams.iter_mut().zip(cwds) {
+            DaemonMsg::Cwd(cwd.clone())
+                .encode(stream)
+                .expect("the pane's socket takes the cwd");
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            vcx.background_executor.run_until_parked();
+            let there = app.update_in(vcx, |app, window, cx| {
+                cwds.iter().enumerate().all(|(i, cwd)| {
+                    app.tab_host_cwd(i, window, cx).map(|(_, c)| c).as_ref() == Some(cwd)
+                })
+            });
+            if there {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the panes never reported their cwds"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn ids(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<TabId> {
+        app.read_with(vcx, |app, _| {
+            app.tabs.iter().map(|t| t.tree_id.get()).collect()
+        })
+    }
+
+    /// Run until `done` holds, under a real-time deadline: the worktree
+    /// lookups run off the UI thread.
+    fn wait_for(
+        vcx: &mut VisualTestContext,
+        what: &str,
+        mut done: impl FnMut(&mut VisualTestContext) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            vcx.background_executor.run_until_parked();
+            vcx.run_until_parked();
+            if done(vcx) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn batch_rows(
+        app: &Entity<Tty59App>,
+        vcx: &mut VisualTestContext,
+    ) -> Option<Vec<(PathBuf, bool)>> {
+        app.read_with(vcx, |app, _| {
+            let batch = app.worktree_batch.as_ref()?;
+            Some(
+                batch
+                    .rows
+                    .iter()
+                    .map(|r| {
+                        (
+                            tty59_core::core::path_spelling::local_spelling_buf(&r.wt.path),
+                            r.keep,
+                        )
+                    })
+                    .collect(),
+            )
+        })
+    }
+
+    /// Three tabs closed together in two worktrees (one twice) ask nothing
+    /// per tab: one dialog lists the two worktrees, both kept.
+    #[gpui::test]
+    fn closing_several_worktree_tabs_asks_once_for_all_their_worktrees(cx: &mut TestAppContext) {
+        let (_dir, root, wts) = repo_with_worktrees(&["bulk-a", "bulk-b"]);
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 4);
+        let cwds = [
+            root.clone(),
+            wts[0].clone(),
+            wts[1].clone(),
+            wts[0].join("."),
+        ];
+        put_tabs_in(&app, &mut vcx, &mut streams, &cwds);
+        let all = ids(&app, &mut vcx);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_tabs(all[1..].to_vec(), window, cx)
+        });
+        wait_for(&mut vcx, "the batch dialog never opened", |vcx| {
+            app.read_with(vcx, |app, _| app.worktree_batch.is_some())
+        });
+        assert!(
+            !vcx.has_pending_prompt(),
+            "no worktree was asked about on its own"
+        );
+        assert_eq!(ids(&app, &mut vcx), vec![all[0]]);
+        assert_eq!(
+            batch_rows(&app, &mut vcx),
+            Some(vec![(wts[0].clone(), true), (wts[1].clone(), true)]),
+            "each worktree once, every one kept"
+        );
+    }
+
+    /// Close Other Tabs takes the same road: one dialog, no question per tab.
+    #[gpui::test]
+    fn close_other_tabs_gathers_the_worktrees_too(cx: &mut TestAppContext) {
+        let (_dir, root, wts) = repo_with_worktrees(&["other-a", "other-b"]);
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 3);
+        put_tabs_in(
+            &app,
+            &mut vcx,
+            &mut streams,
+            &[root, wts[0].clone(), wts[1].clone()],
+        );
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_other_tabs(0, window, cx)
+        });
+        wait_for(&mut vcx, "the batch dialog never opened", |vcx| {
+            app.read_with(vcx, |app, _| app.worktree_batch.is_some())
+        });
+        assert!(!vcx.has_pending_prompt());
+        assert_eq!(batch_rows(&app, &mut vcx).map(|rows| rows.len()), Some(2));
+    }
+
+    /// One worktree left is today's single question, not a dialog of one; a
+    /// worktree a tab still open sits in is not offered at all.
+    #[gpui::test]
+    fn one_worktree_left_is_the_single_question(cx: &mut TestAppContext) {
+        let (_dir, root, wts) = repo_with_worktrees(&["one-a", "one-b"]);
+        let (app, mut vcx, mut streams) = harness_with_tabs(cx, 4);
+        let cwds = [root, wts[0].clone(), wts[1].clone(), wts[1].clone()];
+        put_tabs_in(&app, &mut vcx, &mut streams, &cwds);
+        let all = ids(&app, &mut vcx);
+
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_tabs(vec![all[1], all[2]], window, cx)
+        });
+        wait_for(&mut vcx, "the single question never went up", |vcx| {
+            vcx.has_pending_prompt()
+        });
+        assert!(app.read_with(&vcx, |app, _| app.worktree_batch.is_none()));
+        let (title, _) = vcx.pending_prompt().expect("a question is up");
+        assert!(title.contains("one-a"), "it asks about one-a: {title}");
+        vcx.simulate_prompt_answer(t(L10nKey::AppWorktreeKeep));
+        vcx.run_until_parked();
+        assert!(wts[0].exists(), "Keep keeps it");
+    }
+
+    /// Under `ConfirmClose::Always` the selection's close is asked about
+    /// once for all of its tabs, and nothing closes before the answer.
+    #[gpui::test]
+    fn always_asks_once_for_the_whole_close(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs_configured(cx, 4, |config| {
+            config.confirm_close = crate::core::config::ConfirmClose::Always;
+        });
+        let all = ids(&app, &mut vcx);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_tabs(all[1..].to_vec(), window, cx)
+        });
+        vcx.run_until_parked();
+        assert!(vcx.has_pending_prompt(), "one question for the three");
+        assert_eq!(ids(&app, &mut vcx).len(), 4, "nothing closed yet");
+
+        vcx.simulate_prompt_answer(t(L10nKey::Close));
+        vcx.run_until_parked();
+        assert_eq!(ids(&app, &mut vcx), vec![all[0]]);
+        assert!(!vcx.has_pending_prompt(), "and no second question per tab");
     }
 }

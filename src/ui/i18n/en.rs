@@ -2133,6 +2133,23 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::PaneDragHandleTooltip => "Drag to move this pane",
         L10nKey::AppWorktreeRemoved => "Removed worktree \"{branch}\"",
         L10nKey::AppWorktreeRemoveFailed => "Worktree removal failed: {error}",
+        L10nKey::WorktreeBatchTitle => "{count} closed tabs left worktrees",
+        L10nKey::WorktreeBatchDetail => "Kept worktrees stay on disk with their branches.",
+        L10nKey::WorktreeBatchDirty => "Uncommitted changes",
+        L10nKey::WorktreeBatchDirtyNote => "Saved to refs/tty59/trash/{name} before removal",
+        L10nKey::WorktreeBatchKeep => "Keep",
+        L10nKey::WorktreeBatchKeepToggle => "Keep worktree \"{branch}\"",
+        L10nKey::WorktreeBatchRemoveAllShortcut => "Remove all",
+        L10nKey::WorktreeBatchRemoveButton => "Remove {count} Worktrees",
+        L10nKey::WorktreeBatchRemoveButtonOne => "Remove 1 Worktree",
+        L10nKey::WorktreeBatchRemoveButtonNone => "Remove Worktrees",
+        L10nKey::WorktreeBatchKeepAllButton => "Keep All",
+        L10nKey::WorktreeBatchRemoved => "Removed {count} worktrees",
+        L10nKey::WorktreeBatchRemovedOne => "Removed 1 worktree",
+        L10nKey::WorktreeBatchBranchesKept => {
+            "Branches kept because they are not merged: {branches}"
+        }
+        L10nKey::WorktreeBatchFailed => "Could not remove \"{branch}\": {error}",
         L10nKey::WorktreePromptAgent => "Open With",
         L10nKey::WorktreePromptShell => "Shell",
         L10nKey::WorktreePromptTask => "First Task",
@@ -2408,6 +2425,7 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::ShellDefault => "default",
         L10nKey::SidebarUngroupedGroup => "Ungrouped",
         L10nKey::SidebarMoveToGroup => "Move to Group",
+        L10nKey::SidebarMoveTabsToGroup => "Move {count} Tabs to Group",
         L10nKey::SidebarNewGroup => "New Group…",
         L10nKey::SidebarRemoveFromGroup => "Remove from Group",
         L10nKey::SidebarNewGroupName => "New Group",
@@ -2421,6 +2439,13 @@ pub fn translate_en(key: L10nKey) -> &'static str {
         L10nKey::SidebarDeleteGroup => "Delete Group",
         L10nKey::SidebarDropToPin => "Drop here to pin",
         L10nKey::TabContextCloseTab => "Close Tab",
+        L10nKey::TabContextCloseTabs => "Close {count} Tabs",
+        L10nKey::TabsSkippedOnClose => {
+            "{count} tabs stayed open: they have unsaved files or a connection that asks before closing"
+        }
+        L10nKey::TabsSkippedOnCloseOne => {
+            "1 tab stayed open: it has unsaved files or a connection that asks before closing"
+        }
         L10nKey::TerminalContextClear => "Clear",
         L10nKey::TabContextCloseTabsBelow => "Close Tabs Below",
         L10nKey::AppAgentHooksOpFailed => "Failed: {error}",

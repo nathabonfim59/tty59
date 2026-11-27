@@ -52,6 +52,21 @@ pub(crate) const GRAB_HANDLE_W: f32 = 80.;
 
 const KEEP_SEGMENTS: usize = 3;
 
+#[cfg(test)]
+std::thread_local! {
+    /// The labels of the last selection menu built, so a test can read what an
+    /// open menu offers — the popup keeps its items private.
+    static SELECTION_MENU_LABELS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The last selection menu's labels, drained: empty when no selection menu has
+/// been built since the previous call.
+#[cfg(test)]
+pub(crate) fn take_selection_menu_labels() -> Vec<String> {
+    SELECTION_MENU_LABELS.with(|labels| std::mem::take(&mut *labels.borrow_mut()))
+}
+
 /// Builds a launch specification without recomputing argument ownership locally.
 /// The inventory may originate from a remote host, so only its transported
 /// metadata can distinguish tty59 launch defaults from user-authored arguments.
@@ -2124,6 +2139,15 @@ impl Tty59App {
         // Taken before `this` is let go for the Move to Group submenu below.
         let sidebar =
             cx.global::<Config>().tab_bar_position == crate::core::config::TabBarPosition::Left;
+        // A right click on one of several picked rows asks about the selection,
+        // not the row: the menu moves or closes all of them. A right click on a
+        // row outside the selection ends it as the press lands (in the row's
+        // own handler), so that gesture arrives here with nothing picked and
+        // opens the row's own menu.
+        if sidebar && this.is_tab_selected(index) && this.tab_selection.len() >= 2 {
+            let ids = this.selected_tab_ids(cx);
+            return Self::selection_context_menu(menu, ids, app, window, cx);
+        }
         let move_targets = sidebar.then(|| {
             let keys = this.sidebar_group_keys(cx);
             crate::ui::tab_sidebar::move_targets(&keys, &this.sidebar_groups, index)
@@ -2213,56 +2237,23 @@ impl Tty59App {
         // sidebar draws, and "move to group" from the top tab bar would name
         // something the user cannot see.
         if let Some(targets) = move_targets {
+            let ids = this
+                .tabs
+                .get(index)
+                .map(|t| vec![t.tree_id.get()])
+                .unwrap_or_default();
             let app = app.clone();
             menu = menu.separator().submenu(
                 t(L10nKey::SidebarMoveToGroup),
                 window,
                 cx,
                 move |sub, _window, _cx| {
-                    // A left check makes every row of the menu reserve a
-                    // check column, so the whole submenu sat one icon's
-                    // width right of the tab menu beside it. On the right,
-                    // its labels line up with the parent's.
-                    let mut sub = sub.check_side(Side::Right);
-                    for (i, target) in targets.iter().enumerate() {
-                        // Pinned groups, then the auto ones, as the divider
-                        // splits them in the sidebar.
-                        if i > 0 && targets[i - 1].key.is_pinned() && !target.key.is_pinned() {
-                            sub = sub.separator();
-                        }
-                        let mut item =
-                            PopupMenuItem::new(target.name.clone()).checked(target.checked);
-                        if !target.checked {
-                            let app = app.clone();
-                            let key = target.key.clone();
-                            item = item.on_click(move |_, _window, cx| {
-                                let _ = app.update(cx, |this, cx| {
-                                    this.move_tab_to(index, key.clone(), cx)
-                                });
-                            });
-                        }
-                        sub = sub.item(item);
-                    }
-                    if !targets.is_empty() {
-                        sub = sub.separator();
-                    }
-                    let remove = app.clone();
-                    let new = app.clone();
-                    sub.item(
-                        PopupMenuItem::new(t(L10nKey::SidebarRemoveFromGroup))
-                            .disabled(!in_kept_group)
-                            .on_click(move |_, _window, cx| {
-                                let _ = remove
-                                    .update(cx, |this, cx| this.set_tab_group(index, None, cx));
-                            }),
-                    )
-                    .item(
-                        PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click(
-                            move |_, window, cx| {
-                                let _ = new
-                                    .update(cx, |this, cx| this.new_tab_group(index, window, cx));
-                            },
-                        ),
+                    Self::move_to_group_submenu(
+                        sub,
+                        targets.clone(),
+                        in_kept_group,
+                        ids.clone(),
+                        app.clone(),
                     )
                 },
             );
@@ -2427,6 +2418,138 @@ impl Tty59App {
                     }
                 }),
             )
+    }
+
+    /// The menu a right click opens on one of several picked sidebar rows:
+    /// move them all into a group, or close them all. `ids` are the picked
+    /// tabs in the sidebar's visual order; every handler resolves them again
+    /// when its item is clicked, since tabs may have moved while the menu was
+    /// up.
+    pub(crate) fn selection_context_menu(
+        menu: PopupMenu,
+        ids: Vec<tty59_core::core::machine::TabId>,
+        app: &gpui::WeakEntity<Self>,
+        window: &mut Window,
+        cx: &mut Context<PopupMenu>,
+    ) -> PopupMenu {
+        let Some(entity) = app.upgrade() else {
+            return menu;
+        };
+        let (targets, any_kept) = {
+            let this = entity.read(cx);
+            let keys = this.sidebar_group_keys(cx);
+            let indices = this.tab_indices_of(&ids, cx);
+            let targets =
+                crate::ui::tab_sidebar::move_targets_for(&keys, &this.sidebar_groups, &indices);
+            // Remove from Group hands the picked tabs back to auto grouping,
+            // which only means something for one that is kept in a group.
+            let any_kept = indices.iter().any(|&i| {
+                this.tabs
+                    .get(i)
+                    .and_then(|t| t.group.get())
+                    .is_some_and(|g| this.sidebar_groups.contains(g))
+            });
+            (targets, any_kept)
+        };
+        let count = ids.len().to_string();
+        let move_label = t_fmt(
+            L10nKey::SidebarMoveTabsToGroup,
+            &[("count", count.as_str())],
+        );
+        let close_label = t_fmt(L10nKey::TabContextCloseTabs, &[("count", count.as_str())]);
+        #[cfg(test)]
+        SELECTION_MENU_LABELS.with(|labels| {
+            *labels.borrow_mut() = vec![move_label.clone(), close_label.clone()];
+        });
+        let mut menu = menu.min_w(px(200.));
+        let submenu_app = app.clone();
+        let submenu_ids = ids.clone();
+        menu = menu.submenu(move_label, window, cx, move |sub, _window, _cx| {
+            Self::move_to_group_submenu(
+                sub,
+                targets.clone(),
+                any_kept,
+                submenu_ids.clone(),
+                submenu_app.clone(),
+            )
+        });
+        let close_app = app.clone();
+        menu.separator().item(
+            PopupMenuItem::new(close_label).on_click(move |_, window, cx| {
+                let ids = ids.clone();
+                let _ = close_app.update(cx, |this, cx| this.close_tabs(ids, window, cx));
+            }),
+        )
+    }
+
+    /// The "Move to Group" submenu both tab menus open: every group the
+    /// sidebar draws — pinned groups, then the auto ones behind a divider —
+    /// with the ones the picked tabs already all fill checked and inert, then
+    /// Remove from Group and New Group.
+    ///
+    /// `ids` are the tabs the menu speaks for; every handler resolves them
+    /// again when its item is clicked, since tabs may have moved while the
+    /// menu was up.
+    fn move_to_group_submenu(
+        sub: PopupMenu,
+        targets: Vec<crate::ui::tab_sidebar::MoveTarget>,
+        any_kept: bool,
+        ids: Vec<tty59_core::core::machine::TabId>,
+        app: gpui::WeakEntity<Self>,
+    ) -> PopupMenu {
+        // A left check makes every row of the menu reserve a check column, so
+        // the whole submenu sat one icon's width right of the tab menu beside
+        // it. On the right, its labels line up with the parent's.
+        let mut sub = sub.check_side(Side::Right);
+        for (i, target) in targets.iter().enumerate() {
+            // Pinned groups, then the auto ones, as the divider splits them in
+            // the sidebar.
+            if i > 0 && targets[i - 1].key.is_pinned() && !target.key.is_pinned() {
+                sub = sub.separator();
+            }
+            let mut item = PopupMenuItem::new(target.name.clone()).checked(target.checked);
+            if !target.checked {
+                let app = app.clone();
+                let ids = ids.clone();
+                let key = target.key.clone();
+                item = item.on_click(move |_, _window, cx| {
+                    let ids = ids.clone();
+                    let key = key.clone();
+                    let _ = app.update(cx, |this, cx| {
+                        let indices = this.tab_indices_of(&ids, cx);
+                        this.move_tabs_to(&indices, key.clone(), cx);
+                    });
+                });
+            }
+            sub = sub.item(item);
+        }
+        if !targets.is_empty() {
+            sub = sub.separator();
+        }
+        let remove = app.clone();
+        let remove_ids = ids.clone();
+        let new = app;
+        let new_ids = ids;
+        sub.item(
+            PopupMenuItem::new(t(L10nKey::SidebarRemoveFromGroup))
+                .disabled(!any_kept)
+                .on_click(move |_, _window, cx| {
+                    let ids = remove_ids.clone();
+                    let _ = remove.update(cx, |this, cx| {
+                        let indices = this.tab_indices_of(&ids, cx);
+                        this.set_tabs_group(&indices, None, cx);
+                    });
+                }),
+        )
+        .item(
+            PopupMenuItem::new(t(L10nKey::SidebarNewGroup)).on_click(move |_, window, cx| {
+                let ids = new_ids.clone();
+                let _ = new.update(cx, |this, cx| {
+                    let indices = this.tab_indices_of(&ids, cx);
+                    this.new_tab_group_with(&indices, window, cx);
+                });
+            }),
+        )
     }
 
     pub(crate) fn tab_strip(

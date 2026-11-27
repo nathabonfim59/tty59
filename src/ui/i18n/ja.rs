@@ -2196,6 +2196,21 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneDragHandleTooltip => "ドラッグしてこのペインを移動",
         L10nKey::AppWorktreeRemoved => "ワークツリー「{branch}」を削除しました",
         L10nKey::AppWorktreeRemoveFailed => "ワークツリーの削除に失敗しました: {error}",
+        L10nKey::WorktreeBatchTitle => "{count} 個の閉じたタブにワークツリーが残っています",
+        L10nKey::WorktreeBatchDetail => "保持したワークツリーはブランチとともにディスクに残ります",
+        L10nKey::WorktreeBatchDirty => "未コミットの変更",
+        L10nKey::WorktreeBatchDirtyNote => "削除前に refs/tty59/trash/{name} へ保存します",
+        L10nKey::WorktreeBatchKeep => "保持",
+        L10nKey::WorktreeBatchKeepToggle => "ワークツリー「{branch}」を保持",
+        L10nKey::WorktreeBatchRemoveAllShortcut => "すべて削除",
+        L10nKey::WorktreeBatchRemoveButton => "{count} 個のワークツリーを削除",
+        L10nKey::WorktreeBatchRemoveButtonOne => "1 個のワークツリーを削除",
+        L10nKey::WorktreeBatchRemoveButtonNone => "ワークツリーを削除",
+        L10nKey::WorktreeBatchKeepAllButton => "すべて保持",
+        L10nKey::WorktreeBatchRemoved => "{count} 個のワークツリーを削除しました",
+        L10nKey::WorktreeBatchRemovedOne => "1 個のワークツリーを削除しました",
+        L10nKey::WorktreeBatchBranchesKept => "マージされていないため保持したブランチ: {branches}",
+        L10nKey::WorktreeBatchFailed => "「{branch}」を削除できませんでした: {error}",
         L10nKey::WorktreePromptAgent => "起動方法",
         L10nKey::WorktreePromptShell => "シェル",
         L10nKey::WorktreePromptTask => "最初のタスク",
@@ -2480,6 +2495,7 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::ShellDefault => "デフォルト",
         L10nKey::SidebarUngroupedGroup => "未分類",
         L10nKey::SidebarMoveToGroup => "グループへ移動",
+        L10nKey::SidebarMoveTabsToGroup => "{count} 個のタブをグループへ移動",
         L10nKey::SidebarNewGroup => "新規グループ…",
         L10nKey::SidebarRemoveFromGroup => "グループから外す",
         L10nKey::SidebarNewGroupName => "新規グループ",
@@ -2493,6 +2509,13 @@ pub fn translate_ja(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarDeleteGroup => "グループを削除",
         L10nKey::SidebarDropToPin => "ここにドロップして固定",
         L10nKey::TabContextCloseTab => "タブを閉じる",
+        L10nKey::TabContextCloseTabs => "{count} 個のタブを閉じる",
+        L10nKey::TabsSkippedOnClose => {
+            "{count} 個のタブは閉じていません: 未保存のファイルがあるか、閉じる前に確認が必要な接続があります"
+        }
+        L10nKey::TabsSkippedOnCloseOne => {
+            "1 個のタブは閉じていません: 未保存のファイルがあるか、閉じる前に確認が必要な接続があります"
+        }
         L10nKey::TerminalContextClear => "クリア",
         L10nKey::TabContextCloseTabsBelow => "下のタブを閉じる",
         L10nKey::AppAgentHooksOpFailed => "失敗: {error}",

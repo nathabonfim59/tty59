@@ -1980,6 +1980,21 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::PaneDragHandleTooltip => "拖动可把这个窗格挪到别处",
         L10nKey::AppWorktreeRemoved => "已删除 worktree“{branch}”",
         L10nKey::AppWorktreeRemoveFailed => "删除 worktree 失败：{error}",
+        L10nKey::WorktreeBatchTitle => "{count} 个已关闭的标签页留下了 worktree",
+        L10nKey::WorktreeBatchDetail => "保留的 worktree 会连同其分支留在磁盘上。",
+        L10nKey::WorktreeBatchDirty => "未提交的变更",
+        L10nKey::WorktreeBatchDirtyNote => "删除前会先存到 refs/tty59/trash/{name}",
+        L10nKey::WorktreeBatchKeep => "保留",
+        L10nKey::WorktreeBatchKeepToggle => "保留 worktree“{branch}”",
+        L10nKey::WorktreeBatchRemoveAllShortcut => "全部删除",
+        L10nKey::WorktreeBatchRemoveButton => "删除 {count} 个 worktree",
+        L10nKey::WorktreeBatchRemoveButtonOne => "删除 1 个 worktree",
+        L10nKey::WorktreeBatchRemoveButtonNone => "删除 worktree",
+        L10nKey::WorktreeBatchKeepAllButton => "全部保留",
+        L10nKey::WorktreeBatchRemoved => "已删除 {count} 个 worktree",
+        L10nKey::WorktreeBatchRemovedOne => "已删除 1 个 worktree",
+        L10nKey::WorktreeBatchBranchesKept => "因未合并而保留的分支：{branches}",
+        L10nKey::WorktreeBatchFailed => "无法删除“{branch}”：{error}",
         L10nKey::WorktreePromptAgent => "启动方式",
         L10nKey::WorktreePromptShell => "终端",
         L10nKey::WorktreePromptTask => "首个任务",
@@ -2244,6 +2259,7 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::ShellDefault => "默认",
         L10nKey::SidebarUngroupedGroup => "未分组",
         L10nKey::SidebarMoveToGroup => "移到分组",
+        L10nKey::SidebarMoveTabsToGroup => "将 {count} 个标签页移到分组",
         L10nKey::SidebarNewGroup => "新建分组…",
         L10nKey::SidebarRemoveFromGroup => "移出分组",
         L10nKey::SidebarNewGroupName => "新建分组",
@@ -2257,6 +2273,13 @@ pub fn translate_zh(key: L10nKey) -> Option<&'static str> {
         L10nKey::SidebarDeleteGroup => "删除分组",
         L10nKey::SidebarDropToPin => "拖到此处固定",
         L10nKey::TabContextCloseTab => "关闭标签页",
+        L10nKey::TabContextCloseTabs => "关闭 {count} 个标签页",
+        L10nKey::TabsSkippedOnClose => {
+            "{count} 个标签页没有关闭：其中有未保存的文件，或有需要确认才能关闭的连接"
+        }
+        L10nKey::TabsSkippedOnCloseOne => {
+            "有 1 个标签页没有关闭：它有未保存的文件，或有需要确认才能关闭的连接"
+        }
         L10nKey::TerminalContextClear => "清屏",
         L10nKey::TabContextCloseTabsBelow => "关闭下方标签页",
         L10nKey::AppAgentHooksOpFailed => "失败：{error}",
