@@ -72,9 +72,9 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: mobile/src-tauri
+      # No rust-cache: this runs on mobile-v* tags, and a cache saved from a tag
+      # is readable by that tag only, so it never helped the next build while
+      # it evicted CI's. See "Cache budget" in release.yml.
 
       # The runner has an SDK and some NDK; the NDK is pinned so a runner image
       # update cannot change the toolchain under a release.
@@ -177,9 +177,9 @@ jobs:
         with:
           targets: aarch64-apple-ios
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: mobile/src-tauri
+      # No rust-cache: this runs on mobile-v* tags, and a cache saved from a tag
+      # is readable by that tag only, so it never helped the next build while
+      # it evicted CI's. See "Cache budget" in release.yml.
 
       # An App Store Connect API key signs in for Xcode: it signs the build
       # with a certificate Apple keeps, and uploads it.

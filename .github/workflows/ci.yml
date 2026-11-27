@@ -157,6 +157,13 @@ jobs:
       # Saved only from main (and manual runs): a cache saved on a PR ref is
       # readable by that ref alone, while main's is readable by every branch,
       # and per-branch saves of ~2 GB per target blow the 10 GB repo quota.
+      #
+      # Cache budget: these three caches (~2-2.4 GB each) plus the small
+      # libghostty-vt archives are the only things this repo should keep in
+      # its 10 GB. Nothing else saves a Rust cache: not the server jobs below,
+      # not release.yml or nightly.yml. When they did, the budget overflowed
+      # every day, these caches and the Ghostty archives were evicted, and
+      # every job rebuilt Ghostty (3-10 min) and built cold.
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.outputs.code == 'true'
         with:
@@ -209,13 +216,21 @@ jobs:
       # platform-specific test: `Build` succeeds, `Test` starts, and nothing
       # further is ever written.
       #
-      # The step's honest budget is small: ~75s warm and ~3.5 min when this step
-      # also has to compile the test targets, on every platform. 20 minutes is
-      # pure headroom, so a trip means a hang, not a slow runner.
+      # The budget has grown with the suite. Measured on 26.19.0 (run
+      # 45288877365 and its PR run 45281775076): compiling the test targets
+      # takes 1.5-5 min, and the `tty59-app` unit-test binary alone runs for
+      # 404 s on Linux, 473 s on Windows and 521 s on macOS. The whole step
+      # took 9-13 min and once 18.4 min (Windows, cold). 35 minutes is
+      # headroom over that, so a trip still means a hang. Revisit if the
+      # suite keeps growing.
+      #
+      # `--no-fail-fast` runs every test binary even after one fails. Without
+      # it a red `tty59-app` hid the `tty59-cli` failures behind it, which cost
+      # a whole extra CI round to discover.
       - name: Test
         if: needs.changes.outputs.code == 'true'
-        timeout-minutes: 20
-        run: cargo test --locked --config "${{ env.DENY_WARNINGS }}" --target ${{ matrix.target }}
+        timeout-minutes: 35
+        run: cargo test --locked --no-fail-fast --config "${{ env.DENY_WARNINGS }}" --target ${{ matrix.target }}
 
       - name: Test desktop updater
         if: needs.changes.outputs.code == 'true'
@@ -297,10 +312,8 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}
+      # No rust-cache: a compile-only job off the critical path, and its ~1 GB
+      # per target evicted the `build` caches. See "Cache budget" in `build`.
 
       # The crate split lands separately; until `tty59-server` exists as a
       # workspace member this job has nothing to build. Skip cleanly rather than
@@ -368,10 +381,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-          save-if: ${{ github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' }}
+      # No rust-cache: a compile-only job off the critical path, and its ~1 GB
+      # per target evicted the `build` caches. See "Cache budget" in `build`.
 
       - name: Look for the tty59-server package
         id: probe

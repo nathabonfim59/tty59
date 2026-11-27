@@ -17,20 +17,30 @@ on:
 permissions:
   contents: write
 
+# Cache budget. The repository gets 10 GB of Actions cache, evicted least
+# recently used first. The caches worth keeping are CI's three `build & test`
+# caches (~2-2.4 GB each, saved from main), because every pull request restores
+# them, and the small libghostty-vt archives. This workflow saves no Rust cache:
+#   * a cache saved from a tag can be restored by that same tag only, so a
+#     release's ~2 GB per target never helped the next release;
+#   * those saves evicted CI's caches and the libghostty-vt archives, so every
+#     job rebuilt Ghostty with zig (3-10 min) and pull requests built cold.
+# Nothing is lost: the 26.17.0 legs restored nothing anyway ("No cache found"),
+# and fetching the git dependencies cold takes ~20 s. The libghostty-vt archive
+# is still restored (actions/cache inside the action, keyed by the pins).
+
 env:
   # The tag being released: the pushed one, or the dispatched one.
   RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
-    # The Windows installer embeds the Linux musl `tty59-server` so a WSL distro
-    # can be served the binary the client already shipped with, instead of
-    # downloading one (WSL installs nothing over the network). That
-    # binary comes from `server-musl`, so the two jobs can no longer run in
-    # parallel. Serialising all four platforms behind it costs a few minutes on
-    # a release — cheap next to splitting the Windows entry into its own job and
-    # duplicating the whole toolchain/caching preamble.
-    needs: server-musl
+    # No `needs`: every leg starts at once. The Windows installer embeds the
+    # Linux musl `tty59-server` (a WSL distro is served the binary the client
+    # shipped with, since WSL installs nothing over the network), but only the
+    # packaging needs it, not the compile. So the Windows legs here only build
+    # and hand their binaries to `package-windows`, which waits for both. This
+    # used to hold all five legs behind `server-musl`, ~5 min of critical path.
     strategy:
       fail-fast: false
       matrix:
@@ -119,12 +129,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tty59
-          # Two Windows legs share a runner OS; without the target in the key
-          # they would overwrite each other's cache.
-          key: ${{ matrix.target }}
+      # No rust-cache here on purpose: see "Cache budget" at the top of this file.
 
       # `--locked` because a release must ship the dependency set the tag
       # recorded, not whatever cargo would re-resolve at build time. Safe here
@@ -280,33 +285,20 @@ jobs:
           grep -Fxq usr/lib/tty59/tty59-app <<<"$listing"
           grep -Fxq usr/lib/tty59/tty59 <<<"$listing"
 
-      # The bundled server for WSL. `continue-on-error` mirrors `server-musl`'s
-      # own probe step: if there is no server asset, the release still ships and
-      # `bundle-windows.ps1` warns. It is not silent at runtime either — a WSL
-      # connect then fails with `MissingBundled`, naming every directory it
-      # searched, rather than quietly falling back to a download.
-      - name: Fetch the bundled Linux server
+      # Windows is packaged in `package-windows`, once the musl server it embeds
+      # exists. Not named `release-*`: the `release` job downloads only those,
+      # and these intermediates must not become release assets.
+      - name: Hand the Windows binaries to package-windows
         if: matrix.os == 'windows'
-        continue-on-error: true
-        uses: actions/download-artifact@v8
+        uses: actions/upload-artifact@v7
         with:
-          name: release-${{ matrix.wsl-server }}
-          path: tty59/bundled-server
-
-      - name: Package Windows installer + zip
-        if: matrix.os == 'windows'
-        working-directory: tty59
-        shell: pwsh
-        run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
-
-      # The in-app updater refuses a package whose marker, helper or stamped
-      # version is wrong — on the user's machine, after the download. Check the
-      # same facts here so a packaging mistake fails the release instead.
-      - name: Verify Windows update package
-        if: matrix.os == 'windows'
-        working-directory: tty59
-        shell: pwsh
-        run: '& ./.github/scripts/verify-windows-package.ps1 "${{ matrix.arch }}"'
+          name: winbin-${{ matrix.arch }}
+          path: |
+            tty59/target/${{ matrix.target }}/release/tty59-app.exe
+            tty59/target/${{ matrix.target }}/release/tty59.exe
+            tty59/target/${{ matrix.target }}/release/tty59-updater.exe
+          if-no-files-found: error
+          retention-days: 1
 
       # Hand the artifacts to the assemble job rather than uploading them to the
       # release here. Four parallel jobs each publishing their own slice would
@@ -317,6 +309,8 @@ jobs:
       # intermediates in dist/ (tty59.app, entitlements.plist, the Windows staging
       # dir) that must not reach the release assets.
       - uses: actions/upload-artifact@v7
+        # Windows legs upload their packages from `package-windows` instead.
+        if: matrix.os != 'windows'
         with:
           name: release-${{ matrix.os }}-${{ matrix.arch }}
           path: |
@@ -326,6 +320,80 @@ jobs:
             tty59/dist/*-setup.exe
             tty59/dist/*.AppImage
             tty59/dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # The Windows installer and zip, from the binaries `build` compiled plus the
+  # musl server from `server-musl`. A job of its own so that only this step
+  # waits on the server, not the compile. It needs no toolchain: checkout
+  # (scripts, assets, Cargo.toml's version), two downloads, Inno Setup (on the
+  # runner image) and the same two scripts that used to run inside `build`.
+  #
+  # `needs: build` waits for the whole matrix, macOS included, since a job
+  # cannot wait on one matrix leg. That costs this job's ~2 min after the
+  # slowest leg, still less than the ~5 min `server-musl` used to add in front
+  # of every leg. `!cancelled()` keeps Windows packaging going when an
+  # unrelated leg fails, so a re-run of that leg has these assets waiting.
+  package-windows:
+    needs: [build, server-musl]
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            wsl-server: tty59-server-linux-x86_64-musl
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            wsl-server: tty59-server-linux-aarch64-musl
+            experimental: true
+    runs-on: windows-latest
+    continue-on-error: ${{ matrix.experimental == true }}
+    steps:
+      - name: Checkout tty59
+        uses: actions/checkout@v4
+        with:
+          path: tty59
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Fetch the Windows binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: winbin-${{ matrix.arch }}
+          path: tty59/target/${{ matrix.target }}/release
+
+      # The bundled server for WSL. `continue-on-error` mirrors `server-musl`'s
+      # own probe step: if there is no server asset, the release still ships and
+      # `bundle-windows.ps1` warns. It is not silent at runtime either — a WSL
+      # connect then fails with `MissingBundled`, naming every directory it
+      # searched, rather than quietly falling back to a download.
+      - name: Fetch the bundled Linux server
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: release-${{ matrix.wsl-server }}
+          path: tty59/bundled-server
+
+      - name: Package Windows installer + zip
+        working-directory: tty59
+        shell: pwsh
+        run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
+
+      # The in-app updater refuses a package whose marker, helper or stamped
+      # version is wrong — on the user's machine, after the download. Check the
+      # same facts here so a packaging mistake fails the release instead.
+      - name: Verify Windows update package
+        working-directory: tty59
+        shell: pwsh
+        run: '& ./.github/scripts/verify-windows-package.ps1 "${{ matrix.arch }}"'
+
+      # Same name and globs the Windows legs of `build` used to upload under.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: |
+            tty59/dist/*.zip
+            tty59/dist/*-setup.exe
           if-no-files-found: error
 
   # The headless server binary remote workspaces install on the far machine
@@ -375,10 +443,7 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tty59
-          key: ${{ matrix.target }}
+      # No rust-cache here on purpose: see "Cache budget" at the top of this file.
 
       # Until the crate split lands there is no tty59-server to build. Skip
       # rather than fail, so this workflow can ship ahead of the split; the
@@ -466,10 +531,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tty59
-          key: ${{ matrix.target }}
+      # No rust-cache here on purpose: see "Cache budget" at the top of this file.
 
       - name: Look for the tty59-server package
         id: probe
@@ -564,10 +626,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tty59
-          key: ${{ matrix.target }}
+      # No rust-cache here on purpose: see "Cache budget" at the top of this file.
 
       - name: Build tty59-server
         working-directory: tty59
@@ -599,7 +658,7 @@ jobs:
   # asset set is incomplete or whose notes are still empty. Any failure before
   # the last step leaves the draft for a re-run to top up.
   release:
-    needs: [build, server-musl, server-macos, server-windows]
+    needs: [build, package-windows, server-musl, server-macos, server-windows]
     if: startsWith(github.ref, 'refs/tags/') || inputs.tag != ''
     runs-on: ubuntu-latest
     env:
@@ -616,6 +675,8 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          # Only the assets: `build` also leaves `winbin-*` intermediates.
+          pattern: release-*
           merge-multiple: true
 
       # sha256 over every asset, so the remote-server installer can verify what

@@ -18,6 +18,18 @@ on:
 permissions:
   contents: write
 
+# Cache budget. The repository gets 10 GB of Actions cache, evicted least
+# recently used first. The caches worth keeping are CI's three `build & test`
+# caches (~2-2.4 GB each, saved from main), because every pull request restores
+# them, and the small libghostty-vt archives. Nightly saves no Rust cache: its
+# release-profile caches (~2 GB per GUI leg, ~1 GB per server leg) were enough
+# on their own to fill the budget each night, evicting CI's caches and the
+# libghostty-vt archives, so every job rebuilt Ghostty with zig (3-10 min) and
+# pull requests built cold. The cost is a colder nightly, which nobody waits
+# on. The libghostty-vt archives are still cached (actions/cache inside the
+# action): nightly runs on main, so the archives it saves for the release-only
+# targets (x86_64-apple-darwin, aarch64-pc-windows-msvc) are readable by tags.
+
 concurrency:
   group: nightly
   cancel-in-progress: false
@@ -64,9 +76,9 @@ jobs:
 
   # Mirrors release.yml's build matrix; keep the two in sync when editing.
   build:
-    # Also behind server-musl: the Windows installer embeds its Linux musl
-    # binary for WSL. See the same note in release.yml.
-    needs: [plan, server-musl]
+    # Not behind server-musl: only Windows packaging needs the musl server,
+    # and that runs in `package-windows`. See the same note in release.yml.
+    needs: plan
     if: needs.plan.outputs.build == 'true'
     strategy:
       fail-fast: false
@@ -137,12 +149,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tty59
-          # Two Windows legs share a runner OS; without the target in the key
-          # they would overwrite each other's cache.
-          key: ${{ matrix.target }}
+      # No rust-cache here on purpose: see "Cache budget" at the top of this file.
 
       # The updater ships on every GUI platform now: inside the macOS bundle,
       # beside the Windows app, and inside the Linux AppImage.
@@ -216,9 +223,73 @@ jobs:
           grep -Fxq "X-AppImage-Version=${VERSION}" \
             "$VERIFY_ROOT/squashfs-root/usr/share/applications/tty59.desktop"
 
+      # Windows is packaged in `package-windows`, as in release.yml. Not named
+      # `nightly-*`: `publish` downloads only those.
+      - name: Hand the Windows binaries to package-windows
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: winbin-${{ matrix.arch }}
+          path: |
+            tty59/target/${{ matrix.target }}/release/tty59-app.exe
+            tty59/target/${{ matrix.target }}/release/tty59.exe
+            tty59/target/${{ matrix.target }}/release/tty59-updater.exe
+          if-no-files-found: error
+          retention-days: 1
+
+      # Same glob list as release.yml's Release step: the bundle scripts leave
+      # intermediates in dist/ (tty59.app, entitlements.plist, the Windows
+      # staging dir) that must not reach the release assets.
+      - uses: actions/upload-artifact@v7
+        if: matrix.os != 'windows'
+        with:
+          name: nightly-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            tty59/dist/*.dmg
+            tty59/dist/*.tar.gz
+            tty59/dist/*.zip
+            tty59/dist/*-setup.exe
+            tty59/dist/*.AppImage
+          if-no-files-found: error
+
+  # Mirrors release.yml's package-windows job; keep the two in sync.
+  package-windows:
+    needs: [plan, build, server-musl]
+    if: ${{ !cancelled() && needs.plan.outputs.build == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            wsl-server: tty59-server-linux-x86_64-musl
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+            wsl-server: tty59-server-linux-aarch64-musl
+            experimental: true
+    runs-on: windows-latest
+    continue-on-error: ${{ matrix.experimental == true }}
+    steps:
+      - name: Checkout tty59
+        uses: actions/checkout@v4
+        with:
+          path: tty59
+
+      # The asset names and the Inno version come from Cargo.toml, so this
+      # job stamps it exactly as `build` did.
+      - name: Stamp nightly version
+        working-directory: tty59
+        shell: bash
+        run: bash .github/scripts/stamp-version.sh "${{ needs.plan.outputs.version }}"
+
+      - name: Fetch the Windows binaries
+        uses: actions/download-artifact@v8
+        with:
+          name: winbin-${{ matrix.arch }}
+          path: tty59/target/${{ matrix.target }}/release
+
       # See release.yml for why this is best-effort rather than required.
       - name: Fetch the bundled Linux server
-        if: matrix.os == 'windows'
         continue-on-error: true
         uses: actions/download-artifact@v8
         with:
@@ -226,7 +297,6 @@ jobs:
           path: tty59/bundled-server
 
       - name: Package Windows installer + zip
-        if: matrix.os == 'windows'
         working-directory: tty59
         shell: pwsh
         run: '& ./.github/scripts/bundle-windows.ps1 "${{ matrix.target }}" "${{ matrix.arch }}"'
@@ -236,25 +306,18 @@ jobs:
       # artifacts — but a marker or version regression shows up here a night
       # before it would reach a stable release.
       - name: Verify Windows update package
-        if: matrix.os == 'windows'
         working-directory: tty59
         shell: pwsh
         run: >-
           & ./.github/scripts/verify-windows-package.ps1
           "${{ matrix.arch }}" "${{ needs.plan.outputs.version }}"
 
-      # Same glob list as release.yml's Release step: the bundle scripts leave
-      # intermediates in dist/ (tty59.app, entitlements.plist, the Windows
-      # staging dir) that must not reach the release assets.
       - uses: actions/upload-artifact@v7
         with:
-          name: nightly-${{ matrix.os }}-${{ matrix.arch }}
+          name: nightly-windows-${{ matrix.arch }}
           path: |
-            tty59/dist/*.dmg
-            tty59/dist/*.tar.gz
             tty59/dist/*.zip
             tty59/dist/*-setup.exe
-            tty59/dist/*.AppImage
           if-no-files-found: error
 
   # Mirrors release.yml's server-musl job; keep the two in sync when editing.
@@ -303,10 +366,7 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tty59
-          key: ${{ matrix.target }}
+      # No rust-cache here on purpose: see "Cache budget" at the top of this file.
 
       - name: Look for the tty59-server package
         id: probe
@@ -387,10 +447,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tty59
-          key: ${{ matrix.target }}
+      # No rust-cache here on purpose: see "Cache budget" at the top of this file.
 
       - name: Look for the tty59-server package
         id: probe
@@ -478,10 +535,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: tty59
-          key: ${{ matrix.target }}
+      # No rust-cache here on purpose: see "Cache budget" at the top of this file.
 
       - name: Build tty59-server
         working-directory: tty59
@@ -509,7 +563,7 @@ jobs:
   # always complete — a failed platform means tonight's nightly is skipped
   # entirely and users keep yesterday's, never a partial asset set.
   publish:
-    needs: [plan, build, server-musl, server-macos, server-windows]
+    needs: [plan, build, package-windows, server-musl, server-macos, server-windows]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -520,6 +574,8 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          # Only the assets: `build` also leaves `winbin-*` intermediates.
+          pattern: nightly-*
           merge-multiple: true
 
       # The version has to be readable by a machine, and the tag cannot carry
