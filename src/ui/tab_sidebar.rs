@@ -1587,6 +1587,18 @@ impl Tty59App {
                     // way into another tab's layout must not put itself on
                     // screen on the way there.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    // A right click outside the selection ends it, and opens
+                    // the row's own menu — `tab_context_menu` reads the
+                    // selection as the menu is built, one frame later. Inside
+                    // the selection the same gesture opens the menu that acts
+                    // on all of it. Propagation is left alone: the context
+                    // menu beneath only opens while the event still bubbles.
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, window, cx| {
+                            this.tab_row_right_pressed(i, window, cx)
+                        }),
+                    )
                     .on_click({
                         let drawn = drawn.clone();
                         cx.listener(move |this, ev, window, cx| {
@@ -2864,15 +2876,47 @@ impl Tty59App {
             .is_some_and(|t| self.tab_selection.contains(t.tree_id.get()))
     }
 
-    /// The selected tabs' indices, in the sidebar's visual order.
-    pub(crate) fn selected_tab_indices(&self, cx: &gpui::App) -> Vec<usize> {
-        if self.tab_selection.is_empty() {
-            return Vec::new();
-        }
+    /// The selected tabs' ids, in the sidebar's visual order.
+    pub(crate) fn selected_tab_ids(&self, cx: &gpui::App) -> Vec<tty59_core::core::machine::TabId> {
+        let drawn: Vec<tty59_core::core::machine::TabId> = self
+            .visual_tab_order(cx)
+            .into_iter()
+            .filter_map(|i| self.tabs.get(i).map(|t| t.tree_id.get()))
+            .collect();
+        self.tab_selection.in_order(&drawn)
+    }
+
+    /// Where the tabs `ids` sit now, in the sidebar's visual order; ids that
+    /// are gone drop out. A menu holds ids while it is open, and resolves them
+    /// here when an item is clicked, since tabs may have moved since.
+    pub(crate) fn tab_indices_of(
+        &self,
+        ids: &[tty59_core::core::machine::TabId],
+        cx: &gpui::App,
+    ) -> Vec<usize> {
         self.visual_tab_order(cx)
             .into_iter()
-            .filter(|&i| self.is_tab_selected(i))
+            .filter(|&i| {
+                self.tabs
+                    .get(i)
+                    .is_some_and(|t| ids.contains(&t.tree_id.get()))
+            })
             .collect()
+    }
+
+    /// A right press on a sidebar tab row. When the row is outside the
+    /// selection the press ends it, so the menu the same press opens —
+    /// built one frame later, off `tab_context_menu` — is the row's own.
+    /// A row inside the selection keeps it and gets the selection's menu.
+    pub(crate) fn tab_row_right_pressed(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_tab_selected(index) {
+            self.end_tab_selection(window, cx);
+        }
     }
 
     /// End the selection, giving focus back to the active pane.
@@ -2939,24 +2983,78 @@ impl Tty59App {
         group: Option<GroupId>,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(index) else {
+        self.set_tabs_group(&[index], group, cx);
+    }
+
+    /// [`set_tab_group`](Self::set_tab_group) for the tabs at `indices`: one
+    /// save and one repaint for the whole set, not one per tab.
+    pub(crate) fn set_tabs_group(
+        &mut self,
+        indices: &[usize],
+        group: Option<GroupId>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut moved = false;
+        for &index in indices {
+            if let Some(tab) = self.tabs.get(index) {
+                tab.group.set(group);
+                moved = true;
+            }
+        }
+        if !moved {
             return;
-        };
-        tab.group.set(group);
+        }
         // Carries the move to the daemon as a `TabSetGroup`, so another
         // window on the same workspace sees it too.
         self.save_session(cx);
         cx.notify();
     }
 
-    /// Put tab `index` in group `key`. An auto group's members are decided by
-    /// their cwds, so a tab goes into one by pinning the group, as its
-    /// header's pin does — the tab joins in the same edit.
-    pub(crate) fn move_tab_to(&mut self, index: usize, key: GroupKey, cx: &mut Context<Self>) {
+    /// Put the tabs at `indices` in group `key`, `indices` in the order the
+    /// sidebar drew them. An auto group is pinned once, with all of them.
+    pub(crate) fn move_tabs_to(
+        &mut self,
+        indices: &[usize],
+        key: GroupKey,
+        cx: &mut Context<Self>,
+    ) {
         match key {
-            GroupKey::Pinned(id) => self.set_tab_group(index, Some(id), cx),
-            GroupKey::Auto(auto) => self.pin_auto_group_with(auto, Some(index), cx),
+            GroupKey::Pinned(id) => self.set_tabs_group(indices, Some(id), cx),
+            GroupKey::Auto(auto) => self.pin_auto_group_with(auto, indices, cx),
         }
+        self.keep_moved_order(indices, cx);
+    }
+
+    /// The permutation for [`apply_tab_order`](Self::apply_tab_order) that
+    /// leaves every tab where it is except the moved ones, which fill the
+    /// positions they occupy now — sorted — in the order they were drawn in.
+    ///
+    /// A group lists its tabs in `self.tabs` order, so this is what makes the
+    /// tabs of a multi-move keep the order they were picked in.
+    fn order_keeping(len: usize, moved_in_visual_order: &[usize]) -> Vec<usize> {
+        let moved: Vec<usize> = moved_in_visual_order
+            .iter()
+            .copied()
+            .filter(|&i| i < len)
+            .collect();
+        let mut positions = moved.clone();
+        positions.sort_unstable();
+        positions.dedup();
+        let mut order: Vec<usize> = (0..len).collect();
+        for (&slot, &from) in positions.iter().zip(&moved) {
+            order[slot] = from;
+        }
+        order
+    }
+
+    /// Put the tabs just moved into their group in the order they were drawn
+    /// in, when that is not the order the group would list them in.
+    fn keep_moved_order(&mut self, moved_in_visual_order: &[usize], cx: &mut Context<Self>) {
+        let order = Self::order_keeping(self.tabs.len(), moved_in_visual_order);
+        if order.iter().enumerate().all(|(i, &o)| i == o) {
+            return;
+        }
+        self.apply_tab_order(&order, cx);
     }
 
     /// A name no pinned group is using yet, for a group about to be made.
@@ -2981,23 +3079,26 @@ impl Tty59App {
             .expect("an unbounded range always reaches an untaken name")
     }
 
-    /// Make a new label group, put tab `index` in it, and open its header for
-    /// renaming.
+    /// Make a new label group, put the tabs at `indices` in it, in the order
+    /// they were drawn, and open its header for renaming.
     ///
-    /// No dialog: the tab is in the group before a character is typed, so
+    /// No dialog: the tabs are in the group before a character is typed, so
     /// what the name is being given to is on screen while it is chosen.
-    pub(crate) fn new_tab_group(
+    pub(crate) fn new_tab_group_with(
         &mut self,
-        index: usize,
+        indices: &[usize],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let group = PinnedGroup::label(self.fresh_group_name());
         let id = group.id;
-        if let Some(tab) = self.tabs.get(index) {
-            tab.group.set(Some(id));
+        for &index in indices {
+            if let Some(tab) = self.tabs.get(index) {
+                tab.group.set(Some(id));
+            }
         }
         self.edit_groups(cx, |groups| groups.pinned.push(group));
+        self.keep_moved_order(indices, cx);
         self.start_group_rename(id, window, cx);
     }
 
@@ -3021,12 +3122,12 @@ impl Tty59App {
     /// The fold comes along: a group that was shut stays shut, rather than
     /// springing open in its new place.
     pub(crate) fn pin_auto_group(&mut self, key: AutoKey, cx: &mut Context<Self>) {
-        self.pin_auto_group_with(key, None, cx);
+        self.pin_auto_group_with(key, &[], cx);
     }
 
-    /// [`pin_auto_group`](Self::pin_auto_group), taking tab `also` into the
-    /// new group in the same edit.
-    fn pin_auto_group_with(&mut self, key: AutoKey, also: Option<usize>, cx: &mut Context<Self>) {
+    /// [`pin_auto_group`](Self::pin_auto_group), taking the tabs at `also` into
+    /// the new group in the same edit.
+    fn pin_auto_group_with(&mut self, key: AutoKey, also: &[usize], cx: &mut Context<Self>) {
         let mut group = match &key {
             AutoKey::Repo(root) => PinnedGroup::folder(root),
             AutoKey::SshHost(host) => PinnedGroup::label(host.clone()),
@@ -3051,7 +3152,7 @@ impl Tty59App {
             .zip(self.sidebar_group_keys(cx))
             .enumerate()
         {
-            if place == wanted || also == Some(i) {
+            if place == wanted || also.contains(&i) {
                 tab.group.set(Some(id));
             }
         }
@@ -3942,13 +4043,30 @@ pub(crate) fn move_targets(
     groups: &WorkspaceGroups,
     index: usize,
 ) -> Vec<MoveTarget> {
-    let here = keys.get(index).cloned().flatten();
+    move_targets_for(keys, groups, &[index])
+}
+
+/// [`move_targets`] for the tabs at `indices`: a group is checked only when
+/// every one of them is already in it, so a target the whole set would leave
+/// unchanged is the only one offered as inert.
+pub(crate) fn move_targets_for(
+    keys: &[Option<GroupKey>],
+    groups: &WorkspaceGroups,
+    indices: &[usize],
+) -> Vec<MoveTarget> {
+    // A tab with no group is in none of them, so an empty set — which no
+    // caller passes — would otherwise check every target at once.
+    let every = !indices.is_empty();
     sidebar_sections(keys, groups)
         .into_iter()
         .filter_map(|s| {
             let key = s.key?;
+            let here = every
+                && indices
+                    .iter()
+                    .all(|&i| keys.get(i).is_some_and(|k| k.as_ref() == Some(&key)));
             Some(MoveTarget {
-                checked: here.as_ref() == Some(&key),
+                checked: here,
                 name: s.name.expect("a section with a key has a header"),
                 key,
             })
@@ -4539,9 +4657,9 @@ mod fold_tests {
         let (app, mut vcx, _streams) = harness_with_tabs(cx, 2);
 
         app.update_in(&mut vcx, |app, window, cx| {
-            app.new_tab_group(0, window, cx);
+            app.new_tab_group_with(&[0], window, cx);
             app.commit_group_rename(window, cx);
-            app.new_tab_group(1, window, cx);
+            app.new_tab_group_with(&[1], window, cx);
             app.commit_group_rename(window, cx);
         });
         vcx.run_until_parked();
@@ -4822,7 +4940,7 @@ mod fold_tests {
         vcx.run_until_parked();
 
         app.update(&mut vcx, |app, cx| {
-            app.move_tab_to(2, GroupKey::Auto(r.clone()), cx)
+            app.move_tabs_to(&[2], GroupKey::Auto(r.clone()), cx)
         });
         vcx.run_until_parked();
 
@@ -4870,7 +4988,7 @@ mod fold_tests {
                     .contains(&Some(GroupKey::Auto(r.clone()))),
                 "tab 1 is drawn under the repo's auto group"
             );
-            app.move_tab_to(2, GroupKey::Auto(r.clone()), cx)
+            app.move_tabs_to(&[2], GroupKey::Auto(r.clone()), cx)
         });
         vcx.run_until_parked();
 
@@ -8713,6 +8831,14 @@ mod selection_tests {
         })
     }
 
+    /// The selected tabs' indices, in the sidebar's visual order.
+    fn picked_visual(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> Vec<usize> {
+        app.read_with(vcx, |app, cx| {
+            let ids = app.selected_tab_ids(cx);
+            app.tab_indices_of(&ids, cx)
+        })
+    }
+
     fn sidebar_focused(app: &Entity<Tty59App>, vcx: &mut VisualTestContext) -> bool {
         app.update_in(vcx, |app, window, _| {
             app.tab_selection_focus.is_focused(window)
@@ -8922,5 +9048,413 @@ mod selection_tests {
             "the × took tab 2 alone"
         );
         assert_eq!(picked(&app, &mut vcx), vec![0, 1]);
+    }
+
+    /// A group lists its tabs in `self.tabs` order, so a multi-move reorders
+    /// the list: the moved tabs fill the slots they hold now, in the order
+    /// they were drawn, and nothing else moves.
+    #[test]
+    fn order_keeping_leaves_every_other_tab_where_it_is() {
+        // Already in order: the identity, so no move at all.
+        assert_eq!(Tty59App::order_keeping(4, &[1, 3]), vec![0, 1, 2, 3]);
+        // Drawn back to front across the list.
+        assert_eq!(Tty59App::order_keeping(4, &[3, 0]), vec![3, 1, 2, 0]);
+        // Three of five, out of index order.
+        assert_eq!(Tty59App::order_keeping(5, &[4, 1, 3]), vec![0, 4, 2, 1, 3]);
+    }
+
+    /// A target is checked only when every picked tab is already in it; one
+    /// tab outside leaves it a move.
+    #[test]
+    fn a_move_target_is_checked_only_when_every_picked_tab_is_in_it() {
+        let mut groups = WorkspaceGroups::default();
+        let work = PinnedGroup::label("work");
+        groups.pinned = vec![work.clone()];
+        let auto = GroupKey::Auto(AutoKey::Repo(PathBuf::from("/w/r")));
+        let keys = vec![
+            Some(GroupKey::Pinned(work.id)),
+            Some(GroupKey::Pinned(work.id)),
+            Some(auto.clone()),
+            None,
+        ];
+        let checked = |indices: &[usize]| -> Vec<(GroupKey, bool)> {
+            move_targets_for(&keys, &groups, indices)
+                .into_iter()
+                .map(|m| (m.key, m.checked))
+                .collect()
+        };
+        assert_eq!(
+            checked(&[0, 1]),
+            vec![(GroupKey::Pinned(work.id), true), (auto.clone(), false)],
+            "both picked tabs sit in work"
+        );
+        assert_eq!(
+            checked(&[0, 2]),
+            vec![(GroupKey::Pinned(work.id), false), (auto, false)],
+            "one picked tab outside leaves work a move"
+        );
+        assert_eq!(
+            checked(&[3]),
+            vec![
+                (GroupKey::Pinned(work.id), false),
+                (GroupKey::Auto(AutoKey::Repo(PathBuf::from("/w/r"))), false)
+            ],
+            "an ungrouped tab is in none"
+        );
+    }
+
+    fn draw(vcx: &mut VisualTestContext) {
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    fn label(app: &mut Tty59App, name: &str, cx: &mut Context<Tty59App>) -> GroupId {
+        let group = PinnedGroup::label(name);
+        let id = group.id;
+        app.edit_groups(cx, |groups| groups.pinned.push(group));
+        id
+    }
+
+    fn auto(s: &str) -> GroupKey {
+        GroupKey::Auto(AutoKey::Repo(PathBuf::from(s)))
+    }
+
+    /// Three picked rows, drawn in an order their indices do not spell: moved
+    /// into a group together, they keep the order they were picked in, and
+    /// the selection keeps all three.
+    #[gpui::test]
+    fn moving_several_picked_tabs_keeps_the_order_they_were_drawn_in(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 6);
+        let (dest, before) = app.update(&mut vcx, |app, cx| {
+            let dest = label(app, "dest", cx);
+            let keep = label(app, "keep", cx);
+            for i in [0, 3] {
+                app.set_tab_group(i, Some(keep), cx);
+            }
+            app.active = 3;
+            cx.notify();
+            let ids = app.tabs.iter().map(|t| t.tree_id.get()).collect::<Vec<_>>();
+            (dest, ids)
+        });
+        vcx.run_until_parked();
+
+        click(&app, &mut vcx, 1, Modifiers::secondary_key());
+        click(&app, &mut vcx, 5, Modifiers::secondary_key());
+        assert_eq!(picked(&app, &mut vcx), vec![1, 3, 5]);
+
+        let indices = picked_visual(&app, &mut vcx);
+        assert_eq!(indices, vec![3, 1, 5], "picked in the drawn order");
+        app.update(&mut vcx, |app, cx| {
+            app.move_tabs_to(&indices, GroupKey::Pinned(dest), cx)
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, cx| {
+            assert_eq!(app.tabs.len(), 6, "a move closes nothing");
+            let inside: Vec<TabId> = app
+                .visual_tab_order(cx)
+                .into_iter()
+                .filter(|&i| app.tabs[i].group.get() == Some(dest))
+                .map(|i| app.tabs[i].tree_id.get())
+                .collect();
+            assert_eq!(
+                inside,
+                vec![before[3], before[1], before[5]],
+                "the target lists them as they were drawn"
+            );
+            assert_eq!(app.tab_selection.len(), 3, "the selection stays");
+            assert_eq!(
+                app.selected_tab_ids(cx),
+                vec![before[3], before[1], before[5]]
+            );
+        });
+    }
+
+    /// An auto group's membership is its tabs' own, so moving into one pins it
+    /// once: one new group holds the picked tabs and the group's own, in the
+    /// picked order.
+    #[gpui::test]
+    fn moving_several_picked_tabs_into_an_auto_group_pins_it_once(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 6);
+        let before = app.update(&mut vcx, |app, cx| {
+            for (i, root) in [
+                (0, "/w/beta"),
+                (5, "/w/beta"),
+                (1, "/w/alpha"),
+                (2, "/w/alpha"),
+            ] {
+                *app.tabs[i].auto_group.borrow_mut() = Some(AutoKey::Repo(PathBuf::from(root)));
+            }
+            // Drawn: beta [0, 5], alpha [1, 2], ungrouped [3, 4].
+            app.active = 5;
+            cx.notify();
+            app.tabs.iter().map(|t| t.tree_id.get()).collect::<Vec<_>>()
+        });
+        vcx.run_until_parked();
+
+        click(&app, &mut vcx, 2, Modifiers::secondary_key());
+        click(&app, &mut vcx, 4, Modifiers::secondary_key());
+        assert_eq!(picked(&app, &mut vcx), vec![2, 4, 5]);
+
+        let indices = picked_visual(&app, &mut vcx);
+        assert_eq!(indices, vec![5, 2, 4], "drawn in that order");
+        app.update(&mut vcx, |app, cx| {
+            app.move_tabs_to(&indices, auto("/w/alpha"), cx)
+        });
+        vcx.run_until_parked();
+
+        app.update(&mut vcx, |app, _cx| {
+            let [group] = app.sidebar_groups.pinned.as_slice() else {
+                panic!("one pinned group: {:?}", app.sidebar_groups.pinned);
+            };
+            assert_eq!(group.folder.as_deref(), Some("/w/alpha"));
+            let inside: Vec<TabId> = app
+                .tabs
+                .iter()
+                .filter(|t| t.group.get() == Some(group.id))
+                .map(|t| t.tree_id.get())
+                .collect();
+            assert_eq!(
+                inside,
+                vec![before[1], before[5], before[2], before[4]],
+                "alpha's own tab, then the picked ones in drawn order"
+            );
+            assert_eq!(app.tab_selection.len(), 3);
+        });
+    }
+
+    /// New Group with several picked rows makes one group holding all of
+    /// them, in the picked order, and opens that group's rename.
+    #[gpui::test]
+    fn new_group_takes_every_picked_tab_and_opens_its_rename(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 6);
+        let (keep, before) = app.update(&mut vcx, |app, cx| {
+            let keep = label(app, "keep", cx);
+            for i in [0, 3] {
+                app.set_tab_group(i, Some(keep), cx);
+            }
+            app.active = 3;
+            cx.notify();
+            let ids = app.tabs.iter().map(|t| t.tree_id.get()).collect::<Vec<_>>();
+            (keep, ids)
+        });
+        vcx.run_until_parked();
+
+        click(&app, &mut vcx, 1, Modifiers::secondary_key());
+        click(&app, &mut vcx, 5, Modifiers::secondary_key());
+
+        let indices = picked_visual(&app, &mut vcx);
+        assert_eq!(indices, vec![3, 1, 5]);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.new_tab_group_with(&indices, window, cx);
+            // Read inside the same edit: the box is open the moment the group
+            // is made, before any later focus change can commit it.
+            let opened = app
+                .group_rename
+                .as_ref()
+                .expect("the new group's rename is open")
+                .group;
+            assert!(
+                app.sidebar_groups.pinned.iter().any(|g| g.id == opened),
+                "it names a pinned group"
+            );
+            for i in [1, 3, 5] {
+                assert_eq!(app.tabs[i].group.get(), Some(opened), "tab {i}");
+            }
+            assert_eq!(
+                app.tabs[0].group.get(),
+                Some(keep),
+                "the old group is untouched"
+            );
+            let inside: Vec<TabId> = app
+                .visual_tab_order(cx)
+                .into_iter()
+                .filter(|&i| app.tabs[i].group.get() == Some(opened))
+                .map(|i| app.tabs[i].tree_id.get())
+                .collect();
+            assert_eq!(inside, vec![before[3], before[1], before[5]]);
+            assert_eq!(app.tab_selection.len(), 3);
+        });
+    }
+
+    /// The menu a right click opens on a picked row speaks for all of them,
+    /// and its Close closes all of them. A menu built by hand for a row
+    /// outside the selection is the row's own, and leaves the selection
+    /// menu's labels untouched.
+    ///
+    /// A plain `#[test]` with a context it never tears down, for the same
+    /// reason as `the_header_menu_still_unpins_a_folder_group`: an open
+    /// `ContextMenu` trips `#[gpui::test]`'s leak detector through a known
+    /// toolkit cycle (`ui-audit/bugs/gpui-component-contextmenu-leak.md`).
+    /// That is a limit of this harness, not proof that this menu releases its
+    /// state.
+    #[test]
+    fn the_selection_menu_offers_move_and_close_for_every_picked_tab() {
+        let mut cx = TestAppContext::build(gpui::TestDispatcher::new(0), None);
+        // Forgotten on every path, a failed assertion included: dropping the
+        // context after a panic would run the leak teardown a second time and
+        // abort, which would hide the assertion that actually failed.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            selection_menu_for_the_picked_rows(&mut cx)
+        }));
+        if outcome.is_ok() {
+            cx.run_until_parked();
+        }
+        std::mem::forget(cx);
+        if let Err(failure) = outcome {
+            std::panic::resume_unwind(failure);
+        }
+    }
+
+    fn selection_menu_for_the_picked_rows(cx: &mut TestAppContext) {
+        crate::ui::i18n::set_locale("en");
+        let _ = crate::ui::tab_strip::take_selection_menu_labels();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 4);
+        app.update(&mut vcx, |app, cx| {
+            let work = label(app, "work", cx);
+            app.set_tab_group(0, Some(work), cx);
+            app.active = 1;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        click(&app, &mut vcx, 2, Modifiers::secondary_key());
+        click(&app, &mut vcx, 3, Modifiers::secondary_key());
+        assert_eq!(picked(&app, &mut vcx), vec![1, 2, 3]);
+
+        // A menu for a row outside the selection is the row's own: it does
+        // not touch the selection menu's labels.
+        let weak = app.downgrade();
+        vcx.update(|window, cx| {
+            let menu = gpui_component::menu::PopupMenu::build(window, cx, |m, w, cx| {
+                Tty59App::tab_context_menu(m, 0, true, &weak, w, cx)
+            });
+            drop(menu);
+        });
+        assert!(
+            crate::ui::tab_strip::take_selection_menu_labels().is_empty(),
+            "an unselected row opens the single-tab menu"
+        );
+
+        let at = row(&app, &mut vcx, 2).center();
+        vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        vcx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        draw(&mut vcx);
+        assert_eq!(
+            crate::ui::tab_strip::take_selection_menu_labels(),
+            vec![
+                "Move 3 Tabs to Group".to_string(),
+                "Close 3 Tabs".to_string()
+            ],
+            "the menu speaks for all three"
+        );
+        assert!(
+            vcx.update(|window, _| window.context_stack())
+                .iter()
+                .any(|c| c.contains("PopupMenu")),
+            "the menu has the keys"
+        );
+
+        // Up lands on the last item, Close 3 Tabs.
+        vcx.simulate_keystrokes("up enter");
+        vcx.run_until_parked();
+        assert_eq!(ids(&app, &mut vcx).len(), 1, "the three closed together");
+        assert!(picked(&app, &mut vcx).is_empty(), "the selection is over");
+    }
+
+    /// A right click on a row outside the selection ends it, gives the keys
+    /// back to the active pane, and opens the row's own menu.
+    ///
+    /// A plain `#[test]` with a context it never tears down, for the same
+    /// reason as `the_header_menu_still_unpins_a_folder_group`: an open
+    /// `ContextMenu` trips `#[gpui::test]`'s leak detector through a known
+    /// toolkit cycle (`ui-audit/bugs/gpui-component-contextmenu-leak.md`).
+    /// That is a limit of this harness, not proof that this menu releases its
+    /// state.
+    #[test]
+    fn right_clicking_a_row_outside_the_selection_ends_it() {
+        let mut cx = TestAppContext::build(gpui::TestDispatcher::new(0), None);
+        // Forgotten on every path, a failed assertion included: dropping the
+        // context after a panic would run the leak teardown a second time and
+        // abort, which would hide the assertion that actually failed.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            right_press_outside_the_selection(&mut cx)
+        }));
+        if outcome.is_ok() {
+            cx.run_until_parked();
+        }
+        std::mem::forget(cx);
+        if let Err(failure) = outcome {
+            std::panic::resume_unwind(failure);
+        }
+    }
+
+    fn right_press_outside_the_selection(cx: &mut TestAppContext) {
+        crate::ui::i18n::set_locale("en");
+        let _ = crate::ui::tab_strip::take_selection_menu_labels();
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 4);
+        app.update(&mut vcx, |app, cx| {
+            let work = label(app, "work", cx);
+            app.set_tab_group(0, Some(work), cx);
+            app.active = 1;
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        click(&app, &mut vcx, 2, Modifiers::secondary_key());
+        click(&app, &mut vcx, 3, Modifiers::secondary_key());
+        assert_eq!(picked(&app, &mut vcx), vec![1, 2, 3]);
+        assert!(sidebar_focused(&app, &mut vcx));
+
+        let at = row(&app, &mut vcx, 0).center();
+        vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
+        // Read before the menu is drawn: the press itself ends the selection
+        // and hands the keys back, and the deferred menu takes them next.
+        assert!(
+            picked(&app, &mut vcx).is_empty(),
+            "the press ended the selection"
+        );
+        assert!(!sidebar_focused(&app, &mut vcx));
+        assert!(pane_focused(&app, &mut vcx), "the pane has the keys back");
+        vcx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
+        draw(&mut vcx);
+        assert!(
+            vcx.update(|window, _| window.context_stack())
+                .iter()
+                .any(|c| c.contains("PopupMenu")),
+            "the row's own menu still opens"
+        );
+        assert!(
+            crate::ui::tab_strip::take_selection_menu_labels().is_empty(),
+            "the selection menu was not the one opened"
+        );
+    }
+
+    /// Closing the selection through the menu one confirm, closes each of the
+    /// three, and leaves no selection behind.
+    #[gpui::test]
+    fn closing_the_selection_closes_every_picked_tab(cx: &mut TestAppContext) {
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 5);
+        app.update(&mut vcx, |app, _| app.active = 1);
+        vcx.run_until_parked();
+        click(&app, &mut vcx, 2, Modifiers::secondary_key());
+        click(&app, &mut vcx, 3, Modifiers::secondary_key());
+        assert_eq!(picked(&app, &mut vcx), vec![1, 2, 3]);
+        let before = ids(&app, &mut vcx);
+
+        let to_close = app.read_with(&vcx, |app, cx| app.selected_tab_ids(cx));
+        assert_eq!(to_close, vec![before[1], before[2], before[3]]);
+        app.update_in(&mut vcx, |app, window, cx| {
+            app.close_tabs(to_close, window, cx)
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(
+            ids(&app, &mut vcx),
+            vec![before[0], before[4]],
+            "exactly the picked tabs closed"
+        );
+        assert!(picked(&app, &mut vcx).is_empty());
+        assert!(!vcx.has_pending_prompt(), "one close, no question per tab");
     }
 }
