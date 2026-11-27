@@ -1969,6 +1969,115 @@ pub(super) mod gpui_tests {
         assert_eq!(picker(&app, &mut vcx), (false, false));
     }
 
+    /// ⌘⇧↵ / Ctrl+Shift+Enter is Zoom Pane in a terminal and the document fill
+    /// toggle in a document, through the real keymap and the real dispatch: in
+    /// the focused editor it fills the workspace with the file and docks it
+    /// again — the column back at its width, the keyboard still in the text,
+    /// and no line inserted above — and on a pane of a split it still zooms
+    /// the pane and leaves the document where it was.
+    #[gpui::test]
+    fn the_zoom_chord_fills_the_focused_document_and_zooms_the_focused_pane(
+        cx: &mut TestAppContext,
+    ) {
+        use crate::core::config::DocumentLayout;
+        use crate::terminal::view::quiet_test_pane;
+        use crate::ui::pane::{Pane, PaneSlot};
+
+        let (app, mut vcx, _streams) = harness_with_tabs(cx, 1);
+        crate::ui::i18n::set_locale("en");
+        vcx.simulate_resize(size(px(1440.), px(900.)));
+        // A second pane, so there is something for the zoom to hide.
+        let _sibling = app.update_in(&mut vcx, |app, window, cx| {
+            let (view, stream) = quiet_test_pane(90, window, cx);
+            let tab = &mut app.tabs[0];
+            let first = tab.pane.first_leaf().expect("tab has a pane");
+            tab.pane = Pane::split_node(
+                gpui::Axis::Horizontal,
+                0.5,
+                Pane::leaf(first),
+                Pane::leaf(PaneSlot::Ready(view)),
+            );
+            stream
+        });
+        open_rs(&app, &mut vcx, "/nav-test/a.rs");
+        focus_editor_now(&app, &mut vcx);
+        assert!(text_focused(&app, &mut vcx), "the file has the keyboard");
+
+        let layout = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, _, cx| app.document_layout(cx))
+        };
+        let dock_px = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.update_in(vcx, |app, window, cx| app.document_dock_px(window, cx))
+        };
+        let text = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.read_with(vcx, |app, cx| {
+                app.active_buffer()
+                    .unwrap()
+                    .input
+                    .read(cx)
+                    .value()
+                    .to_string()
+            })
+        };
+        let zoomed = |app: &Entity<Tty59App>, vcx: &mut VisualTestContext| {
+            app.read_with(vcx, |app, _| app.maximized.is_some())
+        };
+        assert_eq!(layout(&app, &mut vcx), DocumentLayout::Dock);
+        let docked = dock_px(&app, &mut vcx).expect("a 1440 window seats both");
+
+        vcx.simulate_keystrokes("secondary-shift-enter");
+        paint(&mut vcx);
+        assert_eq!(
+            layout(&app, &mut vcx),
+            DocumentLayout::Fill,
+            "the chord in the editor fills the workspace with the file"
+        );
+        assert_eq!(dock_px(&app, &mut vcx), None, "no column while filling");
+        assert!(!zoomed(&app, &mut vcx), "and zooms no pane");
+        assert!(
+            text_focused(&app, &mut vcx),
+            "the keyboard stays in the file"
+        );
+
+        vcx.simulate_keystrokes("secondary-shift-enter");
+        paint(&mut vcx);
+        assert_eq!(
+            layout(&app, &mut vcx),
+            DocumentLayout::Dock,
+            "again, and the file docks beside the terminal"
+        );
+        let back = dock_px(&app, &mut vcx).expect("docked again");
+        assert!(
+            (back - docked).abs() < 0.5,
+            "the column comes back at its width: {back} after {docked}"
+        );
+        assert!(
+            text_focused(&app, &mut vcx),
+            "the keyboard is still in the file"
+        );
+        assert_eq!(
+            text(&app, &mut vcx),
+            source(),
+            "Insert Line Above did not run alongside"
+        );
+
+        // The terminal side: the same chord is Zoom Pane's, as it always was.
+        app.update_in(&mut vcx, |app, window, cx| app.focus_active(window, cx));
+        paint(&mut vcx);
+        assert!(!text_focused(&app, &mut vcx));
+        vcx.simulate_keystrokes("secondary-shift-enter");
+        paint(&mut vcx);
+        assert!(zoomed(&app, &mut vcx), "the chord on a pane zooms it");
+        assert_eq!(
+            layout(&app, &mut vcx),
+            DocumentLayout::Dock,
+            "and leaves the document's layout alone"
+        );
+        vcx.simulate_keystrokes("secondary-shift-enter");
+        paint(&mut vcx);
+        assert!(!zoomed(&app, &mut vcx), "and again restores the split");
+    }
+
     /// `Input` covers every text field, so the root handler has to let the
     /// chord go on from the ones that are not the editor: a settings field
     /// and the search palette's query. The picker stays closed in both, and
