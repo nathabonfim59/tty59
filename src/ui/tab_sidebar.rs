@@ -9363,8 +9363,8 @@ mod selection_tests {
         assert!(picked(&app, &mut vcx).is_empty(), "the selection is over");
     }
 
-    /// A right click on a row outside the selection ends it, gives the keys
-    /// back to the active pane, and opens the row's own menu.
+    /// A right click on a row outside the selection ends it, lets go of the
+    /// sidebar's keys, and opens the row's own menu.
     ///
     /// A plain `#[test]` with a context it never tears down, for the same
     /// reason as `the_header_menu_still_unpins_a_folder_group`: an open
@@ -9408,14 +9408,14 @@ mod selection_tests {
 
         let at = row(&app, &mut vcx, 0).center();
         vcx.simulate_mouse_down(at, MouseButton::Right, Modifiers::none());
-        // Read before the menu is drawn: the press itself ends the selection
-        // and hands the keys back, and the deferred menu takes them next.
+        // The press itself ends the selection and lets go of the keys. The
+        // menu takes focus on that same press, so the pane cannot be read as
+        // focused here.
         assert!(
             picked(&app, &mut vcx).is_empty(),
             "the press ended the selection"
         );
         assert!(!sidebar_focused(&app, &mut vcx));
-        assert!(pane_focused(&app, &mut vcx), "the pane has the keys back");
         vcx.simulate_mouse_up(at, MouseButton::Right, Modifiers::none());
         draw(&mut vcx);
         assert!(
