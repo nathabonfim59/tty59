@@ -117,6 +117,45 @@ give `--timeout` when nobody is watching: a line the shell never runs — an
 unclosed quote waiting on `dquote>` — has no end to wait for. On timeout it
 exits 124 and leaves the command running.
 
+### A pane that is an `ssh` session: `send`, never `exec`
+
+This is the case that trips agents most. Someone typed `ssh devbox` in a pane
+(or it is a native-SSH pane), and tty59's server is **not** running on the far
+end: it is a plain terminal connection, not a [remote workspace](#remote-machines).
+The far shell almost never has tty59's shell integration, so nothing on this
+side sees its prompt or its exit codes:
+
+- `exec` refuses it: the near shell's last mark says "busy running `ssh`"
+  forever. The error names the host and tells you to use `send`.
+- `wait --until free` cannot tell an idle remote prompt from a running command,
+  and says so rather than guess.
+- `procs` lists `zsh → ssh`, which is the tunnel, not the work.
+
+Check before you pick a verb. `context` in `procs --json` says where the shell
+is:
+
+```bash
+tty59 procs %7 --json | python3 -c 'import json,sys; c=json.load(sys.stdin)["context"]; print(c.get("remote"), c["remote_prompt_seen"])'
+# {'kind': 'ssh', 'argv': [...], 'target': 'devbox'} False   → send + capture
+# None ...                                                  → local shell, exec works
+# {...} True                                                → far shell reports, exec works
+```
+
+When `remote` is set and `remote_prompt_seen` is false, **type the command
+with `send` and read it with `capture`**. Print a marker you can look for,
+because no exit code is coming back on its own:
+
+```bash
+tty59 capture %7 --plain --tail 3                     # which host, which user? (may be root)
+tty59 send %7 'uname -a; echo "__done rc=$?"' --enter
+tty59 capture %7 --plain --tail 20                    # repeat until "__done rc=" shows up
+```
+
+For long output, write it to a file on the far host and read the parts you
+need with another `send`, since a screen only holds its last rows. The rules
+for a pane you did not open still apply: say which command goes to which pane
+before you type it.
+
 ### Non-blocking: a pane you talk to over time
 
 This is the one that makes tty59 worth reaching for. Get a pane, send it work,
@@ -344,10 +383,30 @@ will not dial a fresh connection — if the link is down, or it's a jump/proxy
 chain, it says so and you should hand that back to the user, who can connect it
 from the GUI.
 
+That is the user's computer reaching *out*. An agent running *inside* a remote
+workspace, a VM or a container that tty59 hosts has no `tty59` CLI: the only
+tty59 binary there is `tty59-server`. That binary answers its own scoped pane
+verbs (`tab new`, `split`, `send`, `capture`, `wait`, `close`), and
+`tty59-server skill install`, run on that machine, writes the `tty59-remote`
+skill that teaches them.
+
+Not to be confused with an `ssh` *pane*: a plain terminal connection with no
+tty59 on the far end. For those, see
+[the ssh section above](#a-pane-that-is-an-ssh-session-send-never-exec).
+
 ## Not wired up yet
 
 `ws stop`, `machine connect` and `machine disconnect` exit with a message saying
 they're not implemented. Don't build a plan around them.
+
+## Keeping this skill current
+
+`tty59 skill install` writes the copy of this skill built into the `tty59`
+binary, so after an upgrade it brings the skill back in step with the CLI. It
+writes to `~/.claude/skills/tty59` by default, `--agent agents` writes to
+`~/.agents/skills/tty59`, and `--dir` picks any directory. It won't overwrite a
+`tty59` skill directory it didn't write itself unless you pass `--force`, which
+moves that directory aside rather than deleting it.
 
 ## References
 

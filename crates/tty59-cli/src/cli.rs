@@ -161,6 +161,12 @@ pub enum Command {
 
     #[command(subcommand, about = "The tty59-server process on this machine")]
     Server(ServerCmd),
+
+    #[command(
+        subcommand,
+        about = "The agent skill that teaches a coding agent to drive tty59, built into this binary"
+    )]
+    Skill(SkillCmd),
 }
 
 #[derive(Debug, Args)]
@@ -756,6 +762,50 @@ pub enum ServerCmd {
 
     #[command(about = "Tail the server log")]
     Logs,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SkillCmd {
+    #[command(
+        about = "Write the skill to an agent's skills directory (re-run after an upgrade)",
+        long_about = "Writes the tty59 skill this binary was built with into \
+                      <skills dir>/tty59: ~/.claude/skills by default ($CLAUDE_CONFIG_DIR \
+                      wins), ~/.agents/skills with --agent agents, or any directory with \
+                      --dir.\n\n\
+                      Re-running replaces what an earlier install wrote. A tty59 directory \
+                      that tty59 did not write (no .tty59-skill marker) is refused; --force \
+                      moves it aside to tty59.bak-<time> and installs over it.\n\n\
+                      For a remote machine, a VM or a container that has only tty59-server, \
+                      run `tty59-server skill install` there instead."
+    )]
+    Install {
+        #[arg(
+            long,
+            value_name = "AGENT",
+            default_value = "claude",
+            help = "Whose skills directory: claude (~/.claude/skills) or agents (~/.agents/skills)"
+        )]
+        agent: String,
+
+        #[arg(
+            long,
+            value_name = "DIR",
+            help = "Install into DIR/tty59 instead of the agent's skills directory"
+        )]
+        dir: Option<std::path::PathBuf>,
+
+        #[arg(
+            long,
+            help = "Move a tty59 skill tty59 did not write aside, then install"
+        )]
+        force: bool,
+    },
+
+    #[command(about = "Print a file of the embedded skill (SKILL.md by default)")]
+    Show {
+        #[arg(value_name = "FILE", help = "e.g. references/commands.md")]
+        file: Option<String>,
+    },
 }
 
 #[cfg(test)]

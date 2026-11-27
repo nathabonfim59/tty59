@@ -438,6 +438,17 @@ list a retry needs.
   or destroy what the user's GUI is attached to.
 </Warning>
 
+## `skill` — the agent skill
+
+| Command | Effect |
+|---|---|
+| `skill install [--agent claude\|agents] [--dir DIR] [--force]` | Write the skill built into this binary to `~/.claude/skills/tty59` (`$CLAUDE_CONFIG_DIR` wins), to `~/.agents/skills/tty59`, or to `DIR/tty59` |
+| `skill show [FILE]` | Print `SKILL.md`, or one of its references |
+
+Re-running `install` replaces what an earlier install wrote. It refuses a
+`tty59` skill directory that tty59 didn't write, and `--force` moves that
+directory aside before installing. [The agent skill →](/cli/agent-skill)
+
 ## Not implemented yet
 
 These parse and then exit 1 with an explanation:

@@ -1,6 +1,9 @@
 use std::io;
 use std::process::ExitCode;
 
+mod skill;
+mod verbs;
+
 const USAGE: &str = "\
 tty59-server — the tty59 session daemon, headless
 
@@ -10,6 +13,8 @@ USAGE:
     tty59-server --stdio --pane [--config-dir <dir>]
     tty59-server --stop [--config-dir <dir>]
     tty59-server agent-hook <agent> <event>
+    tty59-server <pane verb> ...      (see PANE VERBS below)
+    tty59-server skill install|show   (see SKILL below)
 
 OPTIONS:
     --daemon              Serve panes and control connections until killed
@@ -35,6 +40,18 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Words, not flags, so no existing invocation can land here: the pane
+    // verbs for an agent inside one of this machine's panes, and the skill
+    // that teaches it to use them.
+    if let Some(first) = args.first().map(String::as_str) {
+        if first == "skill" {
+            return skill::run(&args[1..]);
+        }
+        if verbs::VERBS.contains(&first) {
+            return verbs::run(&args);
+        }
+    }
+
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("tty59-server {}", env!("CARGO_PKG_VERSION"));
         return ExitCode::SUCCESS;
@@ -50,7 +67,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{USAGE}");
+        print!("{USAGE}\n{}\n{}", verbs::USAGE, skill::USAGE);
         return ExitCode::SUCCESS;
     }
 

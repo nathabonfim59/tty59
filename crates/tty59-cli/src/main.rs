@@ -4,11 +4,11 @@ mod cli;
 mod commands;
 mod exec;
 mod gui;
-mod keys;
 mod output;
 mod resolve;
 mod screen;
 mod server;
+mod skill;
 mod stdio;
 #[cfg(test)]
 mod testbed;
@@ -17,6 +17,7 @@ mod testbed;
 mod bench_vt;
 
 use clap::Parser;
+use tty59_core::core::send_keys as keys;
 
 fn main() -> std::process::ExitCode {
     // Before the first byte goes out, and before clap can print a usage error.

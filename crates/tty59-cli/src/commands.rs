@@ -13,7 +13,7 @@ use crate::address::{self, Context, WorkspaceAddress};
 use crate::backend::{Backend, RunSpec};
 use crate::cli::{
     CaptureArgs, Cli, Command, ExecArgs, MachineCmd, PaneCmd, RunArgs, SendArgs, ServerCmd,
-    SplitArgs, TabCmd, WaitArgs, WaitState, WorktreeCmd, WsCmd,
+    SkillCmd, SplitArgs, TabCmd, WaitArgs, WaitState, WorktreeCmd, WsCmd,
 };
 use crate::exec::ExecEnd;
 use crate::output;
@@ -171,6 +171,10 @@ pub fn execute(cli: Cli, ctx: &Context, backend: &mut dyn Backend) -> Result<Out
             local_server(machine.as_deref(), "logs", crate::server::logs)
         }
         Some(Command::Doctor) => doctor(ctx, backend),
+        Some(Command::Skill(SkillCmd::Install { agent, dir, force })) => {
+            crate::skill::install(&agent, dir, force, machine.as_deref())
+        }
+        Some(Command::Skill(SkillCmd::Show { file })) => crate::skill::show(file.as_deref()),
     }
 }
 
@@ -761,6 +765,18 @@ fn tried_to_write_an_address(s: &str) -> bool {
         .is_some_and(|c| c.is_ascii_digit())
 }
 
+/// The host a pane is connected to, when it is an ssh session (a plain `ssh`
+/// typed in a local shell, or a native-SSH pane) whose far shell has never sent
+/// a prompt mark. That is the pane `exec` cannot drive and `send` can: nothing
+/// on this side knows where the far command starts or ends.
+///
+/// Best effort: a failed `procs` only costs the more specific message.
+fn bare_ssh_target(backend: &mut dyn Backend, pane: u64) -> Option<String> {
+    let ctx = backend.procs(pane).ok()?.context?;
+    let remote = ctx.remote?;
+    (!ctx.remote_prompt_seen).then_some(remote.target)
+}
+
 fn exec(args: ExecArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outcome> {
     let pane = address::pane_or_context(args.target.as_deref(), ctx)?;
     let line = args.cmd.join(" ");
@@ -791,6 +807,16 @@ fn exec(args: ExecArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
         .as_deref()
         .and_then(|p| address::parse_pane(p).ok())
         == Some(pane);
+    if run.end == ExecEnd::NoIntegration
+        && let Some(target) = bare_ssh_target(backend, pane)
+    {
+        bail!(
+            "pane %{pane} is an ssh session to {target} whose shell sends no tty59 prompt \
+             marks, so exec cannot tell when a command there ends. Use \
+             `tty59 send %{pane} '<command>' --enter`, then \
+             `tty59 capture %{pane} --plain --tail 20`"
+        );
+    }
     match run.end {
         ExecEnd::NoIntegration => bail!(
             "pane %{pane} has sent no shell-integration prompt marks, so nothing would say \
@@ -802,10 +828,21 @@ fn exec(args: ExecArgs, ctx: &Context, backend: &mut dyn Backend) -> Result<Outc
             "pane %{pane} is this shell, and it is busy running this very command — exec \
              into another pane"
         ),
-        ExecEnd::Busy => bail!(
-            "pane %{pane} is not at a shell prompt — something is already running there. \
-             `tty59 wait %{pane} --until free` waits for it"
-        ),
+        ExecEnd::Busy => {
+            if let Some(target) = bare_ssh_target(backend, pane) {
+                bail!(
+                    "pane %{pane} is an ssh session to {target}, and the far shell has no tty59 \
+                     shell integration, so exec cannot see its prompt or its exit code. Use \
+                     `tty59 send %{pane} '<command>' --enter`, then \
+                     `tty59 capture %{pane} --plain --tail 20`; for an exit code, end the line \
+                     with `; echo \"rc=$?\"` and read it from the capture"
+                );
+            }
+            bail!(
+                "pane %{pane} is not at a shell prompt — something is already running there. \
+                 `tty59 wait %{pane} --until free` waits for it"
+            )
+        }
         _ => {}
     }
 
@@ -5410,6 +5447,51 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("this shell"), "{err}");
+    }
+
+    #[test]
+    fn exec_into_a_bare_ssh_session_points_at_send() {
+        // The near shell's own marks say "busy running ssh" forever; the far
+        // shell never reports. The refusal has to name the way that works.
+        let mut backend = mock();
+        backend.exec_run = exec_run(ExecEnd::Busy, b"");
+        backend.procs_reply = ssh_procs(Some(false), false);
+        let err = execute(
+            cli(&["tty59", "exec", "%1", "--", "ls"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ssh session to build-box"), "{err}");
+        assert!(err.contains("tty59 send %1"), "{err}");
+
+        // A native-SSH pane whose far shell has no integration at all.
+        let mut backend = mock();
+        backend.exec_run = exec_run(ExecEnd::NoIntegration, b"");
+        backend.procs_reply = routed_procs(None);
+        let err = execute(
+            cli(&["tty59", "exec", "%1", "--", "ls"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ssh session to me@build-box"), "{err}");
+        assert!(err.contains("tty59 send %1"), "{err}");
+
+        // Once the far shell has reported a prompt, busy means busy.
+        let mut backend = mock();
+        backend.exec_run = exec_run(ExecEnd::Busy, b"");
+        backend.procs_reply = ssh_procs(Some(false), true);
+        let err = execute(
+            cli(&["tty59", "exec", "%1", "--", "ls"]),
+            &Context::default(),
+            &mut backend,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not at a shell prompt"), "{err}");
     }
 
     #[test]

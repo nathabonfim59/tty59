@@ -1,4 +1,4 @@
-//! Key names for `tty59 send --key`.
+//! Key names for `tty59 send --key` (and `tty59-server send --key`).
 //!
 //! `send` types text, and text is enough right up until the pane is showing
 //! something that text cannot answer: a permission prompt whose options are

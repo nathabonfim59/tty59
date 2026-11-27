@@ -19,9 +19,11 @@ pub mod paste;
 pub mod path_spelling;
 pub mod pending_prompt;
 pub mod proc;
+pub mod send_keys;
 pub mod session;
 pub mod shell_quote;
 pub mod shells;
+pub mod skill_install;
 #[allow(dead_code)]
 pub mod ssh_profile;
 pub mod tab_view;

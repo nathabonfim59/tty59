@@ -12,6 +12,7 @@ you need; the table of contents mirrors the top-level grammar.
 - [`pane` — panes](#pane--panes)
 - [`machine` — remotes](#machine--remotes)
 - [`server` — the daemon](#server--the-daemon)
+- [`skill` — this skill](#skill--this-skill)
 - [Not implemented yet](#not-implemented-yet)
 
 ## Global flags
@@ -103,6 +104,9 @@ carries the exit code). Refused, with nothing typed:
   --until free`
 - a pane that is not at a prompt — something already runs there (your own pane
   always is: it is running `tty59 exec`)
+- a pane that is an `ssh` session whose far shell has never sent a prompt mark
+  (`procs` context: `remote` set, `remote_prompt_seen` false) — the error names
+  the host; drive it with `send … --enter` and read it with `capture --plain`
 - a line holding a control character (newline, tab, ESC), which the line editor
   would act on rather than type — join commands with `;` / `&&`
 
@@ -446,6 +450,25 @@ managed from the GUI's connection manager.
 
 Do not run `start`, `stop` or `restart` on your own initiative. They change or
 destroy what the user's GUI is attached to.
+
+## `skill` — this skill
+
+| Command | Effect | JSON |
+|---|---|---|
+| `skill install [--agent claude\|agents] [--dir DIR] [--force]` | write the skill built into this binary to `<skills dir>/tty59` | `{"dir","written","removed","backup","updated"}` |
+| `skill show [FILE]` | print one of its files (`SKILL.md` by default, or `references/commands.md`, `references/delegation.md`) | `{"path","contents"}` |
+
+The skills dir is `$CLAUDE_CONFIG_DIR/skills`, else `~/.claude/skills`, for
+`--agent claude` (the default), and `~/.agents/skills` for `--agent agents`.
+Reinstalling replaces what an earlier install wrote, as listed in its
+`.tty59-skill` marker, and removes files the new version no longer ships. A
+`tty59` directory without the marker is someone's own skill: it is refused,
+and `--force` moves it to `tty59.bak-<unix time>` before installing. `-m` is
+refused, because this writes to the local disk.
+
+On a machine that has only `tty59-server` (a remote workspace's host, a VM, a
+container), `tty59-server skill install` writes the `tty59-remote` skill
+instead. It describes the pane verbs that binary answers itself.
 
 ## Not implemented yet
 

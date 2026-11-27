@@ -9,6 +9,21 @@ touch. That is what the skill is for.
 
 ## Installing it
 
+The skill is built into the `tty59` binary, so it always matches the CLI you
+have:
+
+```bash
+tty59 skill install                 # ~/.claude/skills/tty59
+tty59 skill install --agent agents  # ~/.agents/skills/tty59 (Codex, OpenCode, …)
+tty59 skill install --dir ./skills  # anywhere else
+```
+
+Run it again after upgrading tty59. It replaces what it wrote before. It never
+overwrites a `tty59` skill you wrote yourself: `--force` moves yours to
+`tty59.bak-<time>` and installs beside it.
+
+It is also published from the repository:
+
 ```bash
 npx skills add nathabonfim59/tty59
 ```
@@ -18,17 +33,43 @@ The source lives at
 repository: a `SKILL.md` and two references — the full command table, and a
 delegation playbook the agent reads before handing work to another agent.
 
+## Agents on a remote machine, VM or container
+
+An agent running in a pane of a [remote workspace](/remote/workspaces) is on a
+machine where tty59 installed only `tty59-server`, so the `tty59` CLI is not
+there. That binary answers a small set of pane verbs of its own, scoped to the
+agent's workspace and sidebar group: `scope`, `ls`, `tab new`, `tab close`,
+`split`, `send`, `capture`, `procs`, `wait`, `close`. Run this once on that
+machine:
+
+```bash
+"$(ls -t ~/.local/share/tty59/bin/tty59-server-c* | head -n 1)" skill install
+```
+
+That writes the `tty59-remote` skill and a `scripts/tty59` shim, which finds
+the server binary even after an upgrade renames it.
+
+## Panes that are an ssh session
+
+A pane where someone typed `ssh host` is not a remote workspace: tty59 isn't
+running on the far end, and its shell usually has no tty59 integration.
+`tty59 exec` can't see that shell's prompt or exit code, so it refuses the
+pane, names the host and points at `send`. Both skills teach the same fallback:
+`send` the command with a marker such as `echo "__done rc=$?"`, then `capture`
+until the marker appears. `procs --json` shows which case a pane is in:
+`context.remote` is set and `remote_prompt_seen` is false.
+
 <Note>
-  This is the only skill tty59 has — nothing in **Settings → Integrations** installs
-  one for you. Using the CLI to run *other* agents — a worker pane, `tty59 wait`,
+  Nothing in **Settings → Integrations** installs a skill for you. Using the CLI to run *other* agents — a worker pane, `tty59 wait`,
   collecting the result — is covered separately.
   [Orchestration →](/agents/orchestration)
 </Note>
 
 ## Updating it
 
-`add` does not refresh a skill that is already installed — updating is its own
-command, and the skill is named `tty59`:
+If you installed it with `tty59 skill install`, run that again. With `npx`,
+`add` does not refresh a skill that is already installed. Updating is a
+separate command, and the skill is named `tty59`:
 
 ```bash
 npx skills update tty59    # this one
